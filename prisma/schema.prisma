@@ -214,16 +214,6 @@ model comentarios {
   solicitud_id Int
 }
 
-model comentarios_tarea {
-  id_comentario Int       @id @default(autoincrement())
-  id_tarea      Int
-  comentario    String    @db.Text
-  usuario       String    @db.VarChar(255)
-  fecha         DateTime? @default(now()) @db.Timestamp(0)
-  tareas        tareas    @relation(fields: [id_tarea], references: [id], onUpdate: Restrict, map: "comentarios_tarea_ibfk_1")
-
-  @@index([id_tarea], map: "id_tarea")
-}
 
 model cotizacion {
   id                   Int       @id @default(autoincrement())
@@ -553,7 +543,6 @@ model tareas {
   asignado           String?             @db.VarChar(255)
   id_asignado        String?             @db.VarChar(255)
   ids_reservas       String?             @db.Text
-  comentarios_tarea  comentarios_tarea[]
 }
 
 model usuario {

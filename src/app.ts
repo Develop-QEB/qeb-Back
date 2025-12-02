@@ -7,8 +7,21 @@ import { errorMiddleware, notFoundMiddleware } from './middleware/error.middlewa
 
 const app = express();
 
+// Parse FRONTEND_URL: puede ser un solo URL o múltiples separados por coma
+const getAllowedOrigins = () => {
+  const envUrl = process.env.FRONTEND_URL;
+  if (!envUrl) {
+    return ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'];
+  }
+  // Si contiene comas, separar en array
+  if (envUrl.includes(',')) {
+    return envUrl.split(',').map(url => url.trim());
+  }
+  return envUrl;
+};
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'],
+  origin: getAllowedOrigins(),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],

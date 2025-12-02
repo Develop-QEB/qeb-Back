@@ -7,6 +7,7 @@ import solicitudesRoutes from './solicitudes.routes';
 import propuestasRoutes from './propuestas.routes';
 import campanasRoutes from './campanas.routes';
 import dashboardRoutes from './dashboard.routes';
+import notificacionesRoutes from './notificaciones.routes';
 
 const router = Router();
 
@@ -18,5 +19,6 @@ router.use('/solicitudes', solicitudesRoutes);
 router.use('/propuestas', propuestasRoutes);
 router.use('/campanas', campanasRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/notificaciones', notificacionesRoutes);
 
 export default router;
