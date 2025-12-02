@@ -559,6 +559,19 @@ model usuario {
   user_role          String    @default("Normal") @db.VarChar(25)
 }
 
+model correos_enviados {
+  id           Int      @id @default(autoincrement())
+  remitente    String   @db.VarChar(255)
+  destinatario String   @db.VarChar(255)
+  asunto       String   @db.VarChar(500)
+  cuerpo       String   @db.Text
+  fecha_envio  DateTime @default(now()) @db.DateTime(0)
+  leido        Boolean  @default(false)
+
+  @@index([destinatario], map: "idx_destinatario")
+  @@map("correos_enviados")
+}
+
 enum proveedores_estado {
   activo
   inactivo
