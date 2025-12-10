@@ -16,7 +16,11 @@ router.get('/formatos-by-ciudades', solicitudesController.getFormatosByCiudades.
 router.get('/next-id', solicitudesController.getNextId.bind(solicitudesController));
 router.post('/', solicitudesController.create.bind(solicitudesController));
 router.get('/:id', solicitudesController.getById.bind(solicitudesController));
+router.put('/:id', solicitudesController.update.bind(solicitudesController));
 router.patch('/:id/status', solicitudesController.updateStatus.bind(solicitudesController));
+router.post('/:id/atender', solicitudesController.atender.bind(solicitudesController));
+router.get('/:id/comments', solicitudesController.getComments.bind(solicitudesController));
+router.post('/:id/comments', solicitudesController.addComment.bind(solicitudesController));
 router.delete('/:id', solicitudesController.delete.bind(solicitudesController));
 
 export default router;

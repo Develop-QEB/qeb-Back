@@ -2,6 +2,13 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 
+// Helper function to serialize BigInt values to numbers
+function serializeBigInt<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj, (_, value) =>
+    typeof value === 'bigint' ? Number(value) : value
+  ));
+}
+
 export class SolicitudesController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -139,11 +146,65 @@ export class SolicitudesController {
         return;
       }
 
-      res.json({
-        success: true,
-        data: solicitud,
+      // Get related propuesta
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
       });
+
+      // Get related cotizacion
+      const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta.id },
+      }) : null;
+
+      // Get related campania
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      // Get solicitudCaras by propuesta id (idquote)
+      const caras = propuesta ? await prisma.solicitudCaras.findMany({
+        where: { idquote: propuesta.id.toString() },
+      }) : [];
+
+      // Get comentarios
+      const comentarios = await prisma.comentarios.findMany({
+        where: { solicitud_id: solicitud.id },
+        orderBy: { creado_en: 'desc' },
+      });
+
+      // Get autor names for comentarios
+      const autorIds = [...new Set(comentarios.map(c => c.autor_id))].filter(id => id != null);
+      const autores = autorIds.length > 0 ? await prisma.usuario.findMany({
+        where: { id: { in: autorIds } },
+        select: { id: true, nombre: true },
+      }) : [];
+      const autoresMap = new Map(autores.map(a => [a.id, a.nombre]));
+
+      const comentariosWithAuthor = comentarios.map(c => ({
+        ...c,
+        autor_nombre: c.autor_id ? (autoresMap.get(c.autor_id) || 'Usuario desconocido') : 'Sistema',
+      }));
+
+      // Get historial
+      const historial = await prisma.historial.findMany({
+        where: { ref_id: solicitud.id, tipo: 'Solicitud' },
+        orderBy: { fecha_hora: 'desc' },
+      });
+
+      res.json(serializeBigInt({
+        success: true,
+        data: {
+          solicitud,
+          propuesta,
+          cotizacion,
+          campania,
+          caras,
+          comentarios: comentariosWithAuthor,
+          historial,
+        },
+      }));
     } catch (error) {
+      console.error('Error in getById:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener solicitud';
       res.status(500).json({
         success: false,
@@ -565,7 +626,7 @@ export class SolicitudesController {
       } = req.body;
 
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || req.user?.email;
+      const userName = req.user?.nombre || 'Usuario';
 
       // Calculate totals from caras
       const totalCaras = caras.reduce((acc: number, c: { caras: number; bonificacion: number }) => acc + c.caras + (c.bonificacion || 0), 0);
@@ -576,7 +637,7 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
-      // Use transaction for complex creation
+      // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
         // 1. Create solicitud
         const solicitud = await tx.solicitud.create({
@@ -631,6 +692,7 @@ export class SolicitudesController {
             asignado: asignadosStr,
             id_asignado: asignadosIds,
             inversion: totalInversion,
+            precio: totalInversion,
             comentario_cambio_status: '',
             articulo,
           },
@@ -754,6 +816,9 @@ export class SolicitudesController {
           campania,
           caras: createdCaras,
         };
+      }, {
+        maxWait: 60000, // 60 seconds max wait to acquire transaction
+        timeout: 120000, // 2 minutes for the transaction to complete
       });
 
       res.status(201).json({
@@ -768,6 +833,414 @@ export class SolicitudesController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // Add comment to solicitud
+  async addComment(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { comentario } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!userId) {
+        res.status(401).json({ success: false, error: 'No autorizado' });
+        return;
+      }
+
+      // Get solicitud and its campania_id
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+      });
+
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      // Get campania_id from propuesta -> cotizacion -> campania
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
+      });
+      const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta.id },
+      }) : null;
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      const newComment = await prisma.comentarios.create({
+        data: {
+          autor_id: userId,
+          comentario,
+          creado_en: new Date(),
+          campania_id: campania?.id || 0,
+          solicitud_id: solicitud.id,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          ...newComment,
+          autor_nombre: userName,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al agregar comentario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Get comments for solicitud
+  async getComments(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      const comentarios = await prisma.comentarios.findMany({
+        where: { solicitud_id: parseInt(id) },
+        orderBy: { creado_en: 'desc' },
+      });
+
+      // Get autor names
+      const autorIds = [...new Set(comentarios.map(c => c.autor_id))];
+      const autores = await prisma.usuario.findMany({
+        where: { id: { in: autorIds } },
+        select: { id: true, nombre: true },
+      });
+      const autoresMap = new Map(autores.map(a => [a.id, a.nombre]));
+
+      const comentariosWithAuthor = comentarios.map(c => ({
+        ...c,
+        autor_nombre: autoresMap.get(c.autor_id) || 'Usuario desconocido',
+      }));
+
+      res.json({
+        success: true,
+        data: comentariosWithAuthor,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener comentarios';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Atender solicitud (change status to Atendida and create tasks)
+  async atender(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!userId) {
+        res.status(401).json({ success: false, error: 'No autorizado' });
+        return;
+      }
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+      });
+
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      if (solicitud.status !== 'Aprobado' && solicitud.status !== 'Aprobada') {
+        res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
+        return;
+      }
+
+      // Get propuesta
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
+      });
+
+      // Get cotizacion
+      const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta.id },
+      }) : null;
+
+      await prisma.$transaction(async (tx) => {
+        // Update solicitud status
+        await tx.solicitud.update({
+          where: { id: solicitud.id },
+          data: { status: 'Atendida' },
+        });
+
+        // Update propuesta status
+        if (propuesta) {
+          await tx.propuesta.update({
+            where: { id: propuesta.id },
+            data: { status: 'Abierto' },
+          });
+        }
+
+        // Update existing tareas to "Atendido"
+        await tx.tareas.updateMany({
+          where: { id_solicitud: solicitud.id.toString() },
+          data: { estatus: 'Atendido' },
+        });
+
+        // Create new tarea for seguimiento propuesta
+        if (propuesta) {
+          await tx.tareas.create({
+            data: {
+              fecha_inicio: new Date(),
+              fecha_fin: solicitud.fecha || new Date(),
+              tipo: 'Seguimiento de propuesta',
+              responsable: solicitud.nombre_usuario || userName || '',
+              id_responsable: solicitud.usuario_id || userId,
+              asignado: solicitud.asignado || '',
+              id_asignado: solicitud.id_asignado || '',
+              estatus: 'Activo',
+              descripcion: `Seguimiento de propuesta: ${cotizacion?.nombre_campania || ''}`,
+              titulo: `Atender propuesta ${cotizacion?.nombre_campania || ''}`,
+              id_propuesta: propuesta.id.toString(),
+              id_solicitud: solicitud.id.toString(),
+            },
+          });
+        }
+
+        // Create historial for solicitud
+        await tx.historial.create({
+          data: {
+            tipo: 'Solicitud',
+            ref_id: solicitud.id,
+            accion: 'Activación',
+            fecha_hora: new Date(),
+            detalles: 'Se ha atendido la solicitud.',
+          },
+        });
+
+        // Create historial for propuesta
+        if (propuesta) {
+          await tx.historial.create({
+            data: {
+              tipo: 'Propuesta',
+              ref_id: propuesta.id,
+              accion: 'Inicio',
+              fecha_hora: new Date(),
+              detalles: 'Se ha creado la propuesta.',
+            },
+          });
+        }
+      });
+
+      res.json({
+        success: true,
+        message: 'Solicitud atendida exitosamente',
+      });
+    } catch (error) {
+      console.error('Error atendiendo solicitud:', error);
+      const message = error instanceof Error ? error.message : 'Error al atender solicitud';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Update solicitud
+  async update(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const {
+        cliente_id,
+        cuic,
+        razon_social,
+        unidad_negocio,
+        marca_id,
+        marca_nombre,
+        asesor,
+        producto_id,
+        producto_nombre,
+        agencia,
+        categoria_id,
+        categoria_nombre,
+        nombre_campania,
+        descripcion,
+        notas,
+        presupuesto,
+        articulo,
+        asignados,
+        fecha_inicio,
+        fecha_fin,
+        archivo,
+        tipo_archivo,
+        IMU,
+        caras,
+      } = req.body;
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+      });
+
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      // Calculate totals from caras
+      const totalCaras = caras.reduce((acc: number, c: { caras: number; bonificacion: number }) => acc + c.caras + (c.bonificacion || 0), 0);
+      const totalBonificacion = caras.reduce((acc: number, c: { bonificacion: number }) => acc + (c.bonificacion || 0), 0);
+      const totalInversion = caras.reduce((acc: number, c: { costo: number }) => acc + c.costo, 0);
+
+      // Format asignados string
+      const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
+      const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
+
+      // Get existing propuesta
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
+      });
+
+      // Get existing cotizacion
+      const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta.id },
+      }) : null;
+
+      // Get existing campania
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      await prisma.$transaction(async (tx) => {
+        // Update solicitud
+        await tx.solicitud.update({
+          where: { id: solicitud.id },
+          data: {
+            descripcion,
+            presupuesto: presupuesto || totalInversion,
+            notas: notas || '',
+            cliente_id,
+            asignado: asignadosStr,
+            id_asignado: asignadosIds,
+            cuic: cuic?.toString(),
+            razon_social,
+            unidad_negocio,
+            marca_id,
+            marca_nombre,
+            asesor,
+            producto_id,
+            producto_nombre,
+            agencia,
+            categoria_id,
+            categoria_nombre,
+            IMU: IMU ? 1 : 0,
+            archivo,
+            tipo_archivo,
+          },
+        });
+
+        // Update propuesta if exists
+        if (propuesta) {
+          await tx.propuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              cliente_id,
+              descripcion,
+              notas,
+              asignado: asignadosStr,
+              id_asignado: asignadosIds,
+              inversion: totalInversion,
+              precio: totalInversion,
+              articulo,
+            },
+          });
+        }
+
+        // Update cotizacion if exists
+        if (cotizacion) {
+          await tx.cotizacion.update({
+            where: { id: cotizacion.id },
+            data: {
+              clientes_id: cliente_id,
+              nombre_campania,
+              numero_caras: totalCaras,
+              fecha_inicio: new Date(fecha_inicio),
+              fecha_fin: new Date(fecha_fin),
+              frontal: caras.reduce((acc: number, c: { caras_flujo: number }) => acc + (c.caras_flujo || 0), 0),
+              cruzada: caras.reduce((acc: number, c: { caras_contraflujo: number }) => acc + (c.caras_contraflujo || 0), 0),
+              nivel_socioeconomico: caras.map((c: { nivel_socioeconomico: string }) => c.nivel_socioeconomico).join(','),
+              observaciones: notas || '',
+              bonificacion: totalBonificacion,
+              precio: totalInversion,
+              contacto: asignadosStr,
+              articulo,
+            },
+          });
+        }
+
+        // Update campania if exists
+        if (campania) {
+          await tx.campania.update({
+            where: { id: campania.id },
+            data: {
+              cliente_id,
+              nombre: nombre_campania,
+              fecha_inicio: new Date(fecha_inicio),
+              fecha_fin: new Date(fecha_fin),
+              total_caras: totalCaras.toString(),
+              bonificacion: totalBonificacion,
+              articulo,
+            },
+          });
+        }
+
+        // Delete existing caras and recreate
+        if (propuesta) {
+          await tx.solicitudCaras.deleteMany({
+            where: { idquote: propuesta.id.toString() },
+          });
+
+          // Create new caras
+          for (const cara of caras) {
+            await tx.solicitudCaras.create({
+              data: {
+                idquote: propuesta.id.toString(),
+                ciudad: cara.ciudad,
+                estados: cara.estado,
+                tipo: cara.tipo,
+                flujo: cara.flujo || 'Ambos',
+                bonificacion: cara.bonificacion || 0,
+                caras: cara.caras,
+                nivel_socioeconomico: cara.nivel_socioeconomico,
+                formato: cara.formato,
+                costo: cara.costo,
+                tarifa_publica: cara.tarifa_publica || 0,
+                inicio_periodo: new Date(cara.inicio_periodo),
+                fin_periodo: new Date(cara.fin_periodo),
+                caras_flujo: cara.caras_flujo || 0,
+                caras_contraflujo: cara.caras_contraflujo || 0,
+                articulo,
+                descuento: cara.descuento || 0,
+              },
+            });
+          }
+        }
+
+        // Create historial entry
+        await tx.historial.create({
+          data: {
+            tipo: 'Solicitud',
+            ref_id: solicitud.id,
+            accion: 'Edición',
+            fecha_hora: new Date(),
+            detalles: `Solicitud editada por ${req.user?.nombre || 'usuario'}`,
+          },
+        });
+      }, {
+        maxWait: 60000,
+        timeout: 120000,
+      });
+
+      res.json({
+        success: true,
+        message: 'Solicitud actualizada exitosamente',
+      });
+    } catch (error) {
+      console.error('Error updating solicitud:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar solicitud';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }
