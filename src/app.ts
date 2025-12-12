@@ -11,7 +11,7 @@ const app = express();
 const getAllowedOrigins = () => {
   const envUrl = process.env.FRONTEND_URL;
   if (!envUrl) {
-    return ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'];
+    return ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:5177'];
   }
   // Si contiene comas, separar en array
   if (envUrl.includes(',')) {

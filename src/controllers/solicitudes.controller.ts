@@ -947,7 +947,7 @@ export class SolicitudesController {
         return;
       }
 
-      if (solicitud.status !== 'Aprobado' && solicitud.status !== 'Aprobada') {
+      if (solicitud.status !== 'Aprobada') {
         res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
         return;
       }

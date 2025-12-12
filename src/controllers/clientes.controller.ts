@@ -2,7 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 
-const SAP_API_URL = process.env.SAP_API_URL || 'https://rate-focuses-phase-politicians.trycloudflare.com';
+const SAP_API_URL = process.env.SAP_API_URL || 'https://binding-convinced-ride-foto.trycloudflare.com';
 
 // Cache for SAP data (15 minutes)
 let sapCache: { data: unknown[]; timestamp: number } | null = null;
