@@ -9,15 +9,25 @@ const app = express();
 
 // Parse FRONTEND_URL: puede ser un solo URL o múltiples separados por coma
 const getAllowedOrigins = () => {
+  const defaultOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    'http://localhost:5176',
+    'http://localhost:5177',
+    'https://front-qeb.vercel.app'
+  ];
+
   const envUrl = process.env.FRONTEND_URL;
   if (!envUrl) {
-    return ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:5177'];
+    return defaultOrigins;
   }
-  // Si contiene comas, separar en array
+  // Si contiene comas, separar en array y agregar los defaults
   if (envUrl.includes(',')) {
-    return envUrl.split(',').map(url => url.trim());
+    const envOrigins = envUrl.split(',').map(url => url.trim());
+    return [...new Set([...defaultOrigins, ...envOrigins])];
   }
-  return envUrl;
+  return [...new Set([...defaultOrigins, envUrl])];
 };
 
 const corsOptions = {
