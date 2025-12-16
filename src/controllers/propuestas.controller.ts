@@ -188,7 +188,6 @@ export class PropuestasController {
     try {
       const { id } = req.params;
       const { comentario } = req.body;
-      const userId = req.user?.id;
 
       await prisma.historial.create({
         data: {
@@ -196,7 +195,6 @@ export class PropuestasController {
           ref_id: parseInt(id),
           accion: 'Comentario',
           detalles: comentario,
-          usuario_id: userId,
           fecha_hora: new Date(),
         },
       });

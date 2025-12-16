@@ -254,6 +254,7 @@ export class CampanasController {
           i.alto,
           i.nivel_socioeconomico,
           i.tarifa_publica,
+          i.tradicional_digital,
           rsv.archivo,
           rsv.estatus as estatus_reserva,
           rsv.calendario_id,
@@ -261,8 +262,11 @@ export class CampanasController {
           epIn.numero_espacio as espacios,
           sc.id AS solicitud_caras_id,
           sc.articulo,
+          sc.tipo as tipo_medio,
           sc.inicio_periodo,
           sc.fin_periodo,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
           1 AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
@@ -270,6 +274,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
@@ -320,6 +325,7 @@ export class CampanasController {
           i.alto,
           i.nivel_socioeconomico,
           i.tarifa_publica,
+          i.tradicional_digital,
           rsv.archivo,
           rsv.estatus as estatus_reserva,
           rsv.calendario_id,
@@ -328,8 +334,11 @@ export class CampanasController {
           epIn.numero_espacio as espacios,
           sc.id AS solicitud_caras_id,
           sc.articulo,
+          sc.tipo as tipo_medio,
           sc.inicio_periodo,
           sc.fin_periodo,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
           1 AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
@@ -337,6 +346,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
