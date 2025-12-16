@@ -237,48 +237,53 @@ export class CampanasController {
 
       const query = `
         SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.ubicacion,
-          i.tipo_de_cara,
-          i.cara,
-          i.mueble,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.estado,
-          i.municipio,
-          i.tipo_de_mueble,
-          i.ancho,
-          i.alto,
-          i.nivel_socioeconomico,
-          i.tarifa_publica,
-          i.tradicional_digital,
-          rsv.archivo,
-          rsv.estatus as estatus_reserva,
-          rsv.calendario_id,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          epIn.numero_espacio as espacios,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          1 AS caras_totales
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(
+              SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1),
+              '_completo_',
+              SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1)
+            )
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+
+          MAX(sc.id) AS solicitud_caras_id,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
       `;
 
       const inventario = await prisma.$queryRawUnsafe(query, campanaId);
