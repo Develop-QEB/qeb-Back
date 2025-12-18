@@ -448,6 +448,7 @@ model solicitud {
   IMU              Int
   archivo          String?   @db.LongText
   tipo_archivo     String?   @db.VarChar(100)
+  card_code        String?   @db.VarChar(50)
 }
 
 model solicitudCaras {

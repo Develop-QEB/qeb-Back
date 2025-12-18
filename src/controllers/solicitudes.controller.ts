@@ -604,6 +604,7 @@ export class SolicitudesController {
         agencia,
         categoria_id,
         categoria_nombre,
+        card_code, // SAP CardCode (ACA_U_SAPCode)
         // Campaign data
         nombre_campania,
         descripcion,
@@ -666,6 +667,7 @@ export class SolicitudesController {
             IMU: IMU ? 1 : 0,
             archivo,
             tipo_archivo,
+            card_code: card_code || null,
           },
         });
 
