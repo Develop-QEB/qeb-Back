@@ -290,9 +290,14 @@ export class CampanasController {
 
       console.log('Inventario result count:', Array.isArray(inventario) ? inventario.length : 0);
 
+      // Convertir BigInt a Number para que JSON.stringify funcione
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
       res.json({
         success: true,
-        data: inventario,
+        data: inventarioSerializable,
       });
     } catch (error) {
       console.error('Error en getInventarioReservado:', error);
@@ -435,6 +440,74 @@ export class CampanasController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  async removeAPS(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { reservaIds } = req.body;
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      console.log('removeAPS - reservaIds recibidos:', reservaIds);
+
+      // Obtener los grupo_completo_id de las reservas seleccionadas
+      const placeholders = reservaIds.map(() => '?').join(',');
+
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+      console.log('removeAPS - grupos encontrados:', grupoIds);
+
+      // Actualizar reservas directamente seleccionadas (poner APS = NULL)
+      const updateDirectQuery = `
+        UPDATE reservas
+        SET APS = NULL
+        WHERE id IN (${placeholders})
+      `;
+
+      await prisma.$executeRawUnsafe(updateDirectQuery, ...reservaIds);
+      console.log('removeAPS - actualizadas reservas directas');
+
+      // Actualizar reservas del mismo grupo_completo (si hay grupos)
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const updateGruposQuery = `
+          UPDATE reservas
+          SET APS = NULL
+          WHERE grupo_completo_id IN (${grupoPlaceholders})
+        `;
+
+        await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
+        console.log('removeAPS - actualizadas reservas de grupos');
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `APS eliminado de ${reservaIds.length} reserva(s)`,
+          affected: reservaIds.length,
+        },
+      });
+    } catch (error) {
+      console.error('Error en removeAPS:', error);
+      const message = error instanceof Error ? error.message : 'Error al quitar APS';
       res.status(500).json({
         success: false,
         error: message,

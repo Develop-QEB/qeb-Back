@@ -5,6 +5,7 @@ import {
   getCorreosStats,
   toggleLeido,
   createCorreo,
+  sendAuthorizationPIN,
 } from '../controllers/correos.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 
@@ -27,5 +28,8 @@ router.put('/:id/toggle-leido', toggleLeido);
 
 // POST /api/correos - Crear correo (uso interno)
 router.post('/', createCorreo);
+
+// POST /api/correos/send-pin - Enviar PIN de autorización
+router.post('/send-pin', sendAuthorizationPIN);
 
 export default router;

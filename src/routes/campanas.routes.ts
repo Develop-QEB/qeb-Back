@@ -14,5 +14,6 @@ router.get('/:id/inventario-aps', campanasController.getInventarioConAPS.bind(ca
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
+router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));
 
 export default router;
