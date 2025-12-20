@@ -11,6 +11,7 @@ router.get('/stats', campanasController.getStats.bind(campanasController));
 router.get('/:id', campanasController.getById.bind(campanasController));
 router.get('/:id/inventario', campanasController.getInventarioReservado.bind(campanasController));
 router.get('/:id/inventario-aps', campanasController.getInventarioConAPS.bind(campanasController));
+router.patch('/:id', campanasController.update.bind(campanasController));
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));

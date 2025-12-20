@@ -8,26 +8,104 @@ export class CampanasController {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 20;
       const status = req.query.status as string;
+      const search = req.query.search as string;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
 
-      const where: Record<string, unknown> = {};
+      // Build WHERE conditions
+      const conditions: string[] = ['cm.id IS NOT NULL'];
+      const params: (string | number)[] = [];
 
       if (status) {
-        where.status = status;
+        conditions.push('cm.status = ?');
+        params.push(status);
       }
 
-      const [campanas, total] = await Promise.all([
-        prisma.campania.findMany({
-          where,
-          skip: (page - 1) * limit,
-          take: limit,
-          orderBy: { fecha_inicio: 'desc' },
-        }),
-        prisma.campania.count({ where }),
-      ]);
+      if (search) {
+        conditions.push('(cm.nombre LIKE ? OR cm.articulo LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Year/catorcena filters using fecha_inicio
+      if (yearInicio && yearFin) {
+        if (catorcenaInicio && catorcenaFin) {
+          // Get date range from catorcenas
+          conditions.push(`
+            cm.fecha_inicio >= (
+              SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+            )
+            AND cm.fecha_fin <= (
+              SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+            )
+          `);
+          params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        } else {
+          conditions.push('YEAR(cm.fecha_inicio) >= ? AND YEAR(cm.fecha_fin) <= ?');
+          params.push(yearInicio, yearFin);
+        }
+      }
+
+      const whereClause = conditions.join(' AND ');
+
+      // Query with JOINs to get additional data
+      const query = `
+        SELECT
+          cm.*,
+          cl.T0_U_Cliente as cliente_nombre,
+          cl.T0_U_RazonSocial as cliente_razon_social,
+          s.nombre_usuario as creador_nombre,
+          cat_ini.numero_catorcena as catorcena_inicio_num,
+          cat_ini.año as catorcena_inicio_anio,
+          cat_fin.numero_catorcena as catorcena_fin_num,
+          cat_fin.año as catorcena_fin_anio,
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM cotizacion ct2
+              INNER JOIN propuesta pr2 ON pr2.id = ct2.id_propuesta
+              INNER JOIN solicitudCaras sc2 ON sc2.idquote = ct2.id_propuesta
+              INNER JOIN reservas rsv2 ON rsv2.solicitudCaras_id = sc2.id AND rsv2.deleted_at IS NULL
+              WHERE ct2.id = cm.cotizacion_id
+                AND rsv2.APS IS NOT NULL
+                AND rsv2.APS > 0
+            )
+            THEN 1 ELSE 0
+          END AS has_aps
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        WHERE ${whereClause}
+        ORDER BY cm.id DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        WHERE ${whereClause}
+      `;
+
+      const offset = (page - 1) * limit;
+      const campanas = await prisma.$queryRawUnsafe(query, ...params, limit, offset);
+      const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
+      const total = Number(countResult[0]?.total || 0);
+
+      // Convert BigInt to Number for JSON serialization
+      const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
 
       res.json({
         success: true,
-        data: campanas,
+        data: campanasSerializable,
         pagination: {
           page,
           limit,
@@ -36,6 +114,7 @@ export class CampanasController {
         },
       });
     } catch (error) {
+      console.error('Error en getAll campanas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener campanas';
       res.status(500).json({
         success: false,
@@ -81,6 +160,33 @@ export class CampanasController {
         });
       }
 
+      // Obtener info de solicitud relacionada a la propuesta
+      let solicitud = null;
+      if (propuesta?.solicitud_id) {
+        solicitud = await prisma.solicitud.findUnique({
+          where: { id: propuesta.solicitud_id },
+        });
+      }
+
+      // Obtener catorcenas de inicio y fin basadas en las fechas de la campaña
+      const catorcenaData = await prisma.$queryRaw<{
+        catorcena_inicio_num: number | null;
+        catorcena_inicio_anio: number | null;
+        catorcena_fin_num: number | null;
+        catorcena_fin_anio: number | null;
+      }[]>`
+        SELECT
+          cat_ini.numero_catorcena as catorcena_inicio_num,
+          cat_ini.año as catorcena_inicio_anio,
+          cat_fin.numero_catorcena as catorcena_fin_num,
+          cat_fin.año as catorcena_fin_anio
+        FROM campania cm
+        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        WHERE cm.id = ${parseInt(id)}
+      `;
+      const catorcenas = catorcenaData[0] || {};
+
       // Obtener comentarios usando solicitud_id de la propuesta o campania_id
       let comentarios: { id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date; solicitud_id: number }[] = [];
       const solicitudId = propuesta?.solicitud_id;
@@ -114,30 +220,39 @@ export class CampanasController {
       // Combinar toda la info
       const campanaCompleta = {
         ...campana,
-        // Info del cliente
-        T0_U_Asesor: cliente?.T0_U_Asesor || null,
+        // Info del cliente - priorizar datos de solicitud sobre cliente
+        T0_U_Asesor: solicitud?.asesor || cliente?.T0_U_Asesor || null,
         T0_U_IDAsesor: cliente?.T0_U_IDAsesor || null,
         T0_U_IDAgencia: cliente?.T0_U_IDAgencia || null,
-        T0_U_Agencia: cliente?.T0_U_Agencia || null,
+        T0_U_Agencia: solicitud?.agencia || cliente?.T0_U_Agencia || null,
         T0_U_Cliente: cliente?.T0_U_Cliente || null,
-        T0_U_RazonSocial: cliente?.T0_U_RazonSocial || null,
+        T0_U_RazonSocial: solicitud?.razon_social || cliente?.T0_U_RazonSocial || null,
         T0_U_IDACA: cliente?.T0_U_IDACA || null,
-        cuic: cliente?.CUIC || null,
+        cuic: solicitud?.cuic ? parseInt(solicitud.cuic) : cliente?.CUIC || null,
         T1_U_Cliente: cliente?.T1_U_Cliente || null,
         T1_U_IDACA: cliente?.T1_U_IDACA || null,
         T1_U_IDCM: cliente?.T1_U_IDCM || null,
         T1_U_IDMarca: cliente?.T1_U_IDMarca || null,
-        T1_U_UnidadNegocio: cliente?.T1_U_UnidadNegocio || null,
+        T1_U_UnidadNegocio: solicitud?.unidad_negocio || cliente?.T1_U_UnidadNegocio || null,
         T1_U_ValidFrom: cliente?.T1_U_ValidFrom || null,
         T1_U_ValidTo: cliente?.T1_U_ValidTo || null,
         T2_U_IDCategoria: cliente?.T2_U_IDCategoria || null,
-        T2_U_Categoria: cliente?.T2_U_Categoria || null,
+        T2_U_Categoria: solicitud?.categoria_nombre || cliente?.T2_U_Categoria || null,
         T2_U_IDCM: cliente?.T2_U_IDCM || null,
         T2_U_IDProducto: cliente?.T2_U_IDProducto || null,
-        T2_U_Marca: cliente?.T2_U_Marca || null,
-        T2_U_Producto: cliente?.T2_U_Producto || null,
+        T2_U_Marca: solicitud?.marca_nombre || cliente?.T2_U_Marca || null,
+        T2_U_Producto: solicitud?.producto_nombre || cliente?.T2_U_Producto || null,
         T2_U_ValidFrom: cliente?.T2_U_ValidFrom || null,
         T2_U_ValidTo: cliente?.T2_U_ValidTo || null,
+        // Info de solicitud
+        creador_nombre: solicitud?.nombre_usuario || null,
+        cliente_nombre: cliente?.T0_U_Cliente || null,
+        cliente_razon_social: cliente?.T0_U_RazonSocial || null,
+        // Info de catorcenas
+        catorcena_inicio_num: catorcenas.catorcena_inicio_num || null,
+        catorcena_inicio_anio: catorcenas.catorcena_inicio_anio || null,
+        catorcena_fin_num: catorcenas.catorcena_fin_num || null,
+        catorcena_fin_anio: catorcenas.catorcena_fin_anio || null,
         // Info de cotizacion
         user_id: cotizacion?.user_id || null,
         clientes_id: cotizacion?.clientes_id || null,
@@ -167,9 +282,14 @@ export class CampanasController {
         comentarios,
       };
 
+      // Convertir BigInt a Number para JSON serialization
+      const campanaSerializable = JSON.parse(JSON.stringify(campanaCompleta, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
       res.json({
         success: true,
-        data: campanaCompleta,
+        data: campanaSerializable,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener campana';
@@ -196,6 +316,138 @@ export class CampanasController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  async update(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const {
+        nombre,
+        status,
+        descripcion,
+        notas,
+        catorcenaInicioNum,
+        catorcenaInicioAnio,
+        catorcenaFinNum,
+        catorcenaFinAnio
+      } = req.body;
+
+      const campanaId = parseInt(id);
+
+      // Obtener la campaña actual para conseguir cotizacion_id
+      const campanaActual = await prisma.campania.findUnique({
+        where: { id: campanaId },
+      });
+
+      if (!campanaActual) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Obtener fechas de las catorcenas seleccionadas
+      let fechaInicio: Date | null = null;
+      let fechaFin: Date | null = null;
+
+      if (catorcenaInicioNum && catorcenaInicioAnio) {
+        const catIni = await prisma.catorcenas.findFirst({
+          where: { numero_catorcena: catorcenaInicioNum, a_o: catorcenaInicioAnio },
+        });
+        if (catIni) fechaInicio = catIni.fecha_inicio;
+      }
+
+      if (catorcenaFinNum && catorcenaFinAnio) {
+        const catFin = await prisma.catorcenas.findFirst({
+          where: { numero_catorcena: catorcenaFinNum, a_o: catorcenaFinAnio },
+        });
+        if (catFin) fechaFin = catFin.fecha_fin;
+      }
+
+      // Obtener cotizacion_id
+      const cotizacionId = campanaActual.cotizacion_id;
+
+      if (cotizacionId) {
+        // Obtener propuesta y solicitud relacionadas
+        const cotizacion = await prisma.cotizacion.findUnique({
+          where: { id: cotizacionId },
+        });
+
+        if (cotizacion?.id_propuesta) {
+          const propuesta = await prisma.propuesta.findUnique({
+            where: { id: cotizacion.id_propuesta },
+          });
+
+          // 1. Actualizar solicitud
+          if (propuesta?.solicitud_id) {
+            await prisma.solicitud.update({
+              where: { id: propuesta.solicitud_id },
+              data: {
+                ...(descripcion !== undefined && { descripcion }),
+                ...(notas !== undefined && { notas }),
+              },
+            });
+          }
+
+          // 2. Actualizar propuesta
+          await prisma.propuesta.update({
+            where: { id: cotizacion.id_propuesta },
+            data: {
+              ...(descripcion !== undefined && { descripcion }),
+              ...(notas !== undefined && { notas }),
+            },
+          });
+        }
+
+        // 3. Actualizar cotizacion
+        await prisma.cotizacion.update({
+          where: { id: cotizacionId },
+          data: {
+            ...(fechaInicio && { fecha_inicio: fechaInicio }),
+            ...(fechaFin && { fecha_fin: fechaFin }),
+          },
+        });
+
+        // 4. Actualizar solicitudCaras y calendario si cambian las fechas
+        if (fechaInicio && fechaFin && cotizacion?.id_propuesta) {
+          await prisma.$executeRaw`
+            UPDATE solicitudCaras slc
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            INNER JOIN reservas rs ON rs.solicitudCaras_id = slc.id
+            INNER JOIN calendario cl ON cl.id = rs.calendario_id
+            SET
+              slc.inicio_periodo = GREATEST(slc.inicio_periodo, ${fechaInicio}),
+              slc.fin_periodo = LEAST(slc.fin_periodo, ${fechaFin}),
+              cl.fecha_inicio = GREATEST(cl.fecha_inicio, ${fechaInicio}),
+              cl.fecha_fin = LEAST(cl.fecha_fin, ${fechaFin})
+            WHERE ct.id = ${cotizacionId}
+              AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
+          `;
+        }
+      }
+
+      // 5. Actualizar campania
+      const campana = await prisma.campania.update({
+        where: { id: campanaId },
+        data: {
+          ...(nombre !== undefined && { nombre }),
+          ...(status !== undefined && { status }),
+          ...(fechaInicio && { fecha_inicio: fechaInicio }),
+          ...(fechaFin && { fecha_fin: fechaFin }),
+        },
+      });
+
+      res.json({
+        success: true,
+        data: campana,
+      });
+    } catch (error) {
+      console.error('Error updating campana:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar campaña';
       res.status(500).json({
         success: false,
         error: message,
