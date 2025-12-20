@@ -273,21 +273,26 @@ export const sendAuthorizationPIN = async (req: Request, res: Response) => {
     `;
 
     // Intentar enviar email real
-    try {
-      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
-          to: adminEmail,
-          subject: `Código de Autorización QEB - ${solicitante}`,
-          html: htmlBody,
-        });
-        console.log('Email enviado exitosamente a:', adminEmail);
-      } else {
-        console.log('SMTP no configurado, guardando solo en BD');
-      }
-    } catch (emailError) {
-      console.error('Error enviando email:', emailError);
-      // Continuar aunque falle el envío real
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      console.log('Intentando enviar email con config:', {
+        host: process.env.SMTP_HOST,
+        port: process.env.SMTP_PORT,
+        user: process.env.SMTP_USER,
+        to: adminEmail,
+      });
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+        to: adminEmail,
+        subject: `Código de Autorización QEB - ${solicitante}`,
+        html: htmlBody,
+      });
+      console.log('Email enviado exitosamente a:', adminEmail);
+    } else {
+      console.log('SMTP no configurado - Variables:', {
+        hasUser: !!process.env.SMTP_USER,
+        hasPass: !!process.env.SMTP_PASS,
+      });
+      throw new Error('SMTP no configurado en el servidor');
     }
 
     // Guardar en la base de datos
