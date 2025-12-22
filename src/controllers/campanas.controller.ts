@@ -56,6 +56,12 @@ export class CampanasController {
           cm.*,
           cl.T0_U_Cliente as cliente_nombre,
           cl.T0_U_RazonSocial as cliente_razon_social,
+          cl.T0_U_Asesor as T0_U_Asesor,
+          cl.T0_U_Agencia as T0_U_Agencia,
+          cl.T1_U_UnidadNegocio as T1_U_UnidadNegocio,
+          COALESCE(s.marca_nombre, cl.T2_U_Marca) as T2_U_Marca,
+          COALESCE(s.producto_nombre, cl.T2_U_Producto) as T2_U_Producto,
+          COALESCE(s.categoria_nombre, cl.T2_U_Categoria) as T2_U_Categoria,
           s.nombre_usuario as creador_nombre,
           cat_ini.numero_catorcena as catorcena_inicio_num,
           cat_ini.año as catorcena_inicio_anio,
@@ -473,6 +479,61 @@ export class CampanasController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadisticas';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  async getCaras(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      // Obtener campaña para conseguir cotizacion_id
+      const campana = await prisma.campania.findUnique({
+        where: { id: campanaId },
+      });
+
+      if (!campana) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      if (!campana.cotizacion_id) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Obtener cotizacion para conseguir id_propuesta
+      const cotizacion = await prisma.cotizacion.findUnique({
+        where: { id: campana.cotizacion_id },
+      });
+
+      if (!cotizacion?.id_propuesta) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Obtener caras de la propuesta
+      const caras = await prisma.solicitudCaras.findMany({
+        where: { idquote: String(cotizacion.id_propuesta) },
+        orderBy: { id: 'asc' },
+      });
+
+      // Convertir BigInt a Number
+      const carasSerializable = JSON.parse(JSON.stringify(caras, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: carasSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getCaras:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener caras';
       res.status(500).json({
         success: false,
         error: message,
