@@ -66,12 +66,18 @@ export class PropuestasController {
           cl.CUIC AS cuic,
           sl.nombre_usuario AS creador_nombre,
           sl.archivo AS archivo_solicitud,
-          sl.marca_nombre
+          sl.marca_nombre,
+          cat_inicio.numero_catorcena AS catorcena_inicio,
+          cat_inicio.año AS anio_inicio,
+          cat_fin.numero_catorcena AS catorcena_fin,
+          cat_fin.año AS anio_fin
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
+        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -92,6 +98,10 @@ export class PropuestasController {
         cuic: p.cuic ? Number(p.cuic) : null,
         marca_nombre: p.marca_nombre || p.marca || p.articulo,
         creador_nombre: p.creador_nombre || 'Sistema',
+        catorcena_inicio: p.catorcena_inicio ? Number(p.catorcena_inicio) : null,
+        anio_inicio: p.anio_inicio ? Number(p.anio_inicio) : null,
+        catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
+        anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
       }));
 
       res.json({
