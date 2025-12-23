@@ -36,6 +36,7 @@ export class AuthService {
       userId: user.id,
       email: user.correo_electronico,
       rol: user.user_role,
+      nombre: user.nombre, // Add name to payload
     };
 
     const accessToken = jwt.sign(payload, JWT_SECRET, {

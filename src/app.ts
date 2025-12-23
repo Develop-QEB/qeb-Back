@@ -47,6 +47,10 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Public route for client propuesta view (no auth required)
+import { propuestasController } from './controllers/propuestas.controller';
+app.get('/public/propuestas/:id', propuestasController.getPublicDetails.bind(propuestasController));
+
 app.use('/api', routes);
 
 app.use(notFoundMiddleware);

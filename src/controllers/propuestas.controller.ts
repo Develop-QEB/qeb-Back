@@ -10,35 +10,93 @@ export class PropuestasController {
       const status = req.query.status as string;
       const search = req.query.search as string;
 
-      const where: Record<string, unknown> = {
-        deleted_at: null,
-      };
+      // Build WHERE conditions
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa'`;
+      const params: any[] = [];
 
       if (status) {
-        where.status = status;
+        whereConditions += ` AND pr.status = ?`;
+        params.push(status);
       }
 
       if (search) {
-        where.OR = [
-          { articulo: { contains: search } },
-          { descripcion: { contains: search } },
-          { asignado: { contains: search } },
-        ];
+        whereConditions += ` AND (pr.articulo LIKE ? OR pr.descripcion LIKE ? OR pr.asignado LIKE ? OR cl.T1_U_Cliente LIKE ?)`;
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
-      const [propuestas, total] = await Promise.all([
-        prisma.propuesta.findMany({
-          where,
-          skip: (page - 1) * limit,
-          take: limit,
-          orderBy: { fecha: 'desc' },
-        }),
-        prisma.propuesta.count({ where }),
-      ]);
+      // Get total count
+      const countQuery = `
+        SELECT COUNT(DISTINCT pr.id) as total
+        FROM propuesta pr
+        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        WHERE ${whereConditions}
+      `;
+      const countResult = await prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params);
+      const total = Number(countResult[0]?.total || 0);
+
+      // Main query inspired by Retool - get propuestas with related data
+      const offset = (page - 1) * limit;
+      const mainQuery = `
+        SELECT
+          pr.id,
+          pr.cliente_id,
+          pr.fecha,
+          pr.status,
+          pr.descripcion,
+          pr.precio,
+          pr.notas,
+          pr.solicitud_id,
+          pr.precio_simulado,
+          pr.asignado,
+          pr.id_asignado,
+          pr.inversion,
+          pr.comentario_cambio_status,
+          pr.articulo,
+          pr.updated_at,
+          cm.fecha_inicio,
+          cm.fecha_fin,
+          cm.nombre AS campana_nombre,
+          cl.T1_U_Cliente AS nombre_comercial,
+          cl.T0_U_Asesor AS asesor,
+          cl.T0_U_Agencia AS agencia,
+          cl.T2_U_Marca AS marca,
+          cl.T2_U_Producto AS producto,
+          cl.CUIC AS cuic,
+          sl.nombre_usuario AS creador_nombre,
+          sl.archivo AS archivo_solicitud,
+          sl.marca_nombre
+        FROM propuesta pr
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        WHERE ${whereConditions}
+        GROUP BY pr.id
+        ORDER BY pr.id DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      const propuestas = await prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset);
+
+      // Convert BigInt values and format dates
+      const formattedPropuestas = propuestas.map(p => ({
+        ...p,
+        id: Number(p.id),
+        cliente_id: Number(p.cliente_id),
+        solicitud_id: Number(p.solicitud_id),
+        precio: p.precio ? Number(p.precio) : null,
+        precio_simulado: p.precio_simulado ? Number(p.precio_simulado) : null,
+        inversion: p.inversion ? Number(p.inversion) : null,
+        cuic: p.cuic ? Number(p.cuic) : null,
+        marca_nombre: p.marca_nombre || p.marca || p.articulo,
+        creador_nombre: p.creador_nombre || 'Sistema',
+      }));
 
       res.json({
         success: true,
-        data: propuestas,
+        data: formattedPropuestas,
         pagination: {
           page,
           limit,
@@ -47,6 +105,7 @@ export class PropuestasController {
         },
       });
     } catch (error) {
+      console.error('Error in getAll propuestas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener propuestas';
       res.status(500).json({
         success: false,
@@ -156,23 +215,22 @@ export class PropuestasController {
     try {
       const { id } = req.params;
 
-      const comments = await prisma.$queryRaw`
-        SELECT
-          h.id,
-          h.detalles as comentario,
-          h.fecha_hora as creado_en,
-          COALESCE(u.nombre, 'Sistema') as autor_nombre
-        FROM historial h
-        LEFT JOIN usuario u ON u.id = h.usuario_id
-        WHERE h.ref_id = ${parseInt(id)}
-          AND h.tipo = 'Propuesta'
-          AND h.accion = 'Comentario'
-        ORDER BY h.fecha_hora DESC
-      `;
+      const comments = await prisma.historial_comentarios.findMany({
+        where: { id_propuesta: parseInt(id) },
+        orderBy: { fecha: 'desc' },
+      });
+
+      const formattedComments = comments.map(c => ({
+        id: Number(c.id),
+        comentario: c.comentario,
+        creado_en: c.fecha,
+        autor_nombre: c.usuario || 'Sistema',
+        nuevo_status: c.nuevo_status,
+      }));
 
       res.json({
         success: true,
-        data: comments,
+        data: formattedComments,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener comentarios';
@@ -188,19 +246,25 @@ export class PropuestasController {
     try {
       const { id } = req.params;
       const { comentario } = req.body;
+      const userName = req.user?.nombre || 'Usuario';
 
-      await prisma.historial.create({
+      const newComment = await prisma.historial_comentarios.create({
         data: {
-          tipo: 'Propuesta',
-          ref_id: parseInt(id),
-          accion: 'Comentario',
-          detalles: comentario,
-          fecha_hora: new Date(),
+          id_propuesta: parseInt(id),
+          comentario,
+          usuario: userName,
+          fecha: new Date(),
         },
       });
 
       res.json({
         success: true,
+        data: {
+          id: Number(newComment.id),
+          comentario: newComment.comentario,
+          creado_en: newComment.fecha,
+          autor_nombre: userName,
+        },
         message: 'Comentario agregado',
       });
     } catch (error) {
@@ -364,6 +428,689 @@ export class PropuestasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // Get full details for compartir view
+  async getFullDetails(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      // Get propuesta
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      // Get related data
+      const [solicitud, cotizacion, campania, caras] = await Promise.all([
+        prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } }),
+        prisma.cotizacion.findFirst({ where: { id_propuesta: propuestaId } }),
+        prisma.campania.findFirst({
+          where: {
+            cotizacion_id: { in: (await prisma.cotizacion.findMany({ where: { id_propuesta: propuestaId }, select: { id: true } })).map(c => c.id) }
+          }
+        }),
+        prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          propuesta,
+          solicitud,
+          cotizacion,
+          campania,
+          caras,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener detalles';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Get reserved inventory for propuesta
+  async getInventarioReservado(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const query = `
+        SELECT
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MAX(sc.id) AS solicitud_caras_id,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena
+        FROM inventarios i
+          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE sc.idquote = ?
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
+        ORDER BY cat.año DESC, cat.numero_catorcena DESC, MIN(rsv.id) DESC
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, String(propuestaId)) as any[];
+
+      // Convert BigInts to numbers to avoid serialization errors
+      const serializedInventario = inventario.map(item => ({
+        ...item,
+        caras_totales: Number(item.caras_totales),
+      }));
+
+      res.json({
+        success: true,
+        data: serializedInventario,
+      });
+    } catch (error) {
+      console.error('Error en getInventarioReservado propuesta:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Public endpoint for client view (no auth required)
+  async getPublicDetails(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      // Get propuesta
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      // Get related data
+      const [solicitud, cotizacion, campania, caras] = await Promise.all([
+        prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } }),
+        prisma.cotizacion.findFirst({ where: { id_propuesta: propuestaId } }),
+        prisma.campania.findFirst({
+          where: {
+            cotizacion_id: { in: (await prisma.cotizacion.findMany({ where: { id_propuesta: propuestaId }, select: { id: true } })).map(c => c.id) }
+          }
+        }),
+        prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
+      ]);
+
+      // Get cliente name
+      let clienteNombre = '';
+      if (solicitud?.cliente_id) {
+        const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
+        clienteNombre = cliente?.T0_U_Cliente || '';
+      }
+
+      // Get inventory
+      const inventarioQuery = `
+        SELECT
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MAX(sc.id) AS solicitud_caras_id,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena
+        FROM inventarios i
+          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE sc.idquote = ?
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
+        ORDER BY cat.año DESC, cat.numero_catorcena DESC, MIN(rsv.id) DESC
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(inventarioQuery, String(propuestaId)) as any[];
+
+      // Convert BigInts to numbers
+      const serializedInventario = inventario.map(item => ({
+        ...item,
+        caras_totales: Number(item.caras_totales),
+      }));
+
+      res.json({
+        success: true,
+        data: {
+          propuesta: {
+            id: propuesta.id,
+            status: propuesta.status,
+            descripcion: propuesta.descripcion,
+            notas: propuesta.notas,
+            fecha: propuesta.fecha,
+          },
+          solicitud: solicitud ? {
+            cuic: solicitud.cuic,
+            cliente: clienteNombre,
+            razon_social: solicitud.razon_social,
+            unidad_negocio: solicitud.unidad_negocio,
+            marca_nombre: solicitud.marca_nombre,
+            asesor: solicitud.asesor,
+            agencia: solicitud.agencia,
+            producto_nombre: solicitud.producto_nombre,
+            categoria_nombre: solicitud.categoria_nombre,
+          } : null,
+          cotizacion: cotizacion ? {
+            nombre_campania: cotizacion.nombre_campania,
+            fecha_inicio: cotizacion.fecha_inicio,
+            fecha_fin: cotizacion.fecha_fin,
+            numero_caras: cotizacion.numero_caras,
+            bonificacion: cotizacion.bonificacion,
+            precio: cotizacion.precio,
+          } : null,
+          campania: campania ? {
+            id: campania.id,
+            nombre: campania.nombre,
+            status: campania.status,
+          } : null,
+          caras,
+          inventario: serializedInventario,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener detalles';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Create reservas for a propuesta
+  async createReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+
+      if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
+        return;
+      }
+
+      // 0. Get all solicitudCaras IDs for duplicate check
+      const proposalCaras = await prisma.solicitudCaras.findMany({
+        where: { idquote: String(propuestaId) },
+        select: { id: true }
+      });
+      const proposalCaraIds = proposalCaras.map(p => p.id);
+
+      // Verify propuesta exists
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      // Create calendario entry
+      const calendario = await prisma.calendario.create({
+        data: {
+          fecha_inicio: new Date(fechaInicio),
+          fecha_fin: new Date(fechaFin),
+        },
+      });
+
+      // Group reservas by whether they are completo (flujo + contraflujo at same location)
+      const gruposCompletos: Map<string, number[]> = new Map();
+      let reservasNormales: typeof reservas = [];
+
+      // Only group if agruparComoCompleto is enabled
+      if (agruparComoCompleto) {
+        // First pass: identify grupos completos by location
+        const locationMap: Map<string, typeof reservas> = new Map();
+        for (const reserva of reservas) {
+          const locationKey = `${reserva.latitud}-${reserva.longitud}`;
+          if (!locationMap.has(locationKey)) {
+            locationMap.set(locationKey, []);
+          }
+          locationMap.get(locationKey)!.push(reserva);
+        }
+
+        // Get max grupo_completo_id from database to avoid collisions
+        const maxGrupoResult = await prisma.$queryRaw<[{ max_grupo: number | null }]>`
+          SELECT MAX(grupo_completo_id) as max_grupo FROM reservas WHERE grupo_completo_id IS NOT NULL
+        `;
+        let nextGrupoCompletoId = (maxGrupoResult[0]?.max_grupo || 0) + 1;
+
+        // Second pass: determine if location has both flujo and contraflujo
+        for (const [locationKey, locationReservas] of locationMap) {
+          const hasFlujo = locationReservas.some(r => r.tipo === 'Flujo');
+          const hasContraflujo = locationReservas.some(r => r.tipo === 'Contraflujo');
+
+          if (hasFlujo && hasContraflujo) {
+            // This is a grupo completo - use sequential ID
+            const grupoId = nextGrupoCompletoId++;
+            for (const reserva of locationReservas) {
+              if (reserva.tipo === 'Flujo' || reserva.tipo === 'Contraflujo') {
+                if (!gruposCompletos.has(String(grupoId))) {
+                  gruposCompletos.set(String(grupoId), []);
+                }
+                gruposCompletos.get(String(grupoId))!.push(reserva.inventario_id);
+              }
+            }
+          } else {
+            reservasNormales.push(...locationReservas);
+          }
+        }
+      } else {
+        // No grouping - all reservas are treated as normal
+        reservasNormales = [...reservas];
+      }
+
+      // Get espacio_inventario ids for the inventario_ids
+      const inventarioIds = reservas.map(r => r.inventario_id);
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: { in: inventarioIds } },
+      });
+      const inventarioToEspacio = new Map<number, number>();
+      for (const esp of espacios) {
+        inventarioToEspacio.set(esp.inventario_id, esp.id);
+      }
+
+      // Create reservas
+      const createdReservas = [];
+
+      // Process grupos completos first
+      for (const [grupoId, invIds] of gruposCompletos) {
+        for (const invId of invIds) {
+          const reserva = reservas.find(r => r.inventario_id === invId);
+          if (!reserva) continue;
+
+          const espacioId = inventarioToEspacio.get(invId);
+          if (!espacioId) {
+            console.warn(`No espacio_inventario found for inventario_id ${invId}`);
+            continue;
+          }
+
+          const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+
+          const exists = await prisma.reservas.findFirst({
+            where: {
+              inventario_id: espacioId,
+              solicitudCaras_id: { in: proposalCaraIds },
+              deleted_at: null
+            }
+          });
+
+          if (exists) {
+            continue;
+          }
+
+          const created = await prisma.reservas.create({
+            data: {
+              inventario_id: espacioId,
+              calendario_id: calendario.id,
+              cliente_id: clienteId,
+              solicitudCaras_id: solicitudCaraId,
+              estatus,
+              estatus_original: estatus,
+              arte_aprobado: 'Pendiente',
+              comentario_rechazo: '',
+              fecha_testigo: new Date(),
+              imagen_testigo: '',
+              instalado: false,
+              tarea: '',
+              grupo_completo_id: parseInt(grupoId),
+            },
+          });
+          createdReservas.push(created);
+        }
+      }
+
+      // Process normal reservas
+      for (const reserva of reservasNormales) {
+        const espacioId = inventarioToEspacio.get(reserva.inventario_id);
+        if (!espacioId) {
+          console.warn(`No espacio_inventario found for inventario_id ${reserva.inventario_id}`);
+          continue;
+        }
+
+        const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+
+        const exists = await prisma.reservas.findFirst({
+          where: {
+            inventario_id: espacioId,
+            solicitudCaras_id: { in: proposalCaraIds },
+            deleted_at: null
+          }
+        });
+
+        if (exists) {
+          continue;
+        }
+
+        const created = await prisma.reservas.create({
+          data: {
+            inventario_id: espacioId,
+            calendario_id: calendario.id,
+            cliente_id: clienteId,
+            solicitudCaras_id: solicitudCaraId,
+            estatus,
+            estatus_original: estatus,
+            arte_aprobado: 'Pendiente',
+            comentario_rechazo: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            grupo_completo_id: null,
+          },
+        });
+        createdReservas.push(created);
+      }
+
+      // Update solicitudCaras totals if needed
+      await this.updateSolicitudCarasTotals(solicitudCaraId);
+
+      res.json({
+        success: true,
+        data: {
+          calendarioId: calendario.id,
+          reservasCreadas: createdReservas.length,
+        },
+      });
+    } catch (error) {
+      console.error('Error creating reservas:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Helper to update solicitudCaras totals after reservas
+  private async updateSolicitudCarasTotals(solicitudCaraId: number): Promise<void> {
+    try {
+      // Count reservas for this solicitudCara
+      const reservasCount = await prisma.reservas.count({
+        where: {
+          solicitudCaras_id: solicitudCaraId,
+          deleted_at: null,
+        },
+      });
+
+      const bonificadasCount = await prisma.reservas.count({
+        where: {
+          solicitudCaras_id: solicitudCaraId,
+          deleted_at: null,
+          estatus: 'Bonificado',
+        },
+      });
+
+      // Update solicitudCaras with new counts
+      await prisma.solicitudCaras.update({
+        where: { id: solicitudCaraId },
+        data: {
+          // These fields might need adjustment based on actual schema
+        },
+      });
+    } catch (error) {
+      console.error('Error updating solicitudCaras totals:', error);
+    }
+  }
+
+  // Get reservas for modal (individual, not grouped)
+  async getReservasForModal(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.latitud,
+          i.longitud,
+          i.plaza,
+          i.tipo_de_mueble as formato,
+          i.ubicacion,
+          rsv.estatus,
+          rsv.grupo_completo_id,
+          sc.id as solicitud_cara_id
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NULL
+        ORDER BY rsv.id DESC
+      `;
+
+      const reservas = await prisma.$queryRawUnsafe(query, String(propuestaId));
+
+      res.json({
+        success: true,
+        data: reservas,
+      });
+    } catch (error) {
+      console.error('Error en getReservasForModal:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Delete reservas
+  async deleteReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { reservaIds } = req.body;
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Soft delete reservas
+      await prisma.reservas.updateMany({
+        where: { id: { in: reservaIds } },
+        data: { deleted_at: new Date() },
+      });
+
+      res.json({
+        success: true,
+        message: `${reservaIds.length} reservas eliminadas`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al eliminar reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+
+  // Toggle reserva (Immediate Save)
+  async toggleReserva(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+      const { inventarioId, solicitudCaraId, clienteId, tipo, fechaInicio, fechaFin } = req.body;
+
+      // 0. Get all solicitudCaras IDs for duplicates check
+      const proposalCaras = await prisma.solicitudCaras.findMany({
+        where: { idquote: String(propuestaId) },
+        select: { id: true }
+      });
+      const proposalCaraIds = proposalCaras.map(p => p.id);
+
+      // 1. Check if ANY active reservation exists for this inventory in this proposal
+      const existingReserva = await prisma.reservas.findFirst({
+        where: {
+          inventario_id: parseInt(inventarioId),
+          solicitudCaras_id: { in: proposalCaraIds },
+          deleted_at: null
+        }
+      });
+
+      if (existingReserva) {
+        // DELETE (Soft delete)
+        await prisma.reservas.update({
+          where: { id: existingReserva.id },
+          data: { deleted_at: new Date() }
+        });
+
+        // Also delete if it's part of a group group_completo_id
+        if (existingReserva.grupo_completo_id) {
+          await prisma.reservas.updateMany({
+            where: {
+              grupo_completo_id: existingReserva.grupo_completo_id,
+              id: { not: existingReserva.id }
+            },
+            data: { deleted_at: new Date() }
+          });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            action: 'deleted',
+          },
+          message: 'Reserva eliminada'
+        });
+        return;
+      }
+
+      // CREATE
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      let calendario = await prisma.calendario.findFirst({
+        where: {
+          fecha_inicio: new Date(fechaInicio),
+          fecha_fin: new Date(fechaFin),
+          deleted_at: null
+        }
+      });
+
+      if (!calendario) {
+        calendario = await prisma.calendario.create({
+          data: {
+            fecha_inicio: new Date(fechaInicio),
+            fecha_fin: new Date(fechaFin),
+          },
+        });
+      }
+
+      const espacio = await prisma.espacio_inventario.findFirst({
+        where: { inventario_id: parseInt(inventarioId) }
+      });
+
+      if (!espacio) {
+        res.status(400).json({ success: false, error: 'Espacio de inventario no encontrado' });
+        return;
+      }
+
+      const estatus = tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+
+      const newReserva = await prisma.reservas.create({
+        data: {
+          inventario_id: espacio.id,
+          calendario_id: calendario.id,
+          cliente_id: clienteId,
+          solicitudCaras_id: solicitudCaraId,
+          estatus,
+          estatus_original: estatus,
+          arte_aprobado: 'Pendiente',
+          comentario_rechazo: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: null,
+        },
+      });
+
+      // Simple implementation for "completo" logic if needed immediately:
+      // If user selected a "Completo" item in frontend, frontend sends one request.
+      // But if it's "Flujo" and has a "Contraflujo" pair at same location... we might need to handle that.
+      // For now, let's stick to 1:1 unless we see the frontend sending special flags.
+
+      res.json({
+        success: true,
+        data: {
+          action: 'created',
+          reserva: {
+            ...newReserva,
+            inventario_id: inventarioId // Return original intentario ID for frontend mapping
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Error toggling reserva:', error);
+      const message = error instanceof Error ? error.message : 'Error al cambiar reserva';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }

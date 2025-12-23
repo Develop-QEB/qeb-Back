@@ -10,9 +10,12 @@ import dashboardRoutes from './dashboard.routes';
 import notificacionesRoutes from './notificaciones.routes';
 import correosRoutes from './correos.routes';
 
+import publicRoutes from './public.routes';
+
 const router = Router();
 
 router.use('/auth', authRoutes);
+router.use('/public', publicRoutes);
 router.use('/clientes', clientesRoutes);
 router.use('/proveedores', proveedoresRoutes);
 router.use('/inventarios', inventariosRoutes);
