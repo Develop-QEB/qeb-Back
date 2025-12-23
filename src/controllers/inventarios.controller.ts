@@ -369,7 +369,7 @@ export class InventariosController {
         const calendarioIds = calendarios.map(c => c.id);
 
         if (calendarioIds.length > 0) {
-          // Get reservations in those calendarios
+          // Get reservations in those calendarios - need to map through espacio_inventario
           const reservas = await prisma.reservas.findMany({
             where: {
               deleted_at: null,
@@ -379,7 +379,15 @@ export class InventariosController {
             select: { inventario_id: true },
           });
 
-          reservedInventarioIds = new Set(reservas.map(r => r.inventario_id));
+          // reservas.inventario_id is actually espacio_inventario.id, need to map to inventarios.id
+          const espacioIds = reservas.map(r => r.inventario_id);
+          if (espacioIds.length > 0) {
+            const espaciosReservados = await prisma.espacio_inventario.findMany({
+              where: { id: { in: espacioIds } },
+              select: { inventario_id: true },
+            });
+            reservedInventarioIds = new Set(espaciosReservados.map(e => e.inventario_id));
+          }
         }
       }
 
@@ -393,7 +401,15 @@ export class InventariosController {
           },
           select: { inventario_id: true },
         });
-        alreadyReservedForCara = new Set(existingReservas.map(r => r.inventario_id));
+        // reservas.inventario_id is actually espacio_inventario.id, need to map to inventarios.id
+        const espacioIds = existingReservas.map(r => r.inventario_id);
+        if (espacioIds.length > 0) {
+          const espaciosReservados = await prisma.espacio_inventario.findMany({
+            where: { id: { in: espacioIds } },
+            select: { inventario_id: true },
+          });
+          alreadyReservedForCara = new Set(espaciosReservados.map(e => e.inventario_id));
+        }
       }
 
       // Build the response with espacio info and filter out reserved

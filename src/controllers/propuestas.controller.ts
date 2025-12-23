@@ -183,6 +183,34 @@ export class PropuestasController {
     }
   }
 
+  async updateAsignados(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { asignados, id_asignados } = req.body;
+
+      const propuesta = await prisma.propuesta.update({
+        where: { id: parseInt(id) },
+        data: {
+          asignado: asignados,
+          id_asignado: id_asignados,
+          updated_at: new Date(),
+        },
+      });
+
+      res.json({
+        success: true,
+        data: propuesta,
+        message: 'Asignados actualizados correctamente',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al actualizar asignados';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async getStats(_req: AuthRequest, res: Response): Promise<void> {
     try {
       // Get all status counts dynamically
@@ -591,6 +619,38 @@ export class PropuestasController {
         clienteNombre = cliente?.T0_U_Cliente || '';
       }
 
+      // Get catorcena info from campaign dates
+      let catorcenaInicio = null;
+      let anioInicio = null;
+      let catorcenaFin = null;
+      let anioFin = null;
+
+      if (campania) {
+        // Get catorcena for fecha_inicio
+        const catInicio = await prisma.$queryRaw<any[]>`
+          SELECT numero_catorcena, año as anio
+          FROM catorcenas
+          WHERE ${campania.fecha_inicio} BETWEEN fecha_inicio AND fecha_fin
+          LIMIT 1
+        `;
+        if (catInicio.length > 0) {
+          catorcenaInicio = Number(catInicio[0].numero_catorcena);
+          anioInicio = Number(catInicio[0].anio);
+        }
+
+        // Get catorcena for fecha_fin
+        const catFin = await prisma.$queryRaw<any[]>`
+          SELECT numero_catorcena, año as anio
+          FROM catorcenas
+          WHERE ${campania.fecha_fin} BETWEEN fecha_inicio AND fecha_fin
+          LIMIT 1
+        `;
+        if (catFin.length > 0) {
+          catorcenaFin = Number(catFin[0].numero_catorcena);
+          anioFin = Number(catFin[0].anio);
+        }
+      }
+
       // Get inventory
       const inventarioQuery = `
         SELECT
@@ -655,6 +715,10 @@ export class PropuestasController {
             descripcion: propuesta.descripcion,
             notas: propuesta.notas,
             fecha: propuesta.fecha,
+            catorcena_inicio: catorcenaInicio,
+            anio_inicio: anioInicio,
+            catorcena_fin: catorcenaFin,
+            anio_fin: anioFin,
           },
           solicitud: solicitud ? {
             cuic: solicitud.cuic,
