@@ -21,4 +21,7 @@ router.get('/activity', dashboardController.getRecentActivity.bind(dashboardCont
 router.get('/catorcenas', dashboardController.getUpcomingCatorcenas.bind(dashboardController));
 router.get('/top-clientes', dashboardController.getTopClientes.bind(dashboardController));
 
+// Inventario detallado con info de campañas/propuestas
+router.get('/inventory-detail', dashboardController.getInventoryDetail.bind(dashboardController));
+
 export default router;

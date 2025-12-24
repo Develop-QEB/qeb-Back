@@ -575,6 +575,226 @@ export class DashboardController {
       });
     }
   }
+
+  // Obtener inventario detallado con info de campañas/propuestas
+  async getInventoryDetail(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const {
+        estado,
+        ciudad,
+        formato,
+        nse,
+        catorcena_id,
+        fecha_inicio,
+        fecha_fin,
+        estatus: estatusFiltro,
+        page = '1',
+        limit = '50',
+      } = req.query;
+
+      const pageNum = parseInt(page as string) || 1;
+      const limitNum = parseInt(limit as string) || 50;
+      const skip = (pageNum - 1) * limitNum;
+
+      // Construir filtro base para inventarios
+      const inventarioWhere: Record<string, unknown> = {};
+
+      if (estado) {
+        inventarioWhere.estado = estado as string;
+      }
+
+      if (ciudad) {
+        inventarioWhere.plaza = ciudad as string;
+      }
+
+      if (formato) {
+        inventarioWhere.tipo_de_mueble = formato as string;
+      }
+
+      if (nse) {
+        inventarioWhere.nivel_socioeconomico = nse as string;
+      }
+
+      // Obtener TODOS los inventarios para calcular estatus
+      const inventarios = await prisma.inventarios.findMany({
+        where: inventarioWhere,
+        select: {
+          id: true,
+          codigo_unico: true,
+          plaza: true,
+          mueble: true,
+          tipo_de_mueble: true,
+          tradicional_digital: true,
+          municipio: true,
+          estado: true,
+          nivel_socioeconomico: true,
+          latitud: true,
+          longitud: true,
+        },
+      });
+
+      const inventarioIds = inventarios.map((i) => i.id);
+
+      // Filtro de fechas
+      let fechaInicio: Date | null = null;
+      let fechaFin: Date | null = null;
+
+      if (catorcena_id) {
+        const catorcena = await prisma.catorcenas.findUnique({
+          where: { id: parseInt(catorcena_id as string) },
+        });
+        if (catorcena) {
+          fechaInicio = catorcena.fecha_inicio;
+          fechaFin = catorcena.fecha_fin;
+        }
+      } else if (fecha_inicio && fecha_fin) {
+        fechaInicio = new Date(fecha_inicio as string);
+        fechaFin = new Date(fecha_fin as string);
+      }
+
+      const reservasWhere: Record<string, unknown> = {
+        deleted_at: null,
+        inventario_id: { in: inventarioIds },
+      };
+
+      if (fechaInicio && fechaFin) {
+        const calendarios = await prisma.calendario.findMany({
+          where: {
+            deleted_at: null,
+            fecha_inicio: { lte: fechaFin },
+            fecha_fin: { gte: fechaInicio },
+          },
+          select: { id: true },
+        });
+        const calendarioIds = calendarios.map((c) => c.id);
+        reservasWhere.calendario_id = { in: calendarioIds };
+      }
+
+      // Obtener reservas con sus clientes
+      const reservas = await prisma.reservas.findMany({
+        where: reservasWhere,
+        select: {
+          inventario_id: true,
+          estatus: true,
+          cliente_id: true,
+        },
+      });
+
+      // Obtener IDs unicos de clientes
+      const clienteIds = [...new Set(reservas.map((r) => r.cliente_id))];
+
+      // Obtener nombres de clientes
+      const clientes = clienteIds.length > 0 ? await prisma.cliente.findMany({
+        where: { id: { in: clienteIds } },
+        select: { id: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      }) : [];
+      const clienteMap = new Map(clientes.map((c) => [c.id, c.T0_U_Cliente || c.T0_U_RazonSocial || null]));
+
+      // Mapear info de reserva por inventario
+      const inventarioInfo: Record<number, {
+        estatus: string;
+        cliente_nombre: string | null;
+      }> = {};
+
+      reservas.forEach((r) => {
+        const current = inventarioInfo[r.inventario_id];
+        const prioridad = { Vendido: 3, Reservado: 2, Bloqueado: 1 };
+        const currentPrioridad = current ? (prioridad[current.estatus as keyof typeof prioridad] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus as keyof typeof prioridad] || 0;
+
+        if (newPrioridad > currentPrioridad) {
+          inventarioInfo[r.inventario_id] = {
+            estatus: r.estatus,
+            cliente_nombre: clienteMap.get(r.cliente_id) || null,
+          };
+        }
+      });
+
+      // Construir resultado con filtro de estatus
+      const allResults = inventarios
+        .map((inv) => {
+          const info = inventarioInfo[inv.id];
+          const estatusActual = info?.estatus || 'Disponible';
+
+          return {
+            id: inv.id,
+            codigo_unico: inv.codigo_unico,
+            plaza: inv.plaza,
+            mueble: inv.mueble,
+            tipo_de_mueble: inv.tipo_de_mueble,
+            tradicional_digital: inv.tradicional_digital,
+            municipio: inv.municipio,
+            estado: inv.estado,
+            latitud: inv.latitud,
+            longitud: inv.longitud,
+            estatus: estatusActual,
+            cliente_nombre: info?.cliente_nombre || null,
+          };
+        })
+        .filter((inv) => {
+          if (!estatusFiltro) return true;
+          return inv.estatus === estatusFiltro;
+        });
+
+      // Paginación
+      const total = allResults.length;
+      const totalPages = Math.ceil(total / limitNum);
+      const paginatedResults = allResults.slice(skip, skip + limitNum);
+
+      // Todas las coordenadas para heatmap y pines
+      const allCoords = allResults
+        .filter((inv) => inv.latitud && inv.longitud)
+        .map((inv) => ({
+          id: inv.id,
+          lat: inv.latitud as number,
+          lng: inv.longitud as number,
+          plaza: inv.plaza,
+          estatus: inv.estatus,
+        }));
+
+      res.json({
+        success: true,
+        data: {
+          items: paginatedResults,
+          pagination: {
+            page: pageNum,
+            limit: limitNum,
+            total,
+            totalPages,
+          },
+          // Resumen por plaza para el mapa
+          byPlaza: Object.entries(
+            allResults.reduce((acc, inv) => {
+              const plaza = inv.plaza || 'Sin plaza';
+              if (!acc[plaza]) {
+                acc[plaza] = { count: 0, lat: inv.latitud, lng: inv.longitud };
+              }
+              acc[plaza].count++;
+              if (!acc[plaza].lat && inv.latitud) {
+                acc[plaza].lat = inv.latitud;
+                acc[plaza].lng = inv.longitud;
+              }
+              return acc;
+            }, {} as Record<string, { count: number; lat: number | null; lng: number | null }>)
+          ).map(([plaza, data]) => ({
+            plaza,
+            count: data.count,
+            lat: data.lat,
+            lng: data.lng,
+          })).sort((a, b) => b.count - a.count),
+          // Todas las coordenadas para pines/heatmap
+          allCoords,
+        },
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error al obtener inventario detallado';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
 }
 
 export const dashboardController = new DashboardController();
