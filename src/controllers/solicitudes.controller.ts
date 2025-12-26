@@ -879,8 +879,56 @@ export class SolicitudesController {
           creado_en: new Date(),
           campania_id: campania?.id || 0,
           solicitud_id: solicitud.id,
+          origen: 'solicitud',
         },
       });
+
+      // Crear notificaciones para todos los involucrados (excepto el autor)
+      const nombreSolicitud = solicitud.razon_social || solicitud.marca_nombre || 'Sin nombre';
+      const tituloNotificacion = `Nuevo comentario en solicitud #${solicitud.id} - ${nombreSolicitud}`;
+      const descripcionNotificacion = `${userName} comentó: ${comentario.substring(0, 100)}${comentario.length > 100 ? '...' : ''}`;
+
+      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados
+      if (solicitud.id_asignado) {
+        solicitud.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      // Crear una notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            id_solicitud: solicitud.id.toString(),
+            id_propuesta: propuesta?.id?.toString() || '',
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            responsable: '',
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
 
       res.json({
         success: true,

@@ -12,6 +12,7 @@ router.get('/:id', campanasController.getById.bind(campanasController));
 router.get('/:id/inventario', campanasController.getInventarioReservado.bind(campanasController));
 router.get('/:id/inventario-aps', campanasController.getInventarioConAPS.bind(campanasController));
 router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
+router.get('/:id/historial', campanasController.getHistorial.bind(campanasController));
 router.patch('/:id', campanasController.update.bind(campanasController));
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));

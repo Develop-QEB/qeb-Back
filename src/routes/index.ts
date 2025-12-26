@@ -9,6 +9,7 @@ import campanasRoutes from './campanas.routes';
 import dashboardRoutes from './dashboard.routes';
 import notificacionesRoutes from './notificaciones.routes';
 import correosRoutes from './correos.routes';
+import notasRoutes from './notas.routes';
 
 import publicRoutes from './public.routes';
 
@@ -25,5 +26,6 @@ router.use('/campanas', campanasRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/notificaciones', notificacionesRoutes);
 router.use('/correos', correosRoutes);
+router.use('/notas', notasRoutes);
 
 export default router;

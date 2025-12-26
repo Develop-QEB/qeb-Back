@@ -285,15 +285,88 @@ export class PropuestasController {
       const { id } = req.params;
       const { comentario } = req.body;
       const userName = req.user?.nombre || 'Usuario';
+      const userId = req.user?.userId || 0;
+      const propuestaId = parseInt(id);
+
+      // Obtener la propuesta para conseguir los asignados y solicitud_id
+      const propuesta = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
 
       const newComment = await prisma.historial_comentarios.create({
         data: {
-          id_propuesta: parseInt(id),
+          id_propuesta: propuestaId,
           comentario,
           usuario: userName,
           fecha: new Date(),
         },
       });
+
+      // Crear notificaciones para todos los involucrados (excepto el autor)
+      // Obtener nombre de la cotización/campaña para el título
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+      });
+      const nombrePropuesta = cotizacion?.nombre_campania || `Propuesta #${propuestaId}`;
+      const tituloNotificacion = `Nuevo comentario en propuesta: ${nombrePropuesta}`;
+      const descripcionNotificacion = `${userName} comentó: ${comentario.substring(0, 100)}${comentario.length > 100 ? '...' : ''}`;
+
+      // Obtener campaña si existe
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      // Obtener solicitud para el creador
+      const solicitudData = propuesta.solicitud_id
+        ? await prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } })
+        : null;
+
+      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados de la propuesta
+      if (propuesta.id_asignado) {
+        propuesta.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
+        involucrados.add(solicitudData.usuario_id);
+      }
+
+      // Crear una notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            id_solicitud: propuesta.solicitud_id?.toString() || '',
+            id_propuesta: propuestaId.toString(),
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            responsable: '',
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
 
       res.json({
         success: true,

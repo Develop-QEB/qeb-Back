@@ -147,16 +147,26 @@ export class NotificacionesController {
       }
 
       // Obtener comentarios de la tabla comentarios usando solicitud_id
-      let comentarios: { id: number; autor_id: number; contenido: string; fecha: Date; solicitud_id: number }[] = [];
+      let comentarios: { id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date; solicitud_id: number }[] = [];
       if (tarea.id_solicitud) {
         const solicitudId = parseInt(tarea.id_solicitud);
         const rawComentarios = await prisma.comentarios.findMany({
           where: { solicitud_id: solicitudId },
           orderBy: { creado_en: 'desc' },
         });
+
+        // Obtener los nombres de los autores
+        const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
+        const usuarios = await prisma.usuario.findMany({
+          where: { id: { in: autorIds } },
+          select: { id: true, nombre: true },
+        });
+        const usuarioMap = new Map(usuarios.map(u => [u.id, u.nombre]));
+
         comentarios = rawComentarios.map(c => ({
           id: c.id,
           autor_id: c.autor_id,
+          autor_nombre: usuarioMap.get(c.autor_id) || 'Usuario',
           contenido: c.comentario,
           fecha: c.creado_en,
           solicitud_id: c.solicitud_id,
@@ -494,8 +504,67 @@ export class NotificacionesController {
           creado_en: new Date(),
           solicitud_id: solicitudId,
           campania_id: tarea.campania_id || 0,
+          origen: 'tarea',
         },
       });
+
+      // Crear notificaciones para todos los involucrados (excepto el autor)
+      const userName = req.user?.nombre || 'Usuario';
+      const tituloTarea = tarea.titulo || 'Tarea';
+      const tituloNotificacion = `Nuevo comentario en tarea: ${tituloTarea}`;
+      const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+
+      // Obtener solicitud relacionada para el creador
+      const solicitudData = solicitudId > 0
+        ? await prisma.solicitud.findUnique({ where: { id: solicitudId } })
+        : null;
+
+      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar responsable de la tarea
+      if (tarea.id_responsable && tarea.id_responsable !== userId) {
+        involucrados.add(tarea.id_responsable);
+      }
+
+      // Agregar asignados de la tarea
+      if (tarea.id_asignado) {
+        tarea.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
+        involucrados.add(solicitudData.usuario_id);
+      }
+
+      // Crear una notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            id_solicitud: solicitudId.toString(),
+            id_propuesta: tarea.id_propuesta || '',
+            campania_id: tarea.campania_id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            responsable: '',
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
 
       res.status(201).json({
         success: true,
@@ -540,10 +609,19 @@ export class NotificacionesController {
         orderBy: { creado_en: 'desc' },
       });
 
-      // Mapear a formato esperado
+      // Obtener los nombres de los autores
+      const autorIds = [...new Set(comentarios.map(c => c.autor_id))];
+      const usuarios = await prisma.usuario.findMany({
+        where: { id: { in: autorIds } },
+        select: { id: true, nombre: true },
+      });
+      const usuarioMap = new Map(usuarios.map(u => [u.id, u.nombre]));
+
+      // Mapear a formato esperado con nombre del autor
       const mappedComentarios = comentarios.map(c => ({
         id: c.id,
         autor_id: c.autor_id,
+        autor_nombre: usuarioMap.get(c.autor_id) || 'Usuario',
         contenido: c.comentario,
         fecha: c.creado_en,
         solicitud_id: c.solicitud_id,

@@ -550,53 +550,40 @@ export class CampanasController {
 
       const query = `
         SELECT
-          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          MIN(i.id) as id,
-
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(
-              SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1),
-              '_completo_',
-              SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1)
-            )
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-
-          MAX(sc.id) AS solicitud_caras_id,
-          MIN(i.mueble) as mueble,
-          MIN(i.estado) as estado,
-
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
-
-          COUNT(DISTINCT rsv.id) AS caras_totales,
-
-          MIN(i.latitud) as latitud,
-          MIN(i.longitud) as longitud,
-          MIN(i.plaza) as plaza,
-          MAX(rsv.estatus) as estatus_reserva,
-          MAX(sc.articulo) as articulo,
-          MAX(sc.tipo) as tipo_medio,
-          MAX(sc.inicio_periodo) as inicio_periodo,
-          MAX(sc.fin_periodo) as fin_periodo,
-          MIN(i.tradicional_digital) as tradicional_digital,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
-
+          rsv.id as rsv_ids,
+          i.id,
+          i.codigo_unico,
+          i.mueble,
+          i.estado,
+          i.tipo_de_cara,
+          i.latitud,
+          i.longitud,
+          i.plaza,
+          i.tradicional_digital,
+          i.tarifa_publica,
+          rsv.estatus as estatus_reserva,
+          rsv.archivo,
+          rsv.calendario_id,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          sc.id AS solicitud_caras_id,
+          sc.articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          1 AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
-        ORDER BY MIN(rsv.id) DESC
+        ORDER BY rsv.id DESC
       `;
 
       const inventario = await prisma.$queryRawUnsafe(query, campanaId);
@@ -738,8 +725,76 @@ export class CampanasController {
           creado_en: new Date(),
           solicitud_id: solicitudId,
           campania_id: campanaId,
+          origen: 'campana',
         },
       });
+
+      // Crear notificaciones para todos los involucrados (excepto el autor)
+      const userName = req.user?.nombre || 'Usuario';
+      const nombreCampana = campana.nombre || 'Sin nombre';
+      const tituloNotificacion = `Nuevo comentario en campaña #${campanaId} - ${nombreCampana}`;
+      const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+
+      // Obtener propuesta y solicitud para los involucrados
+      let propuestaData = null;
+      let solicitudData = null;
+      if (campana.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+        });
+        if (cotizacion?.id_propuesta) {
+          propuestaData = await prisma.propuesta.findUnique({
+            where: { id: cotizacion.id_propuesta },
+          });
+          if (propuestaData?.solicitud_id) {
+            solicitudData = await prisma.solicitud.findUnique({
+              where: { id: propuestaData.solicitud_id },
+            });
+          }
+        }
+      }
+
+      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados de la propuesta
+      if (propuestaData?.id_asignado) {
+        propuestaData.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
+        involucrados.add(solicitudData.usuario_id);
+      }
+
+      // Crear una notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            id_solicitud: solicitudId.toString(),
+            id_propuesta: propuestaData?.id?.toString() || '',
+            campania_id: campanaId,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            responsable: '',
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
 
       res.status(201).json({
         success: true,
@@ -821,6 +876,65 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en removeAPS:', error);
       const message = error instanceof Error ? error.message : 'Error al quitar APS';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  async getHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      // Obtener la campaña para conseguir el id_propuesta
+      const campana = await prisma.campania.findUnique({
+        where: { id: campanaId },
+      });
+
+      if (!campana) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Obtener id_propuesta desde cotizacion
+      let propuestaId: number | null = null;
+
+      if (campana.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+        });
+        if (cotizacion?.id_propuesta) {
+          propuestaId = cotizacion.id_propuesta;
+        }
+      }
+
+      if (!propuestaId) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Obtener historial donde ref_id = id_propuesta (como en Retool)
+      const historial = await prisma.historial.findMany({
+        where: {
+          ref_id: propuestaId,
+        },
+        orderBy: { fecha_hora: 'asc' },
+      });
+
+      // Convertir BigInt a Number para JSON serialization
+      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: historialSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getHistorial:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({
         success: false,
         error: message,

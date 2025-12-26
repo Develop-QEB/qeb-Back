@@ -212,6 +212,7 @@ model comentarios {
   creado_en    DateTime @db.Timestamp(0)
   campania_id  Int
   solicitud_id Int
+  origen       String?  @db.VarChar(20) // 'solicitud', 'propuesta', 'campana', 'tarea'
 }
 
 
@@ -571,6 +572,19 @@ model correos_enviados {
 
   @@index([destinatario], map: "idx_destinatario")
   @@map("correos_enviados")
+}
+
+model notas_personales {
+  id                 Int       @id @default(autoincrement())
+  usuario_id         Int
+  titulo             String?   @db.VarChar(255)
+  contenido          String    @db.Text
+  color              String?   @db.VarChar(20)
+  fecha_creacion     DateTime  @default(now()) @db.Timestamp(0)
+  fecha_actualizacion DateTime? @db.Timestamp(0)
+
+  @@index([usuario_id], map: "idx_usuario_notas")
+  @@map("notas_personales")
 }
 
 enum proveedores_estado {
