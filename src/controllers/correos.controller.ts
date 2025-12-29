@@ -164,6 +164,8 @@ export const toggleLeido = async (req: Request, res: Response) => {
 export const createCorreo = async (req: Request, res: Response) => {
   try {
     const { remitente, destinatario, asunto, cuerpo } = req.body;
+    const userId = (req as any).user?.id;
+    const userName = (req as any).user?.nombre || 'Sistema';
 
     if (!destinatario || !asunto || !cuerpo) {
       return res.status(400).json({ message: 'Faltan campos requeridos' });
@@ -178,6 +180,34 @@ export const createCorreo = async (req: Request, res: Response) => {
       },
     });
 
+    // Buscar el usuario destinatario por su email para crear notificación
+    const usuarioDestinatario = await prisma.usuario.findFirst({
+      where: {
+        correo_electronico: destinatario,
+        deleted_at: null,
+      },
+    });
+
+    // Crear notificación para el destinatario si existe en el sistema
+    if (usuarioDestinatario && usuarioDestinatario.id !== userId) {
+      const now = new Date();
+      await prisma.tareas.create({
+        data: {
+          titulo: 'Nuevo correo recibido',
+          descripcion: `Has recibido un nuevo correo: "${asunto}"`,
+          tipo: 'Notificación',
+          estatus: 'Pendiente',
+          id_responsable: usuarioDestinatario.id,
+          responsable: usuarioDestinatario.nombre,
+          asignado: userName,
+          id_asignado: userId?.toString() || null,
+          id_solicitud: '',
+          fecha_inicio: now,
+          fecha_fin: now,
+        },
+      });
+    }
+
     res.status(201).json(correo);
   } catch (error) {
     console.error('Error creating correo:', error);
@@ -190,6 +220,8 @@ export const sendAuthorizationPIN = async (req: Request, res: Response) => {
   try {
     const { codigo, solicitante, campana } = req.body;
     const adminEmail = process.env.ADMIN_EMAIL || 'Develop@qeb.mx';
+    const userId = (req as any).user?.id;
+    const userName = (req as any).user?.nombre || solicitante;
 
     if (!codigo || !solicitante) {
       return res.status(400).json({ message: 'Faltan campos requeridos' });
@@ -304,6 +336,34 @@ export const sendAuthorizationPIN = async (req: Request, res: Response) => {
         cuerpo: htmlBody,
       },
     });
+
+    // Buscar el administrador por su email para crear notificación
+    const admin = await prisma.usuario.findFirst({
+      where: {
+        correo_electronico: adminEmail,
+        deleted_at: null,
+      },
+    });
+
+    // Crear notificación para el administrador
+    if (admin && admin.id !== userId) {
+      const now = new Date();
+      await prisma.tareas.create({
+        data: {
+          titulo: 'Código de autorización solicitado',
+          descripcion: `${userName} ha solicitado un código de autorización${campana ? ` para la campaña "${campana}"` : ''}. Revisa tu correo.`,
+          tipo: 'Notificación',
+          estatus: 'Pendiente',
+          id_responsable: admin.id,
+          responsable: admin.nombre,
+          asignado: userName,
+          id_asignado: userId?.toString() || null,
+          id_solicitud: '',
+          fecha_inicio: now,
+          fecha_fin: now,
+        },
+      });
+    }
 
     res.json({
       success: true,

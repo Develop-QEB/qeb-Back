@@ -194,7 +194,7 @@ export class CampanasController {
       const catorcenas = catorcenaData[0] || {};
 
       // Obtener comentarios usando solicitud_id de la propuesta o campania_id
-      let comentarios: { id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date; solicitud_id: number }[] = [];
+      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id: number }[] = [];
       const solicitudId = propuesta?.solicitud_id;
 
       const whereComentarios = solicitudId
@@ -206,18 +206,19 @@ export class CampanasController {
         orderBy: { creado_en: 'desc' },
       });
 
-      // Obtener los nombres de los autores
+      // Obtener los nombres y fotos de los autores
       const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
       const autores = await prisma.usuario.findMany({
         where: { id: { in: autorIds } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, foto_perfil: true },
       });
-      const autoresMap = new Map(autores.map(a => [a.id, a.nombre]));
+      const autoresMap = new Map(autores.map(a => [a.id, { nombre: a.nombre, foto_perfil: a.foto_perfil }]));
 
       comentarios = rawComentarios.map(c => ({
         id: c.id,
         autor_id: c.autor_id,
-        autor_nombre: autoresMap.get(c.autor_id) || 'Usuario',
+        autor_nombre: autoresMap.get(c.autor_id)?.nombre || 'Usuario',
+        autor_foto: autoresMap.get(c.autor_id)?.foto_perfil || null,
         contenido: c.comentario,
         fecha: c.creado_en,
         solicitud_id: c.solicitud_id,
@@ -310,10 +311,94 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const { status } = req.body;
+      const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      // Obtener campaña antes de actualizar
+      const campanaAnterior = await prisma.campania.findUnique({
+        where: { id: campanaId },
+      });
+
+      if (!campanaAnterior) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      const statusAnterior = campanaAnterior.status;
 
       const campana = await prisma.campania.update({
-        where: { id: parseInt(id) },
+        where: { id: campanaId },
         data: { status },
+      });
+
+      // Obtener datos relacionados
+      const cotizacion = campana.cotizacion_id
+        ? await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } })
+        : null;
+      const propuesta = cotizacion?.id_propuesta
+        ? await prisma.propuesta.findUnique({ where: { id: cotizacion.id_propuesta } })
+        : null;
+      const solicitud = propuesta?.solicitud_id
+        ? await prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } })
+        : null;
+
+      // Crear notificaciones para los involucrados
+      const nombreCampana = campana.nombre || `Campaña #${campanaId}`;
+      const tituloNotificacion = `Cambio de estado en campaña: ${nombreCampana}`;
+      const descripcionNotificacion = `${userName} cambió el estado de "${statusAnterior}" a "${status}"`;
+
+      // Recopilar involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados de la propuesta
+      if (propuesta?.id_asignado) {
+        propuesta.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitud?.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      // Crear notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: solicitud?.id?.toString() || '',
+            id_propuesta: propuesta?.id?.toString() || '',
+            campania_id: campanaId,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
+      // Registrar en historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'Campaña',
+          ref_id: propuesta?.id || campanaId,
+          accion: 'Cambio de estado',
+          fecha_hora: now,
+          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+        },
       });
 
       res.json({
@@ -342,6 +427,8 @@ export class CampanasController {
         catorcenaFinNum,
         catorcenaFinAnio
       } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       const campanaId = parseInt(id);
 
@@ -446,6 +533,60 @@ export class CampanasController {
           ...(fechaFin && { fecha_fin: fechaFin }),
         },
       });
+
+      // Crear notificaciones para usuarios involucrados
+      if (cotizacionId) {
+        const cotizacion = await prisma.cotizacion.findUnique({
+          where: { id: cotizacionId },
+        });
+
+        if (cotizacion?.id_propuesta) {
+          const propuesta = await prisma.propuesta.findUnique({
+            where: { id: cotizacion.id_propuesta },
+          });
+
+          if (propuesta?.id_asignado) {
+            const involucrados = new Set<number>();
+            propuesta.id_asignado.split(',').forEach(idStr => {
+              const parsed = parseInt(idStr.trim());
+              if (!isNaN(parsed) && parsed !== userId) {
+                involucrados.add(parsed);
+              }
+            });
+
+            const now = new Date();
+            for (const responsableId of involucrados) {
+              await prisma.tareas.create({
+                data: {
+                  titulo: 'Campaña actualizada',
+                  descripcion: `${userName} ha actualizado la campaña "${campana.nombre || campanaId}"`,
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: responsableId,
+                  asignado: userName,
+                  id_asignado: userId?.toString() || '',
+                  id_solicitud: propuesta.solicitud_id?.toString() || '',
+                  id_propuesta: propuesta.id.toString(),
+                  campania_id: campanaId,
+                  fecha_inicio: now,
+                  fecha_fin: now,
+                },
+              });
+            }
+
+            // Registrar en historial
+            await prisma.historial.create({
+              data: {
+                tipo: 'Campaña',
+                ref_id: campanaId,
+                accion: 'Actualización',
+                fecha_hora: now,
+                detalles: `Campaña actualizada por ${userName}`,
+              },
+            });
+          }
+        }
+      }
 
       res.json({
         success: true,
@@ -817,7 +958,11 @@ export class CampanasController {
 
   async removeAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
+      const { id } = req.params;
       const { reservaIds } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = id ? parseInt(id) : null;
 
       if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
         res.status(400).json({
@@ -864,6 +1009,66 @@ export class CampanasController {
 
         await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
         console.log('removeAPS - actualizadas reservas de grupos');
+      }
+
+      // Crear notificaciones para usuarios involucrados
+      if (campanaId) {
+        const campana = await prisma.campania.findUnique({
+          where: { id: campanaId },
+        });
+
+        if (campana?.cotizacion_id) {
+          const cotizacion = await prisma.cotizacion.findUnique({
+            where: { id: campana.cotizacion_id },
+          });
+
+          if (cotizacion?.id_propuesta) {
+            const propuesta = await prisma.propuesta.findUnique({
+              where: { id: cotizacion.id_propuesta },
+            });
+
+            if (propuesta?.id_asignado) {
+              const involucrados = new Set<number>();
+              propuesta.id_asignado.split(',').forEach(idStr => {
+                const parsed = parseInt(idStr.trim());
+                if (!isNaN(parsed) && parsed !== userId) {
+                  involucrados.add(parsed);
+                }
+              });
+
+              const now = new Date();
+              for (const responsableId of involucrados) {
+                await prisma.tareas.create({
+                  data: {
+                    titulo: 'APS removido de reservas',
+                    descripcion: `${userName} ha removido APS de ${reservaIds.length} reserva(s) en la campaña "${campana.nombre || campanaId}"`,
+                    tipo: 'Notificación',
+                    estatus: 'Pendiente',
+                    id_responsable: responsableId,
+                    asignado: userName,
+                    id_asignado: userId?.toString() || '',
+                    id_solicitud: propuesta.solicitud_id?.toString() || '',
+                    id_propuesta: propuesta.id.toString(),
+                    campania_id: campanaId,
+                    fecha_inicio: now,
+                    fecha_fin: now,
+                  },
+                });
+              }
+
+              // Registrar en historial
+              await prisma.historial.create({
+                data: {
+                  tipo: 'Campaña',
+                  ref_id: campanaId,
+                  accion: 'Remoción de APS',
+                  fecha_hora: now,
+                  detalles: `${userName} removió APS de ${reservaIds.length} reserva(s)`,
+                },
+              });
+            }
+          }
+        }
       }
 
       res.json({
@@ -944,7 +1149,9 @@ export class CampanasController {
 
   async assignAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { inventarioIds } = req.body;
+      const { inventarioIds, campanaId } = req.body;
+      const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
 
       if (!inventarioIds || !Array.isArray(inventarioIds) || inventarioIds.length === 0) {
         res.status(400).json({
@@ -1002,6 +1209,80 @@ export class CampanasController {
 
         await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
         console.log('assignAPS - actualizadas reservas de grupos');
+      }
+
+      // Paso 5: Crear notificaciones para los involucrados
+      let campana = null;
+      let propuesta = null;
+      let solicitud = null;
+
+      if (campanaId) {
+        campana = await prisma.campania.findUnique({ where: { id: parseInt(campanaId) } });
+        if (campana?.cotizacion_id) {
+          const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+          if (cotizacion?.id_propuesta) {
+            propuesta = await prisma.propuesta.findUnique({ where: { id: cotizacion.id_propuesta } });
+            if (propuesta?.solicitud_id) {
+              solicitud = await prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } });
+            }
+          }
+        }
+      }
+
+      const nombreCampana = campana?.nombre || 'Campaña';
+      const tituloNotificacion = `APS #${newAPS} asignado - ${nombreCampana}`;
+      const descripcionNotificacion = `${userName} asignó APS #${newAPS} a ${inventarioIds.length} ubicación(es)`;
+
+      // Recopilar involucrados
+      const involucrados = new Set<number>();
+
+      if (propuesta?.id_asignado) {
+        propuesta.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      if (solicitud?.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: solicitud?.id?.toString() || '',
+            id_propuesta: propuesta?.id?.toString() || '',
+            campania_id: campana?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
+      // Registrar en historial
+      if (propuesta) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: propuesta.id,
+            accion: 'Asignación APS',
+            fecha_hora: now,
+            detalles: `${userName} asignó APS #${newAPS} a ${inventarioIds.length} ubicación(es)`,
+          },
+        });
       }
 
       res.json({

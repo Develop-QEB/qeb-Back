@@ -172,17 +172,18 @@ export class SolicitudesController {
         orderBy: { creado_en: 'desc' },
       });
 
-      // Get autor names for comentarios
+      // Get autor names and photos for comentarios
       const autorIds = [...new Set(comentarios.map(c => c.autor_id))].filter(id => id != null);
       const autores = autorIds.length > 0 ? await prisma.usuario.findMany({
         where: { id: { in: autorIds } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, foto_perfil: true },
       }) : [];
-      const autoresMap = new Map(autores.map(a => [a.id, a.nombre]));
+      const autoresMap = new Map(autores.map(a => [a.id, { nombre: a.nombre, foto_perfil: a.foto_perfil }]));
 
       const comentariosWithAuthor = comentarios.map(c => ({
         ...c,
-        autor_nombre: c.autor_id ? (autoresMap.get(c.autor_id) || 'Usuario desconocido') : 'Sistema',
+        autor_nombre: c.autor_id ? (autoresMap.get(c.autor_id)?.nombre || 'Usuario desconocido') : 'Sistema',
+        autor_foto: c.autor_id ? (autoresMap.get(c.autor_id)?.foto_perfil || null) : null,
       }));
 
       // Get historial
@@ -217,10 +218,93 @@ export class SolicitudesController {
     try {
       const { id } = req.params;
       const { status } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      // Obtener solicitud antes de actualizar
+      const solicitudAnterior = await prisma.solicitud.findUnique({
+        where: { id: parseInt(id) },
+      });
+
+      if (!solicitudAnterior) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      const statusAnterior = solicitudAnterior.status;
 
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
+      });
+
+      // Crear notificaciones para los involucrados
+      const nombreSolicitud = solicitud.razon_social || solicitud.marca_nombre || 'Sin nombre';
+      const tituloNotificacion = `Cambio de estado en solicitud #${solicitud.id}`;
+      const descripcionNotificacion = `${userName} cambió el estado de "${statusAnterior}" a "${status}" - ${nombreSolicitud}`;
+
+      // Obtener propuesta y campaña relacionadas
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
+      });
+      const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta.id },
+      }) : null;
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      // Recopilar involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados
+      if (solicitud.id_asignado) {
+        solicitud.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      // Crear notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: solicitud.id.toString(),
+            id_propuesta: propuesta?.id?.toString() || '',
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId?.toString() || '',
+          },
+        });
+      }
+
+      // Registrar en historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'Solicitud',
+          ref_id: solicitud.id,
+          accion: 'Cambio de estado',
+          fecha_hora: now,
+          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+        },
       });
 
       res.json({
@@ -239,10 +323,67 @@ export class SolicitudesController {
   async delete(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      // Obtener la solicitud antes de eliminar
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+      });
+
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
 
       await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { deleted_at: new Date() },
+      });
+
+      // Crear notificaciones para usuarios involucrados
+      const involucrados = new Set<number>();
+
+      if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      if (solicitud.id_asignado) {
+        solicitud.id_asignado.split(',').forEach(idStr => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      const now = new Date();
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: 'Solicitud eliminada',
+            descripcion: `La solicitud "${solicitud.descripcion || solicitud.id}" ha sido eliminada por ${userName}`,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            asignado: userName,
+            id_asignado: userId?.toString() || '',
+            id_solicitud: solicitud.id.toString(),
+            fecha_inicio: now,
+            fecha_fin: now,
+          },
+        });
+      }
+
+      // Registrar en historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'Solicitud',
+          ref_id: solicitud.id,
+          accion: 'Eliminación',
+          fecha_hora: now,
+          detalles: `Solicitud eliminada por ${userName}`,
+        },
       });
 
       res.json({
@@ -953,17 +1094,18 @@ export class SolicitudesController {
         orderBy: { creado_en: 'desc' },
       });
 
-      // Get autor names
+      // Get autor names and photos
       const autorIds = [...new Set(comentarios.map(c => c.autor_id))];
       const autores = await prisma.usuario.findMany({
         where: { id: { in: autorIds } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, foto_perfil: true },
       });
-      const autoresMap = new Map(autores.map(a => [a.id, a.nombre]));
+      const autoresMap = new Map(autores.map(a => [a.id, { nombre: a.nombre, foto_perfil: a.foto_perfil }]));
 
       const comentariosWithAuthor = comentarios.map(c => ({
         ...c,
-        autor_nombre: autoresMap.get(c.autor_id) || 'Usuario desconocido',
+        autor_nombre: autoresMap.get(c.autor_id)?.nombre || 'Usuario desconocido',
+        autor_foto: autoresMap.get(c.autor_id)?.foto_perfil || null,
       }));
 
       res.json({
@@ -1073,6 +1215,44 @@ export class SolicitudesController {
               accion: 'Inicio',
               fecha_hora: new Date(),
               detalles: 'Se ha creado la propuesta.',
+            },
+          });
+        }
+
+        // Crear notificaciones para usuarios involucrados
+        const involucrados = new Set<number>();
+
+        // Agregar creador de la solicitud
+        if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+          involucrados.add(solicitud.usuario_id);
+        }
+
+        // Agregar usuarios asignados
+        if (solicitud.id_asignado) {
+          solicitud.id_asignado.split(',').forEach(idStr => {
+            const parsed = parseInt(idStr.trim());
+            if (!isNaN(parsed) && parsed !== userId) {
+              involucrados.add(parsed);
+            }
+          });
+        }
+
+        // Crear notificación para cada involucrado
+        const now = new Date();
+        for (const responsableId of involucrados) {
+          await tx.tareas.create({
+            data: {
+              titulo: 'Solicitud atendida',
+              descripcion: `La solicitud "${solicitud.descripcion || solicitud.id}" ha sido atendida por ${userName}`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              asignado: userName,
+              id_asignado: userId.toString(),
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id.toString() || '',
+              fecha_inicio: now,
+              fecha_fin: now,
             },
           });
         }

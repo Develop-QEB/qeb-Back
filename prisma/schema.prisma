@@ -555,6 +555,7 @@ model usuario {
   user_password      String?   @db.VarChar(255)
   area               String    @db.VarChar(50)
   puesto             String    @db.VarChar(50)
+  foto_perfil        String?   @db.VarChar(500)
   updated_at         DateTime? @db.Timestamp(0)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
   deleted_at         DateTime? @db.Timestamp(0)

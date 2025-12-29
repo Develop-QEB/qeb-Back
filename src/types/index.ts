@@ -43,6 +43,7 @@ export interface UserResponse {
   rol: string;
   area: string;
   puesto: string;
+  foto_perfil?: string | null;
 }
 
 export interface AuthResponse {

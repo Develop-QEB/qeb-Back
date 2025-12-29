@@ -160,13 +160,97 @@ export class PropuestasController {
     try {
       const { id } = req.params;
       const { status, comentario_cambio_status } = req.body;
+      const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
+      const propuestaId = parseInt(id);
+
+      // Obtener propuesta antes de actualizar
+      const propuestaAnterior = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+      });
+
+      if (!propuestaAnterior) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      const statusAnterior = propuestaAnterior.status;
 
       const propuesta = await prisma.propuesta.update({
-        where: { id: parseInt(id) },
+        where: { id: propuestaId },
         data: {
           status,
           comentario_cambio_status: comentario_cambio_status || '',
           updated_at: new Date(),
+        },
+      });
+
+      // Obtener datos relacionados para la notificación
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+      });
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+      const solicitud = propuesta.solicitud_id
+        ? await prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } })
+        : null;
+
+      // Crear notificaciones para los involucrados
+      const nombrePropuesta = cotizacion?.nombre_campania || `Propuesta #${propuestaId}`;
+      const tituloNotificacion = `Cambio de estado en propuesta: ${nombrePropuesta}`;
+      const descripcionNotificacion = `${userName} cambió el estado de "${statusAnterior}" a "${status}"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`;
+
+      // Recopilar involucrados (sin duplicados, excluyendo al autor)
+      const involucrados = new Set<number>();
+
+      // Agregar usuarios asignados de la propuesta
+      if (propuesta.id_asignado) {
+        propuesta.id_asignado.split(',').forEach(id => {
+          const parsed = parseInt(id.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
+      // Agregar creador de la solicitud
+      if (solicitud?.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      // Crear notificación para cada involucrado
+      const now = new Date();
+      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      for (const responsableId of involucrados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: propuesta.solicitud_id?.toString() || '',
+            id_propuesta: propuestaId.toString(),
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
+      // Registrar en historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: propuestaId,
+          accion: 'Cambio de estado',
+          fecha_hora: now,
+          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
         },
       });
 
@@ -187,13 +271,99 @@ export class PropuestasController {
     try {
       const { id } = req.params;
       const { asignados, id_asignados } = req.body;
+      const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
+      const propuestaId = parseInt(id);
+
+      // Obtener propuesta antes de actualizar para comparar asignados
+      const propuestaAnterior = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+      });
+
+      if (!propuestaAnterior) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      const asignadosAnteriores = propuestaAnterior.id_asignado?.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id)) || [];
 
       const propuesta = await prisma.propuesta.update({
-        where: { id: parseInt(id) },
+        where: { id: propuestaId },
         data: {
           asignado: asignados,
           id_asignado: id_asignados,
           updated_at: new Date(),
+        },
+      });
+
+      // Obtener datos relacionados para la notificación
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+      });
+      const campania = cotizacion ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacion.id },
+      }) : null;
+
+      const nombrePropuesta = cotizacion?.nombre_campania || `Propuesta #${propuestaId}`;
+
+      // Identificar nuevos asignados (los que no estaban antes)
+      const nuevosAsignadosIds = id_asignados?.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id)) || [];
+      const nuevosAsignados = nuevosAsignadosIds.filter((id: number) => !asignadosAnteriores.includes(id) && id !== userId);
+
+      // Crear notificación para los NUEVOS asignados
+      const now = new Date();
+      const fechaFin = cotizacion?.fecha_fin || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+      for (const responsableId of nuevosAsignados) {
+        await prisma.tareas.create({
+          data: {
+            titulo: `Asignación a propuesta: ${nombrePropuesta}`,
+            descripcion: `${userName} te asignó a esta propuesta`,
+            tipo: 'Solicitud',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: propuesta.solicitud_id?.toString() || '',
+            id_propuesta: propuestaId.toString(),
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
+      // Notificar a los asignados que fueron removidos
+      const removidos = asignadosAnteriores.filter(id => !nuevosAsignadosIds.includes(id) && id !== userId);
+      for (const responsableId of removidos) {
+        await prisma.tareas.create({
+          data: {
+            titulo: `Removido de propuesta: ${nombrePropuesta}`,
+            descripcion: `${userName} te removió de esta propuesta`,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: propuesta.solicitud_id?.toString() || '',
+            id_propuesta: propuestaId.toString(),
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
+      // Registrar en historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: propuestaId,
+          accion: 'Reasignación',
+          fecha_hora: now,
+          detalles: `${userName} actualizó asignados a: ${asignados}`,
         },
       });
 
@@ -258,11 +428,20 @@ export class PropuestasController {
         orderBy: { fecha: 'desc' },
       });
 
+      // Get user photos by name (historial_comentarios stores username, not user_id)
+      const userNames = [...new Set(comments.map(c => c.usuario).filter(Boolean))];
+      const usuarios = userNames.length > 0 ? await prisma.usuario.findMany({
+        where: { nombre: { in: userNames as string[] } },
+        select: { nombre: true, foto_perfil: true },
+      }) : [];
+      const usuarioFotoMap = new Map(usuarios.map(u => [u.nombre, u.foto_perfil]));
+
       const formattedComments = comments.map(c => ({
         id: Number(c.id),
         comentario: c.comentario,
         creado_en: c.fecha,
         autor_nombre: c.usuario || 'Sistema',
+        autor_foto: c.usuario ? (usuarioFotoMap.get(c.usuario) || null) : null,
         nuevo_status: c.nuevo_status,
       }));
 
@@ -1016,6 +1195,39 @@ export class PropuestasController {
       // Update solicitudCaras totals if needed
       await this.updateSolicitudCarasTotals(solicitudCaraId);
 
+      // Crear notificaciones para usuarios asignados a la propuesta
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (propuesta.id_asignado && createdReservas.length > 0) {
+        const involucrados = new Set<number>();
+        propuesta.id_asignado.split(',').forEach(idStr => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+
+        const now = new Date();
+        for (const responsableId of involucrados) {
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Nuevas reservas creadas',
+              descripcion: `${userName} ha creado ${createdReservas.length} reserva(s) en la propuesta`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              asignado: userName,
+              id_asignado: userId?.toString() || '',
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuesta.id.toString(),
+              fecha_inicio: now,
+              fecha_fin: now,
+            },
+          });
+        }
+      }
+
       res.json({
         success: true,
         data: {
@@ -1107,18 +1319,57 @@ export class PropuestasController {
   // Delete reservas
   async deleteReservas(req: AuthRequest, res: Response): Promise<void> {
     try {
+      const { id } = req.params;
       const { reservaIds } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
         return;
       }
 
+      // Obtener propuesta para notificar a usuarios asignados
+      const propuestaId = id ? parseInt(id) : null;
+      const propuesta = propuestaId ? await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+      }) : null;
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Crear notificaciones para usuarios asignados
+      if (propuesta?.id_asignado) {
+        const involucrados = new Set<number>();
+        propuesta.id_asignado.split(',').forEach(idStr => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+
+        const now = new Date();
+        for (const responsableId of involucrados) {
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Reservas eliminadas',
+              descripcion: `${userName} ha eliminado ${reservaIds.length} reserva(s) de la propuesta`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              asignado: userName,
+              id_asignado: userId?.toString() || '',
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuesta.id.toString(),
+              fecha_inicio: now,
+              fecha_fin: now,
+            },
+          });
+        }
+      }
 
       res.json({
         success: true,
@@ -1137,6 +1388,8 @@ export class PropuestasController {
       const { id } = req.params;
       const propuestaId = parseInt(id);
       const { inventarioId, solicitudCaraId, clienteId, tipo, fechaInicio, fechaFin } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       // 0. Get all solicitudCaras IDs for duplicates check
       const proposalCaras = await prisma.solicitudCaras.findMany({
@@ -1170,6 +1423,40 @@ export class PropuestasController {
             },
             data: { deleted_at: new Date() }
           });
+        }
+
+        // Notificar sobre eliminación de reserva
+        const propuestaForDelete = await prisma.propuesta.findFirst({
+          where: { id: propuestaId, deleted_at: null },
+        });
+
+        if (propuestaForDelete?.id_asignado) {
+          const involucrados = new Set<number>();
+          propuestaForDelete.id_asignado.split(',').forEach(idStr => {
+            const parsed = parseInt(idStr.trim());
+            if (!isNaN(parsed) && parsed !== userId) {
+              involucrados.add(parsed);
+            }
+          });
+
+          const now = new Date();
+          for (const responsableId of involucrados) {
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Reserva eliminada',
+                descripcion: `${userName} ha eliminado una reserva de la propuesta`,
+                tipo: 'Notificación',
+                estatus: 'Pendiente',
+                id_responsable: responsableId,
+                asignado: userName,
+                id_asignado: userId?.toString() || '',
+                id_solicitud: propuestaForDelete.solicitud_id?.toString() || '',
+                id_propuesta: propuestaForDelete.id.toString(),
+                fecha_inicio: now,
+                fecha_fin: now,
+              },
+            });
+          }
         }
 
         res.json({
@@ -1242,6 +1529,36 @@ export class PropuestasController {
       // If user selected a "Completo" item in frontend, frontend sends one request.
       // But if it's "Flujo" and has a "Contraflujo" pair at same location... we might need to handle that.
       // For now, let's stick to 1:1 unless we see the frontend sending special flags.
+
+      // Notificar sobre creación de reserva
+      if (propuesta?.id_asignado) {
+        const involucrados = new Set<number>();
+        propuesta.id_asignado.split(',').forEach(idStr => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+
+        const now = new Date();
+        for (const responsableId of involucrados) {
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Nueva reserva creada',
+              descripcion: `${userName} ha creado una reserva en la propuesta`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              asignado: userName,
+              id_asignado: userId?.toString() || '',
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuesta.id.toString(),
+              fecha_inicio: now,
+              fecha_fin: now,
+            },
+          });
+        }
+      }
 
       res.json({
         success: true,

@@ -147,7 +147,7 @@ export class NotificacionesController {
       }
 
       // Obtener comentarios de la tabla comentarios usando solicitud_id
-      let comentarios: { id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date; solicitud_id: number }[] = [];
+      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id: number }[] = [];
       if (tarea.id_solicitud) {
         const solicitudId = parseInt(tarea.id_solicitud);
         const rawComentarios = await prisma.comentarios.findMany({
@@ -155,18 +155,19 @@ export class NotificacionesController {
           orderBy: { creado_en: 'desc' },
         });
 
-        // Obtener los nombres de los autores
+        // Obtener los nombres y fotos de los autores
         const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
         const usuarios = await prisma.usuario.findMany({
           where: { id: { in: autorIds } },
-          select: { id: true, nombre: true },
+          select: { id: true, nombre: true, foto_perfil: true },
         });
-        const usuarioMap = new Map(usuarios.map(u => [u.id, u.nombre]));
+        const usuarioMap = new Map(usuarios.map(u => [u.id, { nombre: u.nombre, foto_perfil: u.foto_perfil }]));
 
         comentarios = rawComentarios.map(c => ({
           id: c.id,
           autor_id: c.autor_id,
-          autor_nombre: usuarioMap.get(c.autor_id) || 'Usuario',
+          autor_nombre: usuarioMap.get(c.autor_id)?.nombre || 'Usuario',
+          autor_foto: usuarioMap.get(c.autor_id)?.foto_perfil || null,
           contenido: c.comentario,
           fecha: c.creado_en,
           solicitud_id: c.solicitud_id,
@@ -609,19 +610,20 @@ export class NotificacionesController {
         orderBy: { creado_en: 'desc' },
       });
 
-      // Obtener los nombres de los autores
+      // Obtener los nombres y fotos de los autores
       const autorIds = [...new Set(comentarios.map(c => c.autor_id))];
       const usuarios = await prisma.usuario.findMany({
         where: { id: { in: autorIds } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, foto_perfil: true },
       });
-      const usuarioMap = new Map(usuarios.map(u => [u.id, u.nombre]));
+      const usuarioMap = new Map(usuarios.map(u => [u.id, { nombre: u.nombre, foto_perfil: u.foto_perfil }]));
 
-      // Mapear a formato esperado con nombre del autor
+      // Mapear a formato esperado con nombre y foto del autor
       const mappedComentarios = comentarios.map(c => ({
         id: c.id,
         autor_id: c.autor_id,
-        autor_nombre: usuarioMap.get(c.autor_id) || 'Usuario',
+        autor_nombre: usuarioMap.get(c.autor_id)?.nombre || 'Usuario',
+        autor_foto: usuarioMap.get(c.autor_id)?.foto_perfil || null,
         contenido: c.comentario,
         fecha: c.creado_en,
         solicitud_id: c.solicitud_id,
