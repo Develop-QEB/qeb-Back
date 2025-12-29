@@ -624,7 +624,7 @@ export class PropuestasController {
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
-          MIN(i.tarifa_publica) as tarifa_publica,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena,
           cat.año as anio_catorcena
@@ -757,7 +757,7 @@ export class PropuestasController {
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
-          MIN(i.tarifa_publica) as tarifa_publica,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena,
           cat.año as anio_catorcena

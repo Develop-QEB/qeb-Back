@@ -804,7 +804,7 @@ export class SolicitudesController {
               fin_periodo: new Date(cara.fin_periodo),
               caras_flujo: cara.caras_flujo || 0,
               caras_contraflujo: cara.caras_contraflujo || 0,
-              articulo,
+              articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
               descuento: cara.descuento || 0,
             },
           });
@@ -1261,7 +1261,7 @@ export class SolicitudesController {
                 fin_periodo: new Date(cara.fin_periodo),
                 caras_flujo: cara.caras_flujo || 0,
                 caras_contraflujo: cara.caras_contraflujo || 0,
-                articulo,
+                articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
                 descuento: cara.descuento || 0,
               },
             });
