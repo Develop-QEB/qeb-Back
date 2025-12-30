@@ -6,17 +6,42 @@ const router = Router();
 
 router.use(authMiddleware);
 
+// Rutas base
 router.get('/', campanasController.getAll.bind(campanasController));
 router.get('/stats', campanasController.getStats.bind(campanasController));
 router.get('/:id', campanasController.getById.bind(campanasController));
-router.get('/:id/inventario', campanasController.getInventarioReservado.bind(campanasController));
-router.get('/:id/inventario-aps', campanasController.getInventarioConAPS.bind(campanasController));
-router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
-router.get('/:id/historial', campanasController.getHistorial.bind(campanasController));
 router.patch('/:id', campanasController.update.bind(campanasController));
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
+
+// Inventario
+router.get('/:id/inventario', campanasController.getInventarioReservado.bind(campanasController));
+router.get('/:id/inventario-aps', campanasController.getInventarioConAPS.bind(campanasController));
+router.get('/:id/inventario-arte', campanasController.getInventarioConArte.bind(campanasController));
+router.get('/:id/inventario-sin-arte', campanasController.getInventarioSinArte.bind(campanasController));
+router.get('/:id/inventario-testigos', campanasController.getInventarioTestigos.bind(campanasController));
+
+// Caras e historial
+router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
+router.get('/:id/historial', campanasController.getHistorial.bind(campanasController));
+
+// Comentarios
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
+
+// APS
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
 router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));
+
+// Gestión de Artes
+router.get('/:id/artes-existentes', campanasController.getArtesExistentes.bind(campanasController));
+router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bind(campanasController));
+router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
+router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
+router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
+router.delete('/:id/limpiar-artes-prueba', campanasController.limpiarArtesPrueba.bind(campanasController));
+
+// Tareas
+router.get('/:id/tareas', campanasController.getTareas.bind(campanasController));
+router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
+router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
 
 export default router;

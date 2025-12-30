@@ -1088,6 +1088,122 @@ export class CampanasController {
     }
   }
 
+  async getInventarioConArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      console.log('Fetching inventario con arte for campana:', campanaId);
+
+      const query = `
+        SELECT
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+
+          inv.id,
+          inv.codigo_unico,
+          inv.ubicacion,
+          inv.tipo_de_cara,
+          inv.cara,
+          inv.mueble,
+          inv.latitud,
+          inv.longitud,
+          inv.plaza,
+          inv.estado,
+          inv.municipio,
+          inv.tipo_de_mueble,
+          inv.ancho,
+          inv.alto,
+          inv.nivel_socioeconomico,
+          inv.tarifa_publica,
+          inv.tradicional_digital,
+
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(
+              SUBSTRING_INDEX(inv.codigo_unico, '_', 1),
+              '_completo_',
+              SUBSTRING_INDEX(inv.codigo_unico, '_', -1)
+            )
+            ELSE inv.codigo_unico
+          END as codigo_unico_display,
+
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN 'Completo'
+            ELSE inv.tipo_de_cara
+          END as tipo_de_cara_display,
+
+          MAX(rsv.archivo) AS archivo,
+
+          GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
+
+          MAX(rsv.estatus) AS estatus,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
+          MAX(rsv.arte_aprobado) AS arte_aprobado,
+          MAX(sc.id) AS APS,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MAX(sc.fin_periodo) AS fin_periodo,
+          MAX(rsv.comentario_rechazo) AS comentario_rechazo,
+          MAX(rsv.instalado) AS instalado,
+          MAX(rsv.APS) AS rsvAPS,
+          MAX(rsv.tarea) AS tarea,
+
+          MAX(CASE
+            WHEN rsv.tarea IS NOT NULL AND rsv.tarea != '' THEN rsv.tarea
+            ELSE rsv.estatus
+          END) AS status_mostrar,
+
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+
+          MAX(sol.IMU) AS IMU,
+
+          sc.articulo,
+          sc.tipo as tipo_medio,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN solicitud sol ON sol.cliente_id = cm.cliente_id
+          LEFT JOIN archivos arc ON inv.archivos_id = arc.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id = ?
+          AND rsv.deleted_at IS NULL
+          AND inv.tradicional_digital = 'Tradicional'
+          AND rsv.archivo IS NOT NULL
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+
+      console.log('Inventario con arte result count:', Array.isArray(inventario) ? inventario.length : 0);
+
+      // Convertir BigInt a Number para JSON serialization
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: inventarioSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getInventarioConArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario con arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async getHistorial(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
@@ -1140,6 +1256,683 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getHistorial:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // ============================================================================
+  // ENDPOINTS PARA GESTION DE ARTES
+  // ============================================================================
+
+  /**
+   * Obtener inventario SIN arte asignado (para tab "Subir Artes")
+   * Muestra items donde archivo IS NULL
+   */
+  async getInventarioSinArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const formato = req.query.formato as string || 'Tradicional';
+
+      console.log('Fetching inventario sin arte for campana:', campanaId, 'formato:', formato);
+
+      const query = `
+        SELECT
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_id,
+          inv.*,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
+            ELSE inv.codigo_unico
+          END as codigo_unico_display,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE inv.tipo_de_cara
+          END as tipo_de_cara_display,
+          MAX(rsv.archivo) AS archivo,
+          GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
+          MAX(rsv.estatus) AS estatus,
+          GROUP_CONCAT(DISTINCT epIn.numero_espacio ORDER BY epIn.numero_espacio SEPARATOR ',') AS espacio,
+          MAX(sc.id) AS grupo,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MAX(sc.fin_periodo) AS fin_periodo,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
+          MAX(rsv.APS) AS APS,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN archivos arc ON inv.archivos_id = arc.id
+          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id = ?
+          AND rsv.deleted_at IS NULL
+          AND rsv.archivo IS NULL
+          AND imDig.id_reserva IS NULL
+          AND inv.tradicional_digital = ?
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+
+      console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
+
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: inventarioSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getInventarioSinArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario sin arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener inventario para validación de testigos (instalaciones)
+   * Muestra items donde arte_aprobado = 'Aprobado' o ya tienen testigo
+   */
+  async getInventarioTestigos(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const formato = req.query.formato as string || 'Tradicional';
+
+      console.log('Fetching inventario testigos for campana:', campanaId);
+
+      const query = `
+        SELECT
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          inv.id,
+          inv.codigo_unico,
+          inv.ubicacion,
+          inv.tipo_de_cara,
+          inv.cara,
+          inv.mueble,
+          inv.latitud,
+          inv.longitud,
+          inv.plaza,
+          inv.estado,
+          inv.municipio,
+          inv.ancho,
+          inv.alto,
+          inv.tarifa_publica,
+          inv.tradicional_digital,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
+            ELSE inv.codigo_unico
+          END as codigo_unico_display,
+          MAX(rsv.archivo) AS archivo,
+          MAX(rsv.estatus) AS estatus,
+          MAX(rsv.arte_aprobado) AS arte_aprobado,
+          MAX(rsv.fecha_testigo) AS fecha_testigo,
+          MAX(rsv.imagen_testigo) AS imagen_testigo,
+          MAX(rsv.instalado) AS instalado,
+          MAX(rsv.tarea) AS tarea,
+          sc.articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id = ?
+          AND rsv.deleted_at IS NULL
+          AND inv.tradicional_digital = ?
+          AND rsv.arte_aprobado = 'Aprobado'
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+
+      console.log('Inventario testigos result count:', Array.isArray(inventario) ? inventario.length : 0);
+
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: inventarioSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getInventarioTestigos:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario para testigos';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Asignar arte (archivo) a reservas
+   */
+  async assignArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivo } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!archivo) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere la URL del archivo',
+        });
+        return;
+      }
+
+      console.log('assignArte - reservaIds:', reservaIds, 'archivo:', archivo);
+
+      // Obtener los grupo_completo_id de las reservas seleccionadas
+      const placeholders = reservaIds.map(() => '?').join(',');
+
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Actualizar reservas directamente seleccionadas
+      const updateDirectQuery = `
+        UPDATE reservas
+        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        WHERE id IN (${placeholders})
+      `;
+
+      await prisma.$executeRawUnsafe(updateDirectQuery, archivo, ...reservaIds);
+
+      // Actualizar reservas del mismo grupo_completo
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const updateGruposQuery = `
+          UPDATE reservas
+          SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+          WHERE grupo_completo_id IN (${grupoPlaceholders})
+        `;
+
+        await prisma.$executeRawUnsafe(updateGruposQuery, archivo, ...grupoIds);
+      }
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Asignación',
+              fecha_hora: new Date(),
+              detalles: `${userName} asignó arte a ${reservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte asignado a ${reservaIds.length} reserva(s)`,
+          affected: reservaIds.length,
+        },
+      });
+    } catch (error) {
+      console.error('Error en assignArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al asignar arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Actualizar estado de arte (aprobar/rechazar)
+   */
+  async updateArteStatus(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, status, comentarioRechazo } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!status || !['Aprobado', 'Rechazado'].includes(status)) {
+        res.status(400).json({
+          success: false,
+          error: 'Status debe ser "Aprobado" o "Rechazado"',
+        });
+        return;
+      }
+
+      console.log('updateArteStatus - reservaIds:', reservaIds, 'status:', status);
+
+      const placeholders = reservaIds.map(() => '?').join(',');
+
+      // Obtener grupo_completo_id
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Construir query de actualización
+      const updateFields = status === 'Rechazado' && comentarioRechazo
+        ? `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`
+        : `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+
+      const updateParams = status === 'Rechazado' && comentarioRechazo
+        ? [status, comentarioRechazo, ...reservaIds]
+        : [status, ...reservaIds];
+
+      // Actualizar reservas directas
+      const updateDirectQuery = `
+        UPDATE reservas
+        SET ${updateFields}
+        WHERE id IN (${placeholders})
+      `;
+
+      await prisma.$executeRawUnsafe(updateDirectQuery, ...updateParams);
+
+      // Actualizar reservas del mismo grupo
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoParams = status === 'Rechazado' && comentarioRechazo
+          ? [status, comentarioRechazo, ...grupoIds]
+          : [status, ...grupoIds];
+
+        const updateGruposQuery = `
+          UPDATE reservas
+          SET ${updateFields}
+          WHERE grupo_completo_id IN (${grupoPlaceholders})
+        `;
+
+        await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoParams);
+      }
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte',
+              ref_id: cotizacion.id_propuesta,
+              accion: status === 'Aprobado' ? 'Aprobación' : 'Rechazo',
+              fecha_hora: new Date(),
+              detalles: `${userName} ${status === 'Aprobado' ? 'aprobó' : 'rechazó'} arte de ${reservaIds.length} reserva(s)${comentarioRechazo ? ': ' + comentarioRechazo : ''}`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte ${status.toLowerCase()} para ${reservaIds.length} reserva(s)`,
+          affected: reservaIds.length,
+        },
+      });
+    } catch (error) {
+      console.error('Error en updateArteStatus:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar estado de arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Actualizar estado de instalación (testigo)
+   */
+  async updateInstalado(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, instalado, imagenTestigo, fechaTestigo } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      console.log('updateInstalado - reservaIds:', reservaIds, 'instalado:', instalado);
+
+      const placeholders = reservaIds.map(() => '?').join(',');
+
+      // Construir campos a actualizar
+      const updateFields: string[] = ['instalado = ?'];
+      const updateParams: (boolean | string | number)[] = [instalado ? 1 : 0];
+
+      if (imagenTestigo) {
+        updateFields.push('imagen_testigo = ?');
+        updateParams.push(imagenTestigo);
+      }
+
+      if (fechaTestigo) {
+        updateFields.push('fecha_testigo = ?');
+        updateParams.push(fechaTestigo);
+      }
+
+      if (instalado) {
+        updateFields.push("estatus = 'Instalado'");
+      }
+
+      const updateQuery = `
+        UPDATE reservas
+        SET ${updateFields.join(', ')}
+        WHERE id IN (${placeholders})
+      `;
+
+      await prisma.$executeRawUnsafe(updateQuery, ...updateParams, ...reservaIds);
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Instalación',
+              ref_id: cotizacion.id_propuesta,
+              accion: instalado ? 'Validación' : 'Rechazo',
+              fecha_hora: new Date(),
+              detalles: `${userName} ${instalado ? 'validó' : 'rechazó'} instalación de ${reservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Instalación ${instalado ? 'validada' : 'rechazada'} para ${reservaIds.length} reserva(s)`,
+          affected: reservaIds.length,
+        },
+      });
+    } catch (error) {
+      console.error('Error en updateInstalado:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar estado de instalación';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener tareas de una campaña específica
+   */
+  async getTareas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const estatus = req.query.estatus as string;
+
+      console.log('Fetching tareas for campana:', campanaId);
+
+      const where: Record<string, unknown> = {
+        campania_id: campanaId,
+        tipo: { not: 'Notificación' }, // Excluir notificaciones, solo tareas reales
+      };
+
+      if (estatus) {
+        where.estatus = estatus;
+      }
+
+      const tareas = await prisma.tareas.findMany({
+        where,
+        orderBy: { fecha_fin: 'asc' },
+      });
+
+      // Obtener nombres de responsables
+      const responsableIds = [...new Set(tareas.map(t => t.id_responsable).filter(id => id > 0))];
+      const usuarios = await prisma.usuario.findMany({
+        where: { id: { in: responsableIds } },
+        select: { id: true, nombre: true, foto_perfil: true },
+      });
+      const usuarioMap = new Map(usuarios.map(u => [u.id, u]));
+
+      const tareasConNombres = tareas.map(t => ({
+        id: t.id,
+        titulo: t.titulo,
+        descripcion: t.descripcion,
+        tipo: t.tipo,
+        estatus: t.estatus,
+        fecha_inicio: t.fecha_inicio,
+        fecha_fin: t.fecha_fin,
+        responsable: t.responsable,
+        id_responsable: t.id_responsable,
+        responsable_nombre: usuarioMap.get(t.id_responsable)?.nombre || t.responsable,
+        responsable_foto: usuarioMap.get(t.id_responsable)?.foto_perfil || null,
+        asignado: t.asignado,
+        id_asignado: t.id_asignado,
+        archivo: t.archivo,
+        evidencia: t.evidencia,
+        ids_reservas: t.ids_reservas,
+        proveedores_id: t.proveedores_id,
+        nombre_proveedores: t.nombre_proveedores,
+      }));
+
+      res.json({
+        success: true,
+        data: tareasConNombres,
+      });
+    } catch (error) {
+      console.error('Error en getTareas:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener tareas';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Crear tarea para una campaña
+   */
+  async createTarea(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const {
+        titulo,
+        descripcion,
+        tipo,
+        fecha_fin,
+        id_responsable,
+        responsable,
+        asignado,
+        id_asignado,
+        ids_reservas,
+        proveedores_id,
+        nombre_proveedores,
+      } = req.body;
+      const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      // Obtener info de la campaña para el id_propuesta
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      let propuestaId = '';
+      let solicitudId = '';
+
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          propuestaId = cotizacion.id_propuesta.toString();
+          const propuesta = await prisma.propuesta.findUnique({ where: { id: cotizacion.id_propuesta } });
+          if (propuesta?.solicitud_id) {
+            solicitudId = propuesta.solicitud_id.toString();
+          }
+        }
+      }
+
+      const tarea = await prisma.tareas.create({
+        data: {
+          titulo: titulo || 'Nueva tarea',
+          descripcion,
+          tipo: tipo || 'Producción',
+          estatus: 'Pendiente',
+          fecha_inicio: new Date(),
+          fecha_fin: fecha_fin ? new Date(fecha_fin) : new Date(),
+          id_responsable: id_responsable || userId,
+          responsable: responsable || userName,
+          asignado: asignado || userName,
+          id_asignado: id_asignado || String(userId),
+          id_solicitud: solicitudId,
+          id_propuesta: propuestaId,
+          campania_id: campanaId,
+          ids_reservas: ids_reservas || null,
+          proveedores_id: proveedores_id || null,
+          nombre_proveedores: nombre_proveedores || null,
+        },
+      });
+
+      // Actualizar campo tarea en las reservas si se proporcionaron ids
+      if (ids_reservas) {
+        const reservaIdArray = ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
+        if (reservaIdArray.length > 0) {
+          const placeholders = reservaIdArray.map(() => '?').join(',');
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
+            tipo || 'Producción',
+            ...reservaIdArray
+          );
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: tarea.id,
+          titulo: tarea.titulo,
+          descripcion: tarea.descripcion,
+          tipo: tarea.tipo,
+          estatus: tarea.estatus,
+          fecha_inicio: tarea.fecha_inicio,
+          fecha_fin: tarea.fecha_fin,
+          campania_id: tarea.campania_id,
+        },
+      });
+    } catch (error) {
+      console.error('Error en createTarea:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear tarea';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Actualizar tarea
+   */
+  async updateTarea(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, tareaId } = req.params;
+      const {
+        titulo,
+        descripcion,
+        tipo,
+        estatus,
+        fecha_fin,
+        asignado,
+        id_asignado,
+        archivo,
+        evidencia,
+      } = req.body;
+
+      const updateData: Record<string, unknown> = {};
+      if (titulo !== undefined) updateData.titulo = titulo;
+      if (descripcion !== undefined) updateData.descripcion = descripcion;
+      if (tipo !== undefined) updateData.tipo = tipo;
+      if (estatus !== undefined) updateData.estatus = estatus;
+      if (fecha_fin !== undefined) updateData.fecha_fin = new Date(fecha_fin);
+      if (asignado !== undefined) updateData.asignado = asignado;
+      if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
+      if (archivo !== undefined) updateData.archivo = archivo;
+      if (evidencia !== undefined) updateData.evidencia = evidencia;
+
+      const tarea = await prisma.tareas.update({
+        where: { id: parseInt(tareaId) },
+        data: updateData,
+      });
+
+      res.json({
+        success: true,
+        data: tarea,
+      });
+    } catch (error) {
+      console.error('Error en updateTarea:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
       res.status(500).json({
         success: false,
         error: message,
@@ -1295,6 +2088,166 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en assignAPS:', error);
       const message = error instanceof Error ? error.message : 'Error al asignar APS';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Limpiar artes de prueba (archivos con prefijo "arte-" generados con timestamp)
+   * ENDPOINT TEMPORAL PARA DESARROLLO
+   */
+  async limpiarArtesPrueba(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      // Buscar reservas con archivos de prueba (arte-TIMESTAMP)
+      const query = `
+        UPDATE reservas r
+        JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
+        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+        JOIN campania cm ON cm.cotizacion_id = ct.id
+        SET r.archivo = NULL, r.arte_aprobado = NULL
+        WHERE cm.id = ?
+          AND r.archivo IS NOT NULL
+          AND (r.archivo LIKE '%arte-%' OR r.archivo LIKE '%localhost%')
+      `;
+
+      await prisma.$executeRawUnsafe(query, campanaId);
+
+      console.log('Artes de prueba limpiados para campaña:', campanaId);
+
+      res.json({
+        success: true,
+        message: 'Artes de prueba limpiados correctamente',
+      });
+    } catch (error) {
+      console.error('Error limpiando artes de prueba:', error);
+      const message = error instanceof Error ? error.message : 'Error al limpiar artes';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Verificar si un arte ya existe en la campaña por nombre de archivo
+   * Retorna si existe, cuántas veces se usa y la URL existente
+   */
+  async verificarArteExistente(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { nombre, url } = req.body;
+
+      // Extraer nombre del archivo de la URL o usar el nombre proporcionado
+      let nombreArchivo = nombre;
+      if (!nombreArchivo && url) {
+        // Extraer nombre del archivo de la URL
+        const urlSinParams = url.split('?')[0];
+        nombreArchivo = urlSinParams.split('/').pop() || '';
+      }
+
+      if (!nombreArchivo) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere el nombre del archivo o URL',
+        });
+        return;
+      }
+
+      // Normalizar nombre para comparación
+      const nombreNormalizado = nombreArchivo.trim().toLowerCase();
+
+      const query = `
+        SELECT
+          r.archivo as url,
+          SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
+          COUNT(*) as uso_count
+        FROM reservas r
+        JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
+        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+        JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ?
+          AND r.archivo IS NOT NULL
+          AND r.archivo != ''
+          AND r.deleted_at IS NULL
+          AND LOWER(SUBSTRING_INDEX(r.archivo, '/', -1)) = ?
+        GROUP BY r.archivo
+        LIMIT 1
+      `;
+
+      const result = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint }[]>(
+        query,
+        parseInt(id),
+        nombreNormalizado
+      );
+
+      const existe = result.length > 0;
+
+      res.json({
+        success: true,
+        data: {
+          existe,
+          nombre: existe ? result[0].nombre : nombreArchivo,
+          usos: existe ? Number(result[0].uso_count) : 0,
+          url: existe ? result[0].url : null,
+        },
+      });
+    } catch (error) {
+      console.error('Error en verificarArteExistente:', error);
+      const message = error instanceof Error ? error.message : 'Error al verificar arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener artes existentes usados en la campaña
+   * Retorna URLs únicas de archivos de arte ya asignados
+   */
+  async getArtesExistentes(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      const query = `
+        SELECT DISTINCT
+          r.archivo as url,
+          SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
+          COUNT(*) as uso_count
+        FROM reservas r
+        JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
+        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+        JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ?
+          AND r.archivo IS NOT NULL
+          AND r.archivo != ''
+          AND r.deleted_at IS NULL
+        GROUP BY r.archivo
+        ORDER BY uso_count DESC
+      `;
+
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint }[]>(query, parseInt(id));
+
+      const result = artes.map((arte, index) => ({
+        id: `arte-${index + 1}`,
+        nombre: arte.nombre || `Arte ${index + 1}`,
+        url: arte.url,
+        usos: Number(arte.uso_count),
+      }));
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      console.error('Error en getArtesExistentes:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener artes existentes';
       res.status(500).json({
         success: false,
         error: message,
