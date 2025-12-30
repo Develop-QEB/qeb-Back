@@ -1577,6 +1577,116 @@ export class PropuestasController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  // Update propuesta general fields
+  async updatePropuesta(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { nombre_campania, notas, descripcion, year_inicio, catorcena_inicio, year_fin, catorcena_fin } = req.body;
+
+      // Update propuesta fields
+      const updatedPropuesta = await prisma.propuesta.update({
+        where: { id: parseInt(id) },
+        data: {
+          notas: notas !== undefined ? notas : undefined,
+          descripcion: descripcion !== undefined ? descripcion : undefined,
+          updated_at: new Date(),
+        },
+      });
+
+      // Update cotizacion nombre_campania if provided
+      if (nombre_campania !== undefined) {
+        await prisma.cotizacion.updateMany({
+          where: { id_propuesta: parseInt(id) },
+          data: { nombre_campania },
+        });
+      }
+
+      // Update campania dates if provided
+      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) {
+        // Find the cotizacion and campania
+        const cotizacion = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: parseInt(id) },
+        });
+
+        if (cotizacion) {
+          // Calculate new dates from catorcenas if provided
+          let fechaInicio: Date | undefined;
+          let fechaFin: Date | undefined;
+
+          if (year_inicio && catorcena_inicio) {
+            const catInicio = await prisma.catorcenas.findFirst({
+              where: { año: year_inicio, numero_catorcena: catorcena_inicio },
+            });
+            if (catInicio) {
+              fechaInicio = catInicio.fecha_inicio;
+            }
+          }
+
+          if (year_fin && catorcena_fin) {
+            const catFin = await prisma.catorcenas.findFirst({
+              where: { año: year_fin, numero_catorcena: catorcena_fin },
+            });
+            if (catFin) {
+              fechaFin = catFin.fecha_fin;
+            }
+          }
+
+          if (fechaInicio || fechaFin) {
+            await prisma.campania.updateMany({
+              where: { cotizacion_id: cotizacion.id },
+              data: {
+                ...(fechaInicio && { fecha_inicio: fechaInicio }),
+                ...(fechaFin && { fecha_fin: fechaFin }),
+              },
+            });
+          }
+        }
+      }
+
+      res.json({ success: true, data: updatedPropuesta });
+    } catch (error) {
+      console.error('Error updating propuesta:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar propuesta';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Upload archivo for propuesta
+  async uploadArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      // For now, we'll handle file upload in a simple way
+      // In production, you'd want to use multer or similar
+      if (!req.files || !('archivo' in req.files)) {
+        res.status(400).json({ success: false, error: 'No se proporcionó archivo' });
+        return;
+      }
+
+      const file = (req.files as any).archivo;
+      const fileName = `propuesta_${id}_${Date.now()}_${file.name}`;
+      const uploadPath = `./uploads/${fileName}`;
+
+      // Move file to uploads directory
+      await file.mv(uploadPath);
+
+      // Update propuesta with file URL
+      await prisma.propuesta.update({
+        where: { id: parseInt(id) },
+        data: {
+          archivo: `/uploads/${fileName}`,
+          updated_at: new Date(),
+        },
+      });
+
+      res.json({ success: true, data: { url: `/uploads/${fileName}` } });
+    } catch (error) {
+      console.error('Error uploading archivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al subir archivo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const propuestasController = new PropuestasController();

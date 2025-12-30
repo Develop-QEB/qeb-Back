@@ -24,6 +24,8 @@ router.post('/:id/reservas/toggle', propuestasController.toggleReserva.bind(prop
 // PATCH routes
 router.patch('/:id/status', propuestasController.updateStatus.bind(propuestasController));
 router.patch('/:id/asignados', propuestasController.updateAsignados.bind(propuestasController));
+router.patch('/:id', propuestasController.updatePropuesta.bind(propuestasController));
+router.post('/:id/archivo', propuestasController.uploadArchivo.bind(propuestasController));
 
 // DELETE routes
 router.delete('/:id/reservas', propuestasController.deleteReservas.bind(propuestasController));
