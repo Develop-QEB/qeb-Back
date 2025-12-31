@@ -1616,7 +1616,7 @@ export class PropuestasController {
 
           if (year_inicio && catorcena_inicio) {
             const catInicio = await prisma.catorcenas.findFirst({
-              where: { año: year_inicio, numero_catorcena: catorcena_inicio },
+              where: { a_o: year_inicio, numero_catorcena: catorcena_inicio },
             });
             if (catInicio) {
               fechaInicio = catInicio.fecha_inicio;
@@ -1625,7 +1625,7 @@ export class PropuestasController {
 
           if (year_fin && catorcena_fin) {
             const catFin = await prisma.catorcenas.findFirst({
-              where: { año: year_fin, numero_catorcena: catorcena_fin },
+              where: { a_o: year_fin, numero_catorcena: catorcena_fin },
             });
             if (catFin) {
               fechaFin = catFin.fecha_fin;
@@ -1672,10 +1672,10 @@ export class PropuestasController {
       await file.mv(uploadPath);
 
       // Update propuesta with file URL
+      // Note: propuesta model doesn't have 'archivo' field, only update timestamp
       await prisma.propuesta.update({
         where: { id: parseInt(id) },
         data: {
-          archivo: `/uploads/${fileName}`,
           updated_at: new Date(),
         },
       });

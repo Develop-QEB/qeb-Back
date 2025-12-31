@@ -1140,12 +1140,12 @@ export class CampanasController {
           MAX(rsv.estatus) AS estatus,
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
           MAX(rsv.arte_aprobado) AS arte_aprobado,
-          MAX(sc.id) AS APS,
+          MAX(sc.id) AS solicitudCarasId,
           MAX(sc.inicio_periodo) AS inicio_periodo,
           MAX(sc.fin_periodo) AS fin_periodo,
           MAX(rsv.comentario_rechazo) AS comentario_rechazo,
           MAX(rsv.instalado) AS instalado,
-          MAX(rsv.APS) AS rsvAPS,
+          MAX(rsv.APS) AS APS,
           MAX(rsv.tarea) AS tarea,
 
           MAX(CASE
@@ -1392,6 +1392,7 @@ export class CampanasController {
           MAX(rsv.imagen_testigo) AS imagen_testigo,
           MAX(rsv.instalado) AS instalado,
           MAX(rsv.tarea) AS tarea,
+          MAX(rsv.APS) AS APS,
           sc.articulo,
           sc.tipo as tipo_medio,
           sc.inicio_periodo,
