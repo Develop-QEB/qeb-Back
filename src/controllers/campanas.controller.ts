@@ -1,6 +1,22 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
+import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
+import nodemailer from 'nodemailer';
+
+// Configurar transporter de nodemailer para envío de correos
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: {
+    rejectUnauthorized: false,
+  },
+});
 
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -1730,19 +1746,116 @@ export class CampanasController {
   }
 
   /**
-   * Obtener tareas de una campaña específica
+   * Obtener tareas de una campaña específica (versión completa con JOINs)
    */
   async getTareas(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
       const estatus = req.query.estatus as string;
+      const activas = req.query.activas === 'true';
 
-      console.log('Fetching tareas for campana:', campanaId);
+      console.log('Fetching tareas for campana:', campanaId, 'activas:', activas);
 
+      // Si se piden tareas activas, usar query completa con JOINs
+      if (activas) {
+        let estatusFilter = '';
+        if (estatus) {
+          estatusFilter = `AND tr.estatus = '${estatus}'`;
+        }
+
+        const tareasActivas = await prisma.$queryRaw<Array<{
+          id: number;
+          titulo: string | null;
+          descripcion: string | null;
+          contenido: string | null;
+          tipo: string | null;
+          estatus: string | null;
+          fecha_inicio: Date;
+          fecha_fin: Date;
+          responsable: string | null;
+          id_responsable: number;
+          asignado: string | null;
+          id_asignado: string | null;
+          archivo: string | null;
+          evidencia: string | null;
+          ids_reservas: string | null;
+          listado_inventario: string | null;
+          proveedores_id: number | null;
+          nombre_proveedores: string | null;
+          nombre: string | null;
+          correo_electronico: string | null;
+          inventario_id: string | null;
+          APS: string | null;
+          tarea_reserva: string | null;
+          Archivo_reserva: string | null;
+        }>>`
+          SELECT tr.*,
+                 us.nombre,
+                 us.correo_electronico,
+                 GROUP_CONCAT(DISTINCT COALESCE(inv.id, inv2.id) SEPARATOR ', ') as inventario_id,
+                 GROUP_CONCAT(DISTINCT COALESCE(sc.id, sc2.id) SEPARATOR ', ') as APS,
+                 GROUP_CONCAT(DISTINCT COALESCE(rsv.tarea, rsv2.tarea) SEPARATOR ', ') as tarea_reserva,
+                 GROUP_CONCAT(DISTINCT COALESCE(rsv.Archivo, rsv2.Archivo) SEPARATOR ', ') as Archivo_reserva
+          FROM tareas tr
+          INNER JOIN usuario us ON us.id = tr.id_responsable
+          LEFT JOIN reservas rsv ON FIND_IN_SET(rsv.id, REPLACE(tr.ids_reservas, '*', '')) > 0
+          LEFT JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          LEFT JOIN inventarios inv ON inv.id = epIn.inventario_id
+          LEFT JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          LEFT JOIN reservas rsv2 ON FIND_IN_SET(rsv2.id, tr.listado_inventario) > 0
+          LEFT JOIN espacio_inventario epIn2 ON epIn2.id = rsv2.inventario_id
+          LEFT JOIN inventarios inv2 ON inv2.id = epIn2.inventario_id
+          LEFT JOIN solicitudCaras sc2 ON sc2.id = rsv2.solicitudCaras_id
+          WHERE tr.campania_id = ${campanaId}
+            AND tr.estatus != 'Atendido'
+            AND tr.estatus != 'Pendientes'
+            AND tr.estatus != 'Notificación nueva'
+            AND (rsv.tarea IS NULL OR rsv.tarea != 'Aprobado')
+            AND (rsv2.tarea IS NULL OR rsv2.tarea != 'Aprobado')
+            ${estatus ? Prisma.sql`AND tr.estatus = ${estatus}` : Prisma.empty}
+          GROUP BY tr.id, us.nombre, us.correo_electronico
+          ORDER BY tr.id DESC
+        `;
+
+        const tareasFormateadas = tareasActivas.map(t => ({
+          id: t.id,
+          titulo: t.titulo,
+          descripcion: t.descripcion,
+          contenido: t.contenido,
+          tipo: t.tipo,
+          estatus: t.estatus,
+          fecha_inicio: t.fecha_inicio,
+          fecha_fin: t.fecha_fin,
+          responsable: t.responsable,
+          id_responsable: t.id_responsable,
+          responsable_nombre: t.nombre,
+          correo_electronico: t.correo_electronico,
+          asignado: t.asignado,
+          id_asignado: t.id_asignado,
+          archivo: t.archivo,
+          evidencia: t.evidencia,
+          ids_reservas: t.ids_reservas,
+          listado_inventario: t.listado_inventario,
+          proveedores_id: t.proveedores_id,
+          nombre_proveedores: t.nombre_proveedores,
+          inventario_id: t.inventario_id,
+          APS: t.APS,
+          tarea_reserva: t.tarea_reserva,
+          Archivo_reserva: t.Archivo_reserva,
+        }));
+
+        res.json({
+          success: true,
+          data: tareasFormateadas,
+        });
+        return;
+      }
+
+      // Query simple para todas las tareas
       const where: Record<string, unknown> = {
         campania_id: campanaId,
-        tipo: { not: 'Notificación' }, // Excluir notificaciones, solo tareas reales
+        tipo: { not: 'Notificación' },
       };
 
       if (estatus) {
@@ -1758,7 +1871,7 @@ export class CampanasController {
       const responsableIds = [...new Set(tareas.map(t => t.id_responsable).filter(id => id > 0))];
       const usuarios = await prisma.usuario.findMany({
         where: { id: { in: responsableIds } },
-        select: { id: true, nombre: true, foto_perfil: true },
+        select: { id: true, nombre: true, foto_perfil: true, correo_electronico: true },
       });
       const usuarioMap = new Map(usuarios.map(u => [u.id, u]));
 
@@ -1766,6 +1879,7 @@ export class CampanasController {
         id: t.id,
         titulo: t.titulo,
         descripcion: t.descripcion,
+        contenido: t.contenido,
         tipo: t.tipo,
         estatus: t.estatus,
         fecha_inicio: t.fecha_inicio,
@@ -1774,11 +1888,13 @@ export class CampanasController {
         id_responsable: t.id_responsable,
         responsable_nombre: usuarioMap.get(t.id_responsable)?.nombre || t.responsable,
         responsable_foto: usuarioMap.get(t.id_responsable)?.foto_perfil || null,
+        correo_electronico: usuarioMap.get(t.id_responsable)?.correo_electronico || null,
         asignado: t.asignado,
         id_asignado: t.id_asignado,
         archivo: t.archivo,
         evidencia: t.evidencia,
         ids_reservas: t.ids_reservas,
+        listado_inventario: t.listado_inventario,
         proveedores_id: t.proveedores_id,
         nombre_proveedores: t.nombre_proveedores,
       }));
@@ -1815,15 +1931,24 @@ export class CampanasController {
         ids_reservas,
         proveedores_id,
         nombre_proveedores,
+        contenido,
+        listado_inventario,
+        catorcena_entrega,
+        creador,
       } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
+      // Debug: Ver qué recibimos
+      console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo });
+      console.log('createTarea - User auth:', { userId, userName, userNombre: req.user?.nombre });
+
       // Obtener info de la campaña para el id_propuesta
       const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
       let propuestaId = '';
       let solicitudId = '';
+      const campanaNombre = campana?.nombre || 'Campaña';
 
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
@@ -1836,14 +1961,37 @@ export class CampanasController {
         }
       }
 
+      // Determinar fecha_fin y estatus según el tipo de tarea
+      let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
+      let estatusFinal = 'Pendiente';
+
+      // Para Revisión de artes, estatus siempre es Activo
+      if (tipo === 'Revisión de artes') {
+        estatusFinal = 'Activo';
+        // Si hay catorcena, obtener fecha_fin de la catorcena seleccionada
+        if (catorcena_entrega) {
+          const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
+          if (match) {
+            const numCatorcena = parseInt(match[1]);
+            const yearCatorcena = parseInt(match[2]);
+            const catorcena = await prisma.catorcenas.findFirst({
+              where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
+            });
+            if (catorcena?.fecha_fin) {
+              fechaFinFinal = new Date(catorcena.fecha_fin);
+            }
+          }
+        }
+      }
+
       const tarea = await prisma.tareas.create({
         data: {
           titulo: titulo || 'Nueva tarea',
           descripcion,
           tipo: tipo || 'Producción',
-          estatus: 'Pendiente',
+          estatus: estatusFinal,
           fecha_inicio: new Date(),
-          fecha_fin: fecha_fin ? new Date(fecha_fin) : new Date(),
+          fecha_fin: fechaFinFinal,
           id_responsable: id_responsable || userId,
           responsable: responsable || userName,
           asignado: asignado || userName,
@@ -1854,6 +2002,8 @@ export class CampanasController {
           ids_reservas: ids_reservas || null,
           proveedores_id: proveedores_id || null,
           nombre_proveedores: nombre_proveedores || null,
+          contenido: contenido || null,
+          listado_inventario: listado_inventario || null,
         },
       });
 
@@ -1862,11 +2012,71 @@ export class CampanasController {
         const reservaIdArray = ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
         if (reservaIdArray.length > 0) {
           const placeholders = reservaIdArray.map(() => '?').join(',');
+          // Para Revisión de artes, actualizar tarea = 'En revisión'
+          const tareaValue = tipo === 'Revisión de artes' ? 'En revisión' : (tipo || 'Producción');
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
-            tipo || 'Producción',
+            tareaValue,
             ...reservaIdArray
           );
+        }
+      }
+
+      // Enviar correo al asignado para tareas de Revisión o Instalación
+      if ((tipo === 'Revisión de artes' || tipo === 'Instalación') && id_asignado) {
+        const asignadoIdNum = parseInt(id_asignado);
+        if (!isNaN(asignadoIdNum)) {
+          const usuarioAsignado = await prisma.usuario.findUnique({
+            where: { id: asignadoIdNum },
+            select: { correo_electronico: true, nombre: true },
+          });
+
+          if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
+            try {
+              const htmlBody = `
+              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
+                  <h1 style="color: #ffffff; margin: 0; font-size: 28px;">QEB</h1>
+                  <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 12px;">OOH Management</p>
+                </div>
+                <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
+                  <h2 style="color: #1f2937; margin: 0 0 20px 0; font-size: 20px;">Nueva Tarea Asignada</h2>
+                  <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 15px 0;">
+                    Se te ha asignado la tarea <strong>${titulo || 'Nueva tarea'}</strong> para <strong>${tipo}</strong>: ${contenido || descripcion || ''}
+                  </p>
+                  <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
+                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${creador || userName}</p>
+                  </div>
+                </div>
+                <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
+                  <p style="color: #9ca3af; font-size: 11px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                </div>
+              </div>
+              `;
+
+              await transporter.sendMail({
+                from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                to: usuarioAsignado.correo_electronico,
+                subject: `Tarea campaña ${campanaNombre}`,
+                html: htmlBody,
+              });
+              console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
+
+              // Guardar en correos_enviados
+              await prisma.correos_enviados.create({
+                data: {
+                  remitente: 'no-reply@qeb.mx',
+                  destinatario: usuarioAsignado.correo_electronico,
+                  asunto: `Tarea campaña ${campanaNombre}`,
+                  cuerpo: htmlBody,
+                },
+              });
+            } catch (emailError) {
+              console.error('Error enviando correo de tarea:', emailError);
+              // No falla la creación de la tarea si el correo falla
+            }
+          }
         }
       }
 
@@ -2252,6 +2462,29 @@ export class CampanasController {
       res.status(500).json({
         success: false,
         error: message,
+      });
+    }
+  }
+
+  // Obtener lista de usuarios para asignación
+  async getUsuarios(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const usuarios = await prisma.$queryRaw<{ id: number; nombre: string }[]>`
+        SELECT id, nombre
+        FROM usuario
+        WHERE deleted_at IS NULL
+        ORDER BY nombre ASC
+      `;
+
+      res.json({
+        success: true,
+        data: usuarios,
+      });
+    } catch (error) {
+      console.error('Error en getUsuarios:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error al obtener usuarios',
       });
     }
   }
