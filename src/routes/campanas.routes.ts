@@ -47,4 +47,8 @@ router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campana
 // Usuarios para asignación
 router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));
 
+// Órdenes de Montaje
+router.get('/ordenes-montaje/cat', campanasController.getOrdenMontajeCAT.bind(campanasController));
+router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.bind(campanasController));
+
 export default router;

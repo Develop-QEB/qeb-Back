@@ -31,12 +31,16 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
 
       // Build WHERE conditions
+      // Excluir campañas 'inactiva' (propuestas no aprobadas) a menos que se filtre explícitamente por ese status
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
       if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
+      } else {
+        // Si no se especifica status, excluir las inactivas (propuestas aún no aprobadas)
+        conditions.push("cm.status != 'inactiva'");
       }
 
       if (search) {
@@ -2466,7 +2470,7 @@ export class CampanasController {
     }
   }
 
-  // Obtener lista de usuarios para asignación
+// Obtener lista de usuarios para asignación
   async getUsuarios(req: AuthRequest, res: Response): Promise<void> {
     try {
       const usuarios = await prisma.$queryRaw<{ id: number; nombre: string }[]>`
@@ -2485,6 +2489,238 @@ export class CampanasController {
       res.status(500).json({
         success: false,
         error: 'Error al obtener usuarios',
+      });
+    }
+  }
+
+  // ============================================================================
+  // ENDPOINTS PARA ÓRDENES DE MONTAJE
+  // ============================================================================
+
+  /**
+   * Obtener datos para Orden de Montaje CAT - Ocupación
+   * Agrupa por campaña, artículo y tipo (RENTA/BONIFICACIÓN)
+   */
+  async getOrdenMontajeCAT(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const status = req.query.status as string;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      let statusFilter = '';
+      const params: (string | number)[] = [];
+
+      if (status) {
+        statusFilter = 'AND cm.status = ?';
+        params.push(status);
+      }
+
+      let dateFilter = '';
+      if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
+        dateFilter = `
+          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+        `;
+        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+      }
+
+      const query = `
+        -- FILA PARA BONIFICACIONES
+        SELECT
+          MIN(inv.municipio) AS plaza,
+          sc.formato AS tipo,
+          pr.asignado AS asesor,
+          ROUND(AVG(rsv.APS), 0) AS aps_especifico,
+          sc.inicio_periodo AS fecha_inicio_periodo,
+          sc.fin_periodo AS fecha_fin_periodo,
+          cliente.T1_U_Cliente AS cliente,
+          cliente.T2_U_Marca AS marca,
+          cm.nombre AS campania,
+          sc.articulo AS numero_articulo,
+          'BONIFICACION' AS negociacion,
+          sc.bonificacion AS caras,
+          0 AS tarifa,
+          0 AS monto_total,
+          cm.id AS campania_id,
+          sc.id AS grupo_id,
+          'bonificacion' AS tipo_fila
+        FROM campania cm
+          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+          INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+          INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus <> 'eliminada'
+          AND rsv.estatus <> 'vendido'
+          AND sc.bonificacion > 0
+          ${statusFilter}
+          ${dateFilter}
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+                 sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
+                 pr.asignado
+
+        UNION ALL
+
+        -- FILA PARA RENTA
+        SELECT
+          MIN(inv.municipio) AS plaza,
+          sc.formato AS tipo,
+          pr.asignado AS asesor,
+          ROUND(AVG(rsv.APS), 0) AS aps_especifico,
+          sc.inicio_periodo AS fecha_inicio_periodo,
+          sc.fin_periodo AS fecha_fin_periodo,
+          cliente.T1_U_Cliente AS cliente,
+          cliente.T2_U_Marca AS marca,
+          cm.nombre AS campania,
+          sc.articulo AS numero_articulo,
+          'RENTA' AS negociacion,
+          (sc.caras - sc.bonificacion) AS caras,
+          ROUND(AVG(sc.tarifa_publica), 2) AS tarifa,
+          ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
+          cm.id AS campania_id,
+          sc.id AS grupo_id,
+          'renta' AS tipo_fila
+        FROM campania cm
+          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+          INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+          INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus <> 'eliminada'
+          AND rsv.estatus <> 'vendido'
+          AND (sc.caras - sc.bonificacion) > 0
+          ${statusFilter}
+          ${dateFilter}
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+                 sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
+                 pr.asignado, ct.descuento
+
+        ORDER BY campania_id, grupo_id, tipo_fila
+      `;
+
+      const data = await prisma.$queryRawUnsafe(query, ...params, ...params);
+
+      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: dataSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getOrdenMontajeCAT:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener orden de montaje CAT';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener datos para Orden de Montaje INVIAN QEB
+   * Formato específico para exportación a sistema INVIAN
+   */
+  async getOrdenMontajeINVIAN(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const status = req.query.status as string;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      let statusFilter = '';
+      const params: (string | number)[] = [];
+
+      if (status) {
+        statusFilter = 'AND cm.status = ?';
+        params.push(status);
+      }
+
+      let dateFilter = '';
+      if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
+        dateFilter = `
+          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+        `;
+        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+      }
+
+      const query = `
+        SELECT
+          cm.nombre AS Campania,
+          cliente.T1_U_Cliente AS Anunciante,
+          CASE
+            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
+            ELSE 'RENTA'
+          END AS Operacion,
+          cm.id AS CodigoContrato,
+          CASE
+            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 0
+            ELSE ROUND(sc.tarifa_publica * (1 - COALESCE(ct.descuento, 0)), 2)
+          END AS PrecioPorCara,
+          pr.asignado AS Vendedor,
+          NULL AS Descripcion,
+          CONCAT('Catorcenas ', YEAR(sc.inicio_periodo)) AS InicioPeriodo,
+          CONCAT('Catorcena #', LPAD(
+            FLOOR((DAYOFYEAR(sc.inicio_periodo) - 1) / 14) + 1,
+            2, '0'
+          )) AS FinSegmento,
+          cliente.T2_U_Marca AS Arte,
+          rsv.id AS CodigoArte,
+          rsv.archivo AS ArteUrl,
+          NULL AS OrigenArte,
+          inv.codigo_unico AS Unidad,
+          inv.tipo_de_cara AS Cara,
+          inv.municipio AS Ciudad,
+          CASE
+            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
+            ELSE 'RENTA'
+          END AS TipoDistribucion,
+          NULL AS Reproducciones,
+          sc.inicio_periodo AS fecha_inicio,
+          sc.fin_periodo AS fecha_fin,
+          cm.status AS status_campania
+        FROM reservas rsv
+          INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+          INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN propuesta pr ON pr.id = sc.idquote
+          INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN cliente ON cliente.id = cm.cliente_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus NOT IN ('eliminada')
+          ${statusFilter}
+          ${dateFilter}
+        ORDER BY cm.id, sc.id, inv.id
+      `;
+
+      const data = await prisma.$queryRawUnsafe(query, ...params);
+
+      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: dataSerializable,
+      });
+    } catch (error) {
+      console.error('Error en getOrdenMontajeINVIAN:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener orden de montaje INVIAN';
+      res.status(500).json({
+        success: false,
+        error: message,
       });
     }
   }
