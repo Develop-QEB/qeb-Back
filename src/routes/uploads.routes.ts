@@ -64,11 +64,10 @@ router.post('/arte', authMiddleware, upload.single('file'), (req: Request, res: 
       return;
     }
 
-    // Construir la URL del archivo
-    const baseUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 3000}`;
-    const fileUrl = `${baseUrl}/uploads/artes/${req.file.filename}`;
+    // Construir la URL relativa del archivo (el frontend añadirá el base URL)
+    const fileUrl = `/uploads/artes/${req.file.filename}`;
 
-    console.log('Archivo subido:', req.file.filename, '-> URL:', fileUrl);
+    console.log('Archivo subido:', req.file.filename, '-> URL relativa:', fileUrl);
 
     res.json({
       success: true,

@@ -898,7 +898,7 @@ export class SolicitudesController {
             contraflujo: caras.reduce((acc: number, c: { caras_contraflujo: number }) => acc + (c.caras_contraflujo || 0), 0),
             total_flujo: totalCaras,
             bonificacion: totalBonificacion,
-            nombre_cliente: razon_social,
+            nombre_cliente: razon_social || nombre_campania || 'Sin nombre',
             descuento: 0,
             articulo,
           },
@@ -1476,3 +1476,4 @@ export class SolicitudesController {
 }
 
 export const solicitudesController = new SolicitudesController();
+

@@ -10,8 +10,8 @@ export class PropuestasController {
       const status = req.query.status as string;
       const search = req.query.search as string;
 
-      // Build WHERE conditions
-      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa'`;
+      // Build WHERE conditions - Solo mostrar propuestas con solicitud atendida
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND (sl.status = 'Atendida' OR sl.id IS NULL)`;
       const params: any[] = [];
 
       if (status) {
