@@ -15,11 +15,19 @@ export class InventariosController {
       const where: Record<string, unknown> = {};
 
       if (search) {
-        where.OR = [
+        const searchNum = parseInt(search);
+        const orConditions: Record<string, unknown>[] = [
           { codigo_unico: { contains: search } },
           { ubicacion: { contains: search } },
           { municipio: { contains: search } },
         ];
+
+        // Si es un número, también buscar por ID
+        if (!isNaN(searchNum)) {
+          orConditions.push({ id: searchNum });
+        }
+
+        where.OR = orConditions;
       }
 
       if (tipo) {
@@ -548,6 +556,94 @@ export class InventariosController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener ciudades';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Obtener historial de un inventario (reservas, campañas, fechas, artes)
+  async getHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const inventarioId = parseInt(id);
+
+      // Obtener info del inventario
+      const inventario = await prisma.inventarios.findUnique({
+        where: { id: inventarioId },
+        select: {
+          id: true,
+          codigo_unico: true,
+          ubicacion: true,
+          mueble: true,
+          plaza: true,
+          estado: true,
+          tipo_de_cara: true,
+          tradicional_digital: true,
+          latitud: true,
+          longitud: true,
+          ancho: true,
+          alto: true,
+        },
+      });
+
+      if (!inventario) {
+        res.status(404).json({
+          success: false,
+          error: 'Inventario no encontrado',
+        });
+        return;
+      }
+
+      // Query para obtener historial de reservas con campañas
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.estatus as reserva_estatus,
+          rsv.archivo,
+          rsv.arte_aprobado,
+          rsv.fecha_reserva,
+          rsv.instalado,
+          rsv.APS,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          sc.tipo as tipo_medio,
+          cm.id as campana_id,
+          cm.nombre as campana_nombre,
+          cl.T0_U_Cliente as cliente_nombre,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena
+        FROM espacio_inventario epIn
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE epIn.inventario_id = ?
+          AND rsv.estatus != 'eliminada'
+          AND rsv.deleted_at IS NULL
+        ORDER BY sc.inicio_periodo DESC
+      `;
+
+      const historial = await prisma.$queryRawUnsafe(query, inventarioId);
+
+      // Convertir BigInt a Number
+      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({
+        success: true,
+        data: {
+          inventario,
+          historial: historialSerializable,
+        },
+      });
+    } catch (error) {
+      console.error('Error en getHistorial:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({
         success: false,
         error: message,

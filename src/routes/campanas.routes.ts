@@ -39,6 +39,11 @@ router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campana
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
 router.delete('/:id/limpiar-artes-prueba', campanasController.limpiarArtesPrueba.bind(campanasController));
 
+// Comentarios de Revisión de Artes (por tarea)
+router.get('/:id/tareas/:tareaId/comentarios-arte', campanasController.getComentariosRevisionArte.bind(campanasController));
+router.post('/:id/tareas/:tareaId/comentarios-arte', campanasController.addComentarioRevisionArte.bind(campanasController));
+router.delete('/:id/comentarios-arte/:comentarioId', campanasController.deleteComentarioRevisionArte.bind(campanasController));
+
 // Tareas
 router.get('/:id/tareas', campanasController.getTareas.bind(campanasController));
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));

@@ -1161,6 +1161,7 @@ export class CampanasController {
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
           MAX(rsv.arte_aprobado) AS arte_aprobado,
           MAX(sc.id) AS solicitudCarasId,
+          MAX(sc.id) AS grupo,
           MAX(sc.inicio_periodo) AS inicio_periodo,
           MAX(sc.fin_periodo) AS fin_periodo,
           MAX(rsv.comentario_rechazo) AS comentario_rechazo,
@@ -1197,6 +1198,7 @@ export class CampanasController {
           AND rsv.deleted_at IS NULL
           AND inv.tradicional_digital = 'Tradicional'
           AND rsv.archivo IS NOT NULL
+          AND rsv.archivo != ''
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
       `;
@@ -1478,15 +1480,10 @@ export class CampanasController {
         return;
       }
 
-      if (!archivo) {
-        res.status(400).json({
-          success: false,
-          error: 'Se requiere la URL del archivo',
-        });
-        return;
-      }
+      // Si archivo es string vacío, es una operación de limpiar arte
+      const isClearing = archivo === '';
 
-      console.log('assignArte - reservaIds:', reservaIds, 'archivo:', archivo);
+      console.log('assignArte - reservaIds:', reservaIds, 'archivo:', archivo, 'isClearing:', isClearing);
 
       // Obtener los grupo_completo_id de las reservas seleccionadas
       const placeholders = reservaIds.map(() => '?').join(',');
@@ -1500,6 +1497,64 @@ export class CampanasController {
 
       const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
       const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      if (isClearing) {
+        // Limpiar arte - poner archivo NULL y resetear estados
+        const updateDirectQuery = `
+          UPDATE reservas
+          SET archivo = NULL, arte_aprobado = NULL, estatus = 'Sin Arte'
+          WHERE id IN (${placeholders})
+        `;
+
+        await prisma.$executeRawUnsafe(updateDirectQuery, ...reservaIds);
+
+        // Actualizar reservas del mismo grupo_completo
+        if (grupoIds.length > 0) {
+          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+          const updateGruposQuery = `
+            UPDATE reservas
+            SET archivo = NULL, arte_aprobado = NULL, estatus = 'Sin Arte'
+            WHERE grupo_completo_id IN (${grupoPlaceholders})
+          `;
+
+          await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
+        }
+
+        // Registrar en historial
+        const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+        if (campana?.cotizacion_id) {
+          const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+          if (cotizacion?.id_propuesta) {
+            await prisma.historial.create({
+              data: {
+                tipo: 'Arte',
+                ref_id: cotizacion.id_propuesta,
+                accion: 'Limpieza',
+                fecha_hora: new Date(),
+                detalles: `${userName} limpió el arte de ${reservaIds.length} reserva(s)`,
+              },
+            });
+          }
+        }
+
+        res.json({
+          success: true,
+          data: {
+            message: `Arte eliminado de ${reservaIds.length} reserva(s)`,
+            affected: reservaIds.length,
+          },
+        });
+        return;
+      }
+
+      // Validar archivo si no es limpieza
+      if (!archivo) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere la URL del archivo',
+        });
+        return;
+      }
 
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
@@ -2718,6 +2773,126 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getOrdenMontajeINVIAN:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener orden de montaje INVIAN';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Obtener comentarios de revisión de artes por tarea
+  async getComentariosRevisionArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { tareaId } = req.params;
+
+      const comentarios = await prisma.$queryRaw`
+        SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+        FROM comentarios_revision_artes
+        WHERE tarea_id = ${parseInt(tareaId)}
+        ORDER BY fecha ASC
+      `;
+
+      res.json({
+        success: true,
+        data: comentarios,
+      });
+    } catch (error) {
+      console.error('Error en getComentariosRevisionArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener comentarios';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Agregar comentario de revisión de artes
+  async addComentarioRevisionArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { tareaId } = req.params;
+      const { contenido } = req.body;
+      const userId = req.user?.userId || 0;
+
+      if (!contenido || !contenido.trim()) {
+        res.status(400).json({
+          success: false,
+          error: 'El contenido del comentario es requerido',
+        });
+        return;
+      }
+
+      // Obtener el nombre del usuario desde la base de datos
+      const [userData] = await prisma.$queryRaw<{ nombre: string }[]>`
+        SELECT nombre FROM usuario WHERE id = ${userId}
+      `;
+      const userName = userData?.nombre || 'Usuario';
+
+      await prisma.$executeRaw`
+        INSERT INTO comentarios_revision_artes (tarea_id, autor_id, autor_nombre, contenido, fecha)
+        VALUES (${parseInt(tareaId)}, ${userId}, ${userName}, ${contenido.trim()}, NOW())
+      `;
+
+      // Obtener el comentario recién insertado
+      const [comentario] = await prisma.$queryRaw<any[]>`
+        SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+        FROM comentarios_revision_artes
+        WHERE tarea_id = ${parseInt(tareaId)}
+        ORDER BY id DESC
+        LIMIT 1
+      `;
+
+      res.json({
+        success: true,
+        data: comentario,
+      });
+    } catch (error) {
+      console.error('Error en addComentarioRevisionArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al agregar comentario';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Eliminar comentario de revisión de artes (solo el autor puede eliminar)
+  async deleteComentarioRevisionArte(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { comentarioId } = req.params;
+      const userId = req.user?.userId || 0;
+
+      // Verificar que el comentario existe y pertenece al usuario
+      const [comentario] = await prisma.$queryRaw<{ id: number; autor_id: number }[]>`
+        SELECT id, autor_id FROM comentarios_revision_artes WHERE id = ${parseInt(comentarioId)}
+      `;
+
+      if (!comentario) {
+        res.status(404).json({
+          success: false,
+          error: 'Comentario no encontrado',
+        });
+        return;
+      }
+
+      if (comentario.autor_id !== userId) {
+        res.status(403).json({
+          success: false,
+          error: 'No tienes permiso para eliminar este comentario',
+        });
+        return;
+      }
+
+      await prisma.$executeRaw`
+        DELETE FROM comentarios_revision_artes WHERE id = ${parseInt(comentarioId)}
+      `;
+
+      res.json({
+        success: true,
+        message: 'Comentario eliminado',
+      });
+    } catch (error) {
+      console.error('Error en deleteComentarioRevisionArte:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar comentario';
       res.status(500).json({
         success: false,
         error: message,

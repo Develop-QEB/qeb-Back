@@ -17,6 +17,7 @@ router.get('/estados', inventariosController.getEstados.bind(inventariosControll
 router.get('/ciudades', inventariosController.getCiudadesByEstado.bind(inventariosController));
 router.get('/formatos', inventariosController.getFormatosByCiudad.bind(inventariosController));
 router.get('/nse', inventariosController.getNSE.bind(inventariosController));
+router.get('/:id/historial', inventariosController.getHistorial.bind(inventariosController));
 router.get('/:id', inventariosController.getById.bind(inventariosController));
 
 export default router;
