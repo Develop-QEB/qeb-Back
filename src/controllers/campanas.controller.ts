@@ -1138,7 +1138,7 @@ export class CampanasController {
           inv.tradicional_digital,
 
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(
               SUBSTRING_INDEX(inv.codigo_unico, '_', 1),
               '_completo_',
@@ -1148,7 +1148,7 @@ export class CampanasController {
           END as codigo_unico_display,
 
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN 'Completo'
             ELSE inv.tipo_de_cara
           END as tipo_de_cara_display,
@@ -1176,13 +1176,13 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          MAX(sol.IMU) AS IMU,
+          (SELECT sol2.IMU FROM solicitud sol2 WHERE sol2.cliente_id = cm.cliente_id LIMIT 1) AS IMU,
 
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
 
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
@@ -1190,7 +1190,6 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          INNER JOIN solicitud sol ON sol.cliente_id = cm.cliente_id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
@@ -1199,7 +1198,7 @@ export class CampanasController {
           AND inv.tradicional_digital = 'Tradicional'
           AND rsv.archivo IS NOT NULL
           AND rsv.archivo != ''
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1304,14 +1303,30 @@ export class CampanasController {
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_id,
-          inv.*,
+          inv.id,
+          inv.codigo_unico,
+          inv.ubicacion,
+          inv.tipo_de_cara,
+          inv.cara,
+          inv.mueble,
+          inv.latitud,
+          inv.longitud,
+          inv.plaza,
+          inv.estado,
+          inv.municipio,
+          inv.tipo_de_mueble,
+          inv.ancho,
+          inv.alto,
+          inv.nivel_socioeconomico,
+          inv.tarifa_publica,
+          inv.tradicional_digital,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
             ELSE inv.codigo_unico
           END as codigo_unico_display,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
             ELSE inv.tipo_de_cara
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
@@ -1326,9 +1341,9 @@ export class CampanasController {
           COUNT(DISTINCT rsv.id) AS caras_totales,
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
-          cat.numero_catorcena,
-          cat.año AS anio_catorcena,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
@@ -1346,7 +1361,7 @@ export class CampanasController {
           AND inv.tradicional_digital = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1508,6 +1523,13 @@ export class CampanasController {
 
         await prisma.$executeRawUnsafe(updateDirectQuery, ...reservaIds);
 
+        // Eliminar registros de imagenes_digitales para estas reservas
+        const deleteImagenesQuery = `
+          DELETE FROM imagenes_digitales
+          WHERE id_reserva IN (${placeholders})
+        `;
+        await prisma.$executeRawUnsafe(deleteImagenesQuery, ...reservaIds);
+
         // Actualizar reservas del mismo grupo_completo
         if (grupoIds.length > 0) {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
@@ -1518,6 +1540,15 @@ export class CampanasController {
           `;
 
           await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
+
+          // También eliminar imagenes_digitales de reservas del mismo grupo
+          const deleteImagenesGrupoQuery = `
+            DELETE FROM imagenes_digitales
+            WHERE id_reserva IN (
+              SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})
+            )
+          `;
+          await prisma.$executeRawUnsafe(deleteImagenesGrupoQuery, ...grupoIds);
         }
 
         // Registrar en historial
