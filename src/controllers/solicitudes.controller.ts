@@ -1473,6 +1473,32 @@ export class SolicitudesController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  async uploadArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      if (!req.file) {
+        res.status(400).json({ success: false, error: 'No se proporcionó archivo' });
+        return;
+      }
+
+      const fileUrl = `/uploads/${req.file.filename}`;
+
+      await prisma.solicitud.update({
+        where: { id: parseInt(id) },
+        data: {
+          archivo: fileUrl,
+        },
+      });
+
+      res.json({ success: true, data: { url: fileUrl } });
+    } catch (error) {
+      console.error('Error uploading archivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al subir archivo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const solicitudesController = new SolicitudesController();

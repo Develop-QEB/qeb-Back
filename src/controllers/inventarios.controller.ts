@@ -280,25 +280,42 @@ export class InventariosController {
         solicitudCaraId,
       } = req.query;
 
+      console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
+
       // Build where clause for inventarios
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
       };
 
-      // Filter by city (plaza)
+      // Filter by city (plaza) - puede ser múltiples ciudades separadas por coma
       if (ciudad) {
-        where.plaza = ciudad;
+        const ciudadList = (ciudad as string).split(',').map(c => c.trim()).filter(Boolean);
+        if (ciudadList.length === 1) {
+          where.plaza = ciudadList[0];
+        } else if (ciudadList.length > 1) {
+          where.plaza = { in: ciudadList };
+        }
       }
 
-      // Filter by state
+      // Filter by state - puede ser múltiples estados separados por coma
       if (estado) {
-        where.estado = estado;
+        const estadoList = (estado as string).split(',').map(e => e.trim()).filter(Boolean);
+        if (estadoList.length === 1) {
+          where.estado = estadoList[0];
+        } else if (estadoList.length > 1) {
+          where.estado = { in: estadoList };
+        }
       }
 
-      // Filter by format (tipo_de_mueble)
+      // Filter by format (tipo_de_mueble) - puede ser múltiples formatos separados por coma
       if (formato) {
-        where.tipo_de_mueble = { contains: formato as string };
+        const formatoList = (formato as string).split(',').map(f => f.trim()).filter(Boolean);
+        if (formatoList.length === 1) {
+          where.tipo_de_mueble = { contains: formatoList[0] };
+        } else if (formatoList.length > 1) {
+          where.OR = formatoList.map(f => ({ tipo_de_mueble: { contains: f } }));
+        }
       }
 
       // Filter by flujo (tipo_de_cara: Flujo/Contraflujo)
@@ -318,6 +335,7 @@ export class InventariosController {
       }
 
       // Get all inventarios that match the criteria
+      console.log('[getDisponibles] Where clause:', JSON.stringify(where, null, 2));
       const inventarios = await prisma.inventarios.findMany({
         where,
         select: {
@@ -348,6 +366,7 @@ export class InventariosController {
       });
 
       // Get espacio_inventario for each inventario
+      console.log('[getDisponibles] Found inventarios:', inventarios.length);
       const inventarioIds = inventarios.map(inv => inv.id);
       const espacios = await prisma.espacio_inventario.findMany({
         where: { inventario_id: { in: inventarioIds } },

@@ -1657,30 +1657,24 @@ export class PropuestasController {
     try {
       const { id } = req.params;
 
-      // For now, we'll handle file upload in a simple way
-      // In production, you'd want to use multer or similar
-      if (!req.files || !('archivo' in req.files)) {
+      // Multer middleware ya procesó el archivo y está en req.file
+      if (!req.file) {
         res.status(400).json({ success: false, error: 'No se proporcionó archivo' });
         return;
       }
 
-      const file = (req.files as any).archivo;
-      const fileName = `propuesta_${id}_${Date.now()}_${file.name}`;
-      const uploadPath = `./uploads/${fileName}`;
+      const fileUrl = `/uploads/${req.file.filename}`;
 
-      // Move file to uploads directory
-      await file.mv(uploadPath);
-
-      // Update propuesta with file URL
-      // Note: propuesta model doesn't have 'archivo' field, only update timestamp
+      // Update propuesta with file URL in database
       await prisma.propuesta.update({
         where: { id: parseInt(id) },
         data: {
+          archivo: fileUrl,
           updated_at: new Date(),
         },
       });
 
-      res.json({ success: true, data: { url: `/uploads/${fileName}` } });
+      res.json({ success: true, data: { url: fileUrl } });
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';

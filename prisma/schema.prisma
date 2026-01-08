@@ -212,9 +212,8 @@ model comentarios {
   creado_en    DateTime @db.Timestamp(0)
   campania_id  Int
   solicitud_id Int
-  origen       String?  @db.VarChar(20) // 'solicitud', 'propuesta', 'campana', 'tarea'
+  origen       String?  @db.VarChar(20)
 }
-
 
 model cotizacion {
   id                   Int       @id @default(autoincrement())
@@ -385,6 +384,7 @@ model propuesta {
   comentario_cambio_status String    @db.Text
   articulo                 String    @db.VarChar(20)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
+  archivo                  String?   @db.VarChar(255)
 
   @@index([solicitud_id], map: "fK_solicitud_id")
 }
@@ -524,27 +524,27 @@ model tags {
 }
 
 model tareas {
-  id                 Int                 @id @default(autoincrement())
-  fecha_inicio       DateTime            @default(dbgenerated("(curdate())")) @db.DateTime(0)
-  fecha_fin          DateTime            @default(now()) @db.DateTime(0)
-  tipo               String?             @db.VarChar(50)
-  responsable        String?             @db.VarChar(50)
+  id                 Int      @id @default(autoincrement())
+  fecha_inicio       DateTime @default(dbgenerated("(curdate())")) @db.DateTime(0)
+  fecha_fin          DateTime @default(now()) @db.DateTime(0)
+  tipo               String?  @db.VarChar(50)
+  responsable        String?  @db.VarChar(50)
   id_responsable     Int
-  estatus            String?             @db.VarChar(50)
-  descripcion        String?             @db.VarChar(255)
-  titulo             String?             @db.VarChar(50)
-  contenido          String?             @db.VarChar(50)
+  estatus            String?  @db.VarChar(50)
+  descripcion        String?  @db.VarChar(255)
+  titulo             String?  @db.VarChar(50)
+  contenido          String?  @db.VarChar(50)
   campania_id        Int?
-  archivo            String?             @db.VarChar(1000)
-  id_solicitud       String              @db.VarChar(100)
-  id_propuesta       String?             @db.VarChar(100)
-  evidencia          String?             @db.VarChar(10000)
+  archivo            String?  @db.VarChar(1000)
+  id_solicitud       String   @db.VarChar(100)
+  id_propuesta       String?  @db.VarChar(100)
+  evidencia          String?  @db.VarChar(10000)
   proveedores_id     Int?
-  listado_inventario String?             @db.VarChar(255)
-  nombre_proveedores String?             @db.VarChar(255)
-  asignado           String?             @db.VarChar(255)
-  id_asignado        String?             @db.VarChar(255)
-  ids_reservas       String?             @db.Text
+  listado_inventario String?  @db.VarChar(255)
+  nombre_proveedores String?  @db.VarChar(255)
+  asignado           String?  @db.VarChar(255)
+  id_asignado        String?  @db.VarChar(255)
+  ids_reservas       String?  @db.Text
 }
 
 model usuario {
@@ -555,11 +555,11 @@ model usuario {
   user_password      String?   @db.VarChar(255)
   area               String    @db.VarChar(50)
   puesto             String    @db.VarChar(50)
-  foto_perfil        String?   @db.VarChar(500)
   updated_at         DateTime? @db.Timestamp(0)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
   deleted_at         DateTime? @db.Timestamp(0)
   user_role          String    @default("Normal") @db.VarChar(25)
+  foto_perfil        String?   @db.VarChar(500)
 }
 
 model correos_enviados {
@@ -576,16 +576,27 @@ model correos_enviados {
 }
 
 model notas_personales {
-  id                 Int       @id @default(autoincrement())
-  usuario_id         Int
-  titulo             String?   @db.VarChar(255)
-  contenido          String    @db.Text
-  color              String?   @db.VarChar(20)
-  fecha_creacion     DateTime  @default(now()) @db.Timestamp(0)
+  id                  Int       @id @default(autoincrement())
+  usuario_id          Int
+  titulo              String?   @db.VarChar(255)
+  contenido           String    @db.Text
+  color               String?   @db.VarChar(20)
+  fecha_creacion      DateTime  @default(now()) @db.Timestamp(0)
   fecha_actualizacion DateTime? @db.Timestamp(0)
 
   @@index([usuario_id], map: "idx_usuario_notas")
   @@map("notas_personales")
+}
+
+model comentarios_revision_artes {
+  id           Int      @id @default(autoincrement())
+  tarea_id     Int
+  autor_id     Int
+  autor_nombre String   @db.VarChar(100)
+  contenido    String   @db.Text
+  fecha        DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([tarea_id], map: "idx_tarea_comentarios")
 }
 
 enum proveedores_estado {
