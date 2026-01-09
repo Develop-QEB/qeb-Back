@@ -72,54 +72,6 @@ model catorcenas {
   @@map("catorcenas")
 }
 
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-model Nuevos_inventarios {
-  codigo_unico         String? @db.VarChar(255)
-  ubicacion            String? @db.VarChar(255)
-  tipo_de_cara         String? @db.VarChar(255)
-  cara                 String? @db.VarChar(255)
-  mueble               String? @db.VarChar(255)
-  latitud              Float?  @db.Float
-  longitud             Float?  @db.Float
-  plaza                String? @db.VarChar(255)
-  estado               String? @db.VarChar(255)
-  municipio            String? @db.VarChar(255)
-  cp                   Int?
-  tradicional_digital  String? @db.VarChar(255)
-  sentido              String? @db.VarChar(255)
-  tipo_de_periodo      String? @db.VarChar(255)
-  entre_calle_1        String? @db.VarChar(255)
-  entre_calle_2        String? @db.VarChar(255)
-  orientacion          String? @db.VarChar(255)
-  tipo_de_mueble       String? @db.VarChar(255)
-  ancho                Float?  @db.Float
-  alto                 Float?  @db.Float
-  archivos_id          String? @db.VarChar(255)
-  costo                Float?  @db.Float
-  nivel_socioeconomico String? @db.VarChar(255)
-  total_espacios       Int?
-  tiempo               String? @db.VarChar(255)
-  estatus              String? @db.VarChar(255)
-
-  @@ignore
-}
-
-model Tamano_empresa {
-  id     Int    @id @default(autoincrement())
-  Tamano String @db.VarChar(255)
-}
-
-model aps_especificos {
-  id         Int       @id @default(autoincrement())
-  created_at DateTime? @default(now()) @db.Timestamp(0)
-}
-
-model aps_especificos_grupos {
-  id                Int @id @default(autoincrement())
-  aps_especifico_id Int
-  inventario_id     Int
-}
-
 model archivos {
   id           Int    @id @default(autoincrement())
   nombre       String @db.VarChar(100)
@@ -149,33 +101,6 @@ model campania {
   status        String   @default("inactiva") @db.VarChar(50)
   cotizacion_id Int?
   articulo      String   @db.VarChar(20)
-}
-
-model caracteristicas {
-  id             Int    @id @default(autoincrement())
-  caracteristica String @db.VarChar(255)
-}
-
-model caracterst_solicitud {
-  id             Int    @id @default(autoincrement())
-  propuesta_id   Int
-  caracteristica String @db.VarChar(255)
-}
-
-model chatservicio {
-  id         Int       @id @default(autoincrement())
-  usuario    String?   @db.VarChar(100)
-  texto      String?   @db.Text
-  imagen     String?   @db.VarChar(255)
-  estatus    String?   @db.VarChar(50)
-  agente     String?   @db.VarChar(100)
-  fechayhora DateTime? @default(now()) @db.DateTime(0)
-}
-
-model ciudades {
-  id        Int     @id @default(autoincrement())
-  ciudad    String  @unique(map: "ciudad_unico") @db.VarChar(50)
-  municipio String? @db.MediumText
 }
 
 model cliente {
@@ -243,35 +168,6 @@ model espacio_inventario {
   numero_espacio Int
 }
 
-model estadistica {
-  id                   Int     @id @default(autoincrement())
-  id_inventario        String  @db.VarChar(255)
-  sentido              String  @db.VarChar(30)
-  latitud              Float   @db.Float
-  longitud             Float   @db.Float
-  plaza                String  @db.VarChar(50)
-  peatones             Int
-  nivel_socioeconomico String  @db.VarChar(50)
-  tamanio              String  @db.VarChar(50)
-  tipo                 String  @db.VarChar(50)
-  trafico_promedio     Int
-  publico              String  @db.VarChar(50)
-  estadisticacol       String? @db.VarChar(45)
-  tag                  String  @db.VarChar(6000)
-  radio_500m           String  @map("500m") @db.VarChar(600)
-  radio_1km            String? @map("1km") @db.VarChar(1000)
-  radio_2km            String? @map("2mk") @db.VarChar(1000)
-  radio_3km            String? @map("3km") @db.VarChar(1000)
-  ciudad               String  @db.VarChar(1000)
-  estado               String  @db.VarChar(45)
-  municipio            String  @db.VarChar(45)
-  localesCercanos_id   String? @map("localesCercanos id") @db.VarChar(1000)
-}
-
-model estados {
-  Municipios String @id @db.VarChar(100)
-}
-
 model historial {
   id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
   tipo       String   @db.VarChar(20)
@@ -300,71 +196,6 @@ model imagenes_digitales {
   spot               Int
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
-}
-
-model impresiones {
-  id                 Int       @id @default(autoincrement())
-  id_tarea           Int
-  cantidad_imprimir  Int
-  archivo            String    @db.VarChar(255)
-  cantidad_recibidos Int?
-  fecha_recibido     DateTime? @db.Date
-}
-
-model intereses {
-  Intereses String @id @db.VarChar(50)
-  id        Int    @unique(map: "id") @default(autoincrement())
-}
-
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-model inventarios_backup_20250914_160039 {
-  id                   Int     @default(0)
-  codigo_unico         String? @db.VarChar(50)
-  ubicacion            String? @db.VarChar(255)
-  tipo_de_cara         String? @db.VarChar(30)
-  cara                 String? @db.VarChar(1)
-  mueble               String? @db.VarChar(255)
-  latitud              Float   @db.Float
-  longitud             Float   @db.Float
-  plaza                String? @db.VarChar(25)
-  estado               String? @db.VarChar(30)
-  municipio            String? @db.Text
-  cp                   Int?
-  tradicional_digital  String? @db.VarChar(11)
-  sentido              String? @db.VarChar(5)
-  tipo_de_periodo      String? @db.VarChar(15)
-  entre_calle_1        String? @db.Text
-  entre_calle_2        String? @db.Text
-  orientacion          String? @db.VarChar(15)
-  tipo_de_mueble       String? @db.Text
-  ancho                Float   @db.Float
-  alto                 Float   @db.Float
-  archivos_id          Int?
-  costo                Int?
-  nivel_socioeconomico String? @db.VarChar(255)
-  total_espacios       Int?
-  tiempo               Int?
-  estatus              String? @db.VarChar(20)
-  hasAPS               Int     @default(0)
-  APS                  String? @db.VarChar(255)
-
-  @@ignore
-}
-
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-model pid {
-  id         Int?
-  nom_estab  String? @db.Text
-  raz_social String? @db.Text
-  nombre_act String? @db.Text
-  per_ocu    String? @db.Text
-  entidad    String? @db.Text
-  municipio  String? @db.Text
-  localidad  String? @db.Text
-  latitud    Float?
-  longitud   Float?
-
-  @@ignore
 }
 
 model propuesta {
@@ -471,56 +302,6 @@ model solicitudCaras {
   caras_contraflujo    Int?     @default(0)
   articulo             String?  @db.VarChar(255)
   descuento            Decimal? @db.Decimal(5, 2)
-}
-
-model solicitudCaras_original {
-  id                   Int      @id @unique(map: "totaldecaras") @default(autoincrement())
-  idquote              String?  @db.VarChar(50)
-  ciudad               String?  @db.VarChar(100)
-  tipo                 String?  @db.VarChar(50)
-  flujo                String?  @db.VarChar(50)
-  bonificacion         Decimal? @db.Decimal(10, 2)
-  caras                Int
-  negativa             String   @db.VarChar(700)
-  coincidencias        Int
-  nivel_socioeconomico String   @db.VarChar(255)
-  formato              String   @db.VarChar(255)
-  inicio_periodo       DateTime @db.Date
-  fin_periodo          DateTime @db.Date
-  tarifa_publica       Decimal? @db.Decimal(10, 2)
-  id_solicitud_cara    Int?
-}
-
-model solicitud_original {
-  id              Int       @id @default(autoincrement())
-  fecha           DateTime  @default(now()) @db.DateTime(0)
-  descripcion     String    @db.VarChar(255)
-  presupuesto     Decimal   @db.Decimal(10, 2)
-  notas           String    @db.Text
-  cliente_id      Int
-  usuario_id      Int?
-  status          String    @default("Pendiente") @db.VarChar(255)
-  deleted_at      DateTime? @db.DateTime(0)
-  nombre_usuario  String?   @db.VarChar(255)
-  propuesta_id    Int
-  nombre_campania String    @db.VarChar(255)
-  fecha_inicio    DateTime  @db.Date
-  fecha_fin       DateTime  @db.Date
-  flujo           Int
-  contraflujo     Int
-  total_flujo     Int
-  bonificacion    Int
-  nombre_cliente  String    @db.VarChar(255)
-  descuento       Float
-  articulo        String    @db.VarChar(20)
-}
-
-model tags {
-  id   Int    @id @default(autoincrement())
-  tipo String @db.VarChar(50)
-  tag  String @db.VarChar(255)
-
-  @@index([tipo], map: "tipo")
 }
 
 model tareas {
