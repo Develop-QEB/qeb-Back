@@ -1681,6 +1681,112 @@ export class PropuestasController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  // Update a solicitudCara
+  async updateCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+      const {
+        ciudad,
+        estados,
+        tipo,
+        flujo,
+        bonificacion,
+        caras,
+        nivel_socioeconomico,
+        formato,
+        costo,
+        tarifa_publica,
+        inicio_periodo,
+        fin_periodo,
+        caras_flujo,
+        caras_contraflujo,
+        articulo,
+        descuento,
+      } = req.body;
+
+      const updatedCara = await prisma.solicitudCaras.update({
+        where: { id: parseInt(caraId) },
+        data: {
+          ciudad,
+          estados,
+          tipo,
+          flujo,
+          bonificacion: bonificacion ? parseFloat(bonificacion) : undefined,
+          caras: caras ? parseInt(caras) : undefined,
+          nivel_socioeconomico,
+          formato,
+          costo: costo ? parseInt(costo) : undefined,
+          tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : undefined,
+          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
+          fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+          caras_flujo: caras_flujo ? parseInt(caras_flujo) : undefined,
+          caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : undefined,
+          articulo,
+          descuento: descuento ? parseFloat(descuento) : undefined,
+        },
+      });
+
+      res.json({ success: true, data: updatedCara });
+    } catch (error) {
+      console.error('Error updating cara:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Create a new solicitudCara
+  async createCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params; // propuesta id
+      const {
+        ciudad,
+        estados,
+        tipo,
+        flujo,
+        bonificacion,
+        caras,
+        nivel_socioeconomico,
+        formato,
+        costo,
+        tarifa_publica,
+        inicio_periodo,
+        fin_periodo,
+        caras_flujo,
+        caras_contraflujo,
+        articulo,
+        descuento,
+      } = req.body;
+
+      const newCara = await prisma.solicitudCaras.create({
+        data: {
+          idquote: id, // Link to propuesta
+          ciudad,
+          estados,
+          tipo,
+          flujo,
+          bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+          caras: caras ? parseInt(caras) : 0,
+          nivel_socioeconomico: nivel_socioeconomico || '',
+          formato: formato || '',
+          costo: costo ? parseInt(costo) : 0,
+          tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
+          fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
+          caras_flujo: caras_flujo ? parseInt(caras_flujo) : 0,
+          caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
+          articulo,
+          descuento: descuento ? parseFloat(descuento) : 0,
+        },
+      });
+
+      res.json({ success: true, data: newCara });
+    } catch (error) {
+      console.error('Error creating cara:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const propuestasController = new PropuestasController();
