@@ -9,10 +9,16 @@ export class PropuestasController {
       const limit = parseInt(req.query.limit as string) || 20;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const soloAtendidas = req.query.soloAtendidas === 'true';
 
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa'`;
       const params: any[] = [];
+
+      // Filter by solicitudes that have been attended
+      if (soloAtendidas) {
+        whereConditions += ` AND sl.status = 'Atendida'`;
+      }
 
       if (status) {
         whereConditions += ` AND pr.status = ?`;
