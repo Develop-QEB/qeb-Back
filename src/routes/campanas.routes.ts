@@ -37,6 +37,7 @@ router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bin
 router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
+router.post('/:id/check-reservas-tareas', campanasController.checkReservasTareas.bind(campanasController));
 router.delete('/:id/limpiar-artes-prueba', campanasController.limpiarArtesPrueba.bind(campanasController));
 
 // Comentarios de Revisión de Artes (por tarea)

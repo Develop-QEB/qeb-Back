@@ -1551,6 +1551,52 @@ export class CampanasController {
           await prisma.$executeRawUnsafe(deleteImagenesGrupoQuery, ...grupoIds);
         }
 
+        // Eliminar reservas de las tareas asociadas
+        // Obtener todas las reservas afectadas (incluyendo las del grupo)
+        let allAffectedReservaIds = [...reservaIds];
+        if (grupoIds.length > 0) {
+          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+          const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+          const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+          allAffectedReservaIds = [...new Set([...allAffectedReservaIds, ...grupoReservas.map(r => r.id)])];
+        }
+
+        // Buscar tareas que contengan estas reservas
+        const tareasQuery = `
+          SELECT id, ids_reservas
+          FROM tareas
+          WHERE campania_id = ?
+          AND ids_reservas IS NOT NULL
+          AND ids_reservas != ''
+        `;
+        const tareas = await prisma.$queryRawUnsafe<{ id: number; ids_reservas: string }[]>(tareasQuery, campanaId);
+
+        for (const tarea of tareas) {
+          // Parsear los IDs de reservas de la tarea (pueden estar separados por coma o asterisco)
+          const tareaReservaIds = tarea.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+          // Filtrar los IDs que NO están siendo limpiados
+          const remainingIds = tareaReservaIds.filter(id => !allAffectedReservaIds.includes(id));
+
+          if (remainingIds.length === 0) {
+            // Si no quedan reservas, eliminar la tarea
+            await prisma.tareas.delete({ where: { id: tarea.id } });
+            console.log(`Tarea ${tarea.id} eliminada porque ya no tiene reservas asignadas`);
+          } else if (remainingIds.length !== tareaReservaIds.length) {
+            // Si quedan algunas reservas, actualizar la tarea
+            const newIdsReservas = remainingIds.join(',');
+            await prisma.tareas.update({
+              where: { id: tarea.id },
+              data: { ids_reservas: newIdsReservas }
+            });
+            console.log(`Tarea ${tarea.id} actualizada: ${tareaReservaIds.length} -> ${remainingIds.length} reservas`);
+          }
+        }
+
         // Registrar en historial
         const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
         if (campana?.cotizacion_id) {
@@ -1661,10 +1707,10 @@ export class CampanasController {
         return;
       }
 
-      if (!status || !['Aprobado', 'Rechazado'].includes(status)) {
+      if (!status || !['Aprobado', 'Rechazado', 'Pendiente'].includes(status)) {
         res.status(400).json({
           success: false,
-          error: 'Status debe ser "Aprobado" o "Rechazado"',
+          error: 'Status debe ser "Aprobado", "Rechazado" o "Pendiente"',
         });
         return;
       }
@@ -1684,14 +1730,26 @@ export class CampanasController {
       const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
       const grupoIds = grupos.map(g => g.grupo_completo_id);
 
-      // Construir query de actualización
-      const updateFields = status === 'Rechazado' && comentarioRechazo
-        ? `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`
-        : `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+      // Construir query de actualización según el estado
+      let updateFields: string;
+      let updateParams: (string | number)[];
 
-      const updateParams = status === 'Rechazado' && comentarioRechazo
-        ? [status, comentarioRechazo, ...reservaIds]
-        : [status, ...reservaIds];
+      if (status === 'Rechazado') {
+        if (comentarioRechazo) {
+          updateFields = `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`;
+          updateParams = [status, comentarioRechazo, ...reservaIds];
+        } else {
+          updateFields = `arte_aprobado = ?, estatus = 'Arte Rechazado'`;
+          updateParams = [status, ...reservaIds];
+        }
+      } else if (status === 'Pendiente') {
+        updateFields = `arte_aprobado = ?, estatus = 'En Arte'`;
+        updateParams = [status, ...reservaIds];
+      } else {
+        // Aprobado
+        updateFields = `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+        updateParams = [status, ...reservaIds];
+      }
 
       // Actualizar reservas directas
       const updateDirectQuery = `
@@ -1705,9 +1763,17 @@ export class CampanasController {
       // Actualizar reservas del mismo grupo
       if (grupoIds.length > 0) {
         const grupoPlaceholders = grupoIds.map(() => '?').join(',');
-        const grupoParams = status === 'Rechazado' && comentarioRechazo
-          ? [status, comentarioRechazo, ...grupoIds]
-          : [status, ...grupoIds];
+        let grupoParams: (string | number)[];
+
+        if (status === 'Rechazado') {
+          if (comentarioRechazo) {
+            grupoParams = [status, comentarioRechazo, ...grupoIds];
+          } else {
+            grupoParams = [status, ...grupoIds];
+          }
+        } else {
+          grupoParams = [status, ...grupoIds];
+        }
 
         const updateGruposQuery = `
           UPDATE reservas
@@ -1831,6 +1897,70 @@ export class CampanasController {
       res.status(500).json({
         success: false,
         error: message,
+      });
+    }
+  }
+
+  /**
+   * Verificar si reservas tienen tareas asociadas (para confirmar antes de limpiar arte)
+   */
+  async checkReservasTareas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds } = req.body;
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.json({ success: true, data: { hasTareas: false, tareas: [] } });
+        return;
+      }
+
+      // Buscar tareas que contengan estas reservas
+      const tareasQuery = `
+        SELECT id, titulo, tipo, estatus, ids_reservas, responsable
+        FROM tareas
+        WHERE campania_id = ?
+        AND ids_reservas IS NOT NULL
+        AND ids_reservas != ''
+        AND estatus NOT IN ('Atendido', 'Cancelado')
+      `;
+      const tareas = await prisma.$queryRawUnsafe<{
+        id: number;
+        titulo: string | null;
+        tipo: string | null;
+        estatus: string | null;
+        ids_reservas: string;
+        responsable: string | null;
+      }[]>(tareasQuery, campanaId);
+
+      // Filtrar solo las tareas que contienen alguna de las reservas
+      const tareasAfectadas = tareas.filter(tarea => {
+        const tareaReservaIds = tarea.ids_reservas
+          .replace(/\*/g, ',')
+          .split(',')
+          .map(id => parseInt(id.trim()))
+          .filter(id => !isNaN(id));
+        return reservaIds.some((rid: number) => tareaReservaIds.includes(rid));
+      });
+
+      res.json({
+        success: true,
+        data: {
+          hasTareas: tareasAfectadas.length > 0,
+          tareas: tareasAfectadas.map(t => ({
+            id: t.id,
+            titulo: t.titulo,
+            tipo: t.tipo,
+            estatus: t.estatus,
+            responsable: t.responsable
+          }))
+        }
+      });
+    } catch (error) {
+      console.error('Error en checkReservasTareas:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error al verificar tareas de reservas'
       });
     }
   }
@@ -2025,6 +2155,7 @@ export class CampanasController {
         listado_inventario,
         catorcena_entrega,
         creador,
+        impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
       } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
@@ -2032,6 +2163,7 @@ export class CampanasController {
 
       // Debug: Ver qué recibimos
       console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo });
+      console.log('createTarea - Impresión data:', { proveedores_id, nombre_proveedores, catorcena_entrega, impresiones });
       console.log('createTarea - User auth:', { userId, userName, userNombre: req.user?.nombre });
 
       // Obtener info de la campaña para el id_propuesta
@@ -2055,8 +2187,8 @@ export class CampanasController {
       let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
       let estatusFinal = 'Pendiente';
 
-      // Para Revisión de artes, estatus siempre es Activo
-      if (tipo === 'Revisión de artes') {
+      // Para Revisión de artes e Impresión, estatus siempre es Activo
+      if (tipo === 'Revisión de artes' || tipo === 'Impresión') {
         estatusFinal = 'Activo';
         // Si hay catorcena, obtener fecha_fin de la catorcena seleccionada
         if (catorcena_entrega) {
@@ -2072,6 +2204,12 @@ export class CampanasController {
             }
           }
         }
+      }
+
+      // Preparar datos de impresiones como JSON para almacenar en evidencia
+      let evidenciaData: string | null = null;
+      if (tipo === 'Impresión' && impresiones) {
+        evidenciaData = JSON.stringify({ impresiones, catorcena_entrega });
       }
 
       const tarea = await prisma.tareas.create({
@@ -2094,6 +2232,7 @@ export class CampanasController {
           nombre_proveedores: nombre_proveedores || null,
           contenido: contenido || null,
           listado_inventario: listado_inventario || null,
+          evidencia: evidenciaData, // Datos de impresiones para tipo Impresión
         },
       });
 
@@ -2102,8 +2241,15 @@ export class CampanasController {
         const reservaIdArray = ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
         if (reservaIdArray.length > 0) {
           const placeholders = reservaIdArray.map(() => '?').join(',');
-          // Para Revisión de artes, actualizar tarea = 'En revisión'
-          const tareaValue = tipo === 'Revisión de artes' ? 'En revisión' : (tipo || 'Producción');
+          // Determinar valor de tarea según tipo
+          let tareaValue = tipo || 'Producción';
+          if (tipo === 'Revisión de artes') {
+            tareaValue = 'En revisión';
+          } else if (tipo === 'Impresión') {
+            tareaValue = 'Pedido Solicitado';
+          } else if (tipo === 'Recepción') {
+            tareaValue = 'Por Recibir';
+          }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
             tareaValue,
@@ -2112,8 +2258,8 @@ export class CampanasController {
         }
       }
 
-      // Enviar correo al asignado para tareas de Revisión o Instalación
-      if ((tipo === 'Revisión de artes' || tipo === 'Instalación') && id_asignado) {
+      // Enviar correo al asignado para tareas de Revisión, Instalación o Impresión
+      if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
           const usuarioAsignado = await prisma.usuario.findUnique({
@@ -2811,17 +2957,81 @@ export class CampanasController {
     }
   }
 
-  // Obtener comentarios de revisión de artes por tarea
+  // Obtener comentarios de revisión de artes por tarea (incluye comentarios de tareas relacionadas)
   async getComentariosRevisionArte(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { tareaId } = req.params;
+      const tareaIdInt = parseInt(tareaId);
 
-      const comentarios = await prisma.$queryRaw`
+      // Obtener la tarea actual para saber sus ids_reservas
+      const [tareaActual] = await prisma.$queryRaw<{ ids_reservas: string | null; campania_id: number }[]>`
+        SELECT ids_reservas, campania_id FROM tareas WHERE id = ${tareaIdInt}
+      `;
+
+      if (!tareaActual || !tareaActual.ids_reservas) {
+        // Si no tiene ids_reservas, solo buscar comentarios de esta tarea
+        const comentarios = await prisma.$queryRaw`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tareaIdInt}
+          ORDER BY fecha ASC
+        `;
+        res.json({ success: true, data: comentarios });
+        return;
+      }
+
+      // Parsear los ids de reservas (pueden estar separados por coma o asterisco)
+      const reservaIds = tareaActual.ids_reservas
+        .replace(/\*/g, ',')
+        .split(',')
+        .map(id => parseInt(id.trim()))
+        .filter(id => !isNaN(id));
+
+      if (reservaIds.length === 0) {
+        const comentarios = await prisma.$queryRaw`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tareaIdInt}
+          ORDER BY fecha ASC
+        `;
+        res.json({ success: true, data: comentarios });
+        return;
+      }
+
+      // Buscar todas las tareas de la misma campaña con ids_reservas coincidentes
+      const tareasRelacionadas = await prisma.$queryRaw<{ id: number; ids_reservas: string }[]>`
+        SELECT id, ids_reservas FROM tareas
+        WHERE campania_id = ${tareaActual.campania_id}
+        AND ids_reservas IS NOT NULL
+        AND ids_reservas != ''
+      `;
+
+      // Filtrar tareas que compartan al menos una reserva
+      const tareasIds = tareasRelacionadas
+        .filter(t => {
+          const tReservaIds = t.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+          // Verificar si hay intersección
+          return tReservaIds.some(id => reservaIds.includes(id));
+        })
+        .map(t => t.id);
+
+      // Si no hay tareas relacionadas, incluir al menos la actual
+      if (!tareasIds.includes(tareaIdInt)) {
+        tareasIds.push(tareaIdInt);
+      }
+
+      // Obtener comentarios de todas las tareas relacionadas
+      const placeholders = tareasIds.map(() => '?').join(',');
+      const comentarios = await prisma.$queryRawUnsafe<any[]>(`
         SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
         FROM comentarios_revision_artes
-        WHERE tarea_id = ${parseInt(tareaId)}
+        WHERE tarea_id IN (${placeholders})
         ORDER BY fecha ASC
-      `;
+      `, ...tareasIds);
 
       res.json({
         success: true,
