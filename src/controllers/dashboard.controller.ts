@@ -101,12 +101,12 @@ export class DashboardController {
       // Mapear estatus de reserva por inventario
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Reservado > Bloqueado
+        // Priorizar: Vendido > Reservado/Bonificado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
         if (r.estatus === 'Vendido') {
           inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if (r.estatus === 'Reservado' && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado';
+        } else if ((r.estatus === 'Reservado' || r.estatus === 'Bonificado') && current !== 'Vendido') {
+          inventarioEstatus[r.inventario_id] = 'Reservado'; // Bonificado cuenta como Reservado
         } else if (r.estatus === 'Bloqueado' && !current) {
           inventarioEstatus[r.inventario_id] = 'Bloqueado';
         }
@@ -303,11 +303,12 @@ export class DashboardController {
 
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
+        // Priorizar: Vendido > Reservado/Bonificado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
         if (r.estatus === 'Vendido') {
           inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if (r.estatus === 'Reservado' && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado';
+        } else if ((r.estatus === 'Reservado' || r.estatus === 'Bonificado') && current !== 'Vendido') {
+          inventarioEstatus[r.inventario_id] = 'Reservado'; // Bonificado cuenta como Reservado
         } else if (r.estatus === 'Bloqueado' && !current) {
           inventarioEstatus[r.inventario_id] = 'Bloqueado';
         }
@@ -698,13 +699,16 @@ export class DashboardController {
 
       reservas.forEach((r) => {
         const current = inventarioInfo[r.inventario_id];
-        const prioridad = { Vendido: 3, Reservado: 2, Bloqueado: 1 };
+        // Prioridad: Vendido > Reservado/Bonificado > Bloqueado
+        const prioridad = { Vendido: 3, Reservado: 2, Bonificado: 2, Bloqueado: 1 };
         const currentPrioridad = current ? (prioridad[current.estatus as keyof typeof prioridad] || 0) : 0;
         const newPrioridad = prioridad[r.estatus as keyof typeof prioridad] || 0;
 
         if (newPrioridad > currentPrioridad) {
+          // Bonificado se muestra como Reservado para consistencia en KPIs
+          const estatusNormalizado = r.estatus === 'Bonificado' ? 'Reservado' : r.estatus;
           inventarioInfo[r.inventario_id] = {
-            estatus: r.estatus,
+            estatus: estatusNormalizado,
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
           };
         }
