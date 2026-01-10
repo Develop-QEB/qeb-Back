@@ -12,7 +12,7 @@ export class PropuestasController {
       const soloAtendidas = req.query.soloAtendidas === 'true';
 
       // Build WHERE conditions
-      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa'`;
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
       const params: any[] = [];
 
       // Filter by solicitudes that have been attended
@@ -392,7 +392,12 @@ export class PropuestasController {
       // Get all status counts dynamically
       const statusCounts = await prisma.propuesta.groupBy({
         by: ['status'],
-        where: { deleted_at: null },
+        where: {
+          deleted_at: null,
+          NOT: {
+            status: { in: ['pendiente', 'Pendiente', 'Sin solicitud activa'] }
+          }
+        },
         _count: { status: true },
       });
 
@@ -1790,6 +1795,37 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error creating cara:', error);
       const message = error instanceof Error ? error.message : 'Error al crear cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Delete a solicitudCara
+  async deleteCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+
+      // First check if the cara has any reservations
+      const reservations = await prisma.reservas.findMany({
+        where: { solicitudCaras_id: parseInt(caraId) },
+      });
+
+      if (reservations.length > 0) {
+        res.status(400).json({
+          success: false,
+          error: 'No se puede eliminar una cara con reservas activas',
+        });
+        return;
+      }
+
+      // Delete the cara
+      await prisma.solicitudCaras.delete({
+        where: { id: parseInt(caraId) },
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error deleting cara:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar cara';
       res.status(500).json({ success: false, error: message });
     }
   }

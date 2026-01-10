@@ -209,7 +209,7 @@ model propuesta {
   deleted_at               DateTime? @db.DateTime(0)
   solicitud_id             Int
   precio_simulado          Int?
-  asignado                 String    @db.VarChar(40)
+  asignado                 String    @db.VarChar(200)
   id_asignado              String?   @db.VarChar(255)
   inversion                Int
   comentario_cambio_status String    @db.Text
@@ -264,7 +264,7 @@ model solicitud {
   status           String    @default("Pendiente") @db.VarChar(255)
   deleted_at       DateTime? @db.DateTime(0)
   nombre_usuario   String?   @db.VarChar(255)
-  asignado         String    @db.VarChar(40)
+  asignado         String    @db.VarChar(200)
   id_asignado      String?   @db.VarChar(255)
   cuic             String?   @db.VarChar(50)
   razon_social     String?   @db.VarChar(255)
@@ -281,6 +281,29 @@ model solicitud {
   archivo          String?   @db.LongText
   tipo_archivo     String?   @db.VarChar(100)
   card_code        String?   @db.VarChar(50)
+}
+
+model solicitud_original {
+  id              Int       @id @default(autoincrement())
+  fecha           DateTime  @default(now()) @db.DateTime(0)
+  descripcion     String    @db.VarChar(255)
+  presupuesto     Decimal   @db.Decimal(10, 2)
+  notas           String    @db.Text
+  cliente_id      Int
+  usuario_id      Int?
+  status          String    @default("Pendiente") @db.VarChar(255)
+  nombre_usuario  String?   @db.VarChar(255)
+  propuesta_id    Int
+  nombre_campania String    @db.VarChar(255)
+  fecha_inicio    DateTime  @db.Date
+  fecha_fin       DateTime  @db.Date
+  flujo           Int       @default(0)
+  contraflujo     Int       @default(0)
+  total_flujo     Int       @default(0)
+  bonificacion    Int       @default(0)
+  nombre_cliente  String?   @db.VarChar(255)
+  descuento       Decimal   @default(0) @db.Decimal(5, 2)
+  articulo        String    @db.VarChar(20)
 }
 
 model solicitudCaras {

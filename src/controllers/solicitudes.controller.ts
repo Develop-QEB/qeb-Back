@@ -219,7 +219,13 @@ export class SolicitudesController {
       const { id } = req.params;
       const { status } = req.body;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Obtener solicitud antes de actualizar
       const solicitudAnterior = await prisma.solicitud.findUnique({
@@ -324,7 +330,13 @@ export class SolicitudesController {
     try {
       const { id } = req.params;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Obtener la solicitud antes de eliminar
       const solicitud = await prisma.solicitud.findFirst({
@@ -768,7 +780,13 @@ export class SolicitudesController {
       } = req.body;
 
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Calculate totals from caras
       const totalCaras = caras.reduce((acc: number, c: { caras: number; bonificacion: number }) => acc + c.caras + (c.bonificacion || 0), 0);
@@ -985,7 +1003,13 @@ export class SolicitudesController {
       const { id } = req.params;
       const { comentario } = req.body;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });
@@ -1123,7 +1147,13 @@ export class SolicitudesController {
     try {
       const { id } = req.params;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });

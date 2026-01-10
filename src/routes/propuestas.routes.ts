@@ -66,6 +66,7 @@ router.post('/:id/archivo', upload.single('archivo'), propuestasController.uploa
 router.post('/:id/caras', propuestasController.createCara.bind(propuestasController));
 
 // DELETE routes
+router.delete('/:id/caras/:caraId', propuestasController.deleteCara.bind(propuestasController));
 router.delete('/:id/reservas', propuestasController.deleteReservas.bind(propuestasController));
 
 export default router;
