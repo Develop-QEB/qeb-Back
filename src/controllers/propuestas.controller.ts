@@ -386,7 +386,12 @@ export class PropuestasController {
       // Get all status counts dynamically
       const statusCounts = await prisma.propuesta.groupBy({
         by: ['status'],
-        where: { deleted_at: null },
+        where: {
+          deleted_at: null,
+          NOT: {
+            status: { in: ['pendiente', 'Pendiente', 'Sin solicitud activa'] }
+          }
+        },
         _count: { status: true },
       });
 
