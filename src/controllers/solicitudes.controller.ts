@@ -758,6 +758,7 @@ export class SolicitudesController {
         categoria_id,
         categoria_nombre,
         card_code, // SAP CardCode (ACA_U_SAPCode)
+        salesperson_code, // SAP SalesPersonCode (ASESOR_U_SAPCode_Original)
         // Campaign data
         nombre_campania,
         descripcion,
@@ -797,15 +798,7 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
-      // Get salesperson_code from cliente table if cuic is provided
-      let salesperson_code: number | null = null;
-      if (cuic) {
-        const cliente = await prisma.cliente.findFirst({
-          where: { CUIC: parseInt(cuic.toString()) },
-          select: { T0_U_IDAsesor: true }
-        });
-        salesperson_code = cliente?.T0_U_IDAsesor || null;
-      }
+      // Use salesperson_code from request (ASESOR_U_SAPCode_Original from frontend)
 
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
