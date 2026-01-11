@@ -797,6 +797,16 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
+      // Get salesperson_code from cliente table if cuic is provided
+      let salesperson_code: number | null = null;
+      if (cuic) {
+        const cliente = await prisma.cliente.findFirst({
+          where: { CUIC: parseInt(cuic.toString()) },
+          select: { T0_U_IDAsesor: true }
+        });
+        salesperson_code = cliente?.T0_U_IDAsesor || null;
+      }
+
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
         // 1. Create solicitud
@@ -827,6 +837,7 @@ export class SolicitudesController {
             archivo,
             tipo_archivo,
             card_code: card_code || null,
+            salesperson_code,
           },
         });
 

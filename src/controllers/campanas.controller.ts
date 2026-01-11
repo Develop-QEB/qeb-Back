@@ -305,6 +305,9 @@ export class CampanasController {
         inversion: propuesta?.inversion || null,
         comentario_cambio_status: propuesta?.comentario_cambio_status || null,
         updated_at: propuesta?.updated_at || null,
+        // Info de SAP desde solicitud
+        card_code: solicitud?.card_code || null,
+        salesperson_code: solicitud?.salesperson_code || null,
         // Comentarios
         comentarios,
       };

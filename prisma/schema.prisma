@@ -281,6 +281,7 @@ model solicitud {
   archivo          String?   @db.LongText
   tipo_archivo     String?   @db.VarChar(100)
   card_code        String?   @db.VarChar(50)
+  salesperson_code Int?
 }
 
 model solicitud_original {
