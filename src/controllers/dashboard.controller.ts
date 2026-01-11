@@ -98,21 +98,29 @@ export class DashboardController {
         },
       });
 
-      // Mapear estatus de reserva por inventario
+      // Mapear estatus de reserva por inventario (guardar estatus original)
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Reservado/Bonificado > Bloqueado
+        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
-        if (r.estatus === 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if ((r.estatus === 'Reservado' || r.estatus === 'Bonificado') && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado'; // Bonificado cuenta como Reservado
-        } else if (r.estatus === 'Bloqueado' && !current) {
-          inventarioEstatus[r.inventario_id] = 'Bloqueado';
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
+
+        if (newPrioridad > currentPrioridad) {
+          inventarioEstatus[r.inventario_id] = r.estatus;
         }
       });
 
       // Calcular KPIs
+      // Reservado = Vendido + Vendido bonificado + Con Arte (todo lo ocupado)
+      // Vendido = solo estatus "Vendido"
       const total = inventariosBase.length;
       let disponibles = 0;
       let reservados = 0;
@@ -123,7 +131,8 @@ export class DashboardController {
         const estatus = inventarioEstatus[inv.id];
         if (estatus === 'Vendido') {
           vendidos++;
-        } else if (estatus === 'Reservado') {
+          reservados++; // Vendido también cuenta como reservado
+        } else if (estatus === 'Vendido bonificado' || estatus === 'Con Arte' || estatus === 'Reservado') {
           reservados++;
         } else if (estatus === 'Bloqueado') {
           bloqueados++;
@@ -303,20 +312,35 @@ export class DashboardController {
 
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Reservado/Bonificado > Bloqueado
+        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
-        if (r.estatus === 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if ((r.estatus === 'Reservado' || r.estatus === 'Bonificado') && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado'; // Bonificado cuenta como Reservado
-        } else if (r.estatus === 'Bloqueado' && !current) {
-          inventarioEstatus[r.inventario_id] = 'Bloqueado';
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
+
+        if (newPrioridad > currentPrioridad) {
+          inventarioEstatus[r.inventario_id] = r.estatus;
         }
       });
 
       // Filtrar inventarios por estatus seleccionado
+      // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
       const inventariosFiltrados = inventariosBase.filter((inv) => {
         const est = inventarioEstatus[inv.id] || 'Disponible';
+
+        if (estatus_filtro === 'Reservado') {
+          // Reservado muestra todo lo ocupado
+          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte' || est === 'Reservado';
+        } else if (estatus_filtro === 'Vendido') {
+          // Vendido solo muestra Vendido
+          return est === 'Vendido';
+        }
         return est === estatus_filtro;
       });
 
@@ -699,16 +723,20 @@ export class DashboardController {
 
       reservas.forEach((r) => {
         const current = inventarioInfo[r.inventario_id];
-        // Prioridad: Vendido > Reservado/Bonificado > Bloqueado
-        const prioridad = { Vendido: 3, Reservado: 2, Bonificado: 2, Bloqueado: 1 };
-        const currentPrioridad = current ? (prioridad[current.estatus as keyof typeof prioridad] || 0) : 0;
-        const newPrioridad = prioridad[r.estatus as keyof typeof prioridad] || 0;
+        // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current.estatus] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
-          // Bonificado se muestra como Reservado para consistencia en KPIs
-          const estatusNormalizado = r.estatus === 'Bonificado' ? 'Reservado' : r.estatus;
           inventarioInfo[r.inventario_id] = {
-            estatus: estatusNormalizado,
+            estatus: r.estatus, // Guardar estatus original
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
           };
         }
@@ -737,6 +765,14 @@ export class DashboardController {
         })
         .filter((inv) => {
           if (!estatusFiltro) return true;
+
+          // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
+          if (estatusFiltro === 'Reservado') {
+            return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' ||
+                   inv.estatus === 'Con Arte' || inv.estatus === 'Reservado';
+          } else if (estatusFiltro === 'Vendido') {
+            return inv.estatus === 'Vendido';
+          }
           return inv.estatus === estatusFiltro;
         });
 
