@@ -1303,6 +1303,15 @@ export class SolicitudesController {
   async update(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.userId;
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
+
       const {
         cliente_id,
         cuic,
@@ -1478,6 +1487,21 @@ export class SolicitudesController {
           }
         }
 
+        // Detectar qué campos cambiaron
+        const cambios: string[] = [];
+        if (descripcion !== solicitud.descripcion) cambios.push('descripción');
+        if (razon_social !== solicitud.razon_social) cambios.push('razón social');
+        if (marca_nombre !== solicitud.marca_nombre) cambios.push('marca');
+        if (presupuesto !== solicitud.presupuesto) cambios.push('presupuesto');
+        if (asignadosStr !== solicitud.asignado) cambios.push('asignados');
+        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) cambios.push('nombre de campaña');
+        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) cambios.push('fecha inicio');
+        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) cambios.push('fecha fin');
+        if (notas !== solicitud.notas) cambios.push('notas');
+        if (archivo !== solicitud.archivo) cambios.push('archivo');
+
+        const cambiosStr = cambios.length > 0 ? cambios.join(', ') : 'datos generales';
+
         // Create historial entry
         await tx.historial.create({
           data: {
@@ -1485,9 +1509,65 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Edición',
             fecha_hora: new Date(),
-            detalles: `Solicitud editada por ${req.user?.nombre || 'usuario'}`,
+            detalles: `${userName} editó: ${cambiosStr}`,
           },
         });
+
+        // Crear notificaciones para usuarios involucrados
+        const nombreSolicitud = razon_social || marca_nombre || solicitud.razon_social || 'Sin nombre';
+        const tituloNotificacion = `Solicitud #${solicitud.id} editada - ${nombreSolicitud}`;
+        const descripcionNotificacion = `${userName} modificó: ${cambiosStr}`;
+
+        // Recopilar involucrados (sin duplicados, excluyendo al autor)
+        const involucrados = new Set<number>();
+
+        // Agregar creador de la solicitud
+        if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+          involucrados.add(solicitud.usuario_id);
+        }
+
+        // Agregar usuarios asignados anteriores
+        if (solicitud.id_asignado) {
+          solicitud.id_asignado.split(',').forEach((idStr: string) => {
+            const parsed = parseInt(idStr.trim());
+            if (!isNaN(parsed) && parsed !== userId) {
+              involucrados.add(parsed);
+            }
+          });
+        }
+
+        // Agregar nuevos asignados
+        if (asignados && Array.isArray(asignados)) {
+          asignados.forEach((a: { id: number }) => {
+            if (a.id && a.id !== userId) {
+              involucrados.add(a.id);
+            }
+          });
+        }
+
+        // Crear notificación para cada involucrado
+        const now = new Date();
+        const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+        for (const responsableId of involucrados) {
+          await tx.tareas.create({
+            data: {
+              titulo: tituloNotificacion,
+              descripcion: descripcionNotificacion,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              responsable: '',
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campania?.id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              asignado: userName,
+              id_asignado: userId?.toString() || '',
+            },
+          });
+        }
       }, {
         maxWait: 60000,
         timeout: 120000,
