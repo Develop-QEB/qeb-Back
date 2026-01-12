@@ -429,31 +429,44 @@ export class PropuestasController {
     }
   }
 
-  // Get comments for a propuesta
+  // Get comments for a propuesta (using solicitud_id to share comments with solicitudes)
   async getComments(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const propuestaId = parseInt(id);
 
-      const comments = await prisma.historial_comentarios.findMany({
-        where: { id_propuesta: parseInt(id) },
-        orderBy: { fecha: 'desc' },
+      // Get propuesta to find solicitud_id
+      const propuesta = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+        select: { solicitud_id: true },
       });
 
-      // Get user photos by name (historial_comentarios stores username, not user_id)
-      const userNames = [...new Set(comments.map(c => c.usuario).filter(Boolean))];
-      const usuarios = userNames.length > 0 ? await prisma.usuario.findMany({
-        where: { nombre: { in: userNames as string[] } },
-        select: { nombre: true, foto_perfil: true },
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      // Get comments from 'comentarios' table using solicitud_id (shared with solicitudes)
+      const comments = await prisma.comentarios.findMany({
+        where: { solicitud_id: propuesta.solicitud_id },
+        orderBy: { creado_en: 'desc' },
+      });
+
+      // Get user photos by autor_id
+      const autorIds = [...new Set(comments.map(c => c.autor_id))];
+      const usuarios = autorIds.length > 0 ? await prisma.usuario.findMany({
+        where: { id: { in: autorIds } },
+        select: { id: true, nombre: true, foto_perfil: true },
       }) : [];
-      const usuarioFotoMap = new Map(usuarios.map(u => [u.nombre, u.foto_perfil]));
+      const usuarioMap = new Map(usuarios.map(u => [u.id, { nombre: u.nombre, foto: u.foto_perfil }]));
 
       const formattedComments = comments.map(c => ({
-        id: Number(c.id),
+        id: c.id,
         comentario: c.comentario,
-        creado_en: c.fecha,
-        autor_nombre: c.usuario || 'Sistema',
-        autor_foto: c.usuario ? (usuarioFotoMap.get(c.usuario) || null) : null,
-        nuevo_status: c.nuevo_status,
+        creado_en: c.creado_en,
+        autor_nombre: usuarioMap.get(c.autor_id)?.nombre || 'Usuario',
+        autor_foto: usuarioMap.get(c.autor_id)?.foto || null,
+        origen: c.origen,
       }));
 
       res.json({
@@ -469,7 +482,7 @@ export class PropuestasController {
     }
   }
 
-  // Add comment to a propuesta
+  // Add comment to a propuesta (saves to comentarios table using solicitud_id to share with solicitudes)
   async addComment(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
@@ -488,12 +501,23 @@ export class PropuestasController {
         return;
       }
 
-      const newComment = await prisma.historial_comentarios.create({
+      // Get campania_id from cotizacion -> campania
+      const cotizacionForComment = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+      });
+      const campaniaForComment = cotizacionForComment ? await prisma.campania.findFirst({
+        where: { cotizacion_id: cotizacionForComment.id },
+      }) : null;
+
+      // Save to comentarios table (shared with solicitudes)
+      const newComment = await prisma.comentarios.create({
         data: {
-          id_propuesta: propuestaId,
+          autor_id: userId,
           comentario,
-          usuario: userName,
-          fecha: new Date(),
+          creado_en: new Date(),
+          campania_id: campaniaForComment?.id || 0,
+          solicitud_id: propuesta.solicitud_id,
+          origen: 'propuesta',
         },
       });
 
@@ -561,9 +585,9 @@ export class PropuestasController {
       res.json({
         success: true,
         data: {
-          id: Number(newComment.id),
+          id: newComment.id,
           comentario: newComment.comentario,
-          creado_en: newComment.fecha,
+          creado_en: newComment.creado_en,
           autor_nombre: userName,
         },
         message: 'Comentario agregado',

@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { getMexicoDate } from '../utils/dateHelper';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -805,7 +806,7 @@ export class SolicitudesController {
         // 1. Create solicitud
         const solicitud = await tx.solicitud.create({
           data: {
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
@@ -840,7 +841,7 @@ export class SolicitudesController {
             tipo: 'Solicitud',
             ref_id: solicitud.id,
             accion: 'Creacion',
-            fecha_hora: new Date(),
+            fecha_hora: getMexicoDate(),
             detalles: `Solicitud creada por ${userName}`,
           },
         });
@@ -849,7 +850,7 @@ export class SolicitudesController {
         const propuesta = await tx.propuesta.create({
           data: {
             cliente_id,
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             status: 'Pendiente',
             descripcion,
             notas,
@@ -904,7 +905,7 @@ export class SolicitudesController {
         // 6. Create solicitud_original
         await tx.solicitud_original.create({
           data: {
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
@@ -930,7 +931,7 @@ export class SolicitudesController {
         for (const asignado of asignados) {
           await tx.tareas.create({
             data: {
-              fecha_inicio: new Date(),
+              fecha_inicio: getMexicoDate(),
               fecha_fin: new Date(fecha_fin),
               tipo: 'Solicitud',
               responsable: asignado.nombre,
