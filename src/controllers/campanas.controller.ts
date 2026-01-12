@@ -1179,7 +1179,7 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          (SELECT sol2.IMU FROM solicitud sol2 WHERE sol2.cliente_id = cm.cliente_id LIMIT 1) AS IMU,
+          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = sc.idquote LIMIT 1) AS IMU,
 
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
@@ -2159,6 +2159,7 @@ export class CampanasController {
         catorcena_entrega,
         creador,
         impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
+        evidencia, // Evidencia para tareas de Recepción Faltantes
       } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
@@ -2213,6 +2214,9 @@ export class CampanasController {
       let evidenciaData: string | null = null;
       if (tipo === 'Impresión' && impresiones) {
         evidenciaData = JSON.stringify({ impresiones, catorcena_entrega });
+      } else if (evidencia) {
+        // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
+        evidenciaData = evidencia;
       }
 
       const tarea = await prisma.tareas.create({
