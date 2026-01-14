@@ -2774,6 +2774,8 @@ export class CampanasController {
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
           sc.inicio_periodo AS fecha_inicio_periodo,
           sc.fin_periodo AS fecha_fin_periodo,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
           cm.nombre AS campania,
@@ -2813,6 +2815,8 @@ export class CampanasController {
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
           sc.inicio_periodo AS fecha_inicio_periodo,
           sc.fin_periodo AS fecha_fin_periodo,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
           cm.nombre AS campania,
@@ -2928,7 +2932,9 @@ export class CampanasController {
           NULL AS Reproducciones,
           sc.inicio_periodo AS fecha_inicio,
           sc.fin_periodo AS fecha_fin,
-          cm.status AS status_campania
+          cm.status AS status_campania,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year
         FROM reservas rsv
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
