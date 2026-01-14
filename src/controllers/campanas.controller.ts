@@ -2062,6 +2062,7 @@ export class CampanasController {
           listado_inventario: string | null;
           proveedores_id: number | null;
           nombre_proveedores: string | null;
+          num_impresiones: number | null;
           nombre: string | null;
           correo_electronico: string | null;
           inventario_id: string | null;
@@ -2118,6 +2119,7 @@ export class CampanasController {
           listado_inventario: t.listado_inventario,
           proveedores_id: t.proveedores_id,
           nombre_proveedores: t.nombre_proveedores,
+          num_impresiones: t.num_impresiones,
           inventario_id: t.inventario_id,
           APS: t.APS,
           tarea_reserva: t.tarea_reserva,
@@ -2274,8 +2276,10 @@ export class CampanasController {
       if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
         evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
         // Calcular total de impresiones sumando todos los valores del objeto
+        console.log('createTarea - impresiones recibido:', impresiones, 'tipo:', typeof impresiones);
         if (impresiones && typeof impresiones === 'object') {
           numImpresionesTotal = Object.values(impresiones).reduce((sum: number, val) => sum + (Number(val) || 0), 0);
+          console.log('createTarea - numImpresionesTotal calculado:', numImpresionesTotal);
         }
       } else if (evidencia) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
