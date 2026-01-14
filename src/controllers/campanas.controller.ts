@@ -2217,6 +2217,7 @@ export class CampanasController {
         catorcena_entrega,
         creador,
         impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
+        num_impresiones, // Total de impresiones (enviado desde frontend)
         evidencia, // Evidencia para tareas de Recepción Faltantes
       } = req.body;
       const campanaId = parseInt(id);
@@ -2275,21 +2276,10 @@ export class CampanasController {
       let numImpresionesTotal: number | null = null;
       if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
         evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
-        // Calcular total de impresiones sumando todos los valores del objeto
-        console.log('createTarea - impresiones recibido:', JSON.stringify(impresiones), 'tipo:', typeof impresiones);
-        try {
-          // Si impresiones es string, parsearlo
-          let impresionesObj = impresiones;
-          if (typeof impresiones === 'string') {
-            impresionesObj = JSON.parse(impresiones);
-          }
-          if (impresionesObj && typeof impresionesObj === 'object') {
-            const valores = Object.values(impresionesObj) as number[];
-            numImpresionesTotal = valores.reduce((sum, val) => sum + (Number(val) || 0), 0);
-            console.log('createTarea - numImpresionesTotal calculado:', numImpresionesTotal);
-          }
-        } catch (e) {
-          console.error('createTarea - Error calculando impresiones:', e);
+        // Usar num_impresiones enviado desde el frontend directamente
+        if (num_impresiones !== undefined && num_impresiones !== null) {
+          numImpresionesTotal = Number(num_impresiones);
+          console.log('createTarea - num_impresiones desde frontend:', numImpresionesTotal);
         }
       } else if (evidencia) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
