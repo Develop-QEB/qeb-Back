@@ -350,6 +350,7 @@ model tareas {
   asignado           String?  @db.VarChar(255)
   id_asignado        String?  @db.VarChar(255)
   ids_reservas       String?  @db.Text
+  num_impresiones    Int?
 }
 
 model usuario {

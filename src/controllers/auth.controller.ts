@@ -32,31 +32,12 @@ export class AuthController {
     }
   }
 
-  async refresh(req: Request, res: Response): Promise<void> {
-    try {
-      const { refreshToken } = req.body;
-
-      if (!refreshToken) {
-        res.status(400).json({
-          success: false,
-          error: 'Refresh token requerido',
-        });
-        return;
-      }
-
-      const result = await authService.refreshToken(refreshToken);
-
-      res.json({
-        success: true,
-        data: result,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Error al refrescar token';
-      res.status(401).json({
-        success: false,
-        error: message,
-      });
-    }
+  async refresh(_req: Request, res: Response): Promise<void> {
+    // Refresh token deshabilitado - usar token de larga duración
+    res.status(410).json({
+      success: false,
+      error: 'Refresh token deshabilitado. Por favor inicia sesión nuevamente.',
+    });
   }
 
   async profile(req: AuthRequest, res: Response): Promise<void> {

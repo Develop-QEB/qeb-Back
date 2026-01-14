@@ -1804,6 +1804,62 @@ export class CampanasController {
         }
       }
 
+      // Si es rechazo, intercambiar creador y asignado en la tarea de Revisión de artes
+      console.log('updateArteStatus - Status:', status, '- CampanaId:', campanaId);
+      if (status === 'Rechazado') {
+        console.log('updateArteStatus - Buscando tareas de Revisión de artes para rotar roles...');
+        // Buscar la tarea de Revisión de artes que contiene estas reservas
+        const tareasRevision = await prisma.$queryRawUnsafe<{
+          id: number;
+          ids_reservas: string;
+          responsable: string | null;
+          id_responsable: number;
+          asignado: string | null;
+          id_asignado: string | null;
+        }[]>(`
+          SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
+          FROM tareas
+          WHERE campania_id = ?
+          AND tipo = 'Revisión de artes'
+          AND ids_reservas IS NOT NULL
+          AND ids_reservas != ''
+          AND estatus = 'Activo'
+        `, campanaId);
+
+        console.log('updateArteStatus - Tareas encontradas:', tareasRevision.length, tareasRevision);
+
+        // Encontrar la tarea que contiene alguna de las reservas rechazadas
+        for (const tarea of tareasRevision) {
+          const tareaReservaIds = tarea.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+          const tieneReservasRechazadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
+
+          if (tieneReservasRechazadas) {
+            // Rotar: el asignado original se vuelve creador, el creador original se vuelve asignado
+            const nuevoResponsable = tarea.asignado;
+            const nuevoIdResponsable = tarea.id_asignado ? parseInt(tarea.id_asignado) : tarea.id_responsable;
+            const nuevoAsignado = tarea.responsable;
+            const nuevoIdAsignado = String(tarea.id_responsable);
+
+            await prisma.tareas.update({
+              where: { id: tarea.id },
+              data: {
+                responsable: nuevoResponsable,
+                id_responsable: nuevoIdResponsable,
+                asignado: nuevoAsignado,
+                id_asignado: nuevoIdAsignado,
+              },
+            });
+
+            console.log(`Tarea ${tarea.id} - Roles rotados: Creador ahora es ${nuevoResponsable}, Asignado ahora es ${nuevoAsignado}`);
+          }
+        }
+      }
+
       res.json({
         success: true,
         data: {
@@ -2161,14 +2217,16 @@ export class CampanasController {
         impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
         evidencia, // Evidencia para tareas de Recepción Faltantes
       } = req.body;
-      const userId = req.user?.userId || 0;
-      const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
+      // Obtener el ID y nombre del responsable desde el token JWT del usuario logueado
+      const responsableId = req.user?.userId || 0;
+      const responsableNombre = req.user?.nombre || '';
+
       // Debug: Ver qué recibimos
-      console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo });
-      console.log('createTarea - Impresión data:', { proveedores_id, nombre_proveedores, catorcena_entrega, impresiones });
-      console.log('createTarea - User auth:', { userId, userName, userNombre: req.user?.nombre });
+      console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo, id_responsable });
+      console.log('createTarea - Token user:', { userId: req.user?.userId, nombre: req.user?.nombre });
+      console.log('createTarea - Responsable final:', { responsableId, responsableNombre });
 
       // Obtener info de la campaña para el id_propuesta
       const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
@@ -2212,8 +2270,13 @@ export class CampanasController {
 
       // Preparar datos de impresiones como JSON para almacenar en evidencia
       let evidenciaData: string | null = null;
-      if (tipo === 'Impresión' && impresiones) {
-        evidenciaData = JSON.stringify({ impresiones, catorcena_entrega });
+      let numImpresionesTotal: number | null = null;
+      if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
+        evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
+        // Calcular total de impresiones sumando todos los valores del objeto
+        if (impresiones && typeof impresiones === 'object') {
+          numImpresionesTotal = Object.values(impresiones).reduce((sum: number, val) => sum + (Number(val) || 0), 0);
+        }
       } else if (evidencia) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
         evidenciaData = evidencia;
@@ -2227,10 +2290,10 @@ export class CampanasController {
           estatus: estatusFinal,
           fecha_inicio: new Date(),
           fecha_fin: fechaFinFinal,
-          id_responsable: id_responsable || userId,
-          responsable: responsable || userName,
-          asignado: asignado || userName,
-          id_asignado: id_asignado || String(userId),
+          id_responsable: responsableId,
+          responsable: responsableNombre || null,
+          asignado: asignado || responsableNombre || null,
+          id_asignado: id_asignado || String(responsableId),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -2240,6 +2303,7 @@ export class CampanasController {
           contenido: contenido || null,
           listado_inventario: listado_inventario || null,
           evidencia: evidenciaData, // Datos de impresiones para tipo Impresión
+          num_impresiones: numImpresionesTotal, // Total de impresiones para tipo Impresión
         },
       });
 
@@ -2289,7 +2353,7 @@ export class CampanasController {
                   </p>
                   <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
                     <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${creador || userName}</p>
+                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${responsableNombre}</p>
                   </div>
                 </div>
                 <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
@@ -2387,6 +2451,54 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en updateTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Eliminar una tarea
+  async deleteTarea(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { tareaId } = req.params;
+      const tareaIdNum = parseInt(tareaId);
+
+      // Verificar que la tarea existe
+      const tarea = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!tarea) {
+        res.status(404).json({
+          success: false,
+          error: 'Tarea no encontrada',
+        });
+        return;
+      }
+
+      // Si la tarea tiene ids_reservas, limpiar el campo tarea de esas reservas
+      if (tarea.ids_reservas) {
+        const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        if (reservaIds.length > 0) {
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = NULL WHERE id IN (${reservaIds.join(',')})`
+          );
+        }
+      }
+
+      // Eliminar la tarea
+      await prisma.tareas.delete({
+        where: { id: tareaIdNum },
+      });
+
+      res.json({
+        success: true,
+        message: 'Tarea eliminada correctamente',
+      });
+    } catch (error) {
+      console.error('Error en deleteTarea:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar tarea';
       res.status(500).json({
         success: false,
         error: message,

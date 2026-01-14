@@ -49,6 +49,7 @@ router.delete('/:id/comentarios-arte/:comentarioId', campanasController.deleteCo
 router.get('/:id/tareas', campanasController.getTareas.bind(campanasController));
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
 router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
+router.delete('/:id/tareas/:tareaId', campanasController.deleteTarea.bind(campanasController));
 
 // Usuarios para asignación
 router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));
