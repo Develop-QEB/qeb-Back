@@ -2276,10 +2276,20 @@ export class CampanasController {
       if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
         evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
         // Calcular total de impresiones sumando todos los valores del objeto
-        console.log('createTarea - impresiones recibido:', impresiones, 'tipo:', typeof impresiones);
-        if (impresiones && typeof impresiones === 'object') {
-          numImpresionesTotal = Object.values(impresiones).reduce((sum: number, val) => sum + (Number(val) || 0), 0);
-          console.log('createTarea - numImpresionesTotal calculado:', numImpresionesTotal);
+        console.log('createTarea - impresiones recibido:', JSON.stringify(impresiones), 'tipo:', typeof impresiones);
+        try {
+          // Si impresiones es string, parsearlo
+          let impresionesObj = impresiones;
+          if (typeof impresiones === 'string') {
+            impresionesObj = JSON.parse(impresiones);
+          }
+          if (impresionesObj && typeof impresionesObj === 'object') {
+            const valores = Object.values(impresionesObj) as number[];
+            numImpresionesTotal = valores.reduce((sum, val) => sum + (Number(val) || 0), 0);
+            console.log('createTarea - numImpresionesTotal calculado:', numImpresionesTotal);
+          }
+        } catch (e) {
+          console.error('createTarea - Error calculando impresiones:', e);
         }
       } else if (evidencia) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
