@@ -22,7 +22,15 @@ router.get('/:id/inventario-testigos', campanasController.getInventarioTestigos.
 
 // Caras e historial
 router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
+router.patch('/:id/caras/:caraId', campanasController.updateCara.bind(campanasController));
+router.post('/:id/caras', campanasController.createCara.bind(campanasController));
+router.delete('/:id/caras/:caraId', campanasController.deleteCara.bind(campanasController));
 router.get('/:id/historial', campanasController.getHistorial.bind(campanasController));
+
+// Reservas (para modal de asignación)
+router.get('/:id/reservas-modal', campanasController.getReservasForModal.bind(campanasController));
+router.post('/:id/reservas', campanasController.createReservas.bind(campanasController));
+router.delete('/:id/reservas', campanasController.deleteReservas.bind(campanasController));
 
 // Comentarios
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));

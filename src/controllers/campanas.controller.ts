@@ -2307,7 +2307,7 @@ export class CampanasController {
           contenido: contenido || null,
           listado_inventario: listado_inventario || null,
           evidencia: evidenciaData, // Datos de impresiones para tipo Impresión
-          num_impresiones: numImpresionesTotal, // Total de impresiones para tipo Impresión
+          // num_impresiones no existe en el schema - comentado
         },
       });
 
@@ -3271,6 +3271,327 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // ============================================================================
+  // MÉTODOS PARA GESTIÓN DE RESERVAS (copiados de propuestas y adaptados)
+  // ============================================================================
+
+  async getReservasForModal(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      // Obtener la campaña para conseguir el cotizacion_id
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana || !campana.cotizacion_id) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Obtener la propuesta asociada a la cotización
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true }
+      });
+
+      if (!cotizacion || !cotizacion.id_propuesta) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.latitud,
+          i.longitud,
+          i.plaza,
+          i.tipo_de_mueble as formato,
+          i.ubicacion,
+          rsv.estatus,
+          rsv.grupo_completo_id,
+          sc.id as solicitud_cara_id,
+          rsv.APS as aps
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NULL
+        ORDER BY rsv.id DESC
+      `;
+
+      const reservas = await prisma.$queryRawUnsafe(query, String(cotizacion.id_propuesta));
+
+      res.json({
+        success: true,
+        data: reservas,
+      });
+    } catch (error) {
+      console.error('Error en getReservasForModal:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async createReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+
+      if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
+        return;
+      }
+
+      // Verificar que la campaña existe
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Crear calendario entry
+      const calendario = await prisma.calendario.create({
+        data: {
+          fecha_inicio: new Date(fechaInicio),
+          fecha_fin: new Date(fechaFin),
+        },
+      });
+
+      let reservasCreadas = 0;
+      let currentGroupId: number | null = null;
+
+      // Procesar reservas
+      for (const reserva of reservas) {
+        // Buscar espacio_inventario
+        const espacioInventario = await prisma.espacio_inventario.findFirst({
+          where: { inventario_id: reserva.inventario_id },
+        });
+
+        if (!espacioInventario) {
+          console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+          continue;
+        }
+
+        // Determinar si necesita grupo completo
+        let grupoCompletoId: number | null = null;
+        if (agruparComoCompleto && reserva.tipo !== 'Bonificacion') {
+          if (!currentGroupId) {
+            // Crear nuevo grupo
+            const maxGroup = await prisma.reservas.aggregate({
+              _max: { grupo_completo_id: true }
+            });
+            currentGroupId = (maxGroup._max.grupo_completo_id || 0) + 1;
+          }
+          grupoCompletoId = currentGroupId;
+        }
+
+        // Crear la reserva
+        await prisma.reservas.create({
+          data: {
+            solicitudCaras_id: solicitudCaraId,
+            inventario_id: espacioInventario.id,
+            calendario_id: calendario.id,
+            cliente_id: clienteId || 0,
+            estatus: reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Apartado',
+            arte_aprobado: '',
+            comentario_rechazo: '',
+            estatus_original: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            grupo_completo_id: grupoCompletoId,
+          },
+        });
+        reservasCreadas++;
+      }
+
+      res.json({
+        success: true,
+        data: {
+          calendarioId: calendario.id,
+          reservasCreadas,
+        },
+      });
+    } catch (error) {
+      console.error('Error en createReservas:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async deleteReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { reservaIds } = req.body;
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Soft delete reservas
+      await prisma.reservas.updateMany({
+        where: { id: { in: reservaIds } },
+        data: { deleted_at: new Date() },
+      });
+
+      res.json({
+        success: true,
+        message: `${reservaIds.length} reserva(s) eliminada(s)`,
+      });
+    } catch (error) {
+      console.error('Error en deleteReservas:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // ============================================================================
+  // MÉTODOS PARA GESTIÓN DE CARAS
+  // ============================================================================
+
+  async updateCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+      const data = req.body;
+
+      const updateData: any = {
+        ciudad: data.ciudad,
+        estados: data.estados,
+        tipo: data.tipo,
+        flujo: data.flujo,
+        bonificacion: data.bonificacion,
+        caras: data.caras,
+        nivel_socioeconomico: data.nivel_socioeconomico,
+        formato: data.formato,
+        costo: data.costo,
+        tarifa_publica: data.tarifa_publica,
+        caras_flujo: data.caras_flujo,
+        caras_contraflujo: data.caras_contraflujo,
+        articulo: data.articulo,
+        descuento: data.descuento,
+      };
+      if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
+      if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+
+      const cara = await prisma.solicitudCaras.update({
+        where: { id: parseInt(caraId) },
+        data: updateData,
+      });
+
+      res.json({ success: true, data: cara });
+    } catch (error) {
+      console.error('Error en updateCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async createCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const data = req.body;
+
+      // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana || !campana.cotizacion_id) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Obtener la propuesta asociada
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true }
+      });
+
+      if (!cotizacion || !cotizacion.id_propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada para esta campaña' });
+        return;
+      }
+
+      const createData: any = {
+        idquote: String(cotizacion.id_propuesta),
+        ciudad: data.ciudad,
+        estados: data.estados,
+        tipo: data.tipo,
+        flujo: data.flujo,
+        bonificacion: data.bonificacion,
+        caras: data.caras,
+        nivel_socioeconomico: data.nivel_socioeconomico,
+        formato: data.formato,
+        costo: data.costo,
+        tarifa_publica: data.tarifa_publica,
+        caras_flujo: data.caras_flujo,
+        caras_contraflujo: data.caras_contraflujo,
+        articulo: data.articulo,
+        descuento: data.descuento,
+      };
+      if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
+      if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+
+      const cara = await prisma.solicitudCaras.create({
+        data: createData,
+      });
+
+      res.json({ success: true, data: cara });
+    } catch (error) {
+      console.error('Error en createCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async deleteCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+
+      // Verificar que no tenga reservas
+      const reservas = await prisma.reservas.count({
+        where: {
+          solicitudCaras_id: parseInt(caraId),
+          deleted_at: null,
+        },
+      });
+
+      if (reservas > 0) {
+        res.status(400).json({
+          success: false,
+          error: 'No se puede eliminar una cara que tiene reservas asociadas',
+        });
+        return;
+      }
+
+      await prisma.solicitudCaras.delete({
+        where: { id: parseInt(caraId) },
+      });
+
+      res.json({ success: true, message: 'Cara eliminada' });
+    } catch (error) {
+      console.error('Error en deleteCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }
