@@ -2274,12 +2274,18 @@ export class CampanasController {
       // Preparar datos de impresiones como JSON para almacenar en evidencia
       let evidenciaData: string | null = null;
       let numImpresionesTotal: number | null = null;
+
+      // DEBUG: Log de todo el body para ver qué llega
+      console.log('createTarea - tipo:', tipo, 'num_impresiones:', num_impresiones, 'impresiones:', JSON.stringify(impresiones));
+
       if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
         evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
         // Usar num_impresiones enviado desde el frontend directamente
         if (num_impresiones !== undefined && num_impresiones !== null) {
           numImpresionesTotal = Number(num_impresiones);
-          console.log('createTarea - num_impresiones desde frontend:', numImpresionesTotal);
+          console.log('createTarea - numImpresionesTotal asignado:', numImpresionesTotal);
+        } else {
+          console.log('createTarea - num_impresiones NO llegó del frontend');
         }
       } else if (evidencia) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
@@ -2307,7 +2313,7 @@ export class CampanasController {
           contenido: contenido || null,
           listado_inventario: listado_inventario || null,
           evidencia: evidenciaData, // Datos de impresiones para tipo Impresión
-          // num_impresiones no existe en el schema - comentado
+          num_impresiones: numImpresionesTotal,
         },
       });
 
@@ -2333,17 +2339,30 @@ export class CampanasController {
         }
       }
 
-      // Enviar correo al asignado para tareas de Revisión, Instalación o Impresión
+      // Enviar respuesta inmediatamente
+      res.status(201).json({
+        success: true,
+        data: {
+          id: tarea.id,
+          titulo: tarea.titulo,
+          descripcion: tarea.descripcion,
+          tipo: tarea.tipo,
+          estatus: tarea.estatus,
+          fecha_inicio: tarea.fecha_inicio,
+          fecha_fin: tarea.fecha_fin,
+          campania_id: tarea.campania_id,
+        },
+      });
+
+      // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
       if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
-          const usuarioAsignado = await prisma.usuario.findUnique({
+          prisma.usuario.findUnique({
             where: { id: asignadoIdNum },
             select: { correo_electronico: true, nombre: true },
-          });
-
-          if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
-            try {
+          }).then(usuarioAsignado => {
+            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
               const htmlBody = `
               <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
                 <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
@@ -2366,44 +2385,29 @@ export class CampanasController {
               </div>
               `;
 
-              await transporter.sendMail({
+              transporter.sendMail({
                 from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
                 to: usuarioAsignado.correo_electronico,
                 subject: `Tarea campaña ${campanaNombre}`,
                 html: htmlBody,
+              }).then(() => {
+                console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
+                // Guardar en correos_enviados
+                prisma.correos_enviados.create({
+                  data: {
+                    remitente: 'no-reply@qeb.mx',
+                    destinatario: usuarioAsignado.correo_electronico,
+                    asunto: `Tarea campaña ${campanaNombre}`,
+                    cuerpo: htmlBody,
+                  },
+                }).catch(err => console.error('Error guardando correo enviado:', err));
+              }).catch(emailError => {
+                console.error('Error enviando correo de tarea:', emailError);
               });
-              console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
-
-              // Guardar en correos_enviados
-              await prisma.correos_enviados.create({
-                data: {
-                  remitente: 'no-reply@qeb.mx',
-                  destinatario: usuarioAsignado.correo_electronico,
-                  asunto: `Tarea campaña ${campanaNombre}`,
-                  cuerpo: htmlBody,
-                },
-              });
-            } catch (emailError) {
-              console.error('Error enviando correo de tarea:', emailError);
-              // No falla la creación de la tarea si el correo falla
             }
-          }
+          }).catch(err => console.error('Error buscando usuario para correo:', err));
         }
       }
-
-      res.status(201).json({
-        success: true,
-        data: {
-          id: tarea.id,
-          titulo: tarea.titulo,
-          descripcion: tarea.descripcion,
-          tipo: tarea.tipo,
-          estatus: tarea.estatus,
-          fecha_inicio: tarea.fecha_inicio,
-          fecha_fin: tarea.fecha_fin,
-          campania_id: tarea.campania_id,
-        },
-      });
     } catch (error) {
       console.error('Error en createTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al crear tarea';
