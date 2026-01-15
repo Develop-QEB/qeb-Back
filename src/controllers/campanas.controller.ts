@@ -2894,6 +2894,7 @@ export class CampanasController {
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
           'BONIFICACION' AS negociacion,
@@ -2907,6 +2908,7 @@ export class CampanasController {
           INNER JOIN cliente ON cliente.id = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
@@ -2917,7 +2919,7 @@ export class CampanasController {
           AND sc.bonificacion > 0
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  pr.asignado
 
@@ -2935,6 +2937,7 @@ export class CampanasController {
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
           'RENTA' AS negociacion,
@@ -2948,6 +2951,7 @@ export class CampanasController {
           INNER JOIN cliente ON cliente.id = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
@@ -2958,7 +2962,7 @@ export class CampanasController {
           AND (sc.caras - sc.bonificacion) > 0
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  pr.asignado, ct.descuento
 
