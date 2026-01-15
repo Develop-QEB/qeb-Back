@@ -2178,6 +2178,7 @@ export class CampanasController {
         listado_inventario: t.listado_inventario,
         proveedores_id: t.proveedores_id,
         nombre_proveedores: t.nombre_proveedores,
+        num_impresiones: t.num_impresiones,
       }));
 
       res.json({
