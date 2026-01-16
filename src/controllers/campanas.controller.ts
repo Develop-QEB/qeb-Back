@@ -2063,6 +2063,7 @@ export class CampanasController {
           proveedores_id: number | null;
           nombre_proveedores: string | null;
           num_impresiones: number | null;
+          archivo_testigo: string | null;
           nombre: string | null;
           correo_electronico: string | null;
           inventario_id: string | null;
@@ -2120,6 +2121,7 @@ export class CampanasController {
           proveedores_id: t.proveedores_id,
           nombre_proveedores: t.nombre_proveedores,
           num_impresiones: t.num_impresiones,
+          archivo_testigo: t.archivo_testigo,
           inventario_id: t.inventario_id,
           APS: t.APS,
           tarea_reserva: t.tarea_reserva,
@@ -2435,6 +2437,7 @@ export class CampanasController {
         id_asignado,
         archivo,
         evidencia,
+        archivo_testigo,
       } = req.body;
 
       const updateData: Record<string, unknown> = {};
@@ -2447,11 +2450,25 @@ export class CampanasController {
       if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
       if (archivo !== undefined) updateData.archivo = archivo;
       if (evidencia !== undefined) updateData.evidencia = evidencia;
+      if (archivo_testigo !== undefined) updateData.archivo_testigo = archivo_testigo;
 
       const tarea = await prisma.tareas.update({
         where: { id: parseInt(tareaId) },
         data: updateData,
       });
+
+      // Si es una tarea de tipo Testigo y se está completando, actualizar el estado de instalación a validado
+      if (tipo === 'Testigo' && estatus === 'Completado' && tarea.ids_reservas) {
+        const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        if (reservaIds.length > 0) {
+          // Actualizar las reservas a instalado = true (validado)
+          await prisma.reserva.updateMany({
+            where: { id: { in: reservaIds } },
+            data: { instalado: true },
+          });
+          console.log(`Testigo completado: ${reservaIds.length} reservas marcadas como validadas`);
+        }
+      }
 
       res.json({
         success: true,

@@ -6,10 +6,16 @@ import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
-// Asegurar que existe la carpeta de uploads
+// Asegurar que existe la carpeta de uploads para artes
 const uploadDir = path.join(__dirname, '../../uploads/artes');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Asegurar que existe la carpeta de uploads para testigos
+const uploadDirTestigos = path.join(__dirname, '../../uploads/testigos');
+if (!fs.existsSync(uploadDirTestigos)) {
+  fs.mkdirSync(uploadDirTestigos, { recursive: true });
 }
 
 // Sanitizar nombre de archivo (quitar caracteres especiales pero mantener legible)
@@ -82,6 +88,66 @@ router.post('/arte', authMiddleware, upload.single('file'), (req: Request, res: 
     });
   } catch (error) {
     console.error('Error al subir archivo:', error);
+    const message = error instanceof Error ? error.message : 'Error al subir archivo';
+    res.status(500).json({
+      success: false,
+      error: message,
+    });
+  }
+});
+
+// Configurar multer para testigos
+const storageTestigos = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, uploadDirTestigos);
+  },
+  filename: (_req, file, cb) => {
+    // Agregar timestamp para evitar colisiones
+    const timestamp = Date.now();
+    const sanitizedName = sanitizeFilename(file.originalname);
+    const ext = path.extname(sanitizedName);
+    const name = path.basename(sanitizedName, ext);
+    cb(null, `testigo-${timestamp}-${name}${ext}`);
+  },
+});
+
+const uploadTestigo = multer({
+  storage: storageTestigos,
+  fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+});
+
+// Endpoint para subir archivo de testigo
+router.post('/testigo', authMiddleware, uploadTestigo.single('file'), (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({
+        success: false,
+        error: 'No se recibio ningun archivo',
+      });
+      return;
+    }
+
+    // Construir la URL del archivo
+    const baseUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const fileUrl = `${baseUrl}/uploads/testigos/${req.file.filename}`;
+
+    console.log('Archivo testigo subido:', req.file.filename, '-> URL:', fileUrl);
+
+    res.json({
+      success: true,
+      data: {
+        url: fileUrl,
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      },
+    });
+  } catch (error) {
+    console.error('Error al subir archivo testigo:', error);
     const message = error instanceof Error ? error.message : 'Error al subir archivo';
     res.status(500).json({
       success: false,
