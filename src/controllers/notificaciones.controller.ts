@@ -1,6 +1,11 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import {
+  aprobarCaras,
+  rechazarSolicitud,
+  obtenerResumenAutorizacion
+} from '../services/autorizacion.service';
 
 export class NotificacionesController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -635,6 +640,247 @@ export class NotificacionesController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener comentarios';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // ==================== ENDPOINTS DE AUTORIZACIÓN ====================
+
+  /**
+   * Obtiene el resumen de autorización de una solicitud
+   */
+  async getResumenAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { idquote } = req.params;
+
+      if (!idquote) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere el idquote de la solicitud',
+        });
+        return;
+      }
+
+      const resumen = await obtenerResumenAutorizacion(idquote);
+
+      res.json({
+        success: true,
+        data: resumen,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener resumen de autorización';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Aprueba las caras pendientes de autorización para DG o DCM
+   */
+  async aprobarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { idquote, tipo } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!idquote || !tipo) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere idquote y tipo de autorización (dg o dcm)',
+        });
+        return;
+      }
+
+      if (tipo !== 'dg' && tipo !== 'dcm') {
+        res.status(400).json({
+          success: false,
+          error: 'El tipo de autorización debe ser "dg" o "dcm"',
+        });
+        return;
+      }
+
+      // Verificar que el usuario tiene permiso para aprobar
+      const usuario = await prisma.usuario.findUnique({
+        where: { id: userId },
+        select: { puesto: true },
+      });
+
+      if (!usuario) {
+        res.status(403).json({
+          success: false,
+          error: 'Usuario no encontrado',
+        });
+        return;
+      }
+
+      const puestoUpper = (usuario.puesto || '').toUpperCase();
+      const tipoUpper = tipo.toUpperCase();
+
+      if (!puestoUpper.includes(tipoUpper)) {
+        res.status(403).json({
+          success: false,
+          error: `No tienes permiso para aprobar autorizaciones de ${tipoUpper}`,
+        });
+        return;
+      }
+
+      const result = await aprobarCaras(idquote, tipo, userId || 0, userName);
+
+      res.json({
+        success: true,
+        message: `${result.carasAprobadas} cara(s) aprobada(s) exitosamente`,
+        data: result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al aprobar autorización';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Rechaza toda la solicitud
+   */
+  async rechazarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { idquote } = req.params;
+      const { comentario } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!idquote) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere el idquote de la solicitud',
+        });
+        return;
+      }
+
+      if (!comentario || comentario.trim() === '') {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un comentario/motivo de rechazo',
+        });
+        return;
+      }
+
+      // Verificar que el usuario tiene permiso para rechazar (DG o DCM)
+      const usuario = await prisma.usuario.findUnique({
+        where: { id: userId },
+        select: { puesto: true },
+      });
+
+      if (!usuario) {
+        res.status(403).json({
+          success: false,
+          error: 'Usuario no encontrado',
+        });
+        return;
+      }
+
+      const puestoUpper = (usuario.puesto || '').toUpperCase();
+      if (!puestoUpper.includes('DG') && !puestoUpper.includes('DCM')) {
+        res.status(403).json({
+          success: false,
+          error: 'No tienes permiso para rechazar solicitudes',
+        });
+        return;
+      }
+
+      // El idquote es en realidad el propuesta_id como string
+      const propuestaId = parseInt(idquote);
+      if (isNaN(propuestaId)) {
+        res.status(400).json({
+          success: false,
+          error: 'idquote inválido',
+        });
+        return;
+      }
+
+      // Obtener la propuesta para conseguir el solicitud_id
+      const propuesta = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+        select: { solicitud_id: true },
+      });
+
+      if (!propuesta) {
+        res.status(404).json({
+          success: false,
+          error: 'Propuesta no encontrada',
+        });
+        return;
+      }
+
+      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario);
+
+      res.json({
+        success: true,
+        message: 'Solicitud rechazada exitosamente',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al rechazar solicitud';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtiene las caras de una solicitud con su estado de autorización
+   */
+  async getCarasAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { idquote } = req.params;
+
+      if (!idquote) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere el idquote de la solicitud',
+        });
+        return;
+      }
+
+      const caras = await prisma.solicitudCaras.findMany({
+        where: { idquote },
+        select: {
+          id: true,
+          idquote: true,
+          ciudad: true,
+          formato: true,
+          tipo: true,
+          caras: true,
+          bonificacion: true,
+          costo: true,
+          tarifa_publica: true,
+          estado_autorizacion: true,
+        },
+      });
+
+      // Calcular tarifa efectiva para cada cara
+      const carasConTarifa = caras.map(cara => {
+        const totalCaras = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
+        const tarifaEfectiva = totalCaras > 0 ? (Number(cara.costo) || 0) / totalCaras : 0;
+        return {
+          ...cara,
+          total_caras: totalCaras,
+          tarifa_efectiva: tarifaEfectiva,
+        };
+      });
+
+      res.json({
+        success: true,
+        data: carasConTarifa,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener caras de autorización';
       res.status(500).json({
         success: false,
         error: message,

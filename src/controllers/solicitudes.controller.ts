@@ -2,6 +2,12 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { getMexicoDate } from '../utils/dateHelper';
+import {
+  calcularEstadoAutorizacion,
+  verificarCarasPendientes,
+  crearTareasAutorizacion,
+  obtenerResumenAutorizacion
+} from '../services/autorizacion.service';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -948,9 +954,20 @@ export class SolicitudesController {
           });
         }
 
-        // 8. Create solicitudCaras for each cara entry
+        // 8. Create solicitudCaras for each cara entry with authorization status
         const createdCaras = [];
         for (const cara of caras) {
+          // Calcular estado de autorización
+          const estadoResult = await calcularEstadoAutorizacion({
+            ciudad: cara.ciudad,
+            formato: cara.formato,
+            tipo: cara.tipo,
+            caras: cara.caras,
+            bonificacion: cara.bonificacion || 0,
+            costo: cara.costo,
+            tarifa_publica: cara.tarifa_publica || 0
+          });
+
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
               idquote: propuesta.id.toString(),
@@ -968,11 +985,25 @@ export class SolicitudesController {
               fin_periodo: new Date(cara.fin_periodo),
               caras_flujo: cara.caras_flujo || 0,
               caras_contraflujo: cara.caras_contraflujo || 0,
-              articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
+              articulo: cara.articulo || articulo,
               descuento: cara.descuento || 0,
+              estado_autorizacion: estadoResult.estado,
             },
           });
           createdCaras.push(solicitudCara);
+        }
+
+        // Verificar si hay caras pendientes de autorización y crear tareas
+        const { tienePendientes, pendientesDg, pendientesDcm } = await verificarCarasPendientes(propuesta.id.toString());
+        if (tienePendientes && userId) {
+          await crearTareasAutorizacion(
+            solicitud.id,
+            propuesta.id,
+            userId,
+            userName,
+            pendientesDg,
+            pendientesDcm
+          );
         }
 
         return {
@@ -1460,14 +1491,25 @@ export class SolicitudesController {
           });
         }
 
-        // Delete existing caras and recreate
+        // Delete existing caras and recreate with authorization status
         if (propuesta) {
           await tx.solicitudCaras.deleteMany({
             where: { idquote: propuesta.id.toString() },
           });
 
-          // Create new caras
+          // Create new caras with authorization calculation
           for (const cara of caras) {
+            // Calcular estado de autorización
+            const estadoResult = await calcularEstadoAutorizacion({
+              ciudad: cara.ciudad,
+              formato: cara.formato,
+              tipo: cara.tipo,
+              caras: cara.caras,
+              bonificacion: cara.bonificacion || 0,
+              costo: cara.costo,
+              tarifa_publica: cara.tarifa_publica || 0
+            });
+
             await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
@@ -1485,10 +1527,24 @@ export class SolicitudesController {
                 fin_periodo: new Date(cara.fin_periodo),
                 caras_flujo: cara.caras_flujo || 0,
                 caras_contraflujo: cara.caras_contraflujo || 0,
-                articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
+                articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
+                estado_autorizacion: estadoResult.estado,
               },
             });
+          }
+
+          // Verificar si hay caras pendientes de autorización y crear tareas
+          const { tienePendientes, pendientesDg, pendientesDcm } = await verificarCarasPendientes(propuesta.id.toString());
+          if (tienePendientes && userId) {
+            await crearTareasAutorizacion(
+              solicitud.id,
+              propuesta.id,
+              userId,
+              userName,
+              pendientesDg,
+              pendientesDcm
+            );
           }
         }
 

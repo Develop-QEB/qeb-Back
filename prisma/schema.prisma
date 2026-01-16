@@ -326,6 +326,24 @@ model solicitudCaras {
   caras_contraflujo    Int?     @default(0)
   articulo             String?  @db.VarChar(255)
   descuento            Decimal? @db.Decimal(5, 2)
+  estado_autorizacion  String?  @default("aprobado") @db.VarChar(20)
+}
+
+model criterios_autorizacion {
+  id             Int      @id @default(autoincrement())
+  formato        String   @db.VarChar(50)
+  tipo           String   @db.VarChar(20)
+  plaza          String   @db.VarChar(50)
+  tarifa_max_dg  Decimal? @db.Decimal(10, 2)
+  tarifa_min_dcm Decimal? @db.Decimal(10, 2)
+  tarifa_max_dcm Decimal? @db.Decimal(10, 2)
+  caras_max_dg   Int?
+  caras_min_dcm  Int?
+  caras_max_dcm  Int?
+  activo         Boolean  @default(true)
+  created_at     DateTime @default(now()) @db.Timestamp(0)
+
+  @@map("criterios_autorizacion")
 }
 
 model tareas {

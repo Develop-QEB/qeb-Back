@@ -10,6 +10,12 @@ router.use(authMiddleware);
 router.get('/stats', notificacionesController.getStats.bind(notificacionesController));
 router.patch('/leer-todas', notificacionesController.marcarTodasLeidas.bind(notificacionesController));
 
+// Autorización (ANTES de rutas con :id para evitar conflictos)
+router.get('/autorizacion/:idquote/resumen', notificacionesController.getResumenAutorizacion.bind(notificacionesController));
+router.get('/autorizacion/:idquote/caras', notificacionesController.getCarasAutorizacion.bind(notificacionesController));
+router.post('/autorizacion/:idquote/aprobar/:tipo', notificacionesController.aprobarAutorizacion.bind(notificacionesController));
+router.post('/autorizacion/:idquote/rechazar', notificacionesController.rechazarAutorizacion.bind(notificacionesController));
+
 // CRUD
 router.get('/', notificacionesController.getAll.bind(notificacionesController));
 router.post('/', notificacionesController.create.bind(notificacionesController));
