@@ -1328,7 +1328,8 @@ export class PropuestasController {
           i.ubicacion,
           rsv.estatus,
           rsv.grupo_completo_id,
-          sc.id as solicitud_cara_id
+          sc.id as solicitud_cara_id,
+          sc.articulo
         FROM reservas rsv
           INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
           INNER JOIN inventarios i ON epIn.inventario_id = i.id
