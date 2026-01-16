@@ -2462,7 +2462,7 @@ export class CampanasController {
         const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
         if (reservaIds.length > 0) {
           // Actualizar las reservas a instalado = true (validado)
-          await prisma.reserva.updateMany({
+          await prisma.reservas.updateMany({
             where: { id: { in: reservaIds } },
             data: { instalado: true },
           });
