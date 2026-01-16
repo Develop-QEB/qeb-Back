@@ -3602,3 +3602,4 @@ export class CampanasController {
 }
 
 export const campanasController = new CampanasController();
+// force restart
