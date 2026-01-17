@@ -1012,16 +1012,29 @@ export class SolicitudesController {
           cotizacion,
           campania,
           caras: createdCaras,
+          autorizacion: {
+            tienePendientes,
+            pendientesDg,
+            pendientesDcm,
+          },
         };
       }, {
         maxWait: 60000, // 60 seconds max wait to acquire transaction
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
+      // Build message with authorization info
+      let mensaje = 'Solicitud creada exitosamente';
+      if (result.autorizacion.tienePendientes) {
+        const totalPendientes = result.autorizacion.pendientesDg.length + result.autorizacion.pendientesDcm.length;
+        mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
       res.status(201).json({
         success: true,
         data: result,
-        message: 'Solicitud creada exitosamente',
+        message: mensaje,
+        autorizacion: result.autorizacion,
       });
     } catch (error) {
       console.error('Error creating solicitud:', error);
@@ -1535,15 +1548,15 @@ export class SolicitudesController {
           }
 
           // Verificar si hay caras pendientes de autorización y crear tareas
-          const { tienePendientes, pendientesDg, pendientesDcm } = await verificarCarasPendientes(propuesta.id.toString());
-          if (tienePendientes && userId) {
+          const autorizacionInfo = await verificarCarasPendientes(propuesta.id.toString());
+          if (autorizacionInfo.tienePendientes && userId) {
             await crearTareasAutorizacion(
               solicitud.id,
               propuesta.id,
               userId,
               userName,
-              pendientesDg,
-              pendientesDcm
+              autorizacionInfo.pendientesDg,
+              autorizacionInfo.pendientesDcm
             );
           }
         }
@@ -1634,9 +1647,23 @@ export class SolicitudesController {
         timeout: 120000,
       });
 
+      // Check for pending authorizations after transaction
+      let autorizacion = { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] };
+      if (propuesta) {
+        autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+      }
+
+      // Build message with authorization info
+      let mensaje = 'Solicitud actualizada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Solicitud actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
       res.json({
         success: true,
-        message: 'Solicitud actualizada exitosamente',
+        message: mensaje,
+        autorizacion,
       });
     } catch (error) {
       console.error('Error updating solicitud:', error);

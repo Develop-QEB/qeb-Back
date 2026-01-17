@@ -1,6 +1,11 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import {
+  calcularEstadoAutorizacion,
+  verificarCarasPendientes,
+  crearTareasAutorizacion
+} from '../services/autorizacion.service';
 
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -178,6 +183,23 @@ export class PropuestasController {
       if (!propuestaAnterior) {
         res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
         return;
+      }
+
+      // Si intenta cambiar a "Aprobada", verificar que no haya caras pendientes de autorización
+      if (status === 'Aprobada') {
+        const autorizacion = await verificarCarasPendientes(propuestaId.toString());
+        if (autorizacion.tienePendientes) {
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          res.status(400).json({
+            success: false,
+            error: `No se puede aprobar la propuesta. ${totalPendientes} cara(s) están pendientes de autorización.`,
+            autorizacion: {
+              pendientesDg: autorizacion.pendientesDg.length,
+              pendientesDcm: autorizacion.pendientesDcm.length
+            }
+          });
+          return;
+        }
       }
 
       const statusAnterior = propuestaAnterior.status;
@@ -1070,6 +1092,21 @@ export class PropuestasController {
         return;
       }
 
+      // Check for pending authorizations - block inventory assignment if there are pending caras
+      const autorizacion = await verificarCarasPendientes(propuestaId.toString());
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        res.status(400).json({
+          success: false,
+          error: `No se puede asignar inventario. ${totalPendientes} cara(s) están pendientes de autorización.`,
+          autorizacion: {
+            pendientesDg: autorizacion.pendientesDg.length,
+            pendientesDcm: autorizacion.pendientesDcm.length
+          }
+        });
+        return;
+      }
+
       // Create calendario entry
       const calendario = await prisma.calendario.create({
         data: {
@@ -1722,6 +1759,8 @@ export class PropuestasController {
   async updateCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
       const {
         ciudad,
         estados,
@@ -1740,6 +1779,28 @@ export class PropuestasController {
         articulo,
         descuento,
       } = req.body;
+
+      // Get current cara to get idquote
+      const currentCara = await prisma.solicitudCaras.findUnique({
+        where: { id: parseInt(caraId) },
+        select: { idquote: true }
+      });
+
+      if (!currentCara) {
+        res.status(404).json({ success: false, error: 'Cara no encontrada' });
+        return;
+      }
+
+      // Calculate authorization state for updated values
+      const estadoResult = await calcularEstadoAutorizacion({
+        ciudad: ciudad || undefined,
+        formato: formato || '',
+        tipo: tipo || undefined,
+        caras: caras ? parseInt(caras) : 0,
+        bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+        costo: costo ? parseInt(costo) : 0,
+        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0
+      });
 
       const updatedCara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -1760,10 +1821,49 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : undefined,
           articulo,
           descuento: descuento ? parseFloat(descuento) : undefined,
+          estado_autorizacion: estadoResult.estado,
         },
       });
 
-      res.json({ success: true, data: updatedCara });
+      // Check for pending authorizations and create tasks if needed
+      const idquote = currentCara.idquote || '';
+      const autorizacion = await verificarCarasPendientes(idquote);
+      if (autorizacion.tienePendientes && userId) {
+        // Get solicitud_id from propuesta
+        const propuesta = await prisma.propuesta.findUnique({
+          where: { id: parseInt(idquote) },
+          select: { solicitud_id: true }
+        });
+
+        if (propuesta?.solicitud_id) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            parseInt(idquote),
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm
+          );
+        }
+      }
+
+      // Build response message
+      let mensaje = 'Cara actualizada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Cara actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
+      res.json({
+        success: true,
+        data: updatedCara,
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
+      });
     } catch (error) {
       console.error('Error updating cara:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar cara';
@@ -1775,6 +1875,8 @@ export class PropuestasController {
   async createCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params; // propuesta id
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
       const {
         ciudad,
         estados,
@@ -1793,6 +1895,17 @@ export class PropuestasController {
         articulo,
         descuento,
       } = req.body;
+
+      // Calculate authorization state
+      const estadoResult = await calcularEstadoAutorizacion({
+        ciudad,
+        formato: formato || '',
+        tipo,
+        caras: caras ? parseInt(caras) : 0,
+        bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+        costo: costo ? parseInt(costo) : 0,
+        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0
+      });
 
       const newCara = await prisma.solicitudCaras.create({
         data: {
@@ -1813,10 +1926,48 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
+          estado_autorizacion: estadoResult.estado,
         },
       });
 
-      res.json({ success: true, data: newCara });
+      // Check for pending authorizations and create tasks if needed
+      const autorizacion = await verificarCarasPendientes(id);
+      if (autorizacion.tienePendientes && userId) {
+        // Get solicitud_id from propuesta
+        const propuesta = await prisma.propuesta.findUnique({
+          where: { id: parseInt(id) },
+          select: { solicitud_id: true }
+        });
+
+        if (propuesta?.solicitud_id) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            parseInt(id),
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm
+          );
+        }
+      }
+
+      // Build response message
+      let mensaje = 'Cara creada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Cara creada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
+      res.json({
+        success: true,
+        data: newCara,
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
+      });
     } catch (error) {
       console.error('Error creating cara:', error);
       const message = error instanceof Error ? error.message : 'Error al crear cara';
