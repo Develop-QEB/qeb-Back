@@ -375,7 +375,6 @@ model tareas {
 model usuario {
   id                 Int       @id @default(autoincrement())
   nombre             String    @db.VarChar(255)
-  fecha_nacimiento   DateTime  @db.Date
   correo_electronico String    @db.VarChar(100)
   user_password      String?   @db.VarChar(255)
   area               String    @db.VarChar(50)
