@@ -84,7 +84,7 @@ model archivos {
 }
 
 model calendario {
-  id           Int       @unique(map: "id") @default(autoincrement())
+  id           Int       @id @default(autoincrement())
   fecha_inicio DateTime  @default(now()) @db.Date
   fecha_fin    DateTime  @default(dbgenerated("(curdate() + interval 3 day)")) @db.Date
   deleted_at   DateTime? @db.Date
@@ -216,12 +216,10 @@ model propuesta {
   articulo                 String    @db.VarChar(20)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
   archivo                  String?   @db.VarChar(255)
-
-  @@index([solicitud_id], map: "fK_solicitud_id")
 }
 
 model reservas {
-  id                 Int       @id @unique(map: "id") @default(autoincrement())
+  id                 Int       @id @default(autoincrement())
   inventario_id      Int
   calendario_id      Int
   cliente_id         Int
@@ -239,18 +237,14 @@ model reservas {
   APS                Int?
   tarea              String    @db.VarChar(50)
   grupo_completo_id  Int?
-
-  @@index([calendario_id], map: "calendario_id")
 }
 
 model session_locks {
   id          Int       @id @default(autoincrement())
-  module_name String    @unique(map: "module_name") @db.VarChar(100)
+  module_name String    @db.VarChar(100)
   user_id     Int?
   username    String?   @db.VarChar(255)
   locked_at   DateTime? @default(now()) @db.Timestamp(0)
-
-  @@index([module_name], map: "idx_module")
 }
 
 model solicitud {
@@ -284,31 +278,8 @@ model solicitud {
   salesperson_code Int?
 }
 
-model solicitud_original {
-  id              Int       @id @default(autoincrement())
-  fecha           DateTime  @default(now()) @db.DateTime(0)
-  descripcion     String    @db.VarChar(255)
-  presupuesto     Decimal   @db.Decimal(10, 2)
-  notas           String    @db.Text
-  cliente_id      Int
-  usuario_id      Int?
-  status          String    @default("Pendiente") @db.VarChar(255)
-  nombre_usuario  String?   @db.VarChar(255)
-  propuesta_id    Int
-  nombre_campania String    @db.VarChar(255)
-  fecha_inicio    DateTime  @db.Date
-  fecha_fin       DateTime  @db.Date
-  flujo           Int       @default(0)
-  contraflujo     Int       @default(0)
-  total_flujo     Int       @default(0)
-  bonificacion    Int       @default(0)
-  nombre_cliente  String?   @db.VarChar(255)
-  descuento       Decimal   @default(0) @db.Decimal(5, 2)
-  articulo        String    @db.VarChar(20)
-}
-
 model solicitudCaras {
-  id                   Int      @id @unique(map: "totaldecaras") @default(autoincrement())
+  id                   Int      @id @default(autoincrement())
   idquote              String?  @db.VarChar(50)
   ciudad               String?  @db.VarChar(1000)
   estados              String?  @db.VarChar(1000)
@@ -327,23 +298,6 @@ model solicitudCaras {
   articulo             String?  @db.VarChar(255)
   descuento            Decimal? @db.Decimal(5, 2)
   estado_autorizacion  String?  @default("aprobado") @db.VarChar(20)
-}
-
-model criterios_autorizacion {
-  id             Int      @id @default(autoincrement())
-  formato        String   @db.VarChar(50)
-  tipo           String   @db.VarChar(20)
-  plaza          String   @db.VarChar(50)
-  tarifa_max_dg  Decimal? @db.Decimal(10, 2)
-  tarifa_min_dcm Decimal? @db.Decimal(10, 2)
-  tarifa_max_dcm Decimal? @db.Decimal(10, 2)
-  caras_max_dg   Int?
-  caras_min_dcm  Int?
-  caras_max_dcm  Int?
-  activo         Boolean  @default(true)
-  created_at     DateTime @default(now()) @db.Timestamp(0)
-
-  @@map("criterios_autorizacion")
 }
 
 model tareas {
@@ -382,7 +336,7 @@ model usuario {
   updated_at         DateTime? @db.Timestamp(0)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
   deleted_at         DateTime? @db.Timestamp(0)
-  user_role          String    @default("Normal") @db.VarChar(25)
+  user_role          String    @default("Normal") @db.VarChar(50)
   foto_perfil        String?   @db.VarChar(500)
 }
 
@@ -395,7 +349,6 @@ model correos_enviados {
   fecha_envio  DateTime @default(now()) @db.DateTime(0)
   leido        Boolean  @default(false)
 
-  @@index([destinatario], map: "idx_destinatario")
   @@map("correos_enviados")
 }
 
@@ -408,7 +361,6 @@ model notas_personales {
   fecha_creacion      DateTime  @default(now()) @db.Timestamp(0)
   fecha_actualizacion DateTime? @db.Timestamp(0)
 
-  @@index([usuario_id], map: "idx_usuario_notas")
   @@map("notas_personales")
 }
 
@@ -419,8 +371,68 @@ model comentarios_revision_artes {
   autor_nombre String   @db.VarChar(100)
   contenido    String   @db.Text
   fecha        DateTime @default(now()) @db.Timestamp(0)
+}
 
-  @@index([tarea_id], map: "idx_tarea_comentarios")
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model conteoTradicionalYDigital {
+  Tradicional BigInt?
+  Digital     BigInt?
+
+  @@ignore
+}
+
+model criterios_autorizacion {
+  id             Int      @id @default(autoincrement())
+  formato        String   @db.VarChar(50)
+  tipo           String   @db.VarChar(20)
+  plaza          String   @db.VarChar(50)
+  tarifa_max_dg  Decimal? @db.Decimal(10, 2)
+  tarifa_min_dcm Decimal? @db.Decimal(10, 2)
+  tarifa_max_dcm Decimal? @db.Decimal(10, 2)
+  caras_max_dg   Int?
+  caras_min_dcm  Int?
+  caras_max_dcm  Int?
+  activo         Boolean  @default(true)
+  created_at     DateTime @default(now()) @db.Timestamp(0)
+}
+
+model solicitud_original {
+  id              Int      @id @default(autoincrement())
+  fecha           DateTime @default(now()) @db.DateTime(0)
+  descripcion     String   @db.VarChar(255)
+  presupuesto     Decimal  @db.Decimal(10, 2)
+  notas           String   @db.Text
+  cliente_id      Int
+  usuario_id      Int?
+  status          String   @default("Pendiente") @db.VarChar(255)
+  nombre_usuario  String?  @db.VarChar(255)
+  propuesta_id    Int
+  nombre_campania String   @db.VarChar(255)
+  fecha_inicio    DateTime @db.Date
+  fecha_fin       DateTime @db.Date
+  flujo           Int      @default(0)
+  contraflujo     Int      @default(0)
+  total_flujo     Int      @default(0)
+  bonificacion    Int      @default(0)
+  nombre_cliente  String?  @db.VarChar(255)
+  descuento       Decimal  @default(0.00) @db.Decimal(5, 2)
+  articulo        String   @db.VarChar(20)
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model vista_conteo_por_ciudades {
+  municipio String? @db.Text
+  total     BigInt?
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model vista_conteo_por_muebles {
+  tipo_de_mueble     String? @db.Text
+  conteo_inventarios BigInt?
+
+  @@ignore
 }
 
 enum proveedores_estado {
