@@ -1713,6 +1713,14 @@ export class CampanasController {
           affected: reservaIds.length,
         },
       });
+
+      // Emitir evento WebSocket para actualizar tablas de Gestión de Artes en tiempo real
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds,
+        tipo: isClearing ? 'limpiar' : 'asignar',
+        usuario: userName,
+      });
     } catch (error) {
       console.error('Error en assignArte:', error);
       const message = error instanceof Error ? error.message : 'Error al asignar arte';
@@ -1899,6 +1907,17 @@ export class CampanasController {
           affected: reservaIds.length,
         },
       });
+
+      // Emitir evento WebSocket para actualizar tablas de Gestión de Artes en tiempo real
+      const socketEvent = status === 'Aprobado' ? SOCKET_EVENTS.ARTE_APROBADO : SOCKET_EVENTS.ARTE_RECHAZADO;
+      emitToCampana(campanaId, socketEvent, {
+        campanaId,
+        reservaIds,
+        status,
+        usuario: userName,
+      });
+      // También emitir INVENTARIO_ACTUALIZADO para refrescar todas las tablas
+      emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
     } catch (error) {
       console.error('Error en updateArteStatus:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar estado de arte';
