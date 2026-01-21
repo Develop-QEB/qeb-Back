@@ -1,6 +1,5 @@
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
+import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 // Plazas principales - todo lo demás es "OTRAS"
 const PLAZAS_PRINCIPALES = ['CIUDAD DE MEXICO', 'GUADALAJARA', 'MONTERREY'];
@@ -262,7 +261,7 @@ export async function crearTareasAutorizacion(
   if (pendientesDg.length > 0 && usuariosDg.length > 0) {
     // El responsable es el primer usuario DG
     const dgPrincipal = usuariosDg[0];
-    await prisma.tareas.create({
+    const tareaDg = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
@@ -277,13 +276,20 @@ export async function crearTareasAutorizacion(
         fecha_fin: fechaFin
       }
     });
+
+    // Emitir notificación via WebSocket
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: tareaDg.id,
+      tipo: 'Autorización DG',
+      solicitudId
+    });
   }
 
   // Crear tarea para DCM si hay pendientes
   if (pendientesDcm.length > 0 && usuariosDcm.length > 0) {
     // El responsable es el primer usuario DCM
     const dcmPrincipal = usuariosDcm[0];
-    await prisma.tareas.create({
+    const tareaDcm = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
@@ -297,6 +303,13 @@ export async function crearTareasAutorizacion(
         asignado: usuariosDcm.map(u => u.nombre).join(', '),
         fecha_fin: fechaFin
       }
+    });
+
+    // Emitir notificación via WebSocket
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: tareaDcm.id,
+      tipo: 'Autorización DCM',
+      solicitudId
     });
   }
 }
@@ -402,7 +415,7 @@ export async function rechazarSolicitud(
   });
 
   if (solicitud?.usuario_id) {
-    await prisma.tareas.create({
+    const notifRechazo = await prisma.tareas.create({
       data: {
         tipo: 'Notificación',
         titulo: `Solicitud #${solicitudId} Rechazada`,
@@ -414,6 +427,13 @@ export async function rechazarSolicitud(
         id_asignado: solicitud.usuario_id.toString(),
         asignado: solicitud.nombre_usuario || ''
       }
+    });
+
+    // Emitir notificación via WebSocket
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: notifRechazo.id,
+      tipo: 'Notificación',
+      solicitudId
     });
   }
 }
