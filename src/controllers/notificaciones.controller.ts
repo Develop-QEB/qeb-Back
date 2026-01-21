@@ -6,6 +6,7 @@ import {
   rechazarSolicitud,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
+import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 export class NotificacionesController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {

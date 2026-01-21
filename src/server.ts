@@ -1,8 +1,13 @@
 import 'dotenv/config';
+import { createServer } from 'http';
 import app from './app';
 import prisma from './utils/prisma';
+import { initializeSocket } from './config/socket';
 
 const PORT = process.env.PORT || 3000;
+
+// Crear servidor HTTP para Socket.io
+const httpServer = createServer(app);
 
 // Constante para días de expiración de reservas
 const DIAS_EXPIRACION_RESERVA = 20;
@@ -49,7 +54,11 @@ async function main() {
     setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
 
-    app.listen(PORT, () => {
+    // Inicializar Socket.io
+    initializeSocket(httpServer);
+    console.log('[Socket] WebSocket server inicializado');
+
+    httpServer.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });

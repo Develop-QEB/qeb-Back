@@ -8,6 +8,7 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
+import { emitToCampana, emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
@@ -2388,6 +2389,14 @@ export class CampanasController {
         },
       });
 
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tarea.id,
+        campanaId,
+        tipo: tarea.tipo,
+        titulo: tarea.titulo,
+      });
+
       // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
       if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
@@ -2505,6 +2514,15 @@ export class CampanasController {
         success: true,
         data: tarea,
       });
+
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      if (tarea.campania_id) {
+        emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+          tareaId: tarea.id,
+          campanaId: tarea.campania_id,
+          estatus: tarea.estatus,
+        });
+      }
     } catch (error) {
       console.error('Error en updateTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
@@ -2544,6 +2562,9 @@ export class CampanasController {
         }
       }
 
+      // Guardar campanaId antes de eliminar
+      const campanaId = tarea.campania_id;
+
       // Eliminar la tarea
       await prisma.tareas.delete({
         where: { id: tareaIdNum },
@@ -2553,6 +2574,14 @@ export class CampanasController {
         success: true,
         message: 'Tarea eliminada correctamente',
       });
+
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      if (campanaId) {
+        emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ELIMINADA, {
+          tareaId: tareaIdNum,
+          campanaId,
+        });
+      }
     } catch (error) {
       console.error('Error en deleteTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar tarea';
