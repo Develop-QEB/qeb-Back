@@ -993,40 +993,38 @@ export class SolicitudesController {
           createdCaras.push(solicitudCara);
         }
 
-        // Verificar si hay caras pendientes de autorización y crear tareas
-        const { tienePendientes, pendientesDg, pendientesDcm } = await verificarCarasPendientes(propuesta.id.toString());
-        if (tienePendientes && userId) {
-          await crearTareasAutorizacion(
-            solicitud.id,
-            propuesta.id,
-            userId,
-            userName,
-            pendientesDg,
-            pendientesDcm
-          );
-        }
-
         return {
           solicitud,
           propuesta,
           cotizacion,
           campania,
           caras: createdCaras,
-          autorizacion: {
-            tienePendientes,
-            pendientesDg,
-            pendientesDcm,
-          },
         };
       }, {
         maxWait: 60000, // 60 seconds max wait to acquire transaction
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
+      // DESPUÉS de la transacción: verificar caras pendientes y crear tareas
+      // (igual que en update - fuera de la transacción para que pueda ver los datos)
+      const autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
+      console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
+
+      if (autorizacionInfo.tienePendientes && userId) {
+        await crearTareasAutorizacion(
+          result.solicitud.id,
+          result.propuesta.id,
+          userId,
+          userName,
+          autorizacionInfo.pendientesDg,
+          autorizacionInfo.pendientesDcm
+        );
+      }
+
       // Build message with authorization info
       let mensaje = 'Solicitud creada exitosamente';
-      if (result.autorizacion.tienePendientes) {
-        const totalPendientes = result.autorizacion.pendientesDg.length + result.autorizacion.pendientesDcm.length;
+      if (autorizacionInfo.tienePendientes) {
+        const totalPendientes = autorizacionInfo.pendientesDg.length + autorizacionInfo.pendientesDcm.length;
         mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
       }
 
@@ -1034,7 +1032,7 @@ export class SolicitudesController {
         success: true,
         data: result,
         message: mensaje,
-        autorizacion: result.autorizacion,
+        autorizacion: autorizacionInfo,
       });
     } catch (error) {
       console.error('Error creating solicitud:', error);
@@ -1694,6 +1692,46 @@ export class SolicitudesController {
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Evalúa el estado de autorización de una cara sin guardarla
+   * Útil para mostrar preview en el frontend antes de crear la solicitud
+   */
+  async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      console.log('[evaluarAutorizacion] Body recibido:', req.body);
+      const { ciudad, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
+
+      // Validar datos requeridos
+      if (!formato || caras === undefined || costo === undefined) {
+        res.status(400).json({
+          success: false,
+          error: 'Faltan datos requeridos: formato, caras y costo son obligatorios'
+        });
+        return;
+      }
+
+      // Calcular estado de autorización
+      const resultado = await calcularEstadoAutorizacion({
+        ciudad: ciudad || null,
+        formato,
+        tipo: tipo || null,
+        caras: Number(caras) || 0,
+        bonificacion: Number(bonificacion) || 0,
+        costo: Number(costo) || 0,
+        tarifa_publica: Number(tarifa_publica) || 0
+      });
+
+      res.json({
+        success: true,
+        data: resultado
+      });
+    } catch (error) {
+      console.error('Error evaluando autorización:', error);
+      const message = error instanceof Error ? error.message : 'Error al evaluar autorización';
       res.status(500).json({ success: false, error: message });
     }
   }

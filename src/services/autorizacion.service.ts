@@ -191,10 +191,14 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
   pendientesDg: number[];
   pendientesDcm: number[];
 }> {
+  console.log('[verificarCarasPendientes] Buscando caras con idquote:', idquote);
+
   const caras = await prisma.solicitudCaras.findMany({
     where: { idquote },
     select: { id: true, estado_autorizacion: true }
   });
+
+  console.log('[verificarCarasPendientes] Caras encontradas:', caras);
 
   const pendientesDg = caras
     .filter(c => c.estado_autorizacion === 'pendiente_dg')
@@ -222,6 +226,13 @@ export async function crearTareasAutorizacion(
   pendientesDg: number[],
   pendientesDcm: number[]
 ): Promise<void> {
+  console.log('[crearTareasAutorizacion] Iniciando con:', {
+    solicitudId,
+    propuestaId,
+    pendientesDg,
+    pendientesDcm
+  });
+
   // Obtener usuarios DG y DCM
   const usuariosDg = await prisma.usuario.findMany({
     where: {
@@ -239,19 +250,26 @@ export async function crearTareasAutorizacion(
     select: { id: true, nombre: true }
   });
 
+  console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
+    usuariosDg,
+    usuariosDcm
+  });
+
   const fechaFin = new Date();
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
   // Crear tarea para DG si hay pendientes
   if (pendientesDg.length > 0 && usuariosDg.length > 0) {
+    // El responsable es el primer usuario DG
+    const dgPrincipal = usuariosDg[0];
     await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
         descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
         estatus: 'Pendiente',
-        id_responsable: responsableId,
-        responsable: responsableNombre,
+        id_responsable: dgPrincipal.id,
+        responsable: dgPrincipal.nombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDg.map(u => u.id).join(','),
@@ -263,14 +281,16 @@ export async function crearTareasAutorizacion(
 
   // Crear tarea para DCM si hay pendientes
   if (pendientesDcm.length > 0 && usuariosDcm.length > 0) {
+    // El responsable es el primer usuario DCM
+    const dcmPrincipal = usuariosDcm[0];
     await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
         descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
         estatus: 'Pendiente',
-        id_responsable: responsableId,
-        responsable: responsableNombre,
+        id_responsable: dcmPrincipal.id,
+        responsable: dcmPrincipal.nombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDcm.map(u => u.id).join(','),

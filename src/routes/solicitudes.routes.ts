@@ -37,6 +37,9 @@ const upload = multer({
   },
 });
 
+// Endpoint público - no requiere autenticación (solo cálculo, no modifica datos)
+router.post('/evaluar-autorizacion', solicitudesController.evaluarAutorizacion.bind(solicitudesController));
+
 router.use(authMiddleware);
 
 router.get('/', solicitudesController.getAll.bind(solicitudesController));
