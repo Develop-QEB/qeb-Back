@@ -70,11 +70,10 @@ router.post('/arte', authMiddleware, upload.single('file'), (req: Request, res: 
       return;
     }
 
-    // Construir la URL del archivo
-    const baseUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 3000}`;
-    const fileUrl = `${baseUrl}/uploads/artes/${req.file.filename}`;
+    // Construir la URL relativa del archivo (el frontend agregará el dominio correcto)
+    const fileUrl = `/uploads/artes/${req.file.filename}`;
 
-    console.log('Archivo subido:', req.file.filename, '-> URL:', fileUrl);
+    console.log('Archivo subido:', req.file.filename, '-> Path:', fileUrl);
 
     res.json({
       success: true,
@@ -130,11 +129,10 @@ router.post('/testigo', authMiddleware, uploadTestigo.single('file'), (req: Requ
       return;
     }
 
-    // Construir la URL del archivo
-    const baseUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 3000}`;
-    const fileUrl = `${baseUrl}/uploads/testigos/${req.file.filename}`;
+    // Construir la URL relativa del archivo (el frontend agregará el dominio correcto)
+    const fileUrl = `/uploads/testigos/${req.file.filename}`;
 
-    console.log('Archivo testigo subido:', req.file.filename, '-> URL:', fileUrl);
+    console.log('Archivo testigo subido:', req.file.filename, '-> Path:', fileUrl);
 
     res.json({
       success: true,
