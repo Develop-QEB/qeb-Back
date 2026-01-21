@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
 
 export class DashboardController {
   // Obtener estadisticas del dashboard con filtros
@@ -386,75 +387,83 @@ export class DashboardController {
     }
   }
 
-  // Obtener opciones para los filtros
+  // Obtener opciones para los filtros (con cache de 30 minutos)
   async getFilterOptions(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [estados, ciudades, formatos, nses, catorcenas] = await Promise.all([
-        // Estados
-        prisma.inventarios.findMany({
-          select: { estado: true },
-          distinct: ['estado'],
-          where: { estado: { not: null } },
-        }),
-        // Ciudades/Plazas
-        prisma.inventarios.findMany({
-          select: { plaza: true },
-          distinct: ['plaza'],
-          where: { plaza: { not: null } },
-        }),
-        // Formatos (tipo de mueble)
-        prisma.inventarios.findMany({
-          select: { tipo_de_mueble: true },
-          distinct: ['tipo_de_mueble'],
-          where: { tipo_de_mueble: { not: null } },
-        }),
-        // Nivel Socioeconomico
-        prisma.inventarios.findMany({
-          select: { nivel_socioeconomico: true },
-          distinct: ['nivel_socioeconomico'],
-          where: { nivel_socioeconomico: { not: null } },
-        }),
-        // Catorcenas (ultimos 2 anos)
-        prisma.catorcenas.findMany({
-          where: {
-            a_o: { gte: new Date().getFullYear() - 1 },
-          },
-          orderBy: [{ a_o: 'desc' }, { numero_catorcena: 'desc' }],
-        }),
-      ]);
+      const data = await cache.getOrSet(
+        CACHE_KEYS.FILTER_OPTIONS,
+        async () => {
+          const [estados, ciudades, formatos, nses, catorcenas] = await Promise.all([
+            // Estados
+            prisma.inventarios.findMany({
+              select: { estado: true },
+              distinct: ['estado'],
+              where: { estado: { not: null } },
+            }),
+            // Ciudades/Plazas
+            prisma.inventarios.findMany({
+              select: { plaza: true },
+              distinct: ['plaza'],
+              where: { plaza: { not: null } },
+            }),
+            // Formatos (tipo de mueble)
+            prisma.inventarios.findMany({
+              select: { tipo_de_mueble: true },
+              distinct: ['tipo_de_mueble'],
+              where: { tipo_de_mueble: { not: null } },
+            }),
+            // Nivel Socioeconomico
+            prisma.inventarios.findMany({
+              select: { nivel_socioeconomico: true },
+              distinct: ['nivel_socioeconomico'],
+              where: { nivel_socioeconomico: { not: null } },
+            }),
+            // Catorcenas (ultimos 2 anos)
+            prisma.catorcenas.findMany({
+              where: {
+                a_o: { gte: new Date().getFullYear() - 1 },
+              },
+              orderBy: [{ a_o: 'desc' }, { numero_catorcena: 'desc' }],
+            }),
+          ]);
 
-      // Buscar catorcena actual por separado
-      const catorcenaActual = await prisma.catorcenas.findFirst({
-        where: {
-          fecha_inicio: { lte: new Date() },
-          fecha_fin: { gte: new Date() },
+          // Buscar catorcena actual por separado
+          const catorcenaActual = await prisma.catorcenas.findFirst({
+            where: {
+              fecha_inicio: { lte: new Date() },
+              fecha_fin: { gte: new Date() },
+            },
+          });
+
+          return {
+            estados: estados.map((e) => e.estado).filter(Boolean).sort(),
+            ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
+            formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
+            nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
+            catorcenaActual: catorcenaActual ? {
+              id: catorcenaActual.id,
+              label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,
+              numero: catorcenaActual.numero_catorcena,
+              ano: catorcenaActual.a_o,
+              fecha_inicio: catorcenaActual.fecha_inicio,
+              fecha_fin: catorcenaActual.fecha_fin,
+            } : null,
+            catorcenas: catorcenas.map((c) => ({
+              id: c.id,
+              label: `Cat ${c.numero_catorcena} - ${c.a_o}`,
+              numero: c.numero_catorcena,
+              ano: c.a_o,
+              fecha_inicio: c.fecha_inicio,
+              fecha_fin: c.fecha_fin,
+            })),
+          };
         },
-      });
+        CACHE_TTL.FILTER_OPTIONS
+      );
 
       res.json({
         success: true,
-        data: {
-          estados: estados.map((e) => e.estado).filter(Boolean).sort(),
-          ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
-          formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
-          nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
-          catorcenaActual: catorcenaActual ? {
-            id: catorcenaActual.id,
-            label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,
-            numero: catorcenaActual.numero_catorcena,
-            ano: catorcenaActual.a_o,
-            fecha_inicio: catorcenaActual.fecha_inicio,
-            fecha_fin: catorcenaActual.fecha_fin,
-          } : null,
-          catorcenas: catorcenas.map((c) => ({
-            id: c.id,
-            label: `Cat ${c.numero_catorcena} - ${c.a_o}`,
-            numero: c.numero_catorcena,
-            ano: c.a_o,
-            fecha_inicio: c.fecha_inicio,
-            fecha_fin: c.fecha_fin,
-          })),
-        },
+        data,
       });
     } catch (error) {
       const message =
@@ -525,27 +534,35 @@ export class DashboardController {
     }
   }
 
-  // Widget: Proximas catorcenas
+  // Widget: Proximas catorcenas (con cache de 1 hora)
   async getUpcomingCatorcenas(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const hoy = new Date();
-      const catorcenas = await prisma.catorcenas.findMany({
-        where: {
-          fecha_inicio: { gte: hoy },
+      const data = await cache.getOrSet(
+        CACHE_KEYS.CATORCENAS,
+        async () => {
+          const hoy = new Date();
+          const catorcenas = await prisma.catorcenas.findMany({
+            where: {
+              fecha_inicio: { gte: hoy },
+            },
+            orderBy: { fecha_inicio: 'asc' },
+            take: 6,
+          });
+
+          return catorcenas.map((c) => ({
+            id: c.id,
+            numero: c.numero_catorcena,
+            ano: c.a_o,
+            fecha_inicio: c.fecha_inicio,
+            fecha_fin: c.fecha_fin,
+          }));
         },
-        orderBy: { fecha_inicio: 'asc' },
-        take: 6,
-      });
+        CACHE_TTL.CATORCENAS
+      );
 
       res.json({
         success: true,
-        data: catorcenas.map((c) => ({
-          id: c.id,
-          numero: c.numero_catorcena,
-          ano: c.a_o,
-          fecha_inicio: c.fecha_inicio,
-          fecha_fin: c.fecha_fin,
-        })),
+        data,
       });
     } catch (error) {
       const message =

@@ -257,6 +257,12 @@ export class NotificacionesController {
         },
       });
 
+      // Emitir evento WebSocket para actualizar notificaciones en tiempo real
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tareaId: tarea.id,
+        tipo: tarea.tipo,
+      });
+
       res.status(201).json({
         success: true,
         data: {
@@ -357,6 +363,9 @@ export class NotificacionesController {
         estatus: tarea.estatus,
       };
 
+      // Emitir evento WebSocket para actualizar contador
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { tareaId: tarea.id });
+
       res.json({
         success: true,
         data: notificacion,
@@ -389,6 +398,9 @@ export class NotificacionesController {
         where,
         data: { estatus: 'Atendido' },
       });
+
+      // Emitir evento WebSocket para actualizar contador
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { all: true, userId });
 
       res.json({
         success: true,
