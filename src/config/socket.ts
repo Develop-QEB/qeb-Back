@@ -3,14 +3,37 @@ import { Server as HttpServer } from 'http';
 
 let io: SocketServer | null = null;
 
+// Parse FRONTEND_URL: puede ser un solo URL o múltiples separados por coma
+const getAllowedOrigins = (): string[] => {
+  const defaultOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    'http://localhost:5176',
+    'http://localhost:5177',
+    'http://localhost:3000',
+    'https://front-qeb.vercel.app',
+  ];
+
+  const envUrl = process.env.FRONTEND_URL;
+  if (!envUrl) {
+    return defaultOrigins;
+  }
+  // Si contiene comas, separar en array
+  if (envUrl.includes(',')) {
+    const envOrigins = envUrl.split(',').map(url => url.trim());
+    return [...new Set([...defaultOrigins, ...envOrigins])];
+  }
+  return [...new Set([...defaultOrigins, envUrl])];
+};
+
 export function initializeSocket(httpServer: HttpServer): SocketServer {
+  const allowedOrigins = getAllowedOrigins();
+  console.log('[Socket] Orígenes permitidos:', allowedOrigins);
+
   io = new SocketServer(httpServer, {
     cors: {
-      origin: [
-        'http://localhost:5173',
-        'http://localhost:3000',
-        process.env.FRONTEND_URL || '',
-      ].filter(Boolean),
+      origin: allowedOrigins,
       methods: ['GET', 'POST'],
       credentials: true,
     },
