@@ -18,8 +18,8 @@ export class NotificacionesController {
       const leida = req.query.leida as string;
       const search = req.query.search as string;
       const groupBy = req.query.groupBy as string;
-      const orderBy = req.query.orderBy as string || 'fecha_fin';
-      const orderDir = req.query.orderDir as string || 'asc';
+      const orderBy = req.query.orderBy as string || 'fecha_inicio';
+      const orderDir = req.query.orderDir as string || 'desc';
       const userId = req.user?.userId;
 
       const where: Record<string, unknown> = {};
@@ -74,7 +74,7 @@ export class NotificacionesController {
       } else if (orderBy === 'estatus') {
         orderByClause.estatus = orderDir;
       } else {
-        orderByClause.fecha_fin = 'asc';
+        orderByClause.fecha_inicio = 'desc';
       }
 
       const [tareas, total] = await Promise.all([
