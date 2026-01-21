@@ -226,7 +226,7 @@ model reservas {
   fecha_reserva      DateTime? @default(now()) @db.Date
   deleted_at         DateTime? @db.DateTime(0)
   solicitudCaras_id  Int
-  archivo            String?   @db.VarChar(255)
+  archivo            String?   @db.LongText
   estatus            String    @db.VarChar(255)
   arte_aprobado      String    @db.VarChar(25)
   comentario_rechazo String    @db.VarChar(255)
