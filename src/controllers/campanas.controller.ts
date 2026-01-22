@@ -2485,14 +2485,14 @@ export class CampanasController {
         return;
       }
 
-      // Buscar tareas que contengan estas reservas
+      // Buscar tareas que contengan estas reservas (excluir completadas, atendidas y canceladas)
       const tareasQuery = `
         SELECT id, titulo, tipo, estatus, ids_reservas, responsable
         FROM tareas
         WHERE campania_id = ?
         AND ids_reservas IS NOT NULL
         AND ids_reservas != ''
-        AND estatus NOT IN ('Atendido', 'Cancelado')
+        AND estatus NOT IN ('Atendido', 'Cancelado', 'Completado')
       `;
       const tareas = await prisma.$queryRawUnsafe<{
         id: number;
