@@ -190,6 +190,7 @@ model imagenes_digitales {
   id                 Int      @id @default(autoincrement())
   id_reserva         Int
   archivo            String   @db.VarChar(255)
+  archivo_data       String?  @db.LongText
   comentario         String   @db.Text
   aprobado_rechazado String   @db.VarChar(25)
   respuesta          String   @db.VarChar(255)

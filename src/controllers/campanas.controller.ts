@@ -1769,14 +1769,6 @@ export class CampanasController {
 
       console.log(`assignArteDigital - campanaId: ${campanaId}, reservaIds: ${reservaIds.length}, archivos: ${archivos.length}`);
 
-      // Crear directorio para archivos digitales si no existe
-      const fs = await import('fs');
-      const path = await import('path');
-      const uploadDir = path.join(__dirname, '../../uploads/digitales');
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-      }
-
       // Obtener los grupo_completo_id de las reservas seleccionadas
       const placeholders = reservaIds.map(() => '?').join(',');
       const gruposQuery = `
@@ -1801,7 +1793,7 @@ export class CampanasController {
       const deleteOldQuery = `DELETE FROM imagenes_digitales WHERE id_reserva IN (${allReservaIds.map(() => '?').join(',')})`;
       await prisma.$executeRawUnsafe(deleteOldQuery, ...allReservaIds);
 
-      // Guardar cada archivo y crear registros en imagenes_digitales
+      // Guardar cada archivo directamente en la base de datos (base64)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
         const { archivo: base64Data, spot, nombre, tipo } = archivo;
@@ -1812,24 +1804,19 @@ export class CampanasController {
           extension = 'mp4';
         }
 
-        // Generar nombre único
+        // Generar nombre único para referencia
         const timestamp = Date.now();
         const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
-        const filePath = path.join(uploadDir, uniqueFilename);
 
-        // Extraer datos base64 y guardar archivo
-        const base64Content = base64Data.replace(/^data:[^;]+;base64,/, '');
-        fs.writeFileSync(filePath, Buffer.from(base64Content, 'base64'));
+        // Guardar el nombre como referencia
+        savedFiles.push(uniqueFilename);
 
-        const fileUrl = `/uploads/digitales/${uniqueFilename}`;
-        savedFiles.push(fileUrl);
-
-        // Insertar registro en imagenes_digitales para cada reserva
+        // Insertar registro en imagenes_digitales para cada reserva con el base64 en archivo_data
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
-            VALUES (?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, fileUrl, spot);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, uniqueFilename, base64Data, spot);
         }
       }
 
@@ -1913,12 +1900,6 @@ export class CampanasController {
         return;
       }
 
-      // Crear directorio si no existe
-      const uploadDir = path.join(__dirname, '../../uploads/digitales');
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-      }
-
       // Obtener grupos de las reservas para aplicar a todo el grupo
       const placeholders = reservaIds.map(() => '?').join(',');
       const gruposQuery = `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`;
@@ -1935,7 +1916,7 @@ export class CampanasController {
 
       // NO eliminamos archivos existentes - solo agregamos nuevos
 
-      // Guardar cada archivo y crear registros en imagenes_digitales
+      // Guardar cada archivo directamente en la base de datos (base64)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
         const { archivo: base64Data, spot, nombre, tipo } = archivo;
@@ -1946,24 +1927,19 @@ export class CampanasController {
           extension = 'mp4';
         }
 
-        // Generar nombre único
+        // Generar nombre único para referencia
         const timestamp = Date.now();
         const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
-        const filePath = path.join(uploadDir, uniqueFilename);
 
-        // Extraer datos base64 y guardar archivo
-        const base64Content = base64Data.replace(/^data:[^;]+;base64,/, '');
-        fs.writeFileSync(filePath, Buffer.from(base64Content, 'base64'));
+        // Guardar el nombre como referencia
+        savedFiles.push(uniqueFilename);
 
-        const fileUrl = `/uploads/digitales/${uniqueFilename}`;
-        savedFiles.push(fileUrl);
-
-        // Insertar registro en imagenes_digitales para cada reserva
+        // Insertar registro en imagenes_digitales para cada reserva con el base64 en archivo_data
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
-            VALUES (?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, fileUrl, spot);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, uniqueFilename, base64Data, spot);
         }
       }
 
@@ -2037,6 +2013,7 @@ export class CampanasController {
         id: number;
         id_reserva: number;
         archivo: string;
+        archivo_data: string | null;
         comentario: string;
         aprobado_rechazado: string;
         respuesta: string;
@@ -2044,11 +2021,11 @@ export class CampanasController {
         fecha_testigo: Date;
         imagen_testigo: string;
       }[]>(`
-        SELECT DISTINCT archivo, MIN(id) as id, MIN(id_reserva) as id_reserva,
+        SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
                comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
         FROM imagenes_digitales
         WHERE id_reserva IN (${placeholders})
-        GROUP BY archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+        GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
         ORDER BY spot ASC
       `, ...reservaIds);
 
@@ -2058,6 +2035,7 @@ export class CampanasController {
           id: img.id,
           idReserva: img.id_reserva,
           archivo: img.archivo,
+          archivoData: img.archivo_data, // Base64 data URL
           comentario: img.comentario,
           estado: img.aprobado_rechazado,
           respuesta: img.respuesta,
