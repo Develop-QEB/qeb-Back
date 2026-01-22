@@ -2805,8 +2805,27 @@ export class CampanasController {
           console.log('createTarea - num_impresiones NO llegó del frontend');
         }
       } else if (evidencia) {
-        // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes)
-        evidenciaData = evidencia;
+        // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes, Programación)
+        // IMPORTANTE: Limpiar archivoData de la evidencia para evitar problemas de memoria y truncamiento
+        // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
+        try {
+          const evidenciaObj = JSON.parse(evidencia);
+          if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
+            // Eliminar archivoData de cada archivo para reducir el tamaño
+            evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
+              archivo: a.archivo,
+              spot: a.spot,
+              tipo: a.tipo,
+              // NO incluir archivoData
+            }));
+            evidenciaData = JSON.stringify(evidenciaObj);
+          } else {
+            evidenciaData = evidencia;
+          }
+        } catch (parseError) {
+          // Si no es JSON válido, usar como está
+          evidenciaData = evidencia;
+        }
       }
 
       const tarea = await prisma.tareas.create({
