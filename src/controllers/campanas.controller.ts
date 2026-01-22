@@ -1420,15 +1420,15 @@ export class CampanasController {
   }
 
   /**
-   * Obtener inventario para validación de testigos (instalaciones)
-   * Muestra items donde arte_aprobado = 'Aprobado' o ya tienen testigo
+   * Obtener inventario para validación de instalaciones
+   * Muestra items que forman parte de una tarea de tipo 'Instalación'
    */
   async getInventarioTestigos(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
-      console.log('Fetching inventario testigos for campana:', campanaId);
+      console.log('Fetching inventario para instalaciones campana:', campanaId);
 
       const query = `
         SELECT
@@ -1449,10 +1449,14 @@ export class CampanasController {
           inv.tarifa_publica,
           inv.tradicional_digital,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
             ELSE inv.codigo_unico
           END as codigo_unico_display,
+          CASE
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE inv.tipo_de_cara
+          END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           MAX(rsv.estatus) AS estatus,
           MAX(rsv.arte_aprobado) AS arte_aprobado,
@@ -1461,32 +1465,40 @@ export class CampanasController {
           MAX(rsv.instalado) AS instalado,
           MAX(rsv.tarea) AS tarea,
           MAX(rsv.APS) AS APS,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
+          MAX(rsv.comentario_rechazo) AS comentario_rechazo,
+          MAX(sc.id) AS solicitudCarasId,
+          MAX(sc.id) AS grupo,
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MAX(sc.fin_periodo) AS fin_periodo,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
           COUNT(DISTINCT rsv.id) AS caras_totales,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id,
+          MAX(tr.id) AS tarea_instalacion_id,
+          MAX(tr.titulo) AS tarea_instalacion_titulo,
+          MAX(tr.estatus) AS tarea_instalacion_estatus
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN tareas tr ON tr.campania_id = cm.id
+            AND tr.tipo = 'Instalación'
+            AND FIND_IN_SET(rsv.id, REPLACE(tr.ids_reservas, ' ', '')) > 0
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND rsv.arte_aprobado = 'Aprobado'
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
       const inventario = await prisma.$queryRawUnsafe(query, campanaId);
 
-      console.log('Inventario testigos result count:', Array.isArray(inventario) ? inventario.length : 0);
+      console.log('Inventario instalaciones result count:', Array.isArray(inventario) ? inventario.length : 0);
 
       const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
@@ -1498,7 +1510,7 @@ export class CampanasController {
       });
     } catch (error) {
       console.error('Error en getInventarioTestigos:', error);
-      const message = error instanceof Error ? error.message : 'Error al obtener inventario para testigos';
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario para instalaciones';
       res.status(500).json({
         success: false,
         error: message,
