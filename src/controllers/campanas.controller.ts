@@ -1,4 +1,6 @@
 import { Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import prisma from '../utils/prisma';
 import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
@@ -1739,6 +1741,457 @@ export class CampanasController {
   }
 
   /**
+   * Asignar arte digital (múltiples archivos para rotación)
+   */
+  async assignArteDigital(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivos } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!archivos || !Array.isArray(archivos) || archivos.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de archivos',
+        });
+        return;
+      }
+
+      console.log(`assignArteDigital - campanaId: ${campanaId}, reservaIds: ${reservaIds.length}, archivos: ${archivos.length}`);
+
+      // Crear directorio para archivos digitales si no existe
+      const fs = await import('fs');
+      const path = await import('path');
+      const uploadDir = path.join(process.cwd(), 'uploads', 'digitales');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+
+      // Obtener los grupo_completo_id de las reservas seleccionadas
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Obtener todas las reservas afectadas (incluyendo las del grupo)
+      let allReservaIds = [...reservaIds];
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+        const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+        allReservaIds = [...new Set([...allReservaIds, ...grupoReservas.map(r => r.id)])];
+      }
+
+      // Primero, eliminar registros anteriores de imagenes_digitales para estas reservas
+      const deleteOldQuery = `DELETE FROM imagenes_digitales WHERE id_reserva IN (${allReservaIds.map(() => '?').join(',')})`;
+      await prisma.$executeRawUnsafe(deleteOldQuery, ...allReservaIds);
+
+      // Guardar cada archivo y crear registros en imagenes_digitales
+      const savedFiles: string[] = [];
+      for (const archivo of archivos) {
+        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+
+        // Extraer extensión del nombre o del tipo MIME
+        let extension = nombre.split('.').pop() || 'jpg';
+        if (tipo === 'video' && !['mp4', 'mov', 'webm', 'avi'].includes(extension.toLowerCase())) {
+          extension = 'mp4';
+        }
+
+        // Generar nombre único
+        const timestamp = Date.now();
+        const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
+        const filePath = path.join(uploadDir, uniqueFilename);
+
+        // Extraer datos base64 y guardar archivo
+        const base64Content = base64Data.replace(/^data:[^;]+;base64,/, '');
+        fs.writeFileSync(filePath, Buffer.from(base64Content, 'base64'));
+
+        const fileUrl = `/uploads/digitales/${uniqueFilename}`;
+        savedFiles.push(fileUrl);
+
+        // Insertar registro en imagenes_digitales para cada reserva
+        for (const reservaId of allReservaIds) {
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO imagenes_digitales (id_reserva, archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, fileUrl, spot);
+        }
+      }
+
+      // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
+      const firstFileUrl = savedFiles[0] || '';
+      const updateReservasQuery = `
+        UPDATE reservas
+        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        WHERE id IN (${allReservaIds.map(() => '?').join(',')})
+      `;
+      await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte Digital',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Asignación',
+              fecha_hora: new Date(),
+              detalles: `${userName} asignó ${archivos.length} archivo(s) digital(es) a ${allReservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte digital asignado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
+          affected: allReservaIds.length,
+          files: savedFiles,
+        },
+      });
+
+      // Emitir evento WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds: allReservaIds,
+        tipo: 'digital',
+        usuario: userName,
+        archivosCount: archivos.length,
+      });
+    } catch (error) {
+      console.error('Error en assignArteDigital:', error);
+      const message = error instanceof Error ? error.message : 'Error al asignar arte digital';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Agregar archivos digitales SIN eliminar los existentes
+   * Útil para editar/añadir archivos manteniendo los que ya están
+   */
+  async addArteDigital(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivos } = req.body;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!archivos || !Array.isArray(archivos) || archivos.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de archivos',
+        });
+        return;
+      }
+
+      // Crear directorio si no existe
+      const uploadDir = path.join(__dirname, '../../uploads/digitales');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+
+      // Obtener grupos de las reservas para aplicar a todo el grupo
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const gruposQuery = `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`;
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      let allReservaIds = [...reservaIds];
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+        const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+        allReservaIds = [...new Set([...allReservaIds, ...grupoReservas.map(r => r.id)])];
+      }
+
+      // NO eliminamos archivos existentes - solo agregamos nuevos
+
+      // Guardar cada archivo y crear registros en imagenes_digitales
+      const savedFiles: string[] = [];
+      for (const archivo of archivos) {
+        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+
+        // Extraer extensión del nombre o del tipo MIME
+        let extension = nombre.split('.').pop() || 'jpg';
+        if (tipo === 'video' && !['mp4', 'mov', 'webm', 'avi'].includes(extension.toLowerCase())) {
+          extension = 'mp4';
+        }
+
+        // Generar nombre único
+        const timestamp = Date.now();
+        const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
+        const filePath = path.join(uploadDir, uniqueFilename);
+
+        // Extraer datos base64 y guardar archivo
+        const base64Content = base64Data.replace(/^data:[^;]+;base64,/, '');
+        fs.writeFileSync(filePath, Buffer.from(base64Content, 'base64'));
+
+        const fileUrl = `/uploads/digitales/${uniqueFilename}`;
+        savedFiles.push(fileUrl);
+
+        // Insertar registro en imagenes_digitales para cada reserva
+        for (const reservaId of allReservaIds) {
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO imagenes_digitales (id_reserva, archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, fileUrl, spot);
+        }
+      }
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte Digital',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Adición',
+              fecha_hora: new Date(),
+              detalles: `${userName} agregó ${archivos.length} archivo(s) digital(es) a ${allReservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte digital agregado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
+          affected: allReservaIds.length,
+          files: savedFiles,
+        },
+      });
+
+      // Emitir evento WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds: allReservaIds,
+        tipo: 'digital',
+        usuario: userName,
+        archivosCount: archivos.length,
+      });
+    } catch (error) {
+      console.error('Error en addArteDigital:', error);
+      const message = error instanceof Error ? error.message : 'Error al agregar arte digital';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener imágenes digitales de una reserva
+   */
+  async getImagenesDigitales(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, reservaId } = req.params;
+      const campanaId = parseInt(id);
+
+      // Soportar múltiples reserva IDs separados por coma
+      const reservaIds = reservaId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+      if (reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'ID de reserva inválido',
+        });
+        return;
+      }
+
+      // Obtener imágenes digitales ordenadas por spot para todas las reservas
+      // Usar DISTINCT para evitar duplicados si el mismo archivo está asociado a múltiples reservas
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const imagenes = await prisma.$queryRawUnsafe<{
+        id: number;
+        id_reserva: number;
+        archivo: string;
+        comentario: string;
+        aprobado_rechazado: string;
+        respuesta: string;
+        spot: number;
+        fecha_testigo: Date;
+        imagen_testigo: string;
+      }[]>(`
+        SELECT DISTINCT archivo, MIN(id) as id, MIN(id_reserva) as id_reserva,
+               comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+        FROM imagenes_digitales
+        WHERE id_reserva IN (${placeholders})
+        GROUP BY archivo, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+        ORDER BY spot ASC
+      `, ...reservaIds);
+
+      res.json({
+        success: true,
+        data: imagenes.map(img => ({
+          id: img.id,
+          idReserva: img.id_reserva,
+          archivo: img.archivo,
+          comentario: img.comentario,
+          estado: img.aprobado_rechazado,
+          respuesta: img.respuesta,
+          spot: img.spot,
+          tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getImagenesDigitales:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener imágenes digitales';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener resumen de archivos digitales por reserva para toda la campaña
+   * Devuelve cantidad de imágenes y videos por cada reserva
+   */
+  async getDigitalFileSummaries(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      if (isNaN(campanaId)) {
+        res.status(400).json({
+          success: false,
+          error: 'ID de campaña inválido',
+        });
+        return;
+      }
+
+      // Obtener todas las reservas digitales de la campaña con conteo de archivos
+      // Join path: imagenes_digitales -> reservas -> solicitudCaras -> cotizacion -> campania
+      const summaries = await prisma.$queryRaw<{
+        id_reserva: number;
+        total_archivos: number;
+        count_imagenes: number;
+        count_videos: number;
+      }[]>`
+        SELECT
+          img.id_reserva,
+          COUNT(*) as total_archivos,
+          SUM(CASE WHEN LOWER(img.archivo) REGEXP '\\.(jpg|jpeg|png|gif|webp|bmp)$' THEN 1 ELSE 0 END) as count_imagenes,
+          SUM(CASE WHEN LOWER(img.archivo) REGEXP '\\.(mp4|mov|avi|webm|mkv|wmv)$' THEN 1 ELSE 0 END) as count_videos
+        FROM imagenes_digitales img
+        INNER JOIN reservas r ON r.id = img.id_reserva
+        INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+        INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ${campanaId}
+        GROUP BY img.id_reserva
+      `;
+
+      res.json({
+        success: true,
+        data: summaries.map(s => ({
+          idReserva: Number(s.id_reserva),
+          totalArchivos: Number(s.total_archivos),
+          countImagenes: Number(s.count_imagenes),
+          countVideos: Number(s.count_videos),
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getDigitalFileSummaries:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener resumen de archivos digitales';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Eliminar archivos digitales por IDs o por archivo paths + reservaIds
+   * Soporta dos modos:
+   * 1. Por imageIds: elimina registros específicos por ID
+   * 2. Por archivos + reservaIds: elimina todos los registros que coincidan con esos archivos en esas reservas
+   */
+  async deleteImagenesDigitales(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { imageIds, archivos, reservaIds } = req.body;
+
+      // Modo 2: Eliminar por archivo paths y reservaIds (para eliminar de múltiples items)
+      if (archivos && Array.isArray(archivos) && archivos.length > 0 &&
+          reservaIds && Array.isArray(reservaIds) && reservaIds.length > 0) {
+
+        // Construir query para eliminar archivos que coincidan con los paths en las reservas especificadas
+        const archivoPlaceholders = archivos.map(() => '?').join(',');
+        const reservaPlaceholders = reservaIds.map(() => '?').join(',');
+        const deleteQuery = `
+          DELETE FROM imagenes_digitales
+          WHERE archivo IN (${archivoPlaceholders})
+          AND id_reserva IN (${reservaPlaceholders})
+        `;
+        await prisma.$executeRawUnsafe(deleteQuery, ...archivos, ...reservaIds);
+
+        res.json({
+          success: true,
+          message: `Se eliminaron archivos digitales de ${reservaIds.length} reserva(s)`,
+        });
+        return;
+      }
+
+      // Modo 1: Eliminar por imageIds (comportamiento original)
+      if (!imageIds || !Array.isArray(imageIds) || imageIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de imageIds, o archivos + reservaIds',
+        });
+        return;
+      }
+
+      const placeholders = imageIds.map(() => '?').join(',');
+      const deleteQuery = `DELETE FROM imagenes_digitales WHERE id IN (${placeholders})`;
+      await prisma.$executeRawUnsafe(deleteQuery, ...imageIds);
+
+      res.json({
+        success: true,
+        message: `Se eliminaron ${imageIds.length} archivo(s) digital(es)`,
+      });
+    } catch (error) {
+      console.error('Error en deleteImagenesDigitales:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar archivos digitales';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
    * Actualizar estado de arte (aprobar/rechazar)
    */
   async updateArteStatus(req: AuthRequest, res: Response): Promise<void> {
@@ -2313,21 +2766,23 @@ export class CampanasController {
       let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
       let estatusFinal = 'Pendiente';
 
-      // Para Revisión de artes e Impresión, estatus siempre es Activo
-      if (tipo === 'Revisión de artes' || tipo === 'Impresión') {
+      // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
-        // Si hay catorcena, obtener fecha_fin de la catorcena seleccionada
-        if (catorcena_entrega) {
-          const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
-          if (match) {
-            const numCatorcena = parseInt(match[1]);
-            const yearCatorcena = parseInt(match[2]);
-            const catorcena = await prisma.catorcenas.findFirst({
-              where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
-            });
-            if (catorcena?.fecha_fin) {
-              fechaFinFinal = new Date(catorcena.fecha_fin);
-            }
+      }
+
+      // Si hay catorcena_entrega, obtener fecha_fin de la catorcena seleccionada
+      // Aplica para: Revisión de artes, Impresión, Instalación, Testigo, Programación
+      if (catorcena_entrega && (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Instalación' || tipo === 'Testigo' || tipo === 'Programación')) {
+        const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
+        if (match) {
+          const numCatorcena = parseInt(match[1]);
+          const yearCatorcena = parseInt(match[2]);
+          const catorcena = await prisma.catorcenas.findFirst({
+            where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
+          });
+          if (catorcena?.fecha_fin) {
+            fechaFinFinal = new Date(catorcena.fecha_fin);
           }
         }
       }

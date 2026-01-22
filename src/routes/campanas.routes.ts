@@ -43,6 +43,11 @@ router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasControl
 router.get('/:id/artes-existentes', campanasController.getArtesExistentes.bind(campanasController));
 router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bind(campanasController));
 router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
+router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));
+router.post('/:id/add-arte-digital', campanasController.addArteDigital.bind(campanasController));
+router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesDigitales.bind(campanasController));
+router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
+router.delete('/:id/imagenes-digitales', campanasController.deleteImagenesDigitales.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
 router.post('/:id/check-reservas-tareas', campanasController.checkReservasTareas.bind(campanasController));
