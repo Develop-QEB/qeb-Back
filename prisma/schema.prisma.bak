@@ -1,0 +1,386 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model proveedores {
+  id                 Int                 @id @default(autoincrement())
+  nombre             String              @db.VarChar(100)
+  direccion          String?             @db.VarChar(200)
+  ciudad             String?             @db.VarChar(100)
+  codigo_postal      String?             @db.VarChar(20)
+  telefono           String?             @db.VarChar(20)
+  email              String?             @db.VarChar(100)
+  sitio_web          String?             @db.VarChar(200)
+  contacto_principal String?             @db.VarChar(100)
+  categoria          String?             @db.VarChar(50)
+  fecha_alta         DateTime?           @db.Date
+  estado             proveedores_estado? @default(activo)
+  notas              String?             @db.Text
+  deleted_at         DateTime?           @db.Date
+
+  @@map("proveedores")
+}
+
+model inventarios {
+  id                   Int      @id @default(autoincrement())
+  codigo_unico         String?  @db.VarChar(50)
+  ubicacion            String?  @db.VarChar(255)
+  tipo_de_cara         String?  @db.VarChar(30)
+  cara                 String?  @db.VarChar(1)
+  mueble               String?  @db.VarChar(255)
+  latitud              Float    @db.Float
+  longitud             Float    @db.Float
+  plaza                String?  @db.VarChar(25)
+  estado               String?  @db.VarChar(30)
+  municipio            String?  @db.Text
+  cp                   Int?
+  tradicional_digital  String?  @db.VarChar(11)
+  sentido              String?  @db.VarChar(5)
+  tipo_de_mueble       String?  @db.Text
+  ancho                Float    @db.Float
+  alto                 Float    @db.Float
+  archivos_id          Int?
+  nivel_socioeconomico String?  @db.VarChar(255)
+  total_espacios       Int?
+  tiempo               Int?
+  estatus              String?  @db.VarChar(20)
+  codigo               String?  @db.VarChar(10)
+  col_5354             Boolean?
+  isla                 String?  @db.VarChar(20)
+  mueble_isla          String?  @db.VarChar(20)
+  entre_calle_1        String?  @db.VarChar(255)
+  entre_calle_2        String?  @db.VarChar(255)
+  orientacion          String?  @db.VarChar(50)
+  tarifa_piso          Decimal? @db.Decimal(12, 2)
+  tarifa_publica       Decimal? @db.Decimal(12, 2)
+
+  @@map("inventarios")
+}
+
+model catorcenas {
+  id               Int      @id @default(autoincrement())
+  a_o              Int      @map("año")
+  numero_catorcena Int
+  fecha_inicio     DateTime @db.Date
+  fecha_fin        DateTime @db.Date
+
+  @@map("catorcenas")
+}
+
+model archivos {
+  id           Int    @id @default(autoincrement())
+  nombre       String @db.VarChar(100)
+  tipo         String @db.VarChar(50)
+  campana_id   Int
+  tareas_id    Int
+  alto         String @db.VarChar(100)
+  ancho        String @db.VarChar(100)
+  idinventario String @db.VarChar(100)
+}
+
+model calendario {
+  id           Int       @unique(map: "id") @default(autoincrement())
+  fecha_inicio DateTime  @default(now()) @db.Date
+  fecha_fin    DateTime  @default(dbgenerated("(curdate() + interval 3 day)")) @db.Date
+  deleted_at   DateTime? @db.Date
+}
+
+model campania {
+  id            Int      @id @default(autoincrement())
+  cliente_id    Int
+  nombre        String   @db.VarChar(100)
+  fecha_inicio  DateTime @db.Date
+  fecha_fin     DateTime @db.Date
+  total_caras   String   @db.VarChar(255)
+  bonificacion  Int
+  status        String   @default("inactiva") @db.VarChar(50)
+  cotizacion_id Int?
+  articulo      String   @db.VarChar(20)
+}
+
+model cliente {
+  id                 Int       @id @default(autoincrement())
+  CUIC               Int?
+  T0_U_IDAsesor      Int?
+  T0_U_Asesor        String?   @db.VarChar(255)
+  T0_U_IDAgencia     Int?
+  T0_U_Agencia       String?   @db.VarChar(255)
+  T0_U_Cliente       String?   @db.VarChar(255)
+  T0_U_RazonSocial   String?   @db.VarChar(255)
+  T0_U_IDACA         Int?
+  T1_U_Cliente       String?   @db.VarChar(255)
+  T1_U_IDACA         Int?
+  T1_U_IDCM          Int?
+  T1_U_IDMarca       Int?
+  T1_U_UnidadNegocio String?   @db.VarChar(255)
+  T1_U_ValidFrom     DateTime? @db.Date
+  T1_U_ValidTo       DateTime? @db.Date
+  T2_U_IDCategoria   Int?
+  T2_U_Categoria     String?   @db.VarChar(255)
+  T2_U_IDCM          Int?
+  T2_U_IDProducto    Int?
+  T2_U_Marca         String?   @db.VarChar(255)
+  T2_U_Producto      String?   @db.VarChar(255)
+  T2_U_ValidFrom     DateTime? @db.Date
+  T2_U_ValidTo       DateTime? @db.Date
+}
+
+model comentarios {
+  id           Int      @id @default(autoincrement())
+  autor_id     Int
+  comentario   String   @db.Text
+  creado_en    DateTime @db.Timestamp(0)
+  campania_id  Int
+  solicitud_id Int
+  origen       String?  @db.VarChar(20)
+}
+
+model cotizacion {
+  id                   Int       @id @default(autoincrement())
+  user_id              Int
+  clientes_id          Int
+  nombre_campania      String    @db.VarChar(100)
+  numero_caras         Int
+  fecha_inicio         DateTime  @db.Date
+  fecha_fin            DateTime  @db.Date
+  frontal              Int
+  cruzada              Int
+  nivel_socioeconomico String?   @db.VarChar(50)
+  observaciones        String    @db.VarChar(255)
+  bonificacion         Float
+  descuento            Float
+  precio               Decimal?  @db.Decimal(10, 2)
+  contacto             String    @db.VarChar(50)
+  status               String    @default("Pendiente") @db.VarChar(50)
+  id_propuesta         Int
+  fecha_expiracion     DateTime? @db.Date
+  articulo             String    @db.VarChar(20)
+}
+
+model espacio_inventario {
+  id             Int @id @default(autoincrement())
+  inventario_id  Int
+  numero_espacio Int
+}
+
+model historial {
+  id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  tipo       String   @db.VarChar(20)
+  ref_id     Int
+  accion     String   @db.VarChar(20)
+  fecha_hora DateTime @default(now()) @db.Timestamp(0)
+  detalles   String?  @db.Text
+}
+
+model historial_comentarios {
+  id           BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  id_propuesta Int
+  comentario   String    @db.Text
+  nuevo_status String?   @db.VarChar(255)
+  usuario      String?   @db.VarChar(255)
+  fecha        DateTime? @default(now()) @db.Timestamp(0)
+}
+
+model imagenes_digitales {
+  id                 Int      @id @default(autoincrement())
+  id_reserva         Int
+  archivo            String   @db.VarChar(255)
+  comentario         String   @db.Text
+  aprobado_rechazado String   @db.VarChar(25)
+  respuesta          String   @db.VarChar(255)
+  spot               Int
+  fecha_testigo      DateTime @db.Date
+  imagen_testigo     String   @db.Text
+}
+
+model propuesta {
+  id                       Int       @id @default(autoincrement())
+  cliente_id               Int
+  fecha                    DateTime  @default(now()) @db.Date
+  status                   String    @default("Pendiente") @db.VarChar(50)
+  descripcion              String?   @db.Text
+  precio                   Decimal?  @db.Decimal(10, 2)
+  notas                    String?   @db.Text
+  deleted_at               DateTime? @db.DateTime(0)
+  solicitud_id             Int
+  precio_simulado          Int?
+  asignado                 String    @db.VarChar(200)
+  id_asignado              String?   @db.VarChar(255)
+  inversion                Int
+  comentario_cambio_status String    @db.Text
+  articulo                 String    @db.VarChar(20)
+  updated_at               DateTime? @default(now()) @db.Timestamp(0)
+  archivo                  String?   @db.VarChar(255)
+
+  @@index([solicitud_id], map: "fK_solicitud_id")
+}
+
+model reservas {
+  id                 Int       @id @unique(map: "id") @default(autoincrement())
+  inventario_id      Int
+  calendario_id      Int
+  cliente_id         Int
+  fecha_reserva      DateTime? @default(now()) @db.Date
+  deleted_at         DateTime? @db.DateTime(0)
+  solicitudCaras_id  Int
+  archivo            String?   @db.VarChar(255)
+  estatus            String    @db.VarChar(255)
+  arte_aprobado      String    @db.VarChar(25)
+  comentario_rechazo String    @db.VarChar(255)
+  estatus_original   String    @db.VarChar(20)
+  fecha_testigo      DateTime  @db.Date
+  imagen_testigo     String    @db.Text
+  instalado          Boolean
+  APS                Int?
+  tarea              String    @db.VarChar(50)
+  grupo_completo_id  Int?
+
+  @@index([calendario_id], map: "calendario_id")
+}
+
+model session_locks {
+  id          Int       @id @default(autoincrement())
+  module_name String    @unique(map: "module_name") @db.VarChar(100)
+  user_id     Int?
+  username    String?   @db.VarChar(255)
+  locked_at   DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([module_name], map: "idx_module")
+}
+
+model solicitud {
+  id               Int       @id @default(autoincrement())
+  fecha            DateTime  @default(now()) @db.DateTime(0)
+  descripcion      String    @db.VarChar(255)
+  presupuesto      Decimal   @db.Decimal(10, 2)
+  notas            String    @db.Text
+  cliente_id       Int
+  usuario_id       Int?
+  status           String    @default("Pendiente") @db.VarChar(255)
+  deleted_at       DateTime? @db.DateTime(0)
+  nombre_usuario   String?   @db.VarChar(255)
+  asignado         String    @db.VarChar(200)
+  id_asignado      String?   @db.VarChar(255)
+  cuic             String?   @db.VarChar(50)
+  razon_social     String?   @db.VarChar(255)
+  unidad_negocio   String?   @db.VarChar(100)
+  marca_id         Int?
+  marca_nombre     String?   @db.VarChar(100)
+  asesor           String?   @db.VarChar(100)
+  producto_id      Int?
+  producto_nombre  String?   @db.VarChar(255)
+  agencia          String?   @db.VarChar(100)
+  categoria_id     Int?
+  categoria_nombre String?   @db.VarChar(100)
+  IMU              Int
+  archivo          String?   @db.LongText
+  tipo_archivo     String?   @db.VarChar(100)
+  card_code        String?   @db.VarChar(50)
+}
+
+model solicitudCaras {
+  id                   Int      @id @unique(map: "totaldecaras") @default(autoincrement())
+  idquote              String?  @db.VarChar(50)
+  ciudad               String?  @db.VarChar(1000)
+  estados              String?  @db.VarChar(1000)
+  tipo                 String?  @db.VarChar(50)
+  flujo                String?  @db.VarChar(50)
+  bonificacion         Decimal? @db.Decimal(10, 2)
+  caras                Int
+  nivel_socioeconomico String   @db.VarChar(500)
+  formato              String   @db.VarChar(1000)
+  costo                Int
+  tarifa_publica       Int
+  inicio_periodo       DateTime @default(now()) @db.Date
+  fin_periodo          DateTime @default(now()) @db.Date
+  caras_flujo          Int?     @default(0)
+  caras_contraflujo    Int?     @default(0)
+  articulo             String?  @db.VarChar(255)
+  descuento            Decimal? @db.Decimal(5, 2)
+}
+
+model tareas {
+  id                 Int      @id @default(autoincrement())
+  fecha_inicio       DateTime @default(dbgenerated("(curdate())")) @db.DateTime(0)
+  fecha_fin          DateTime @default(now()) @db.DateTime(0)
+  tipo               String?  @db.VarChar(50)
+  responsable        String?  @db.VarChar(50)
+  id_responsable     Int
+  estatus            String?  @db.VarChar(50)
+  descripcion        String?  @db.VarChar(255)
+  titulo             String?  @db.VarChar(50)
+  contenido          String?  @db.VarChar(50)
+  campania_id        Int?
+  archivo            String?  @db.VarChar(1000)
+  id_solicitud       String   @db.VarChar(100)
+  id_propuesta       String?  @db.VarChar(100)
+  evidencia          String?  @db.VarChar(10000)
+  proveedores_id     Int?
+  listado_inventario String?  @db.VarChar(255)
+  nombre_proveedores String?  @db.VarChar(255)
+  asignado           String?  @db.VarChar(255)
+  id_asignado        String?  @db.VarChar(255)
+  ids_reservas       String?  @db.Text
+}
+
+model usuario {
+  id                 Int       @id @default(autoincrement())
+  nombre             String    @db.VarChar(255)
+  fecha_nacimiento   DateTime  @db.Date
+  correo_electronico String    @db.VarChar(100)
+  user_password      String?   @db.VarChar(255)
+  area               String    @db.VarChar(50)
+  puesto             String    @db.VarChar(50)
+  updated_at         DateTime? @db.Timestamp(0)
+  created_at         DateTime? @default(now()) @db.Timestamp(0)
+  deleted_at         DateTime? @db.Timestamp(0)
+  user_role          String    @default("Normal") @db.VarChar(25)
+  foto_perfil        String?   @db.VarChar(500)
+}
+
+model correos_enviados {
+  id           Int      @id @default(autoincrement())
+  remitente    String   @db.VarChar(255)
+  destinatario String   @db.VarChar(255)
+  asunto       String   @db.VarChar(500)
+  cuerpo       String   @db.Text
+  fecha_envio  DateTime @default(now()) @db.DateTime(0)
+  leido        Boolean  @default(false)
+
+  @@index([destinatario], map: "idx_destinatario")
+  @@map("correos_enviados")
+}
+
+model notas_personales {
+  id                  Int       @id @default(autoincrement())
+  usuario_id          Int
+  titulo              String?   @db.VarChar(255)
+  contenido           String    @db.Text
+  color               String?   @db.VarChar(20)
+  fecha_creacion      DateTime  @default(now()) @db.Timestamp(0)
+  fecha_actualizacion DateTime? @db.Timestamp(0)
+
+  @@index([usuario_id], map: "idx_usuario_notas")
+  @@map("notas_personales")
+}
+
+model comentarios_revision_artes {
+  id           Int      @id @default(autoincrement())
+  tarea_id     Int
+  autor_id     Int
+  autor_nombre String   @db.VarChar(100)
+  contenido    String   @db.Text
+  fecha        DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([tarea_id], map: "idx_tarea_comentarios")
+}
+
+enum proveedores_estado {
+  activo
+  inactivo
+}
