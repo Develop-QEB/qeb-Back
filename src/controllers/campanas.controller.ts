@@ -1230,7 +1230,6 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND inv.tradicional_digital = 'Tradicional'
           AND rsv.archivo IS NOT NULL
           AND rsv.archivo != ''
         GROUP BY inv.id
@@ -1331,9 +1330,8 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const formato = req.query.formato as string || 'Tradicional';
 
-      console.log('Fetching inventario sin arte for campana:', campanaId, 'formato:', formato);
+      console.log('Fetching inventario sin arte for campana:', campanaId);
 
       const query = `
         SELECT
@@ -1393,14 +1391,13 @@ export class CampanasController {
           AND rsv.deleted_at IS NULL
           AND rsv.archivo IS NULL
           AND imDig.id_reserva IS NULL
-          AND inv.tradicional_digital = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
 
       console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
@@ -1430,7 +1427,6 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const formato = req.query.formato as string || 'Tradicional';
 
       console.log('Fetching inventario testigos for campana:', campanaId);
 
@@ -1483,13 +1479,12 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND inv.tradicional_digital = ?
           AND rsv.arte_aprobado = 'Aprobado'
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
 
       console.log('Inventario testigos result count:', Array.isArray(inventario) ? inventario.length : 0);
 
