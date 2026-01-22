@@ -17,16 +17,34 @@ export interface CloudinaryUploadResult {
 }
 
 /**
+ * Verifica si Cloudinary está configurado correctamente
+ */
+export function isCloudinaryConfigured(): boolean {
+  return !!(
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET
+  );
+}
+
+/**
  * Sube un archivo base64 a Cloudinary
  * @param base64Data - Datos en formato base64 (con o sin prefijo data:)
  * @param folder - Carpeta en Cloudinary donde guardar el archivo
  * @param resourceType - Tipo de recurso: 'image' | 'video' | 'auto'
+ * @returns URL de Cloudinary o null si no está configurado
  */
 export async function uploadToCloudinary(
   base64Data: string,
   folder: string,
   resourceType: 'image' | 'video' | 'auto' = 'auto'
-): Promise<CloudinaryUploadResult> {
+): Promise<CloudinaryUploadResult | null> {
+  // Si Cloudinary no está configurado, retornar null para usar fallback
+  if (!isCloudinaryConfigured()) {
+    console.log('Cloudinary no configurado, usando almacenamiento base64 en BD');
+    return null;
+  }
+
   // Asegurar que el base64 tenga el prefijo correcto
   let uploadData = base64Data;
   if (!base64Data.startsWith('data:')) {
@@ -34,21 +52,27 @@ export async function uploadToCloudinary(
     uploadData = `data:application/octet-stream;base64,${base64Data}`;
   }
 
-  const result = await cloudinary.uploader.upload(uploadData, {
-    folder,
-    resource_type: resourceType,
-    // Para videos, permitir archivos grandes
-    chunk_size: 6000000, // 6MB chunks para videos grandes
-  });
+  try {
+    const result = await cloudinary.uploader.upload(uploadData, {
+      folder,
+      resource_type: resourceType,
+      // Para videos, permitir archivos grandes
+      chunk_size: 6000000, // 6MB chunks para videos grandes
+    });
 
-  return {
-    secure_url: result.secure_url,
-    public_id: result.public_id,
-    resource_type: result.resource_type,
-    format: result.format,
-    width: result.width,
-    height: result.height,
-  };
+    return {
+      secure_url: result.secure_url,
+      public_id: result.public_id,
+      resource_type: result.resource_type,
+      format: result.format,
+      width: result.width,
+      height: result.height,
+    };
+  } catch (error) {
+    console.error('Error subiendo a Cloudinary:', error);
+    // Retornar null para usar fallback de base64
+    return null;
+  }
 }
 
 /**

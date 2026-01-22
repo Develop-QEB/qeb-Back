@@ -1794,7 +1794,7 @@ export class CampanasController {
       const deleteOldQuery = `DELETE FROM imagenes_digitales WHERE id_reserva IN (${allReservaIds.map(() => '?').join(',')})`;
       await prisma.$executeRawUnsafe(deleteOldQuery, ...allReservaIds);
 
-      // Subir cada archivo a Cloudinary
+      // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
         const { archivo: base64Data, spot, nombre, tipo } = archivo;
@@ -1809,24 +1809,26 @@ export class CampanasController {
         const timestamp = Date.now();
         const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
 
-        // Subir a Cloudinary
+        // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
         const cloudinaryResult = await uploadToCloudinary(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-        const cloudinaryUrl = cloudinaryResult.secure_url;
 
-        // Guardar la URL como referencia
-        savedFiles.push(cloudinaryUrl);
+        // Usar URL de Cloudinary si está disponible, sino usar base64
+        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
-        // Insertar registro en imagenes_digitales para cada reserva con la URL de Cloudinary
+        // Guardar la referencia
+        savedFiles.push(archivoData);
+
+        // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
             INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, uniqueFilename, cloudinaryUrl, spot);
+          `, reservaId, uniqueFilename, archivoData, spot);
         }
       }
 
@@ -1926,7 +1928,7 @@ export class CampanasController {
 
       // NO eliminamos archivos existentes - solo agregamos nuevos
 
-      // Subir cada archivo a Cloudinary
+      // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
         const { archivo: base64Data, spot, nombre, tipo } = archivo;
@@ -1941,24 +1943,26 @@ export class CampanasController {
         const timestamp = Date.now();
         const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
 
-        // Subir a Cloudinary
+        // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
         const cloudinaryResult = await uploadToCloudinary(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-        const cloudinaryUrl = cloudinaryResult.secure_url;
 
-        // Guardar la URL como referencia
-        savedFiles.push(cloudinaryUrl);
+        // Usar URL de Cloudinary si está disponible, sino usar base64
+        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
-        // Insertar registro en imagenes_digitales para cada reserva con la URL de Cloudinary
+        // Guardar la referencia
+        savedFiles.push(archivoData);
+
+        // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
             INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, uniqueFilename, cloudinaryUrl, spot);
+          `, reservaId, uniqueFilename, archivoData, spot);
         }
       }
 
