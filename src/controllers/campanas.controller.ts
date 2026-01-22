@@ -3497,18 +3497,78 @@ export class CampanasController {
         },
       });
 
+      // Obtener calendarios que se solapan con el período para validar disponibilidad
+      const fechaIni = new Date(fechaInicio);
+      const fechaFinDate = new Date(fechaFin);
+      const calendariosOverlap = await prisma.calendario.findMany({
+        where: {
+          deleted_at: null,
+          fecha_inicio: { lte: fechaFinDate },
+          fecha_fin: { gte: fechaIni },
+        },
+        select: { id: true },
+      });
+      const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
+
+      // Obtener espacios ya reservados en el período
+      let espaciosReservadosEnPeriodo: Set<number> = new Set();
+      if (calendarioIdsOverlap.length > 0) {
+        const reservasExistentes = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIdsOverlap },
+            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+          },
+          select: { inventario_id: true },
+        });
+        espaciosReservadosEnPeriodo = new Set(reservasExistentes.map(r => r.inventario_id));
+      }
+
       let reservasCreadas = 0;
+      let reservasOmitidas = 0;
       let currentGroupId: number | null = null;
 
       // Procesar reservas
       for (const reserva of reservas) {
-        // Buscar espacio_inventario
-        const espacioInventario = await prisma.espacio_inventario.findFirst({
-          where: { inventario_id: reserva.inventario_id },
-        });
+        let espacioId: number;
 
-        if (!espacioInventario) {
-          console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+        // Si viene espacio_id del frontend, usarlo directamente
+        if (reserva.espacio_id) {
+          espacioId = reserva.espacio_id;
+        } else {
+          // Buscar todos los espacios del inventario
+          const espaciosInventario = await prisma.espacio_inventario.findMany({
+            where: { inventario_id: reserva.inventario_id },
+            orderBy: { numero_espacio: 'asc' },
+          });
+
+          if (espaciosInventario.length === 0) {
+            console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+            continue;
+          }
+
+          // Buscar el primer espacio disponible (no reservado en el período)
+          let espacioEncontrado: number | null = null;
+          for (const espacio of espaciosInventario) {
+            if (!espaciosReservadosEnPeriodo.has(espacio.id)) {
+              espacioEncontrado = espacio.id;
+              break;
+            }
+          }
+
+          if (!espacioEncontrado) {
+            console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
+            reservasOmitidas++;
+            continue;
+          }
+
+          espacioId = espacioEncontrado;
+        }
+
+        // Validar que el espacio no esté ya reservado en el período
+        if (espaciosReservadosEnPeriodo.has(espacioId)) {
+          console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          reservasOmitidas++;
           continue;
         }
 
@@ -3529,7 +3589,7 @@ export class CampanasController {
         await prisma.reservas.create({
           data: {
             solicitudCaras_id: solicitudCaraId,
-            inventario_id: espacioInventario.id,
+            inventario_id: espacioId,
             calendario_id: calendario.id,
             cliente_id: clienteId || 0,
             estatus: reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Apartado',
@@ -3543,6 +3603,9 @@ export class CampanasController {
             grupo_completo_id: grupoCompletoId,
           },
         });
+
+        // Marcar espacio como usado para evitar duplicados en este mismo request
+        espaciosReservadosEnPeriodo.add(espacioId);
         reservasCreadas++;
       }
 
@@ -3551,6 +3614,7 @@ export class CampanasController {
         data: {
           calendarioId: calendario.id,
           reservasCreadas,
+          reservasOmitidas,
         },
       });
     } catch (error) {

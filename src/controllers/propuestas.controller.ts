@@ -1115,6 +1115,34 @@ export class PropuestasController {
         },
       });
 
+      // Obtener calendarios que se solapan con el período para validar disponibilidad
+      const fechaIni = new Date(fechaInicio);
+      const fechaFinDate = new Date(fechaFin);
+      const calendariosOverlap = await prisma.calendario.findMany({
+        where: {
+          deleted_at: null,
+          fecha_inicio: { lte: fechaFinDate },
+          fecha_fin: { gte: fechaIni },
+        },
+        select: { id: true },
+      });
+      const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
+
+      // Obtener espacios ya reservados en el período (excluyendo los de esta propuesta)
+      let espaciosReservadosEnPeriodo: Set<number> = new Set();
+      if (calendarioIdsOverlap.length > 0) {
+        const reservasExistentes = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIdsOverlap },
+            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+            solicitudCaras_id: { notIn: proposalCaraIds }, // Excluir reservas de esta propuesta
+          },
+          select: { inventario_id: true },
+        });
+        espaciosReservadosEnPeriodo = new Set(reservasExistentes.map(r => r.inventario_id));
+      }
+
       // Group reservas by whether they are completo (flujo + contraflujo at same location)
       const gruposCompletos: Map<string, number[]> = new Map();
       let reservasNormales: typeof reservas = [];
@@ -1162,15 +1190,36 @@ export class PropuestasController {
         reservasNormales = [...reservas];
       }
 
-      // Get espacio_inventario ids for the inventario_ids
-      const inventarioIds = reservas.map(r => r.inventario_id);
-      const espacios = await prisma.espacio_inventario.findMany({
-        where: { inventario_id: { in: inventarioIds } },
-      });
-      const inventarioToEspacio = new Map<number, number>();
+      // Get espacio_inventario ids for the inventario_ids (only for items without espacio_id)
+      const inventarioIdsWithoutEspacio = reservas.filter(r => !r.espacio_id).map(r => r.inventario_id);
+      const espacios = inventarioIdsWithoutEspacio.length > 0
+        ? await prisma.espacio_inventario.findMany({
+            where: { inventario_id: { in: inventarioIdsWithoutEspacio } },
+            orderBy: { numero_espacio: 'asc' },
+          })
+        : [];
+
+      // Agrupar espacios por inventario_id para encontrar el primer disponible
+      const espaciosPorInventario = new Map<number, number[]>();
       for (const esp of espacios) {
-        inventarioToEspacio.set(esp.inventario_id, esp.id);
+        if (!espaciosPorInventario.has(esp.inventario_id)) {
+          espaciosPorInventario.set(esp.inventario_id, []);
+        }
+        espaciosPorInventario.get(esp.inventario_id)!.push(esp.id);
       }
+
+      // Función helper para encontrar el primer espacio disponible de un inventario
+      const encontrarEspacioDisponible = (inventarioId: number): number | null => {
+        const espaciosDelInventario = espaciosPorInventario.get(inventarioId);
+        if (!espaciosDelInventario) return null;
+
+        for (const espacioId of espaciosDelInventario) {
+          if (!espaciosReservadosEnPeriodo.has(espacioId)) {
+            return espacioId;
+          }
+        }
+        return null; // Todos los espacios están ocupados
+      };
 
       // Create reservas
       const createdReservas = [];
@@ -1181,14 +1230,22 @@ export class PropuestasController {
           const reserva = reservas.find(r => r.inventario_id === invId);
           if (!reserva) continue;
 
-          const espacioId = inventarioToEspacio.get(invId);
+          // Use espacio_id directly if provided (for digital items), otherwise find available
+          let espacioId = reserva.espacio_id || encontrarEspacioDisponible(invId);
           if (!espacioId) {
-            console.warn(`No espacio_inventario found for inventario_id ${invId}`);
+            console.warn(`No hay espacios disponibles para inventario_id ${invId}`);
+            continue;
+          }
+
+          // Validar que el espacio no esté reservado en el período (por otra propuesta)
+          if (espaciosReservadosEnPeriodo.has(espacioId)) {
+            console.warn(`El espacio ${espacioId} ya está reservado en el período`);
             continue;
           }
 
           const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
 
+          // Verificar duplicados en la misma propuesta
           const exists = await prisma.reservas.findFirst({
             where: {
               inventario_id: espacioId,
@@ -1218,20 +1275,31 @@ export class PropuestasController {
               grupo_completo_id: parseInt(grupoId),
             },
           });
+
+          // Marcar espacio como usado para evitar duplicados en este request
+          espaciosReservadosEnPeriodo.add(espacioId);
           createdReservas.push(created);
         }
       }
 
       // Process normal reservas
       for (const reserva of reservasNormales) {
-        const espacioId = inventarioToEspacio.get(reserva.inventario_id);
+        // Use espacio_id directly if provided (for digital items), otherwise find available
+        let espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
         if (!espacioId) {
-          console.warn(`No espacio_inventario found for inventario_id ${reserva.inventario_id}`);
+          console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
+          continue;
+        }
+
+        // Validar que el espacio no esté reservado en el período (por otra propuesta)
+        if (espaciosReservadosEnPeriodo.has(espacioId)) {
+          console.warn(`El espacio ${espacioId} ya está reservado en el período`);
           continue;
         }
 
         const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
 
+        // Verificar duplicados en la misma propuesta
         const exists = await prisma.reservas.findFirst({
           where: {
             inventario_id: espacioId,
@@ -1261,6 +1329,9 @@ export class PropuestasController {
             grupo_completo_id: null,
           },
         });
+
+        // Marcar espacio como usado para evitar duplicados en este request
+        espaciosReservadosEnPeriodo.add(espacioId);
         createdReservas.push(created);
       }
 

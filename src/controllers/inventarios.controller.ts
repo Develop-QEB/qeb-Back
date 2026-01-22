@@ -439,23 +439,119 @@ export class InventariosController {
         }
       }
 
-      // Build the response with espacio info and filter out reserved
-      const espaciosByInventario = espacios.reduce((acc, esp) => {
-        if (!acc[esp.inventario_id]) {
-          acc[esp.inventario_id] = [];
-        }
-        acc[esp.inventario_id].push(esp);
-        return acc;
-      }, {} as Record<number, typeof espacios>);
+      // Get reserved espacio_ids (not inventario_ids) for digital inventory
+      let reservedEspacioIds: Set<number> = new Set();
+      let reservedForCaraEspacioIds: Set<number> = new Set();
 
-      const disponibles = inventarios
-        .filter(inv => !reservedInventarioIds.has(inv.id))
-        .map(inv => ({
-          ...inv,
-          espacios: espaciosByInventario[inv.id] || [],
-          espacios_count: (espaciosByInventario[inv.id] || []).length,
-          ya_reservado_para_cara: alreadyReservedForCara.has(inv.id),
-        }));
+      if (fecha_inicio && fecha_fin) {
+        const fechaIni2 = new Date(fecha_inicio as string);
+        const fechaFin2 = new Date(fecha_fin as string);
+
+        const calendarios2 = await prisma.calendario.findMany({
+          where: {
+            deleted_at: null,
+            OR: [{ fecha_inicio: { lte: fechaFin2 }, fecha_fin: { gte: fechaIni2 } }],
+          },
+          select: { id: true },
+        });
+
+        if (calendarios2.length > 0) {
+          const reservas2 = await prisma.reservas.findMany({
+            where: {
+              deleted_at: null,
+              calendario_id: { in: calendarios2.map(c => c.id) },
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
+            },
+            select: { inventario_id: true }, // This is actually espacio_inventario.id
+          });
+          reservedEspacioIds = new Set(reservas2.map(r => r.inventario_id));
+        }
+      }
+
+      if (solicitudCaraId) {
+        const existingReservas2 = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            solicitudCaras_id: parseInt(solicitudCaraId as string),
+          },
+          select: { inventario_id: true },
+        });
+        reservedForCaraEspacioIds = new Set(existingReservas2.map(r => r.inventario_id));
+      }
+
+      // Build the response - for digital items, create one entry per available espacio
+      const disponibles: Array<{
+        id: number;
+        codigo_unico: string | null;
+        ubicacion: string | null;
+        tipo_de_mueble: string | null;
+        tipo_de_cara: string | null;
+        cara: string | null;
+        latitud: number | null;
+        longitud: number | null;
+        plaza: string | null;
+        estado: string | null;
+        municipio: string | null;
+        estatus: string | null;
+        tarifa_publica: number | null;
+        tarifa_piso: number | null;
+        tradicional_digital: string | null;
+        nivel_socioeconomico: string | null;
+        ancho: number | null;
+        alto: number | null;
+        total_espacios: number | null;
+        entre_calle_1: string | null;
+        entre_calle_2: string | null;
+        orientacion: string | null;
+        sentido: string | null;
+        espacio_id: number | null;
+        numero_espacio: number | null;
+        espacios: typeof espacios;
+        espacios_count: number;
+        ya_reservado_para_cara: boolean;
+      }> = [];
+
+      for (const inv of inventarios) {
+        const invEspacios = espacios.filter(e => e.inventario_id === inv.id);
+        const isDigital = inv.tradicional_digital === 'Digital' || (inv.total_espacios && inv.total_espacios > 0);
+
+        if (isDigital && invEspacios.length > 0) {
+          // Digital: create one entry per available espacio
+          for (const esp of invEspacios) {
+            const isReserved = reservedEspacioIds.has(esp.id);
+            const isReservedForCara = reservedForCaraEspacioIds.has(esp.id);
+
+            if (!isReserved) {
+              disponibles.push({
+                ...inv,
+                tarifa_publica: inv.tarifa_publica ? Number(inv.tarifa_publica) : null,
+                tarifa_piso: inv.tarifa_piso ? Number(inv.tarifa_piso) : null,
+                espacio_id: esp.id,
+                numero_espacio: esp.numero_espacio,
+                espacios: [esp],
+                espacios_count: 1,
+                ya_reservado_para_cara: isReservedForCara,
+              });
+            }
+          }
+        } else {
+          // Traditional: show once if not all reserved
+          const allReserved = invEspacios.length > 0 && invEspacios.every(e => reservedEspacioIds.has(e.id));
+          if (!allReserved && !reservedInventarioIds.has(inv.id)) {
+            const availableEspacios = invEspacios.filter(e => !reservedEspacioIds.has(e.id));
+            disponibles.push({
+              ...inv,
+              tarifa_publica: inv.tarifa_publica ? Number(inv.tarifa_publica) : null,
+              tarifa_piso: inv.tarifa_piso ? Number(inv.tarifa_piso) : null,
+              espacio_id: availableEspacios[0]?.id || null,
+              numero_espacio: availableEspacios[0]?.numero_espacio || null,
+              espacios: availableEspacios,
+              espacios_count: availableEspacios.length,
+              ya_reservado_para_cara: alreadyReservedForCara.has(inv.id),
+            });
+          }
+        }
+      }
 
       res.json({
         success: true,
@@ -663,6 +759,283 @@ export class InventariosController {
     } catch (error) {
       console.error('Error en getHistorial:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Poblar/actualizar la tabla espacio_inventario basado en todos los inventarios
+   * - Para digitales (total_espacios > 0): crear N registros (1 por espacio)
+   * - Para tradicionales: crear 1 registro por inventario
+   */
+  async poblarEspaciosInventario(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      // 1. Limpiar la tabla espacio_inventario
+      await prisma.espacio_inventario.deleteMany({});
+      console.log('[poblarEspacios] Tabla espacio_inventario limpiada');
+
+      // 2. Obtener TODOS los inventarios
+      const todosInventarios = await prisma.inventarios.findMany({
+        select: {
+          id: true,
+          codigo_unico: true,
+          total_espacios: true,
+          tipo_de_mueble: true,
+          tradicional_digital: true
+        }
+      });
+
+      console.log(`[poblarEspacios] Encontrados ${todosInventarios.length} inventarios totales`);
+
+      // 3. Crear registros de espacios
+      const espaciosToCreate: { inventario_id: number; numero_espacio: number }[] = [];
+      let digitalesCount = 0;
+      let tradicionalesCount = 0;
+
+      for (const inv of todosInventarios) {
+        const isDigital = inv.tradicional_digital === 'Digital' || (inv.total_espacios && inv.total_espacios > 0);
+
+        if (isDigital && inv.total_espacios && inv.total_espacios > 0) {
+          // Digital: crear N espacios
+          for (let i = 1; i <= inv.total_espacios; i++) {
+            espaciosToCreate.push({
+              inventario_id: inv.id,
+              numero_espacio: i
+            });
+          }
+          digitalesCount++;
+        } else {
+          // Tradicional: crear 1 espacio
+          espaciosToCreate.push({
+            inventario_id: inv.id,
+            numero_espacio: 1
+          });
+          tradicionalesCount++;
+        }
+      }
+
+      // 4. Insertar todos los espacios
+      if (espaciosToCreate.length > 0) {
+        await prisma.espacio_inventario.createMany({
+          data: espaciosToCreate
+        });
+      }
+
+      console.log(`[poblarEspacios] Creados ${espaciosToCreate.length} espacios (${digitalesCount} digitales, ${tradicionalesCount} tradicionales)`);
+
+      // Detalle solo de digitales para no sobrecargar la respuesta
+      const inventariosDigitales = todosInventarios.filter(inv =>
+        inv.tradicional_digital === 'Digital' || (inv.total_espacios && inv.total_espacios > 0)
+      );
+
+      res.json({
+        success: true,
+        message: `Se poblaron ${espaciosToCreate.length} espacios (${digitalesCount} digitales con múltiples espacios, ${tradicionalesCount} tradicionales)`,
+        data: {
+          inventarios_procesados: todosInventarios.length,
+          espacios_creados: espaciosToCreate.length,
+          digitales: digitalesCount,
+          tradicionales: tradicionalesCount,
+          detalle_digitales: inventariosDigitales.map(inv => ({
+            id: inv.id,
+            codigo: inv.codigo_unico,
+            tipo: inv.tipo_de_mueble,
+            espacios: inv.total_espacios
+          }))
+        }
+      });
+    } catch (error) {
+      console.error('Error en poblarEspaciosInventario:', error);
+      const message = error instanceof Error ? error.message : 'Error al poblar espacios';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Arreglar reservas huérfanas después de repoblar espacio_inventario
+   * Las reservas que tenían inventario_id apuntando a IDs viejos necesitan actualizarse
+   */
+  async arreglarReservasHuerfanas(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      // 1. Obtener todos los espacio_inventario actuales
+      const espaciosActuales = await prisma.espacio_inventario.findMany({
+        select: { id: true, inventario_id: true, numero_espacio: true }
+      });
+      const espacioIdsActuales = new Set(espaciosActuales.map(e => e.id));
+
+      // Crear mapa de inventario_id -> espacio_id (primer espacio de cada inventario)
+      const inventarioToEspacio = new Map<number, number>();
+      for (const esp of espaciosActuales) {
+        if (!inventarioToEspacio.has(esp.inventario_id)) {
+          inventarioToEspacio.set(esp.inventario_id, esp.id);
+        }
+      }
+
+      // 2. Obtener todas las reservas
+      const todasReservas = await prisma.reservas.findMany({
+        where: { deleted_at: null },
+        select: { id: true, inventario_id: true }
+      });
+
+      // 3. Identificar reservas huérfanas (su inventario_id no existe en espacio_inventario actual)
+      const reservasHuerfanas = todasReservas.filter(r => !espacioIdsActuales.has(r.inventario_id));
+      console.log(`[arreglarReservas] Encontradas ${reservasHuerfanas.length} reservas huérfanas de ${todasReservas.length} totales`);
+
+      // 4. Intentar arreglar cada reserva huérfana
+      // Asumimos que el viejo inventario_id era el inventarios.id directamente
+      let arregladas = 0;
+      let noEncontradas = 0;
+      const detalles: { reservaId: number; oldId: number; newId: number | null; status: string }[] = [];
+
+      for (const reserva of reservasHuerfanas) {
+        const oldInventarioId = reserva.inventario_id;
+
+        // Buscar si existe un espacio_inventario para este inventario_id
+        const nuevoEspacioId = inventarioToEspacio.get(oldInventarioId);
+
+        if (nuevoEspacioId) {
+          // Actualizar la reserva con el nuevo espacio_id
+          await prisma.reservas.update({
+            where: { id: reserva.id },
+            data: { inventario_id: nuevoEspacioId }
+          });
+          arregladas++;
+          detalles.push({
+            reservaId: reserva.id,
+            oldId: oldInventarioId,
+            newId: nuevoEspacioId,
+            status: 'arreglada'
+          });
+        } else {
+          noEncontradas++;
+          detalles.push({
+            reservaId: reserva.id,
+            oldId: oldInventarioId,
+            newId: null,
+            status: 'no_encontrada'
+          });
+        }
+      }
+
+      console.log(`[arreglarReservas] Arregladas: ${arregladas}, No encontradas: ${noEncontradas}`);
+
+      res.json({
+        success: true,
+        message: `Se procesaron ${reservasHuerfanas.length} reservas huérfanas`,
+        data: {
+          total_reservas: todasReservas.length,
+          huerfanas_encontradas: reservasHuerfanas.length,
+          arregladas,
+          no_encontradas: noEncontradas,
+          detalle: detalles.slice(0, 50) // Solo mostrar las primeras 50 para no sobrecargar
+        }
+      });
+    } catch (error) {
+      console.error('Error en arreglarReservasHuerfanas:', error);
+      const message = error instanceof Error ? error.message : 'Error al arreglar reservas';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener espacios disponibles de un inventario digital
+   * Retorna los espacios que NO están reservados en el período dado
+   */
+  async getEspaciosDisponibles(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const inventarioId = parseInt(req.params.id);
+      const { fecha_inicio, fecha_fin, solicitudCaraId } = req.query;
+
+      // Obtener todos los espacios del inventario
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: inventarioId }
+      });
+
+      if (espacios.length === 0) {
+        res.json({
+          success: true,
+          data: {
+            total_espacios: 0,
+            disponibles: 0,
+            reservados: 0,
+            espacios: []
+          }
+        });
+        return;
+      }
+
+      // Obtener calendarios del período
+      let reservadosIds: Set<number> = new Set();
+
+      if (fecha_inicio && fecha_fin) {
+        const calendarios = await prisma.calendario.findMany({
+          where: {
+            OR: [
+              { fecha_inicio: { lte: new Date(fecha_fin as string), gte: new Date(fecha_inicio as string) } },
+              { fecha_fin: { lte: new Date(fecha_fin as string), gte: new Date(fecha_inicio as string) } },
+              { AND: [{ fecha_inicio: { lte: new Date(fecha_inicio as string) } }, { fecha_fin: { gte: new Date(fecha_fin as string) } }] }
+            ]
+          },
+          select: { id: true }
+        });
+
+        const calendarioIds = calendarios.map(c => c.id);
+
+        if (calendarioIds.length > 0) {
+          const reservas = await prisma.reservas.findMany({
+            where: {
+              deleted_at: null,
+              calendario_id: { in: calendarioIds },
+              inventario_id: { in: espacios.map(e => e.id) },
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] }
+            },
+            select: { inventario_id: true }
+          });
+          reservadosIds = new Set(reservas.map(r => r.inventario_id));
+        }
+      }
+
+      // También excluir los ya reservados para esta cara específica
+      if (solicitudCaraId) {
+        const existingReservas = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            solicitudCaras_id: parseInt(solicitudCaraId as string),
+            inventario_id: { in: espacios.map(e => e.id) }
+          },
+          select: { inventario_id: true }
+        });
+        existingReservas.forEach(r => reservadosIds.add(r.inventario_id));
+      }
+
+      const espaciosConEstado = espacios.map(esp => ({
+        ...esp,
+        disponible: !reservadosIds.has(esp.id)
+      }));
+
+      const disponibles = espaciosConEstado.filter(e => e.disponible).length;
+
+      res.json({
+        success: true,
+        data: {
+          total_espacios: espacios.length,
+          disponibles,
+          reservados: espacios.length - disponibles,
+          espacios: espaciosConEstado
+        }
+      });
+    } catch (error) {
+      console.error('Error en getEspaciosDisponibles:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener espacios';
       res.status(500).json({
         success: false,
         error: message,
