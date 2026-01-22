@@ -1772,7 +1772,7 @@ export class CampanasController {
       // Crear directorio para archivos digitales si no existe
       const fs = await import('fs');
       const path = await import('path');
-      const uploadDir = path.join(process.cwd(), 'uploads', 'digitales');
+      const uploadDir = path.join(__dirname, '../../uploads/digitales');
       if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
       }
