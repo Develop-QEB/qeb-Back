@@ -328,17 +328,43 @@ model tareas {
 }
 
 model usuario {
-  id                 Int       @id @default(autoincrement())
-  nombre             String    @db.VarChar(255)
-  correo_electronico String    @db.VarChar(100)
-  user_password      String?   @db.VarChar(255)
-  area               String    @db.VarChar(50)
-  puesto             String    @db.VarChar(50)
-  updated_at         DateTime? @db.Timestamp(0)
-  created_at         DateTime? @default(now()) @db.Timestamp(0)
-  deleted_at         DateTime? @db.Timestamp(0)
-  user_role          String    @default("Normal") @db.VarChar(50)
-  foto_perfil        String?   @db.VarChar(500)
+  id                 Int              @id @default(autoincrement())
+  nombre             String           @db.VarChar(255)
+  correo_electronico String           @db.VarChar(100)
+  user_password      String?          @db.VarChar(255)
+  area               String           @db.VarChar(50)
+  puesto             String           @db.VarChar(50)
+  updated_at         DateTime?        @db.Timestamp(0)
+  created_at         DateTime?        @default(now()) @db.Timestamp(0)
+  deleted_at         DateTime?        @db.Timestamp(0)
+  user_role          String           @default("Normal") @db.VarChar(50)
+  foto_perfil        String?          @db.VarChar(500)
+  equipos            usuario_equipo[]
+}
+
+model equipo {
+  id          Int              @id @default(autoincrement())
+  nombre      String           @db.VarChar(100)
+  descripcion String?          @db.Text
+  color       String?          @db.VarChar(20)
+  created_at  DateTime?        @default(now()) @db.Timestamp(0)
+  updated_at  DateTime?        @db.Timestamp(0)
+  deleted_at  DateTime?        @db.Timestamp(0)
+  miembros    usuario_equipo[]
+}
+
+model usuario_equipo {
+  id         Int       @id @default(autoincrement())
+  usuario_id Int
+  equipo_id  Int
+  rol        String?   @db.VarChar(50)
+  created_at DateTime? @default(now()) @db.Timestamp(0)
+  usuario    usuario   @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+  equipo     equipo    @relation(fields: [equipo_id], references: [id], onDelete: Cascade)
+
+  @@unique([usuario_id, equipo_id])
+  @@index([usuario_id])
+  @@index([equipo_id])
 }
 
 model correos_enviados {

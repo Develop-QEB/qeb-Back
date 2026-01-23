@@ -12,6 +12,7 @@ import correosRoutes from './correos.routes';
 import notasRoutes from './notas.routes';
 import uploadsRoutes from './uploads.routes';
 import usuariosRoutes from './usuarios.routes';
+import equiposRoutes from './equipos.routes';
 
 import publicRoutes from './public.routes';
 
@@ -31,5 +32,6 @@ router.use('/correos', correosRoutes);
 router.use('/notas', notasRoutes);
 router.use('/uploads', uploadsRoutes);
 router.use('/usuarios', usuariosRoutes);
+router.use('/equipos', equiposRoutes);
 
 export default router;
