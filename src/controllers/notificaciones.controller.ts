@@ -900,10 +900,26 @@ export class NotificacionesController {
           tarifa_publica: true,
           estado_autorizacion: true,
           articulo: true,
+          inicio_periodo: true,
         },
       });
 
-      // Calcular tarifa efectiva para cada cara e incluir cliente/campaña
+      // Get catorcena info based on the first cara's periodo
+      let catorcenaInfo: string | null = null;
+      if (caras.length > 0 && caras[0].inicio_periodo) {
+        const fecha = new Date(caras[0].inicio_periodo);
+        const catorcena = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: fecha },
+            fecha_fin: { gte: fecha },
+          },
+        });
+        if (catorcena) {
+          catorcenaInfo = `Cat ${catorcena.numero_catorcena} - ${catorcena.a_o}`;
+        }
+      }
+
+      // Calcular tarifa efectiva para cada cara e incluir cliente/campaña/catorcena
       const carasConTarifa = caras.map(cara => {
         const totalCaras = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
         const tarifaEfectiva = totalCaras > 0 ? (Number(cara.costo) || 0) / totalCaras : 0;
@@ -913,6 +929,7 @@ export class NotificacionesController {
           tarifa_efectiva: tarifaEfectiva,
           cliente: solicitudInfo?.cliente_nombre || null,
           campana: solicitudInfo?.cotizacion?.nombre_campania || null,
+          catorcena: catorcenaInfo,
         };
       });
 
