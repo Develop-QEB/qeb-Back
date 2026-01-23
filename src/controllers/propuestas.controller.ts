@@ -6,6 +6,7 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
+import { emitToPropuesta, emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -1337,6 +1338,12 @@ export class PropuestasController {
 
       // Update solicitudCaras totals if needed
       await this.updateSolicitudCarasTotals(solicitudCaraId);
+
+      // Emit socket event for real-time updates
+      if (createdReservas.length > 0) {
+        emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
+        emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
+      }
 
       // Crear notificaciones para usuarios asignados a la propuesta
       const userId = req.user?.userId;

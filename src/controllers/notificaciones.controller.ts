@@ -744,6 +744,12 @@ export class NotificacionesController {
 
       const result = await aprobarCaras(idquote, tipo, userId || 0, userName);
 
+      // Emit socket event for real-time updates
+      const propuestaId = parseInt(idquote);
+      if (!isNaN(propuestaId)) {
+        emitToAll(SOCKET_EVENTS.AUTORIZACION_APROBADA, { propuestaId, idquote });
+      }
+
       res.json({
         success: true,
         message: `${result.carasAprobadas} cara(s) aprobada(s) exitosamente`,
@@ -833,6 +839,12 @@ export class NotificacionesController {
 
       await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario);
 
+      // Emit socket event for real-time updates
+      const propuestaId = parseInt(idquote);
+      if (!isNaN(propuestaId)) {
+        emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });
+      }
+
       res.json({
         success: true,
         message: 'Solicitud rechazada exitosamente',
@@ -861,6 +873,19 @@ export class NotificacionesController {
         return;
       }
 
+      // Get solicitud info for cliente and campaña
+      const solicitudInfo = await prisma.propuestas.findFirst({
+        where: { idquote },
+        select: {
+          cliente_nombre: true,
+          cotizacion: {
+            select: {
+              nombre_campania: true,
+            },
+          },
+        },
+      });
+
       const caras = await prisma.solicitudCaras.findMany({
         where: { idquote },
         select: {
@@ -874,10 +899,11 @@ export class NotificacionesController {
           costo: true,
           tarifa_publica: true,
           estado_autorizacion: true,
+          articulo: true,
         },
       });
 
-      // Calcular tarifa efectiva para cada cara
+      // Calcular tarifa efectiva para cada cara e incluir cliente/campaña
       const carasConTarifa = caras.map(cara => {
         const totalCaras = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
         const tarifaEfectiva = totalCaras > 0 ? (Number(cara.costo) || 0) / totalCaras : 0;
@@ -885,6 +911,8 @@ export class NotificacionesController {
           ...cara,
           total_caras: totalCaras,
           tarifa_efectiva: tarifaEfectiva,
+          cliente: solicitudInfo?.cliente_nombre || null,
+          campana: solicitudInfo?.cotizacion?.nombre_campania || null,
         };
       });
 

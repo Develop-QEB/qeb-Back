@@ -54,6 +54,18 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de campana-${campanaId}`);
     });
 
+    // Unirse a un room específico de propuesta
+    socket.on('join-propuesta', (propuestaId: number) => {
+      socket.join(`propuesta-${propuestaId}`);
+      console.log(`[Socket] ${socket.id} se unió a propuesta-${propuestaId}`);
+    });
+
+    // Salir del room de propuesta
+    socket.on('leave-propuesta', (propuestaId: number) => {
+      socket.leave(`propuesta-${propuestaId}`);
+      console.log(`[Socket] ${socket.id} salió de propuesta-${propuestaId}`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`[Socket] Cliente desconectado: ${socket.id}`);
     });
@@ -88,6 +100,15 @@ export const SOCKET_EVENTS = {
   // Inventario
   INVENTARIO_ACTUALIZADO: 'inventario:actualizado',
 
+  // Reservas y Propuestas
+  RESERVA_CREADA: 'reserva:creada',
+  RESERVA_ELIMINADA: 'reserva:eliminada',
+  PROPUESTA_ACTUALIZADA: 'propuesta:actualizada',
+
+  // Autorizaciones
+  AUTORIZACION_APROBADA: 'autorizacion:aprobada',
+  AUTORIZACION_RECHAZADA: 'autorizacion:rechazada',
+
   // General
   DATOS_ACTUALIZADOS: 'datos:actualizados',
 };
@@ -105,5 +126,13 @@ export function emitToAll(event: string, data: unknown): void {
   if (io) {
     io.emit(event, data);
     console.log(`[Socket] Emitido ${event} a todos`);
+  }
+}
+
+// Helper para emitir a una propuesta específica
+export function emitToPropuesta(propuestaId: number, event: string, data: unknown): void {
+  if (io) {
+    io.to(`propuesta-${propuestaId}`).emit(event, data);
+    console.log(`[Socket] Emitido ${event} a propuesta-${propuestaId}`);
   }
 }
