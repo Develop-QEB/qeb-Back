@@ -417,22 +417,24 @@ export async function rechazarSolicitud(
   if (solicitud?.usuario_id) {
     const notifRechazo = await prisma.tareas.create({
       data: {
-        tipo: 'Notificación',
-        titulo: `Solicitud #${solicitudId} Rechazada`,
-        descripcion: `Tu solicitud ha sido rechazada por ${rechazadorNombre}. Motivo: ${comentario}`,
-        estatus: 'Notificación nueva',
-        id_responsable: rechazadorId,
-        responsable: rechazadorNombre,
+        tipo: 'Rechazo Autorización',
+        titulo: `Solicitud #${solicitudId} Rechazada - Requiere edición`,
+        descripcion: `Tu solicitud ha sido rechazada por ${rechazadorNombre}. Motivo: ${comentario}. Haz clic para editar la solicitud y corregir las caras.`,
+        estatus: 'Pendiente',
+        id_responsable: solicitud.usuario_id,
+        responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
         id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || ''
+        asignado: solicitud.nombre_usuario || '',
+        referencia_tipo: 'solicitud',
+        referencia_id: solicitudId
       }
     });
 
     // Emitir notificación via WebSocket
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
       tareaId: notifRechazo.id,
-      tipo: 'Notificación',
+      tipo: 'Rechazo Autorización',
       solicitudId
     });
   }
