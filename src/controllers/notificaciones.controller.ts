@@ -840,10 +840,7 @@ export class NotificacionesController {
       await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario);
 
       // Emit socket event for real-time updates
-      const propuestaId = parseInt(idquote);
-      if (!isNaN(propuestaId)) {
-        emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });
-      }
+      emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });
 
       res.json({
         success: true,
@@ -872,19 +869,6 @@ export class NotificacionesController {
         });
         return;
       }
-
-      // Get solicitud info for cliente and campaña
-      const solicitudInfo = await prisma.propuestas.findFirst({
-        where: { idquote },
-        select: {
-          cliente_nombre: true,
-          cotizacion: {
-            select: {
-              nombre_campania: true,
-            },
-          },
-        },
-      });
 
       const caras = await prisma.solicitudCaras.findMany({
         where: { idquote },
@@ -927,8 +911,6 @@ export class NotificacionesController {
           ...cara,
           total_caras: totalCaras,
           tarifa_efectiva: tarifaEfectiva,
-          cliente: solicitudInfo?.cliente_nombre || null,
-          campana: solicitudInfo?.cotizacion?.nombre_campania || null,
           catorcena: catorcenaInfo,
         };
       });

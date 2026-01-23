@@ -425,9 +425,7 @@ export async function rechazarSolicitud(
         responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
         id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || '',
-        referencia_tipo: 'solicitud',
-        referencia_id: solicitudId
+        asignado: solicitud.nombre_usuario || ''
       }
     });
 
