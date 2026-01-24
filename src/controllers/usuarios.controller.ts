@@ -105,22 +105,51 @@ export class UsuariosController {
           user_role: true,
           foto_perfil: true,
           created_at: true,
+          equipos: {
+            include: {
+              equipo: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  color: true,
+                  deleted_at: true,
+                },
+              },
+            },
+          },
         },
         orderBy: {
           nombre: 'asc',
         },
       });
 
-      const formattedUsers = usuarios.map((u) => ({
-        id: u.id,
-        nombre: u.nombre,
-        email: u.correo_electronico,
-        area: u.area,
-        puesto: u.puesto,
-        rol: u.user_role,
-        foto_perfil: u.foto_perfil,
-        created_at: u.created_at,
-      }));
+      const formattedUsers = usuarios.map((u) => {
+        const equiposActivos = u.equipos.filter((e) => e.equipo.deleted_at === null);
+        const equiposAdmin = equiposActivos.filter((e) => e.rol === 'Administrador');
+
+        return {
+          id: u.id,
+          nombre: u.nombre,
+          email: u.correo_electronico,
+          area: u.area,
+          puesto: u.puesto,
+          rol: u.user_role,
+          foto_perfil: u.foto_perfil,
+          created_at: u.created_at,
+          total_equipos: equiposActivos.length,
+          equipos_admin: equiposAdmin.map((e) => ({
+            id: e.equipo.id,
+            nombre: e.equipo.nombre,
+            color: e.equipo.color,
+          })),
+          equipos: equiposActivos.map((e) => ({
+            id: e.equipo.id,
+            nombre: e.equipo.nombre,
+            color: e.equipo.color,
+            rol_equipo: e.rol,
+          })),
+        };
+      });
 
       res.json({
         success: true,
