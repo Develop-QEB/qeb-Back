@@ -37,6 +37,13 @@ export interface PaginatedResponse<T> extends ApiResponse<T[]> {
   };
 }
 
+export interface UserEquipo {
+  id: number;
+  nombre: string;
+  color: string | null;
+  rol_equipo: string | null;
+}
+
 export interface UserResponse {
   id: number;
   nombre: string;
@@ -45,6 +52,7 @@ export interface UserResponse {
   area: string;
   puesto: string;
   foto_perfil?: string | null;
+  equipos?: UserEquipo[];
 }
 
 export interface AuthResponse {

@@ -4,6 +4,34 @@ import { authService } from '../services/auth.service';
 import { AuthRequest } from '../types';
 
 export class AuthController {
+  async register(req: Request, res: Response): Promise<void> {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        res.status(400).json({
+          success: false,
+          error: 'Datos de entrada inválidos',
+          details: errors.array(),
+        });
+        return;
+      }
+
+      const { nombre, correo, password, area, puesto } = req.body;
+      const result = await authService.register({ nombre, correo, password, area, puesto });
+
+      res.status(201).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al registrar usuario';
+      res.status(400).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async login(req: Request, res: Response): Promise<void> {
     try {
       const errors = validationResult(req);

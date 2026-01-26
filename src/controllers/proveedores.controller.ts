@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { validationResult } from 'express-validator';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { emitToProveedores, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 
 export class ProveedoresController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -134,6 +135,14 @@ export class ProveedoresController {
         success: true,
         data: proveedor,
       });
+
+      // Emitir evento WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      emitToProveedores(SOCKET_EVENTS.PROVEEDOR_CREADO, {
+        proveedor,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'creado' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al crear proveedor';
       res.status(500).json({
@@ -206,6 +215,14 @@ export class ProveedoresController {
         success: true,
         data: proveedor,
       });
+
+      // Emitir evento WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      emitToProveedores(SOCKET_EVENTS.PROVEEDOR_ACTUALIZADO, {
+        proveedor,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'actualizado' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar proveedor';
       res.status(500).json({
@@ -303,6 +320,14 @@ export class ProveedoresController {
         success: true,
         message: 'Proveedor eliminado correctamente',
       });
+
+      // Emitir evento WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      emitToProveedores(SOCKET_EVENTS.PROVEEDOR_ELIMINADO, {
+        proveedorId: parseInt(id),
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'eliminado' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar proveedor';
       res.status(500).json({

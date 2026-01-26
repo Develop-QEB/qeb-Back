@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 export class EquiposController {
   // Obtener todos los equipos con sus miembros
@@ -335,6 +336,13 @@ export class EquiposController {
         },
       });
 
+      // Emitir evento de socket para actualizar usuarios en tiempo real
+      emitToAll(SOCKET_EVENTS.EQUIPO_MIEMBROS_ACTUALIZADO, {
+        equipoId: parseInt(id),
+        usuarioIds: usuario_ids,
+        action: 'added',
+      });
+
       res.json({
         success: true,
         message: `${addedCount} miembro(s) agregado(s) al equipo`,
@@ -424,6 +432,13 @@ export class EquiposController {
         });
         return;
       }
+
+      // Emitir evento de socket para actualizar usuarios en tiempo real
+      emitToAll(SOCKET_EVENTS.EQUIPO_MIEMBROS_ACTUALIZADO, {
+        equipoId: parseInt(id),
+        usuarioIds: usuario_ids,
+        action: 'removed',
+      });
 
       res.json({
         success: true,

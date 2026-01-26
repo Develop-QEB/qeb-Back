@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { emitToClientes, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 
 const SAP_API_URL = process.env.SAP_API_URL || 'https://binding-convinced-ride-foto.trycloudflare.com';
 
@@ -485,6 +486,14 @@ export class ClientesController {
         data: cliente,
         message: 'Cliente agregado exitosamente',
       });
+
+      // Emitir evento WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      emitToClientes(SOCKET_EVENTS.CLIENTE_CREADO, {
+        cliente,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'cliente', accion: 'creado' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al crear cliente';
       res.status(500).json({
@@ -518,6 +527,14 @@ export class ClientesController {
         success: true,
         message: 'Cliente eliminado exitosamente',
       });
+
+      // Emitir evento WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      emitToClientes(SOCKET_EVENTS.CLIENTE_ELIMINADO, {
+        clienteId: parseInt(id),
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'cliente', accion: 'eliminado' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar cliente';
       res.status(500).json({

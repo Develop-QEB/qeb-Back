@@ -10,7 +10,7 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
-import { emitToCampana, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { uploadToCloudinary } from '../config/cloudinary';
 
 // Configurar transporter de nodemailer para envío de correos
@@ -463,6 +463,21 @@ export class CampanasController {
         success: true,
         data: campana,
       });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+        campanaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+        campanaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'campana', accion: 'status_changed' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
       res.status(500).json({
@@ -650,6 +665,17 @@ export class CampanasController {
         success: true,
         data: campana,
       });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+        campanaId,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+        campanaId,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'campana', accion: 'actualizada' });
     } catch (error) {
       console.error('Error updating campana:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar campaña';
@@ -2602,7 +2628,7 @@ export class CampanasController {
           LEFT JOIN solicitudCaras sc2 ON sc2.id = rsv2.solicitudCaras_id
           WHERE tr.campania_id = ${campanaId}
             AND tr.estatus != 'Atendido'
-            AND tr.estatus != 'Pendientes'
+            AND tr.estatus != 'Pendiente'
             AND tr.estatus != 'Notificación nueva'
             AND (rsv.tarea IS NULL OR rsv.tarea != 'Aprobado')
             AND (rsv2.tarea IS NULL OR rsv2.tarea != 'Aprobado')
@@ -2746,6 +2772,44 @@ export class CampanasController {
       console.log('createTarea - Token user:', { userId: req.user?.userId, nombre: req.user?.nombre });
       console.log('createTarea - Responsable final:', { responsableId, responsableNombre });
 
+      // Validación de campos requeridos según tipo de tarea
+      if (tipo === 'Impresión') {
+        if (num_impresiones === undefined || num_impresiones === null || Number(num_impresiones) <= 0) {
+          res.status(400).json({
+            success: false,
+            error: 'El número de impresiones es requerido para tareas de tipo Impresión',
+          });
+          return;
+        }
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de tipo Impresión',
+          });
+          return;
+        }
+      }
+
+      if (tipo === 'Revisión de artes' || tipo === 'Corrección') {
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de Revisión de artes',
+          });
+          return;
+        }
+      }
+
+      if (tipo === 'Testigo' || tipo === 'Instalación') {
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de Testigo/Instalación',
+          });
+          return;
+        }
+      }
+
       // Obtener info de la campaña para el id_propuesta
       const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
       let propuestaId = '';
@@ -2866,6 +2930,14 @@ export class CampanasController {
             tareaValue = 'Pedido Solicitado';
           } else if (tipo === 'Recepción') {
             tareaValue = 'Por Recibir';
+          } else if (tipo === 'Corrección') {
+            tareaValue = 'En corrección';
+          } else if (tipo === 'Testigo') {
+            tareaValue = 'Pendiente testigo';
+          } else if (tipo === 'Programación') {
+            tareaValue = 'En programación';
+          } else if (tipo === 'Instalación') {
+            tareaValue = 'Pendiente instalación';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
@@ -3057,8 +3129,11 @@ export class CampanasController {
       if (tarea.ids_reservas) {
         const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
         if (reservaIds.length > 0) {
+          // Usar query parametrizada para evitar SQL injection
+          const placeholders = reservaIds.map(() => '?').join(',');
           await prisma.$executeRawUnsafe(
-            `UPDATE reservas SET tarea = NULL WHERE id IN (${reservaIds.join(',')})`
+            `UPDATE reservas SET tarea = NULL WHERE id IN (${placeholders})`,
+            ...reservaIds
           );
         }
       }
@@ -3408,15 +3483,71 @@ export class CampanasController {
     }
   }
 
-// Obtener lista de usuarios para asignación
+// Obtener lista de usuarios para asignación (filtrado por equipo)
   async getUsuarios(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const usuarios = await prisma.$queryRaw<{ id: number; nombre: string }[]>`
-        SELECT id, nombre
-        FROM usuario
-        WHERE deleted_at IS NULL
-        ORDER BY nombre ASC
-      `;
+      const filterByTeam = req.query.filterByTeam !== 'false'; // true por defecto
+      const userId = req.user?.userId;
+
+      let teamMemberIds: number[] = [];
+
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      if (filterByTeam && userId) {
+        const userTeams = await prisma.usuario_equipo.findMany({
+          where: {
+            usuario_id: userId,
+            equipo: {
+              deleted_at: null,
+            },
+          },
+          select: {
+            equipo_id: true,
+          },
+        });
+
+        if (userTeams.length > 0) {
+          const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
+          const teamMembers = await prisma.usuario_equipo.findMany({
+            where: {
+              equipo_id: { in: teamIds },
+              equipo: {
+                deleted_at: null,
+              },
+            },
+            select: {
+              usuario_id: true,
+            },
+          });
+          teamMemberIds = [...new Set(teamMembers.map((m: { usuario_id: number }) => m.usuario_id))];
+        }
+      }
+
+      // Si hay filtro por equipo y el usuario tiene equipos, filtrar por miembros
+      let usuarios: { id: number; nombre: string }[];
+      if (filterByTeam && teamMemberIds.length > 0) {
+        usuarios = await prisma.usuario.findMany({
+          where: {
+            deleted_at: null,
+            id: { in: teamMemberIds },
+          },
+          select: {
+            id: true,
+            nombre: true,
+          },
+          orderBy: { nombre: 'asc' },
+        });
+      } else {
+        usuarios = await prisma.usuario.findMany({
+          where: {
+            deleted_at: null,
+          },
+          select: {
+            id: true,
+            nombre: true,
+          },
+          orderBy: { nombre: 'asc' },
+        });
+      }
 
       res.json({
         success: true,

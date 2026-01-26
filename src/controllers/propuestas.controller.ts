@@ -6,7 +6,7 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
-import { emitToPropuesta, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -287,6 +287,21 @@ export class PropuestasController {
         success: true,
         data: propuesta,
       });
+
+      // Emitir eventos WebSocket
+      emitToPropuesta(propuestaId, SOCKET_EVENTS.PROPUESTA_STATUS_CHANGED, {
+        propuestaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToPropuestas(SOCKET_EVENTS.PROPUESTA_STATUS_CHANGED, {
+        propuestaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'propuesta', accion: 'status_changed' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
       res.status(500).json({
@@ -1526,6 +1541,20 @@ export class PropuestasController {
         success: true,
         message: `${reservaIds.length} reservas eliminadas`,
       });
+
+      // Emitir eventos WebSocket
+      if (propuestaId) {
+        emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_ELIMINADA, {
+          propuestaId,
+          reservaIds,
+          usuario: userName,
+        });
+        emitToPropuestas(SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, {
+          propuestaId,
+          usuario: userName,
+        });
+      }
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'reserva', accion: 'eliminada' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar reservas';
       res.status(500).json({ success: false, error: message });
@@ -1796,6 +1825,19 @@ export class PropuestasController {
       }
 
       res.json({ success: true, data: updatedPropuesta });
+
+      // Emitir eventos WebSocket
+      const userName = req.user?.nombre || 'Usuario';
+      const propuestaId = parseInt(id);
+      emitToPropuesta(propuestaId, SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, {
+        propuestaId,
+        usuario: userName,
+      });
+      emitToPropuestas(SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, {
+        propuestaId,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'propuesta', accion: 'actualizada' });
     } catch (error) {
       console.error('Error updating propuesta:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar propuesta';

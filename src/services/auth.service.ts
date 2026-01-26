@@ -5,7 +5,49 @@ import { AuthResponse, JwtPayload, UserResponse } from '../types';
 const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
 const ACCESS_TOKEN_EXPIRY = '30d'; // Token de larga duración (30 días)
 
+export interface RegisterData {
+  nombre: string;
+  correo: string;
+  password: string;
+  area: string;
+  puesto: string;
+}
+
 export class AuthService {
+  async register(data: RegisterData): Promise<{ message: string }> {
+    // Verificar si el correo ya existe
+    const existingUser = await prisma.usuario.findFirst({
+      where: {
+        correo_electronico: data.correo,
+        deleted_at: null,
+      },
+    });
+
+    if (existingUser) {
+      throw new Error('El correo electrónico ya está registrado');
+    }
+
+    // El rol se asigna automáticamente basado en el puesto
+    // (el puesto y el rol son iguales excepto para Administrador)
+    const user_role = data.puesto;
+
+    // Crear usuario con contraseña encriptada usando ENCRYPT() de MySQL
+    await prisma.$executeRaw`
+      INSERT INTO usuario (nombre, correo_electronico, user_password, area, puesto, user_role, created_at)
+      VALUES (
+        ${data.nombre},
+        ${data.correo},
+        ENCRYPT(${data.password}, CONCAT('$6$', SUBSTRING(SHA2(UUID(), 256), 1, 16))),
+        ${data.area},
+        ${data.puesto},
+        ${user_role},
+        NOW()
+      )
+    `;
+
+    return { message: 'Usuario registrado correctamente' };
+  }
+
   async login(email: string, password: string): Promise<AuthResponse> {
     // Verificar credenciales usando ENCRYPT() de MySQL
     const users = await prisma.$queryRaw<Array<{
@@ -31,6 +73,32 @@ export class AuthService {
       throw new Error('Credenciales invalidas');
     }
 
+    // Obtener los equipos del usuario
+    const userTeams = await prisma.usuario_equipo.findMany({
+      where: {
+        usuario_id: user.id,
+        equipo: {
+          deleted_at: null,
+        },
+      },
+      include: {
+        equipo: {
+          select: {
+            id: true,
+            nombre: true,
+            color: true,
+          },
+        },
+      },
+    });
+
+    const equipos = userTeams.map((t: { equipo: { id: number; nombre: string; color: string | null }; rol: string | null }) => ({
+      id: t.equipo.id,
+      nombre: t.equipo.nombre,
+      color: t.equipo.color,
+      rol_equipo: t.rol,
+    }));
+
     const payload: JwtPayload = {
       userId: user.id,
       email: user.correo_electronico,
@@ -50,6 +118,7 @@ export class AuthService {
       area: user.area || '',
       puesto: user.puesto || '',
       foto_perfil: user.foto_perfil,
+      equipos,
     };
 
     return {
@@ -70,6 +139,32 @@ export class AuthService {
       throw new Error('Usuario no encontrado');
     }
 
+    // Obtener los equipos del usuario
+    const userTeams = await prisma.usuario_equipo.findMany({
+      where: {
+        usuario_id: userId,
+        equipo: {
+          deleted_at: null,
+        },
+      },
+      include: {
+        equipo: {
+          select: {
+            id: true,
+            nombre: true,
+            color: true,
+          },
+        },
+      },
+    });
+
+    const equipos = userTeams.map((t: { equipo: { id: number; nombre: string; color: string | null }; rol: string | null }) => ({
+      id: t.equipo.id,
+      nombre: t.equipo.nombre,
+      color: t.equipo.color,
+      rol_equipo: t.rol,
+    }));
+
     return {
       id: user.id,
       nombre: user.nombre,
@@ -78,6 +173,7 @@ export class AuthService {
       area: user.area,
       puesto: user.puesto,
       foto_perfil: user.foto_perfil,
+      equipos,
     };
   }
 

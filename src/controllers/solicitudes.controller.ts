@@ -8,6 +8,7 @@ import {
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
+import { emitToSolicitudes, emitToDashboard, emitToCampanas, SOCKET_EVENTS } from '../config/socket';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -324,6 +325,21 @@ export class SolicitudesController {
         success: true,
         data: solicitud,
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_STATUS_CHANGED, {
+        solicitudId: solicitud.id,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      if (campania) {
+        emitToCampanas(SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+          campaniaId: campania.id,
+          usuario: userName,
+        });
+      }
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'status_changed' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
       res.status(500).json({
@@ -409,6 +425,13 @@ export class SolicitudesController {
         success: true,
         message: 'Solicitud eliminada correctamente',
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ELIMINADA, {
+        solicitudId: solicitud.id,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'eliminada' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar solicitud';
       res.status(500).json({
@@ -599,6 +622,43 @@ export class SolicitudesController {
   async getUsers(req: AuthRequest, res: Response): Promise<void> {
     try {
       const area = req.query.area as string;
+      const filterByTeam = req.query.filterByTeam === 'true';
+      const userId = req.user?.userId;
+
+      let teamMemberIds: number[] = [];
+
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      if (filterByTeam && userId) {
+        // Obtener los equipos del usuario actual
+        const userTeams = await prisma.usuario_equipo.findMany({
+          where: {
+            usuario_id: userId,
+            equipo: {
+              deleted_at: null,
+            },
+          },
+          select: {
+            equipo_id: true,
+          },
+        });
+
+        // Si el usuario tiene equipos, obtener todos los miembros de esos equipos
+        if (userTeams.length > 0) {
+          const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
+          const teamMembers = await prisma.usuario_equipo.findMany({
+            where: {
+              equipo_id: { in: teamIds },
+              equipo: {
+                deleted_at: null,
+              },
+            },
+            select: {
+              usuario_id: true,
+            },
+          });
+          teamMemberIds = [...new Set(teamMembers.map((m: { usuario_id: number }) => m.usuario_id))];
+        }
+      }
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -606,6 +666,11 @@ export class SolicitudesController {
 
       if (area) {
         where.area = area;
+      }
+
+      // Si hay filtro por equipo y el usuario tiene equipos, filtrar por miembros
+      if (filterByTeam && teamMemberIds.length > 0) {
+        where.id = { in: teamMemberIds };
       }
 
       const users = await prisma.usuario.findMany({
@@ -1034,6 +1099,19 @@ export class SolicitudesController {
         message: mensaje,
         autorizacion: autorizacionInfo,
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_CREADA, {
+        solicitud: result.solicitud,
+        propuesta: result.propuesta,
+        campania: result.campania,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_CREADA, {
+        campania: result.campania,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'creada' });
     } catch (error) {
       console.error('Error creating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al crear solicitud';
@@ -1193,6 +1271,7 @@ export class SolicitudesController {
   async atender(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const { asignados } = req.body as { asignados?: { id: number; nombre: string }[] };
       const userId = req.user?.userId;
       // Get user name from database if not in token
       let userName = req.user?.nombre;
@@ -1201,6 +1280,10 @@ export class SolicitudesController {
         userName = user?.nombre || 'Usuario';
       }
       userName = userName || 'Usuario';
+
+      // Process asignados - convert to strings for storage
+      const asignadoNombres = asignados?.map(a => a.nombre).join(', ') || '';
+      const asignadoIds = asignados?.map(a => a.id.toString()).join(', ') || '';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });
@@ -1238,11 +1321,18 @@ export class SolicitudesController {
           data: { status: 'Atendida' },
         });
 
-        // Update propuesta status
+        // Update propuesta status and asignados
         if (propuesta) {
           await tx.propuesta.update({
             where: { id: propuesta.id },
-            data: { status: 'Abierto' },
+            data: {
+              status: 'Abierto',
+              // Update asignados if provided, otherwise keep existing
+              ...(asignados && asignados.length > 0 ? {
+                asignado: asignadoNombres,
+                id_asignado: asignadoIds,
+              } : {}),
+            },
           });
         }
 
@@ -1254,6 +1344,10 @@ export class SolicitudesController {
 
         // Create new tarea for seguimiento propuesta
         if (propuesta) {
+          // Use new asignados if provided, otherwise use existing from solicitud
+          const tareaAsignado = asignados && asignados.length > 0 ? asignadoNombres : (solicitud.asignado || '');
+          const tareaIdAsignado = asignados && asignados.length > 0 ? asignadoIds : (solicitud.id_asignado || '');
+
           await tx.tareas.create({
             data: {
               fecha_inicio: new Date(),
@@ -1261,8 +1355,8 @@ export class SolicitudesController {
               tipo: 'Seguimiento de propuesta',
               responsable: solicitud.nombre_usuario || userName || '',
               id_responsable: solicitud.usuario_id || userId,
-              asignado: solicitud.asignado || '',
-              id_asignado: solicitud.id_asignado || '',
+              asignado: tareaAsignado,
+              id_asignado: tareaIdAsignado,
               estatus: 'Activo',
               descripcion: `Seguimiento de propuesta: ${cotizacion?.nombre_campania || ''}`,
               titulo: `Atender propuesta ${cotizacion?.nombre_campania || ''}`,
@@ -1663,6 +1757,19 @@ export class SolicitudesController {
         message: mensaje,
         autorizacion,
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, {
+        solicitudId: solicitud.id,
+        usuario: userName,
+      });
+      if (campania) {
+        emitToCampanas(SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+          campaniaId: campania.id,
+          usuario: userName,
+        });
+      }
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'actualizada' });
     } catch (error) {
       console.error('Error updating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar solicitud';
