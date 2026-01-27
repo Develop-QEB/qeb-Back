@@ -302,9 +302,10 @@ model solicitudCaras {
 }
 
 model tareas {
-  id                 Int      @id @default(autoincrement())
-  fecha_inicio       DateTime @default(dbgenerated("(curdate())")) @db.DateTime(0)
-  fecha_fin          DateTime @default(now()) @db.DateTime(0)
+  id                 Int       @id @default(autoincrement())
+  fecha_inicio       DateTime  @default(dbgenerated("(curdate())")) @db.DateTime(0)
+  fecha_fin          DateTime  @default(now()) @db.DateTime(0)
+  created_at         DateTime? @default(now()) @db.Timestamp(0)
   tipo               String?  @db.VarChar(50)
   responsable        String?  @db.VarChar(50)
   id_responsable     Int

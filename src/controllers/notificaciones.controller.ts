@@ -69,12 +69,15 @@ export class NotificacionesController {
         orderByClause.fecha_fin = orderDir;
       } else if (orderBy === 'fecha_inicio') {
         orderByClause.fecha_inicio = orderDir;
+      } else if (orderBy === 'created_at') {
+        orderByClause.created_at = orderDir;
       } else if (orderBy === 'titulo') {
         orderByClause.titulo = orderDir;
       } else if (orderBy === 'estatus') {
         orderByClause.estatus = orderDir;
       } else {
-        orderByClause.fecha_inicio = 'desc';
+        // Por defecto ordenar por created_at (más nuevo primero)
+        orderByClause.created_at = 'desc';
       }
 
       const [tareas, total] = await Promise.all([
@@ -97,7 +100,8 @@ export class NotificacionesController {
         leida: tarea.estatus === 'Atendido',
         referencia_tipo: tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
         referencia_id: tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
-        fecha_creacion: tarea.fecha_inicio,
+        fecha_creacion: tarea.created_at || tarea.fecha_inicio,
+        created_at: tarea.created_at,
         fecha_inicio: tarea.fecha_inicio,
         fecha_fin: tarea.fecha_fin,
         responsable: tarea.responsable,
@@ -870,6 +874,24 @@ export class NotificacionesController {
         return;
       }
 
+      // Obtener información de la solicitud (cliente, campaña)
+      // idquote puede ser el cuic o el id de la solicitud
+      const solicitudId = parseInt(idquote);
+      const solicitud = await prisma.solicitud.findFirst({
+        where: {
+          OR: [
+            { cuic: idquote },
+            ...(isNaN(solicitudId) ? [] : [{ id: solicitudId }])
+          ],
+          deleted_at: null
+        },
+        select: {
+          razon_social: true,
+          descripcion: true,
+          producto_nombre: true,
+        },
+      });
+
       const caras = await prisma.solicitudCaras.findMany({
         where: { idquote },
         select: {
@@ -912,6 +934,8 @@ export class NotificacionesController {
           total_caras: totalCaras,
           tarifa_efectiva: tarifaEfectiva,
           catorcena: catorcenaInfo,
+          cliente: solicitud?.razon_social || null,
+          campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
         };
       });
 

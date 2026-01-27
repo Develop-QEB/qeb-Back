@@ -1537,6 +1537,12 @@ export class PropuestasController {
         }
       }
 
+      // Emitir evento de socket para actualización en tiempo real
+      if (propuestaId) {
+        emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId });
+        emitToAll(SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId });
+      }
+
       res.json({
         success: true,
         message: `${reservaIds.length} reservas eliminadas`,
@@ -1639,6 +1645,10 @@ export class PropuestasController {
           }
         }
 
+        // Emitir evento de socket
+        emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId });
+        emitToAll(SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId });
+
         res.json({
           success: true,
           data: {
@@ -1739,6 +1749,10 @@ export class PropuestasController {
           });
         }
       }
+
+      // Emitir evento de socket
+      emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
+      emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
 
       res.json({
         success: true,

@@ -4019,6 +4019,7 @@ export class CampanasController {
         return;
       }
 
+      // Only return reservas that have APS assigned (to match what campaign view shows)
       const query = `
         SELECT
           rsv.id as reserva_id,
@@ -4041,6 +4042,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
         WHERE sc.idquote = ?
           AND rsv.deleted_at IS NULL
+          AND rsv.APS IS NOT NULL
         ORDER BY rsv.id DESC
       `;
 
