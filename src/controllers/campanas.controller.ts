@@ -1262,11 +1262,16 @@ export class CampanasController {
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND rsv.archivo IS NOT NULL
-          AND rsv.archivo != ''
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+          AND (
+            (rsv.archivo IS NOT NULL AND rsv.archivo != '')
+            OR imDig.id_reserva IS NOT NULL
+          )
         GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
@@ -2725,6 +2730,7 @@ export class CampanasController {
         proveedores_id: t.proveedores_id,
         nombre_proveedores: t.nombre_proveedores,
         num_impresiones: t.num_impresiones,
+        archivo_testigo: t.archivo_testigo,
       }));
 
       res.json({
