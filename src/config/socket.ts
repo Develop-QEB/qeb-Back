@@ -199,6 +199,7 @@ export const SOCKET_EVENTS = {
   CAMPANA_ACTUALIZADA: 'campana:actualizada',
   CAMPANA_ELIMINADA: 'campana:eliminada',
   CAMPANA_STATUS_CHANGED: 'campana:status:changed',
+  CAMPANA_COMENTARIO_CREADO: 'campana:comentario:creado',
 
   // Clientes
   CLIENTE_CREADO: 'cliente:creado',

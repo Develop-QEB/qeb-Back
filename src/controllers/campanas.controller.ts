@@ -912,37 +912,41 @@ export class CampanasController {
       const { id } = req.params;
       const { contenido } = req.body;
       const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
-      // Obtener la campaña para conseguir el solicitud_id via propuesta
-      const campana = await prisma.campania.findUnique({
-        where: { id: campanaId },
-      });
+      // UNA SOLA consulta para obtener toda la info necesaria
+      const [campanaInfo] = await prisma.$queryRaw<{
+        campana_id: number;
+        campana_nombre: string | null;
+        solicitud_id: number | null;
+        propuesta_id: number | null;
+        propuesta_id_asignado: string | null;
+        solicitud_usuario_id: number | null;
+      }[]>`
+        SELECT
+          cm.id as campana_id,
+          cm.nombre as campana_nombre,
+          s.id as solicitud_id,
+          p.id as propuesta_id,
+          p.id_asignado as propuesta_id_asignado,
+          s.usuario_id as solicitud_usuario_id
+        FROM campania cm
+        LEFT JOIN cotizacion c ON cm.cotizacion_id = c.id
+        LEFT JOIN propuesta p ON c.id_propuesta = p.id
+        LEFT JOIN solicitud s ON p.solicitud_id = s.id
+        WHERE cm.id = ${campanaId}
+        LIMIT 1
+      `;
 
-      if (!campana) {
-        res.status(404).json({
-          success: false,
-          error: 'Campaña no encontrada',
-        });
+      if (!campanaInfo) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
         return;
       }
 
-      // Intentar obtener solicitud_id de la propuesta relacionada
-      let solicitudId = 0;
-      if (campana.cotizacion_id) {
-        const cotizacion = await prisma.cotizacion.findUnique({
-          where: { id: campana.cotizacion_id },
-        });
-        if (cotizacion?.id_propuesta) {
-          const propuesta = await prisma.propuesta.findUnique({
-            where: { id: cotizacion.id_propuesta },
-          });
-          if (propuesta?.solicitud_id) {
-            solicitudId = propuesta.solicitud_id;
-          }
-        }
-      }
+      const solicitudId = campanaInfo.solicitud_id || 0;
 
+      // Crear el comentario
       const comentario = await prisma.comentarios.create({
         data: {
           autor_id: userId,
@@ -954,73 +958,20 @@ export class CampanasController {
         },
       });
 
-      // Crear notificaciones para todos los involucrados (excepto el autor)
-      const userName = req.user?.nombre || 'Usuario';
-      const nombreCampana = campana.nombre || 'Sin nombre';
-      const tituloNotificacion = `Nuevo comentario en campaña #${campanaId} - ${nombreCampana}`;
-      const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+      // Emitir evento de socket para actualizar en tiempo real
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_COMENTARIO_CREADO, {
+        campanaId,
+        comentario: {
+          id: comentario.id,
+          autor_id: comentario.autor_id,
+          autor_nombre: userName,
+          autor_foto: null, // Se obtiene del cache del frontend
+          contenido: comentario.comentario,
+          fecha: comentario.creado_en,
+        },
+      });
 
-      // Obtener propuesta y solicitud para los involucrados
-      let propuestaData = null;
-      let solicitudData = null;
-      if (campana.cotizacion_id) {
-        const cotizacion = await prisma.cotizacion.findUnique({
-          where: { id: campana.cotizacion_id },
-        });
-        if (cotizacion?.id_propuesta) {
-          propuestaData = await prisma.propuesta.findUnique({
-            where: { id: cotizacion.id_propuesta },
-          });
-          if (propuestaData?.solicitud_id) {
-            solicitudData = await prisma.solicitud.findUnique({
-              where: { id: propuestaData.solicitud_id },
-            });
-          }
-        }
-      }
-
-      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
-      const involucrados = new Set<number>();
-
-      // Agregar usuarios asignados de la propuesta
-      if (propuestaData?.id_asignado) {
-        propuestaData.id_asignado.split(',').forEach(id => {
-          const parsed = parseInt(id.trim());
-          if (!isNaN(parsed) && parsed !== userId) {
-            involucrados.add(parsed);
-          }
-        });
-      }
-
-      // Agregar creador de la solicitud
-      if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
-        involucrados.add(solicitudData.usuario_id);
-      }
-
-      // Crear una notificación para cada involucrado
-      const now = new Date();
-      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
-
-      for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            id_solicitud: solicitudId.toString(),
-            id_propuesta: propuestaData?.id?.toString() || '',
-            campania_id: campanaId,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            responsable: '',
-            asignado: userName,
-            id_asignado: userId.toString(),
-          },
-        });
-      }
-
+      // Responder inmediatamente al cliente
       res.status(201).json({
         success: true,
         data: {
@@ -1030,6 +981,61 @@ export class CampanasController {
           fecha: comentario.creado_en,
           solicitud_id: comentario.solicitud_id,
         },
+      });
+
+      // Crear notificaciones en background (no bloquea la respuesta)
+      setImmediate(async () => {
+        try {
+          const involucrados = new Set<number>();
+
+          // Agregar usuarios asignados de la propuesta
+          if (campanaInfo.propuesta_id_asignado) {
+            campanaInfo.propuesta_id_asignado.split(',').forEach(id => {
+              const parsed = parseInt(id.trim());
+              if (!isNaN(parsed) && parsed !== userId) {
+                involucrados.add(parsed);
+              }
+            });
+          }
+
+          // Agregar creador de la solicitud
+          if (campanaInfo.solicitud_usuario_id && campanaInfo.solicitud_usuario_id !== userId) {
+            involucrados.add(campanaInfo.solicitud_usuario_id);
+          }
+
+          if (involucrados.size === 0) return;
+
+          const nombreCampana = campanaInfo.campana_nombre || 'Sin nombre';
+          const tituloNotificacion = `Nuevo comentario en campaña #${campanaId} - ${nombreCampana}`;
+          const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+          const now = new Date();
+          const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+          // Crear todas las notificaciones en paralelo
+          await Promise.all(
+            Array.from(involucrados).map(responsableId =>
+              prisma.tareas.create({
+                data: {
+                  titulo: tituloNotificacion,
+                  descripcion: descripcionNotificacion,
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: responsableId,
+                  id_solicitud: solicitudId.toString(),
+                  id_propuesta: campanaInfo.propuesta_id?.toString() || '',
+                  campania_id: campanaId,
+                  fecha_inicio: now,
+                  fecha_fin: fechaFin,
+                  responsable: '',
+                  asignado: userName,
+                  id_asignado: userId.toString(),
+                },
+              })
+            )
+          );
+        } catch (err) {
+          console.error('Error creando notificaciones de comentario:', err);
+        }
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
