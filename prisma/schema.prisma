@@ -467,3 +467,23 @@ enum proveedores_estado {
   activo
   inactivo
 }
+
+// Sistema de Tickets para soporte técnico
+model tickets {
+  id              Int       @id @default(autoincrement())
+  titulo          String    @db.VarChar(255)
+  descripcion     String    @db.Text
+  imagen          String?   @db.LongText // Base64 image
+  status          String    @default("Nuevo") @db.VarChar(50) // Nuevo, En Progreso, Resuelto, Cerrado
+  prioridad       String    @default("Normal") @db.VarChar(20) // Baja, Normal, Alta, Urgente
+  usuario_id      Int
+  usuario_nombre  String    @db.VarChar(255)
+  usuario_email   String    @db.VarChar(255)
+  respuesta       String?   @db.Text // Respuesta del programador
+  respondido_por  String?   @db.VarChar(255)
+  respondido_at   DateTime? @db.DateTime(0)
+  created_at      DateTime  @default(now()) @db.DateTime(0)
+  updated_at      DateTime  @updatedAt @db.DateTime(0)
+
+  @@map("tickets")
+}

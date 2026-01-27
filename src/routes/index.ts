@@ -13,6 +13,7 @@ import notasRoutes from './notas.routes';
 import uploadsRoutes from './uploads.routes';
 import usuariosRoutes from './usuarios.routes';
 import equiposRoutes from './equipos.routes';
+import ticketsRoutes from './tickets.routes';
 
 import publicRoutes from './public.routes';
 
@@ -33,5 +34,6 @@ router.use('/notas', notasRoutes);
 router.use('/uploads', uploadsRoutes);
 router.use('/usuarios', usuariosRoutes);
 router.use('/equipos', equiposRoutes);
+router.use('/tickets', ticketsRoutes);
 
 export default router;
