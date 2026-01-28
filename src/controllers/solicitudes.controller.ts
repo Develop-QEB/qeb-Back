@@ -1052,7 +1052,8 @@ export class SolicitudesController {
               caras_contraflujo: cara.caras_contraflujo || 0,
               articulo: cara.articulo || articulo,
               descuento: cara.descuento || 0,
-              estado_autorizacion: estadoResult.estado,
+              autorizacion_dg: estadoResult.autorizacion_dg,
+              autorizacion_dcm: estadoResult.autorizacion_dcm,
             },
           });
           createdCaras.push(solicitudCara);
@@ -1634,7 +1635,8 @@ export class SolicitudesController {
                 caras_contraflujo: cara.caras_contraflujo || 0,
                 articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
-                estado_autorizacion: estadoResult.estado,
+                autorizacion_dg: estadoResult.autorizacion_dg,
+                autorizacion_dcm: estadoResult.autorizacion_dcm,
               },
             });
           }

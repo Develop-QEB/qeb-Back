@@ -298,7 +298,8 @@ model solicitudCaras {
   caras_contraflujo    Int?     @default(0)
   articulo             String?  @db.VarChar(255)
   descuento            Decimal? @db.Decimal(5, 2)
-  estado_autorizacion  String?  @default("aprobado") @db.VarChar(20)
+  autorizacion_dg      String?  @default("aprobado") @db.VarChar(20)
+  autorizacion_dcm     String?  @default("aprobado") @db.VarChar(20)
 }
 
 model tareas {

@@ -1955,7 +1955,8 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : undefined,
           articulo,
           descuento: descuento ? parseFloat(descuento) : undefined,
-          estado_autorizacion: estadoResult.estado,
+          autorizacion_dg: estadoResult.autorizacion_dg,
+          autorizacion_dcm: estadoResult.autorizacion_dcm,
         },
       });
 
@@ -2060,7 +2061,8 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
-          estado_autorizacion: estadoResult.estado,
+          autorizacion_dg: estadoResult.autorizacion_dg,
+          autorizacion_dcm: estadoResult.autorizacion_dcm,
         },
       });
 

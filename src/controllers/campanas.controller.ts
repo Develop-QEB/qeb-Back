@@ -4325,7 +4325,8 @@ export class CampanasController {
         caras_contraflujo: data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
-        estado_autorizacion: estadoResult.estado,
+        autorizacion_dg: estadoResult.autorizacion_dg,
+        autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
       if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
@@ -4444,7 +4445,8 @@ export class CampanasController {
         caras_contraflujo: data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
-        estado_autorizacion: estadoResult.estado,
+        autorizacion_dg: estadoResult.autorizacion_dg,
+        autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
       if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);

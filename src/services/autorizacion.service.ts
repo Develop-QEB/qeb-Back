@@ -18,8 +18,10 @@ export interface CaraData {
 }
 
 export interface EstadoAutorizacionResult {
-  estado: 'aprobado' | 'pendiente_dcm' | 'pendiente_dg';
-  motivo?: string;
+  autorizacion_dg: 'aprobado' | 'pendiente' | 'rechazado';
+  autorizacion_dcm: 'aprobado' | 'pendiente' | 'rechazado';
+  motivo_dg?: string;
+  motivo_dcm?: string;
   tarifa_efectiva?: number;
   total_caras?: number;
 }
@@ -85,6 +87,7 @@ function normalizarTipo(tipo: string | null | undefined): string {
 
 /**
  * Calcula el estado de autorización de una cara
+ * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
  */
 export async function calcularEstadoAutorizacion(cara: CaraData): Promise<EstadoAutorizacionResult> {
   // Calcular tarifa efectiva y total caras
@@ -94,11 +97,11 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
   // Normalizar datos para búsqueda
   const formatoNormalizado = normalizarFormato(cara.formato);
 
-  // Si el formato no tiene criterios definidos, aprobar automáticamente
+  // Si el formato no tiene criterios definidos, aprobar automáticamente ambos
   if (!formatoNormalizado) {
     return {
-      estado: 'aprobado',
-      motivo: 'Formato sin criterios de autorización',
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'aprobado',
       tarifa_efectiva: tarifaEfectiva,
       total_caras: totalCaras
     };
@@ -117,66 +120,59 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     }
   });
 
-  // Si no hay criterio definido, aprobar automáticamente
+  // Si no hay criterio definido, aprobar automáticamente ambos
   if (!criterio) {
     return {
-      estado: 'aprobado',
-      motivo: 'Sin criterio de autorización configurado',
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'aprobado',
       tarifa_efectiva: tarifaEfectiva,
       total_caras: totalCaras
     };
   }
 
-  // Evaluar por TARIFA EFECTIVA
-  let estadoPorTarifa: 'aprobado' | 'pendiente_dcm' | 'pendiente_dg' = 'aprobado';
-  let motivoTarifa = '';
+  // Evaluar si requiere DG
+  let requiereDg = false;
+  let motivoDg = '';
 
   const tarifaMaxDg = criterio.tarifa_max_dg ? Number(criterio.tarifa_max_dg) : null;
-  const tarifaMinDcm = criterio.tarifa_min_dcm ? Number(criterio.tarifa_min_dcm) : null;
-  const tarifaMaxDcm = criterio.tarifa_max_dcm ? Number(criterio.tarifa_max_dcm) : null;
+  const carasMaxDg = criterio.caras_max_dg;
 
   if (tarifaMaxDg !== null && tarifaEfectiva <= tarifaMaxDg) {
-    estadoPorTarifa = 'pendiente_dg';
-    motivoTarifa = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg} (límite DG)`;
-  } else if (tarifaMinDcm !== null && tarifaMaxDcm !== null &&
-             tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm) {
-    estadoPorTarifa = 'pendiente_dcm';
-    motivoTarifa = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} en rango DCM ($${tarifaMinDcm}-$${tarifaMaxDcm})`;
+    requiereDg = true;
+    motivoDg = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg} (límite DG)`;
+  }
+  if (carasMaxDg !== null && totalCaras <= carasMaxDg) {
+    requiereDg = true;
+    if (motivoDg) motivoDg += '; ';
+    motivoDg += `Total caras ${totalCaras} <= ${carasMaxDg} (límite DG)`;
   }
 
-  // Evaluar por NÚMERO DE CARAS
-  let estadoPorCaras: 'aprobado' | 'pendiente_dcm' | 'pendiente_dg' = 'aprobado';
-  let motivoCaras = '';
+  // Evaluar si requiere DCM
+  let requiereDcm = false;
+  let motivoDcm = '';
 
-  const carasMaxDg = criterio.caras_max_dg;
+  const tarifaMinDcm = criterio.tarifa_min_dcm ? Number(criterio.tarifa_min_dcm) : null;
+  const tarifaMaxDcm = criterio.tarifa_max_dcm ? Number(criterio.tarifa_max_dcm) : null;
   const carasMinDcm = criterio.caras_min_dcm;
   const carasMaxDcm = criterio.caras_max_dcm;
 
-  if (carasMaxDg !== null && totalCaras <= carasMaxDg) {
-    estadoPorCaras = 'pendiente_dg';
-    motivoCaras = `Total caras ${totalCaras} <= ${carasMaxDg} (límite DG)`;
-  } else if (carasMinDcm !== null && carasMaxDcm !== null &&
-             totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm) {
-    estadoPorCaras = 'pendiente_dcm';
-    motivoCaras = `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
+  if (tarifaMinDcm !== null && tarifaMaxDcm !== null &&
+      tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm) {
+    requiereDcm = true;
+    motivoDcm = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} en rango DCM ($${tarifaMinDcm}-$${tarifaMaxDcm})`;
   }
-
-  // Determinar estado final (el más restrictivo gana)
-  // DG es más restrictivo que DCM
-  let estadoFinal: 'aprobado' | 'pendiente_dcm' | 'pendiente_dg' = 'aprobado';
-  let motivoFinal = '';
-
-  if (estadoPorTarifa === 'pendiente_dg' || estadoPorCaras === 'pendiente_dg') {
-    estadoFinal = 'pendiente_dg';
-    motivoFinal = [motivoTarifa, motivoCaras].filter(Boolean).join('; ');
-  } else if (estadoPorTarifa === 'pendiente_dcm' || estadoPorCaras === 'pendiente_dcm') {
-    estadoFinal = 'pendiente_dcm';
-    motivoFinal = [motivoTarifa, motivoCaras].filter(Boolean).join('; ');
+  if (carasMinDcm !== null && carasMaxDcm !== null &&
+      totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm) {
+    requiereDcm = true;
+    if (motivoDcm) motivoDcm += '; ';
+    motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
   }
 
   return {
-    estado: estadoFinal,
-    motivo: motivoFinal || undefined,
+    autorizacion_dg: requiereDg ? 'pendiente' : 'aprobado',
+    autorizacion_dcm: requiereDcm ? 'pendiente' : 'aprobado',
+    motivo_dg: motivoDg || undefined,
+    motivo_dcm: motivoDcm || undefined,
     tarifa_efectiva: tarifaEfectiva,
     total_caras: totalCaras
   };
@@ -184,6 +180,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
 
 /**
  * Verifica si una solicitud tiene caras pendientes de autorización
+ * Ahora verifica ambas columnas: autorizacion_dg y autorizacion_dcm
  */
 export async function verificarCarasPendientes(idquote: string): Promise<{
   tienePendientes: boolean;
@@ -194,17 +191,19 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
 
   const caras = await prisma.solicitudCaras.findMany({
     where: { idquote },
-    select: { id: true, estado_autorizacion: true }
+    select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
   });
 
   console.log('[verificarCarasPendientes] Caras encontradas:', caras);
 
+  // Caras que tienen DG pendiente
   const pendientesDg = caras
-    .filter(c => c.estado_autorizacion === 'pendiente_dg')
+    .filter(c => c.autorizacion_dg === 'pendiente')
     .map(c => c.id);
 
+  // Caras que tienen DCM pendiente
   const pendientesDcm = caras
-    .filter(c => c.estado_autorizacion === 'pendiente_dcm')
+    .filter(c => c.autorizacion_dcm === 'pendiente')
     .map(c => c.id);
 
   return {
@@ -316,6 +315,7 @@ export async function crearTareasAutorizacion(
 
 /**
  * Aprueba las caras pendientes de un tipo específico
+ * Ahora actualiza la columna correspondiente: autorizacion_dg o autorizacion_dcm
  */
 export async function aprobarCaras(
   idquote: string,
@@ -323,16 +323,16 @@ export async function aprobarCaras(
   aprobadorId: number,
   aprobadorNombre: string
 ): Promise<{ carasAprobadas: number }> {
-  const estadoPendiente = tipoAutorizacion === 'dg' ? 'pendiente_dg' : 'pendiente_dcm';
+  const columna = tipoAutorizacion === 'dg' ? 'autorizacion_dg' : 'autorizacion_dcm';
 
-  // Actualizar caras pendientes a aprobado
+  // Actualizar caras pendientes a aprobado en la columna correspondiente
   const result = await prisma.solicitudCaras.updateMany({
     where: {
       idquote,
-      estado_autorizacion: estadoPendiente
+      [columna]: 'pendiente'
     },
     data: {
-      estado_autorizacion: 'aprobado'
+      [columna]: 'aprobado'
     }
   });
 
@@ -376,6 +376,7 @@ export async function aprobarCaras(
 
 /**
  * Rechaza toda la solicitud
+ * Ahora marca ambas columnas como rechazadas
  */
 export async function rechazarSolicitud(
   idquote: string,
@@ -384,10 +385,13 @@ export async function rechazarSolicitud(
   rechazadorNombre: string,
   comentario: string
 ): Promise<void> {
-  // Marcar todas las caras como rechazadas
+  // Marcar todas las caras como rechazadas en ambas columnas
   await prisma.solicitudCaras.updateMany({
     where: { idquote },
-    data: { estado_autorizacion: 'rechazado' }
+    data: {
+      autorizacion_dg: 'rechazado',
+      autorizacion_dcm: 'rechazado'
+    }
   });
 
   // Marcar la solicitud como rechazada
@@ -440,6 +444,7 @@ export async function rechazarSolicitud(
 
 /**
  * Obtiene el resumen de autorización de una solicitud
+ * Ahora verifica ambas columnas: autorizacion_dg y autorizacion_dcm
  */
 export async function obtenerResumenAutorizacion(idquote: string): Promise<{
   totalCaras: number;
@@ -451,19 +456,33 @@ export async function obtenerResumenAutorizacion(idquote: string): Promise<{
 }> {
   const caras = await prisma.solicitudCaras.findMany({
     where: { idquote },
-    select: { estado_autorizacion: true }
+    select: { autorizacion_dg: true, autorizacion_dcm: true }
   });
+
+  // Una cara está completamente aprobada si ambas autorizaciones están aprobadas
+  const aprobadas = caras.filter(c =>
+    c.autorizacion_dg === 'aprobado' && c.autorizacion_dcm === 'aprobado'
+  ).length;
+
+  // Caras con DG pendiente
+  const pendientesDg = caras.filter(c => c.autorizacion_dg === 'pendiente').length;
+
+  // Caras con DCM pendiente
+  const pendientesDcm = caras.filter(c => c.autorizacion_dcm === 'pendiente').length;
+
+  // Una cara está rechazada si cualquiera de las dos está rechazada
+  const rechazadas = caras.filter(c =>
+    c.autorizacion_dg === 'rechazado' || c.autorizacion_dcm === 'rechazado'
+  ).length;
 
   const conteo = {
     totalCaras: caras.length,
-    aprobadas: caras.filter(c => c.estado_autorizacion === 'aprobado').length,
-    pendientesDg: caras.filter(c => c.estado_autorizacion === 'pendiente_dg').length,
-    pendientesDcm: caras.filter(c => c.estado_autorizacion === 'pendiente_dcm').length,
-    rechazadas: caras.filter(c => c.estado_autorizacion === 'rechazado').length,
-    puedeContinuar: false
+    aprobadas,
+    pendientesDg,
+    pendientesDcm,
+    rechazadas,
+    puedeContinuar: pendientesDg === 0 && pendientesDcm === 0 && rechazadas === 0
   };
-
-  conteo.puedeContinuar = conteo.pendientesDg === 0 && conteo.pendientesDcm === 0 && conteo.rechazadas === 0;
 
   return conteo;
 }
