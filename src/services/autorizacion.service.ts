@@ -410,16 +410,16 @@ export async function aprobarCaras(
   });
 
   // Verificar si quedan pendientes
-  const { tienePendientes } = await verificarCarasPendientes(idquote);
+  const { tienePendientes, pendientesDg, pendientesDcm } = await verificarCarasPendientes(idquote);
 
-  // Si ya no hay pendientes, marcar las tareas de autorización como atendidas
+  // El idquote es el ID de propuesta, usarlo para buscar tareas
+  const propuestaId = idquote;
+
+  // Si ya no hay pendientes de ningún tipo, marcar TODAS las tareas de autorización como atendidas
   if (!tienePendientes) {
-    // Extraer el ID de solicitud del idquote (formato: "SOL-123" o similar)
-    const solicitudId = idquote.replace(/\D/g, '');
-
     await prisma.tareas.updateMany({
       where: {
-        id_solicitud: solicitudId,
+        id_propuesta: propuestaId,
         tipo: { contains: 'Autorización' },
         estatus: 'Pendiente'
       },
@@ -428,20 +428,23 @@ export async function aprobarCaras(
       }
     });
   } else {
-    // Marcar solo la tarea del tipo específico como atendida
-    const solicitudId = idquote.replace(/\D/g, '');
+    // Marcar solo la tarea del tipo específico como atendida SI ya no hay pendientes de ese tipo
     const tipoTarea = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
+    const pendientesDelTipo = tipoAutorizacion === 'dg' ? pendientesDg : pendientesDcm;
 
-    await prisma.tareas.updateMany({
-      where: {
-        id_solicitud: solicitudId,
-        tipo: tipoTarea,
-        estatus: 'Pendiente'
-      },
-      data: {
-        estatus: 'Atendido'
-      }
-    });
+    // Solo marcar como atendida si ya no hay más pendientes de este tipo
+    if (pendientesDelTipo.length === 0) {
+      await prisma.tareas.updateMany({
+        where: {
+          id_propuesta: propuestaId,
+          tipo: tipoTarea,
+          estatus: 'Pendiente'
+        },
+        data: {
+          estatus: 'Atendido'
+        }
+      });
+    }
   }
 
   return { carasAprobadas: result.count };
