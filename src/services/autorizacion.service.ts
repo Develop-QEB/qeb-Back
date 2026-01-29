@@ -90,9 +90,24 @@ function normalizarTipo(tipo: string | null | undefined): string {
  * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
  */
 export async function calcularEstadoAutorizacion(cara: CaraData): Promise<EstadoAutorizacionResult> {
+  console.log('[calcularEstadoAutorizacion] Datos recibidos:', {
+    ciudad: cara.ciudad,
+    formato: cara.formato,
+    tipo: cara.tipo,
+    caras: cara.caras,
+    bonificacion: cara.bonificacion,
+    costo: cara.costo,
+    tarifa_publica: cara.tarifa_publica
+  });
+
   // Calcular tarifa efectiva y total caras
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
+
+  console.log('[calcularEstadoAutorizacion] Valores calculados:', {
+    totalCaras,
+    tarifaEfectiva
+  });
 
   // Normalizar datos para búsqueda
   const formatoNormalizado = normalizarFormato(cara.formato);
@@ -110,6 +125,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
   const plazaNormalizada = normalizarPlaza(cara.ciudad);
   const tipoNormalizado = normalizarTipo(cara.tipo);
 
+  console.log('[calcularEstadoAutorizacion] Buscando criterio con:', {
+    formatoNormalizado,
+    tipoNormalizado,
+    plazaNormalizada
+  });
+
   // Buscar criterio en la base de datos
   const criterio = await prisma.criterios_autorizacion.findFirst({
     where: {
@@ -120,8 +141,11 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     }
   });
 
+  console.log('[calcularEstadoAutorizacion] Criterio encontrado:', criterio);
+
   // Si no hay criterio definido, aprobar automáticamente ambos
   if (!criterio) {
+    console.log('[calcularEstadoAutorizacion] No hay criterio, aprobando automáticamente');
     return {
       autorizacion_dg: 'aprobado',
       autorizacion_dcm: 'aprobado',
@@ -136,6 +160,15 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
 
   const tarifaMaxDg = criterio.tarifa_max_dg ? Number(criterio.tarifa_max_dg) : null;
   const carasMaxDg = criterio.caras_max_dg;
+
+  console.log('[calcularEstadoAutorizacion] Evaluando DG:', {
+    tarifaMaxDg,
+    carasMaxDg,
+    tarifaEfectiva,
+    totalCaras,
+    tarifaCheck: tarifaMaxDg !== null ? `${tarifaEfectiva} <= ${tarifaMaxDg} = ${tarifaEfectiva <= tarifaMaxDg}` : 'N/A',
+    carasCheck: carasMaxDg !== null ? `${totalCaras} <= ${carasMaxDg} = ${totalCaras <= carasMaxDg}` : 'N/A'
+  });
 
   if (tarifaMaxDg !== null && tarifaEfectiva <= tarifaMaxDg) {
     requiereDg = true;
@@ -156,6 +189,19 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
   const carasMinDcm = criterio.caras_min_dcm;
   const carasMaxDcm = criterio.caras_max_dcm;
 
+  console.log('[calcularEstadoAutorizacion] Evaluando DCM:', {
+    tarifaMinDcm,
+    tarifaMaxDcm,
+    carasMinDcm,
+    carasMaxDcm,
+    tarifaCheck: tarifaMinDcm !== null && tarifaMaxDcm !== null
+      ? `${tarifaEfectiva} >= ${tarifaMinDcm} && ${tarifaEfectiva} <= ${tarifaMaxDcm} = ${tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm}`
+      : 'N/A',
+    carasCheck: carasMinDcm !== null && carasMaxDcm !== null
+      ? `${totalCaras} >= ${carasMinDcm} && ${totalCaras} <= ${carasMaxDcm} = ${totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm}`
+      : 'N/A'
+  });
+
   if (tarifaMinDcm !== null && tarifaMaxDcm !== null &&
       tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm) {
     requiereDcm = true;
@@ -168,7 +214,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
   }
 
-  return {
+  const resultado = {
     autorizacion_dg: requiereDg ? 'pendiente' : 'aprobado',
     autorizacion_dcm: requiereDcm ? 'pendiente' : 'aprobado',
     motivo_dg: motivoDg || undefined,
@@ -176,6 +222,10 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     tarifa_efectiva: tarifaEfectiva,
     total_caras: totalCaras
   };
+
+  console.log('[calcularEstadoAutorizacion] Resultado final:', resultado);
+
+  return resultado as EstadoAutorizacionResult;
 }
 
 /**
