@@ -1973,6 +1973,7 @@ export class PropuestasController {
       // Calculate authorization state for updated values
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: ciudad || undefined,
+        estado: estados || undefined,
         formato: formato || '',
         tipo: tipo || undefined,
         caras: caras ? parseInt(caras) : 0,
@@ -2079,6 +2080,7 @@ export class PropuestasController {
       // Calculate authorization state
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad,
+        estado: estados,
         formato: formato || '',
         tipo,
         caras: caras ? parseInt(caras) : 0,

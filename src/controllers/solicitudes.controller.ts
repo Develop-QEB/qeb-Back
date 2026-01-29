@@ -1025,6 +1025,7 @@ export class SolicitudesController {
           // Calcular estado de autorización
           const estadoResult = await calcularEstadoAutorizacion({
             ciudad: cara.ciudad,
+            estado: cara.estado,
             formato: cara.formato,
             tipo: cara.tipo,
             caras: cara.caras,
@@ -1608,6 +1609,7 @@ export class SolicitudesController {
             // Calcular estado de autorización
             const estadoResult = await calcularEstadoAutorizacion({
               ciudad: cara.ciudad,
+              estado: cara.estado,
               formato: cara.formato,
               tipo: cara.tipo,
               caras: cara.caras,
@@ -1812,7 +1814,7 @@ export class SolicitudesController {
   async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
     try {
       console.log('[evaluarAutorizacion] Body recibido:', req.body);
-      const { ciudad, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
+      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
 
       // Validar datos requeridos
       if (!formato || caras === undefined || costo === undefined) {
@@ -1826,6 +1828,7 @@ export class SolicitudesController {
       // Calcular estado de autorización
       const resultado = await calcularEstadoAutorizacion({
         ciudad: ciudad || null,
+        estado: estado || null,
         formato,
         tipo: tipo || null,
         caras: Number(caras) || 0,

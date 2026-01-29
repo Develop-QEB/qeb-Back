@@ -9,6 +9,7 @@ const FORMATOS_CON_CRITERIOS = ['PARABUS', 'COLUMNA'];
 
 export interface CaraData {
   ciudad?: string | null;
+  estado?: string | null;  // Estado para determinar la plaza
   formato?: string;
   tipo?: string | null;
   caras: number;
@@ -28,8 +29,21 @@ export interface EstadoAutorizacionResult {
 
 /**
  * Normaliza el nombre de la plaza para buscar en criterios
+ * Para Ciudad de México usa el estado (porque las ciudades son alcaldías)
+ * Para las demás plazas usa la ciudad directamente
  */
-function normalizarPlaza(ciudad: string | null | undefined): string {
+function normalizarPlaza(ciudad: string | null | undefined, estado: string | null | undefined): string {
+  // Caso especial: Ciudad de México - verificar por estado
+  // porque las ciudades son alcaldías (Álvaro Obregón, Azcapotzalco, etc.)
+  if (estado) {
+    const estadoUpper = estado.toUpperCase().trim();
+    if (estadoUpper.includes('CIUDAD DE MEXICO') || estadoUpper.includes('CDMX') ||
+        estadoUpper === 'DISTRITO FEDERAL' || estadoUpper === 'DF') {
+      return 'CIUDAD DE MEXICO';
+    }
+  }
+
+  // Para las demás plazas, usar ciudad
   if (!ciudad) return 'OTRAS';
   const ciudadUpper = ciudad.toUpperCase().trim();
 
@@ -40,7 +54,7 @@ function normalizarPlaza(ciudad: string | null | undefined): string {
     }
   }
 
-  // Casos especiales
+  // Casos especiales por ciudad
   if (ciudadUpper.includes('CDMX') || ciudadUpper.includes('MEXICO')) {
     return 'CIUDAD DE MEXICO';
   }
@@ -92,6 +106,7 @@ function normalizarTipo(tipo: string | null | undefined): string {
 export async function calcularEstadoAutorizacion(cara: CaraData): Promise<EstadoAutorizacionResult> {
   console.log('[calcularEstadoAutorizacion] Datos recibidos:', {
     ciudad: cara.ciudad,
+    estado: cara.estado,
     formato: cara.formato,
     tipo: cara.tipo,
     caras: cara.caras,
@@ -122,7 +137,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     };
   }
 
-  const plazaNormalizada = normalizarPlaza(cara.ciudad);
+  const plazaNormalizada = normalizarPlaza(cara.ciudad, cara.estado);
   const tipoNormalizado = normalizarTipo(cara.tipo);
 
   console.log('[calcularEstadoAutorizacion] Buscando criterio con:', {

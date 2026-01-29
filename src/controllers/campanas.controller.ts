@@ -4332,6 +4332,7 @@ export class CampanasController {
       // Calculate authorization state for updated values
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: data.ciudad || undefined,
+        estado: data.estados || undefined,
         formato: data.formato || '',
         tipo: data.tipo || undefined,
         caras: data.caras ? parseInt(data.caras) : 0,
@@ -4451,6 +4452,7 @@ export class CampanasController {
       // Calculate authorization state
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: data.ciudad,
+        estado: data.estados,
         formato: data.formato || '',
         tipo: data.tipo,
         caras: data.caras ? parseInt(data.caras) : 0,
