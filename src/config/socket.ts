@@ -77,6 +77,18 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de solicitudes`);
     });
 
+    // Unirse al room de una solicitud específica
+    socket.on('join-solicitud', (solicitudId: number) => {
+      socket.join(`solicitud-${solicitudId}`);
+      console.log(`[Socket] ${socket.id} se unió a solicitud-${solicitudId}`);
+    });
+
+    // Salir del room de solicitud específica
+    socket.on('leave-solicitud', (solicitudId: number) => {
+      socket.leave(`solicitud-${solicitudId}`);
+      console.log(`[Socket] ${socket.id} salió de solicitud-${solicitudId}`);
+    });
+
     socket.on('join-propuestas', () => {
       socket.join('propuestas');
       console.log(`[Socket] ${socket.id} se unió a propuestas`);
@@ -248,6 +260,14 @@ export function emitToSolicitudes(event: string, data: unknown): void {
   if (io) {
     io.to('solicitudes').emit(event, data);
     console.log(`[Socket] Emitido ${event} a solicitudes`);
+  }
+}
+
+// Helper para emitir a una solicitud específica
+export function emitToSolicitud(solicitudId: number, event: string, data: unknown): void {
+  if (io) {
+    io.to(`solicitud-${solicitudId}`).emit(event, data);
+    console.log(`[Socket] Emitido ${event} a solicitud-${solicitudId}`);
   }
 }
 
