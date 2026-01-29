@@ -874,7 +874,18 @@ export class CampanasController {
           sc.fin_periodo,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
-          1 AS caras_totales
+          1 AS caras_totales,
+          rsv.arte_aprobado,
+          rsv.instalado,
+          -- Calcular estatus de arte basado en el flujo
+          CASE
+            WHEN rsv.instalado = 1 THEN 'Instalado'
+            WHEN t_recepcion.id IS NOT NULL AND t_recepcion.estatus = 'Completado' THEN 'Artes Recibidos'
+            WHEN t_impresion.id IS NOT NULL AND t_impresion.estatus IN ('Activo', 'Atendido') THEN 'En Impresion'
+            WHEN rsv.arte_aprobado = 'aprobado' THEN 'Artes Aprobados'
+            WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'Revision Artes'
+            ELSE 'Carga Artes'
+          END as estatus_arte
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -882,6 +893,14 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN tareas t_impresion ON t_impresion.campana_id = cm.id
+            AND t_impresion.tipo = 'Impresión'
+            AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
+            AND t_impresion.deleted_at IS NULL
+          LEFT JOIN tareas t_recepcion ON t_recepcion.campana_id = cm.id
+            AND t_recepcion.tipo = 'Recepción'
+            AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
+            AND t_recepcion.deleted_at IS NULL
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
