@@ -993,7 +993,6 @@ export class SolicitudesController {
             total_flujo: totalCaras,
             bonificacion: totalBonificacion,
             nombre_cliente: razon_social,
-            descuento: 0,
             articulo,
           },
         });
