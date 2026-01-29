@@ -716,17 +716,23 @@ export class CampanasController {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
+      console.log('[getCaras Campaña] Buscando caras para campaña:', campanaId);
+
       // Obtener campaña para conseguir cotizacion_id
       const campana = await prisma.campania.findUnique({
         where: { id: campanaId },
       });
 
       if (!campana) {
+        console.log('[getCaras Campaña] Campaña no encontrada');
         res.status(404).json({ success: false, error: 'Campaña no encontrada' });
         return;
       }
 
+      console.log('[getCaras Campaña] cotizacion_id:', campana.cotizacion_id);
+
       if (!campana.cotizacion_id) {
+        console.log('[getCaras Campaña] No tiene cotizacion_id, retornando []');
         res.json({ success: true, data: [] });
         return;
       }
@@ -736,7 +742,10 @@ export class CampanasController {
         where: { id: campana.cotizacion_id },
       });
 
+      console.log('[getCaras Campaña] cotizacion:', cotizacion?.id, 'id_propuesta:', cotizacion?.id_propuesta);
+
       if (!cotizacion?.id_propuesta) {
+        console.log('[getCaras Campaña] Cotización sin id_propuesta, retornando []');
         res.json({ success: true, data: [] });
         return;
       }
@@ -746,6 +755,8 @@ export class CampanasController {
         where: { idquote: String(cotizacion.id_propuesta) },
         orderBy: { id: 'asc' },
       });
+
+      console.log('[getCaras Campaña] Encontradas', caras.length, 'caras para idquote:', String(cotizacion.id_propuesta));
 
       // Convertir BigInt a Number
       const carasSerializable = JSON.parse(JSON.stringify(caras, (_, value) =>
