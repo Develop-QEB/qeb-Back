@@ -28,6 +28,13 @@ export interface EstadoAutorizacionResult {
 }
 
 /**
+ * Quita acentos de un string para comparaciones
+ */
+function quitarAcentos(str: string): string {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
  * Normaliza el nombre de la plaza para buscar en criterios
  * Para Ciudad de México usa el estado (porque las ciudades son alcaldías)
  * Para las demás plazas usa la ciudad directamente
@@ -36,32 +43,33 @@ function normalizarPlaza(ciudad: string | null | undefined, estado: string | nul
   // Caso especial: Ciudad de México - verificar por estado
   // porque las ciudades son alcaldías (Álvaro Obregón, Azcapotzalco, etc.)
   if (estado) {
-    const estadoUpper = estado.toUpperCase().trim();
-    if (estadoUpper.includes('CIUDAD DE MEXICO') || estadoUpper.includes('CDMX') ||
-        estadoUpper === 'DISTRITO FEDERAL' || estadoUpper === 'DF') {
+    const estadoNorm = quitarAcentos(estado.toUpperCase().trim());
+    console.log('[normalizarPlaza] Estado normalizado:', estadoNorm);
+    if (estadoNorm.includes('CIUDAD DE MEXICO') || estadoNorm.includes('CDMX') ||
+        estadoNorm === 'DISTRITO FEDERAL' || estadoNorm === 'DF') {
       return 'CIUDAD DE MEXICO';
     }
   }
 
   // Para las demás plazas, usar ciudad
   if (!ciudad) return 'OTRAS';
-  const ciudadUpper = ciudad.toUpperCase().trim();
+  const ciudadNorm = quitarAcentos(ciudad.toUpperCase().trim());
 
   // Verificar si es una plaza principal
   for (const plaza of PLAZAS_PRINCIPALES) {
-    if (ciudadUpper.includes(plaza) || plaza.includes(ciudadUpper)) {
+    if (ciudadNorm.includes(plaza) || plaza.includes(ciudadNorm)) {
       return plaza;
     }
   }
 
   // Casos especiales por ciudad
-  if (ciudadUpper.includes('CDMX') || ciudadUpper.includes('MEXICO')) {
+  if (ciudadNorm.includes('CDMX') || ciudadNorm.includes('MEXICO')) {
     return 'CIUDAD DE MEXICO';
   }
-  if (ciudadUpper.includes('GDL')) {
+  if (ciudadNorm.includes('GDL')) {
     return 'GUADALAJARA';
   }
-  if (ciudadUpper.includes('MTY')) {
+  if (ciudadNorm.includes('MTY')) {
     return 'MONTERREY';
   }
 
