@@ -168,6 +168,51 @@ export class PropuestasController {
     }
   }
 
+  async getCaras(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      const caras = await prisma.solicitudCaras.findMany({
+        where: {
+          idquote: String(id),
+        },
+        select: {
+          id: true,
+          idquote: true,
+          ciudad: true,
+          estados: true,
+          tipo: true,
+          flujo: true,
+          bonificacion: true,
+          caras: true,
+          nivel_socioeconomico: true,
+          formato: true,
+          costo: true,
+          tarifa_publica: true,
+          inicio_periodo: true,
+          fin_periodo: true,
+          caras_flujo: true,
+          caras_contraflujo: true,
+          articulo: true,
+          descuento: true,
+          autorizacion_dg: true,
+          autorizacion_dcm: true,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: caras,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener caras de propuesta';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async updateStatus(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
