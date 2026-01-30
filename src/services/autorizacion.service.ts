@@ -356,9 +356,7 @@ export async function crearTareasAutorizacion(
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDg.map(u => u.id).join(','),
         asignado: usuariosDg.map(u => u.nombre).join(', '),
-        fecha_fin: fechaFin,
-        referencia_tipo: 'solicitud',
-        referencia_id: solicitudId
+        fecha_fin: fechaFin
       }
     });
 
@@ -389,9 +387,7 @@ export async function crearTareasAutorizacion(
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDcm.map(u => u.id).join(','),
         asignado: usuariosDcm.map(u => u.nombre).join(', '),
-        fecha_fin: fechaFin,
-        referencia_tipo: 'solicitud',
-        referencia_id: solicitudId
+        fecha_fin: fechaFin
       }
     });
 
@@ -523,9 +519,7 @@ export async function rechazarSolicitud(
         responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
         id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || '',
-        referencia_tipo: 'solicitud',
-        referencia_id: solicitudId
+        asignado: solicitud.nombre_usuario || ''
       }
     });
 
