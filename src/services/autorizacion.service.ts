@@ -347,8 +347,13 @@ export async function crearTareasAutorizacion(
       }
     });
 
-    // Emitir notificación via WebSocket
+    // Emitir notificación y tarea creada via WebSocket
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: tareaDg.id,
+      tipo: 'Autorización DG',
+      solicitudId
+    });
+    emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
       tareaId: tareaDg.id,
       tipo: 'Autorización DG',
       solicitudId
@@ -373,8 +378,13 @@ export async function crearTareasAutorizacion(
       }
     });
 
-    // Emitir notificación via WebSocket
+    // Emitir notificación y tarea creada via WebSocket
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: tareaDcm.id,
+      tipo: 'Autorización DCM',
+      solicitudId
+    });
+    emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
       tareaId: tareaDcm.id,
       tipo: 'Autorización DCM',
       solicitudId
