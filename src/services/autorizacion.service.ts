@@ -329,8 +329,21 @@ export async function crearTareasAutorizacion(
   const fechaFin = new Date();
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
-  // Crear tarea para DG si hay pendientes
-  if (pendientesDg.length > 0 && usuariosDg.length > 0) {
+  // Verificar si ya existen tareas pendientes para evitar duplicados
+  const tareasExistentes = await prisma.tareas.findMany({
+    where: {
+      id_solicitud: solicitudId.toString(),
+      tipo: { contains: 'Autorización' },
+      estatus: 'Pendiente'
+    },
+    select: { tipo: true }
+  });
+
+  const existeTareaDg = tareasExistentes.some(t => t.tipo === 'Autorización DG');
+  const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM');
+
+  // Crear tarea para DG si hay pendientes y no existe ya una tarea
+  if (pendientesDg.length > 0 && usuariosDg.length > 0 && !existeTareaDg) {
     const tareaDg = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
@@ -362,8 +375,8 @@ export async function crearTareasAutorizacion(
     });
   }
 
-  // Crear tarea para DCM si hay pendientes
-  if (pendientesDcm.length > 0 && usuariosDcm.length > 0) {
+  // Crear tarea para DCM si hay pendientes y no existe ya una tarea
+  if (pendientesDcm.length > 0 && usuariosDcm.length > 0 && !existeTareaDcm) {
     const tareaDcm = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
@@ -472,18 +485,13 @@ export async function rechazarSolicitud(
   comentario: string
 ): Promise<void> {
   // Marcar todas las caras como rechazadas en ambas columnas
+  // NO cambiamos el status de la solicitud, solo de las caras
   await prisma.solicitudCaras.updateMany({
     where: { idquote },
     data: {
       autorizacion_dg: 'rechazado',
       autorizacion_dcm: 'rechazado'
     }
-  });
-
-  // Marcar la solicitud como rechazada
-  await prisma.solicitud.update({
-    where: { id: solicitudId },
-    data: { status: 'Rechazada' }
   });
 
   // Marcar todas las tareas de autorización como atendidas
@@ -515,12 +523,19 @@ export async function rechazarSolicitud(
         responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
         id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || ''
+        asignado: solicitud.nombre_usuario || '',
+        referencia_tipo: 'solicitud',
+        referencia_id: solicitudId
       }
     });
 
     // Emitir notificación via WebSocket
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: notifRechazo.id,
+      tipo: 'Rechazo Autorización',
+      solicitudId
+    });
+    emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
       tareaId: notifRechazo.id,
       tipo: 'Rechazo Autorización',
       solicitudId
