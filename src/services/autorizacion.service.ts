@@ -331,16 +331,14 @@ export async function crearTareasAutorizacion(
 
   // Crear tarea para DG si hay pendientes
   if (pendientesDg.length > 0 && usuariosDg.length > 0) {
-    // El responsable es el primer usuario DG
-    const dgPrincipal = usuariosDg[0];
     const tareaDg = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
         descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
         estatus: 'Pendiente',
-        id_responsable: dgPrincipal.id,
-        responsable: dgPrincipal.nombre,
+        id_responsable: responsableId,
+        responsable: responsableNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDg.map(u => u.id).join(','),
@@ -359,16 +357,14 @@ export async function crearTareasAutorizacion(
 
   // Crear tarea para DCM si hay pendientes
   if (pendientesDcm.length > 0 && usuariosDcm.length > 0) {
-    // El responsable es el primer usuario DCM
-    const dcmPrincipal = usuariosDcm[0];
     const tareaDcm = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
         titulo: `Autorización requerida - Solicitud #${solicitudId}`,
         descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
         estatus: 'Pendiente',
-        id_responsable: dcmPrincipal.id,
-        responsable: dcmPrincipal.nombre,
+        id_responsable: responsableId,
+        responsable: responsableNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
         id_asignado: usuariosDcm.map(u => u.id).join(','),
