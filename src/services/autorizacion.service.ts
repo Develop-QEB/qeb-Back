@@ -466,35 +466,84 @@ export async function aprobarCaras(
     }
   }
 
+  // Crear notificación de aprobación para el creador de la solicitud
+  const propuesta = await prisma.propuesta.findFirst({
+    where: { id: parseInt(propuestaId) },
+    select: { solicitud_id: true }
+  });
+
+  if (propuesta) {
+    const solicitud = await prisma.solicitud.findUnique({
+      where: { id: propuesta.solicitud_id },
+      select: { usuario_id: true, nombre_usuario: true }
+    });
+
+    if (solicitud?.usuario_id) {
+      const tipoLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
+      const notifAprobacion = await prisma.tareas.create({
+        data: {
+          tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
+          titulo: `Solicitud #${propuesta.solicitud_id} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
+          descripcion: `${result.count} cara(s) de tu solicitud han sido aprobadas por ${tipoLabel} (${aprobadorNombre}).`,
+          estatus: 'Pendiente',
+          id_responsable: solicitud.usuario_id,
+          responsable: solicitud.nombre_usuario || '',
+          id_solicitud: propuesta.solicitud_id.toString(),
+          id_propuesta: propuestaId,
+          id_asignado: solicitud.usuario_id.toString(),
+          asignado: solicitud.nombre_usuario || ''
+        }
+      });
+
+      // Emitir notificación via WebSocket
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tareaId: notifAprobacion.id,
+        tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
+        solicitudId: propuesta.solicitud_id
+      });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: notifAprobacion.id,
+        tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
+        solicitudId: propuesta.solicitud_id
+      });
+    }
+  }
+
   return { carasAprobadas: result.count };
 }
 
 /**
- * Rechaza toda la solicitud
- * Ahora marca ambas columnas como rechazadas
+ * Rechaza las caras de una solicitud para un tipo específico de autorización
+ * Solo marca la columna correspondiente como rechazada (autorizacion_dg o autorizacion_dcm)
  */
 export async function rechazarSolicitud(
   idquote: string,
   solicitudId: number,
   rechazadorId: number,
   rechazadorNombre: string,
-  comentario: string
+  comentario: string,
+  tipoAutorizacion: 'dg' | 'dcm'
 ): Promise<void> {
-  // Marcar todas las caras como rechazadas en ambas columnas
+  const columna = tipoAutorizacion === 'dg' ? 'autorizacion_dg' : 'autorizacion_dcm';
+
+  // Marcar solo las caras con autorización pendiente del tipo correspondiente como rechazadas
   // NO cambiamos el status de la solicitud, solo de las caras
   await prisma.solicitudCaras.updateMany({
-    where: { idquote },
+    where: {
+      idquote,
+      [columna]: 'pendiente'
+    },
     data: {
-      autorizacion_dg: 'rechazado',
-      autorizacion_dcm: 'rechazado'
+      [columna]: 'rechazado'
     }
   });
 
-  // Marcar todas las tareas de autorización como atendidas
+  // Marcar solo la tarea del tipo específico como atendida
+  const tipoTarea = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
   await prisma.tareas.updateMany({
     where: {
       id_solicitud: solicitudId.toString(),
-      tipo: { contains: 'Autorización' },
+      tipo: tipoTarea,
       estatus: 'Pendiente'
     },
     data: {
@@ -503,6 +552,7 @@ export async function rechazarSolicitud(
   });
 
   // Crear notificación para el creador de la solicitud
+  const tipoLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
   const solicitud = await prisma.solicitud.findUnique({
     where: { id: solicitudId },
     select: { usuario_id: true, nombre_usuario: true }
@@ -511,9 +561,9 @@ export async function rechazarSolicitud(
   if (solicitud?.usuario_id) {
     const notifRechazo = await prisma.tareas.create({
       data: {
-        tipo: 'Rechazo Autorización',
-        titulo: `Solicitud #${solicitudId} Rechazada - Requiere edición`,
-        descripcion: `Tu solicitud ha sido rechazada por ${rechazadorNombre}. Motivo: ${comentario}. Haz clic para editar la solicitud y corregir las caras.`,
+        tipo: `Rechazo ${tipoAutorizacion.toUpperCase()}`,
+        titulo: `Solicitud #${solicitudId} - Rechazo ${tipoAutorizacion.toUpperCase()}`,
+        descripcion: `Tu solicitud ha sido rechazada por ${tipoLabel} (${rechazadorNombre}). Motivo: ${comentario}. Haz clic para editar la solicitud y corregir las caras.`,
         estatus: 'Pendiente',
         id_responsable: solicitud.usuario_id,
         responsable: solicitud.nombre_usuario || '',

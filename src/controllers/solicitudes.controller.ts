@@ -8,7 +8,7 @@ import {
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
-import { emitToSolicitudes, emitToDashboard, emitToCampanas, SOCKET_EVENTS } from '../config/socket';
+import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -1641,19 +1641,7 @@ export class SolicitudesController {
               },
             });
           }
-
-          // Verificar si hay caras pendientes de autorización y crear tareas
-          const autorizacionInfo = await verificarCarasPendientes(propuesta.id.toString());
-          if (autorizacionInfo.tienePendientes && userId) {
-            await crearTareasAutorizacion(
-              solicitud.id,
-              propuesta.id,
-              userId,
-              userName,
-              autorizacionInfo.pendientesDg,
-              autorizacionInfo.pendientesDcm
-            );
-          }
+          // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
 
         // Detectar qué campos cambiaron
@@ -1742,10 +1730,22 @@ export class SolicitudesController {
         timeout: 120000,
       });
 
-      // Check for pending authorizations after transaction
+      // Check for pending authorizations after transaction and create tasks
       let autorizacion = { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] };
       if (propuesta) {
         autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+
+        // Crear tareas de autorización si hay pendientes
+        if (autorizacion.tienePendientes && userId) {
+          await crearTareasAutorizacion(
+            solicitud.id,
+            propuesta.id,
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm
+          );
+        }
       }
 
       // Build message with authorization info
@@ -1753,6 +1753,53 @@ export class SolicitudesController {
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
         mensaje = `Solicitud actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
+      // Notificar a Tráfico sobre el ajuste de caras si hay propuesta
+      if (propuesta && caras && caras.length > 0) {
+        const usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } }
+            ],
+            deleted_at: null
+          },
+          select: { id: true, nombre: true }
+        });
+
+        if (usuariosTrafico.length > 0) {
+          const fechaFin = new Date();
+          fechaFin.setDate(fechaFin.getDate() + 7);
+
+          for (const usuarioTrafico of usuariosTrafico) {
+            if (usuarioTrafico.id !== userId) {
+              await prisma.tareas.create({
+                data: {
+                  tipo: 'Ajuste de Caras',
+                  titulo: `Solicitud #${solicitud.id} - Ajuste de caras`,
+                  descripcion: `${userName} modificó las caras de la solicitud. Total de caras: ${caras.length}`,
+                  estatus: 'Pendiente',
+                  id_responsable: usuarioTrafico.id,
+                  responsable: usuarioTrafico.nombre,
+                  id_solicitud: solicitud.id.toString(),
+                  id_propuesta: propuesta.id.toString(),
+                  id_asignado: usuarioTrafico.id.toString(),
+                  asignado: usuarioTrafico.nombre,
+                  fecha_fin: fechaFin
+                }
+              });
+            }
+          }
+
+          // Emitir notificación via WebSocket
+          emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+            tipo: 'Ajuste de Caras',
+            solicitudId: solicitud.id
+          });
+        }
       }
 
       res.json({

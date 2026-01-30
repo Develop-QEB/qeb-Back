@@ -188,6 +188,7 @@ export const SOCKET_EVENTS = {
   // Reservas y Propuestas
   RESERVA_CREADA: 'reserva:creada',
   RESERVA_ELIMINADA: 'reserva:eliminada',
+  RESERVA_PROGRESO: 'reserva:progreso',
   PROPUESTA_ACTUALIZADA: 'propuesta:actualizada',
   PROPUESTA_CREADA: 'propuesta:creada',
   PROPUESTA_ELIMINADA: 'propuesta:eliminada',

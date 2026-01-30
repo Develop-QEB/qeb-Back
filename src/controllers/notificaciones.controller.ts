@@ -809,7 +809,14 @@ export class NotificacionesController {
       }
 
       const puestoUpper = (usuario.puesto || '').toUpperCase();
-      if (!puestoUpper.includes('DG') && !puestoUpper.includes('DCM')) {
+
+      // Determinar el tipo de autorización según el puesto del usuario
+      let tipoAutorizacion: 'dg' | 'dcm';
+      if (puestoUpper.includes('DG')) {
+        tipoAutorizacion = 'dg';
+      } else if (puestoUpper.includes('DCM')) {
+        tipoAutorizacion = 'dcm';
+      } else {
         res.status(403).json({
           success: false,
           error: 'No tienes permiso para rechazar solicitudes',
@@ -841,7 +848,7 @@ export class NotificacionesController {
         return;
       }
 
-      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario);
+      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
 
       // Emit socket event for real-time updates
       emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });

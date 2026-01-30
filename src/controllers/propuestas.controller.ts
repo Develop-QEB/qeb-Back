@@ -1284,6 +1284,8 @@ export class PropuestasController {
 
       // Create reservas
       const createdReservas = [];
+      const totalReservas = reservas.length;
+      let reservasProcesadas = 0;
 
       // Process grupos completos first
       for (const [grupoId, invIds] of gruposCompletos) {
@@ -1295,12 +1297,14 @@ export class PropuestasController {
           let espacioId = reserva.espacio_id || encontrarEspacioDisponible(invId);
           if (!espacioId) {
             console.warn(`No hay espacios disponibles para inventario_id ${invId}`);
+            reservasProcesadas++;
             continue;
           }
 
           // Validar que el espacio no esté reservado en el período (por otra propuesta)
           if (espaciosReservadosEnPeriodo.has(espacioId)) {
             console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+            reservasProcesadas++;
             continue;
           }
 
@@ -1316,6 +1320,7 @@ export class PropuestasController {
           });
 
           if (exists) {
+            reservasProcesadas++;
             continue;
           }
 
@@ -1340,6 +1345,18 @@ export class PropuestasController {
           // Marcar espacio como usado para evitar duplicados en este request
           espaciosReservadosEnPeriodo.add(espacioId);
           createdReservas.push(created);
+          reservasProcesadas++;
+
+          // Emitir progreso cada 5 reservas o en la última
+          if (reservasProcesadas % 5 === 0 || reservasProcesadas === totalReservas) {
+            emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_PROGRESO, {
+              propuestaId,
+              procesadas: reservasProcesadas,
+              total: totalReservas,
+              creadas: createdReservas.length,
+              porcentaje: Math.round((reservasProcesadas / totalReservas) * 100)
+            });
+          }
         }
       }
 
@@ -1349,12 +1366,14 @@ export class PropuestasController {
         let espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
         if (!espacioId) {
           console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
+          reservasProcesadas++;
           continue;
         }
 
         // Validar que el espacio no esté reservado en el período (por otra propuesta)
         if (espaciosReservadosEnPeriodo.has(espacioId)) {
           console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          reservasProcesadas++;
           continue;
         }
 
@@ -1370,6 +1389,7 @@ export class PropuestasController {
         });
 
         if (exists) {
+          reservasProcesadas++;
           continue;
         }
 
@@ -1394,6 +1414,18 @@ export class PropuestasController {
         // Marcar espacio como usado para evitar duplicados en este request
         espaciosReservadosEnPeriodo.add(espacioId);
         createdReservas.push(created);
+        reservasProcesadas++;
+
+        // Emitir progreso cada 5 reservas o en la última
+        if (reservasProcesadas % 5 === 0 || reservasProcesadas === totalReservas) {
+          emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_PROGRESO, {
+            propuestaId,
+            procesadas: reservasProcesadas,
+            total: totalReservas,
+            creadas: createdReservas.length,
+            porcentaje: Math.round((reservasProcesadas / totalReservas) * 100)
+          });
+        }
       }
 
       // Update solicitudCaras totals if needed
