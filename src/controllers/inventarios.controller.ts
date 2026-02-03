@@ -362,6 +362,7 @@ export class InventariosController {
           entre_calle_2: true,
           orientacion: true,
           sentido: true,
+          isla: true,
         },
       });
 
