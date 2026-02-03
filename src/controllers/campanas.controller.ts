@@ -904,11 +904,11 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN tareas t_impresion ON t_impresion.campana_id = cm.id
+          LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
             AND t_impresion.tipo = 'Impresión'
             AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
             AND t_impresion.deleted_at IS NULL
-          LEFT JOIN tareas t_recepcion ON t_recepcion.campana_id = cm.id
+          LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
             AND t_recepcion.tipo = 'Recepción'
             AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
             AND t_recepcion.deleted_at IS NULL
