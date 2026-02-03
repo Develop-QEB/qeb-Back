@@ -923,9 +923,14 @@ export class CampanasController {
 
       console.log('Inventario con APS result count:', Array.isArray(inventario) ? inventario.length : 0);
 
+      // Convertir BigInt a Number para que JSON.stringify funcione
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
       res.json({
         success: true,
-        data: inventario,
+        data: inventarioSerializable,
       });
     } catch (error) {
       console.error('Error en getInventarioConAPS:', error);
