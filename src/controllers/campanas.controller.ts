@@ -907,11 +907,9 @@ export class CampanasController {
           LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
             AND t_impresion.tipo = 'Impresión'
             AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
-            AND t_impresion.deleted_at IS NULL
           LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
             AND t_recepcion.tipo = 'Recepción'
             AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
-            AND t_recepcion.deleted_at IS NULL
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
