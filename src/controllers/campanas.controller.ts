@@ -4074,6 +4074,7 @@ export class CampanasController {
           i.plaza,
           i.tipo_de_mueble as formato,
           i.ubicacion,
+          i.isla,
           rsv.estatus,
           rsv.grupo_completo_id,
           sc.id as solicitud_cara_id,
