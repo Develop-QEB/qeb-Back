@@ -21,6 +21,7 @@ export class NotificacionesController {
       const orderBy = req.query.orderBy as string || 'fecha_inicio';
       const orderDir = req.query.orderDir as string || 'desc';
       const userId = req.user?.userId;
+      const quick = req.query.quick as string;
 
       const where: Record<string, unknown> = {};
 
@@ -36,21 +37,23 @@ export class NotificacionesController {
         where.tipo = tipo;
       }
 
-      if (estatus) {
-        where.estatus = estatus;
-      }
+      if (!quick) {
+        if (estatus) {
+          where.estatus = estatus;
+        }
 
       if (leida !== undefined && leida !== '') {
         // 'leida' = estatus 'Atendido'
-        if (leida === 'true') {
-          where.estatus = 'Atendido';
-        } else {
-          where.estatus = { not: 'Atendido' };
-        }
-      }
+        where.estatus =
+      leida === 'true'
+        ? 'Atendido'
+        : { not: 'Atendido' };
+  }
+}
 
       if (search) {
         where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
           {
             OR: [
               { titulo: { contains: search } },
@@ -62,6 +65,47 @@ export class NotificacionesController {
           },
         ];
       }
+
+      // filtros rapidos
+      if (quick) {
+        switch (quick) {
+          case 'no_leidas':
+            where.estatus = { not: 'Atendido' };
+            break;
+
+          case 'leidas':
+            where.estatus = 'Atendido';
+            break;
+
+          case 'hoy': {
+            const start = new Date();
+            start.setHours(0, 0, 0, 0);
+
+            const end = new Date();
+            end.setHours(23, 59, 59, 999);
+
+            where.fecha_inicio = {
+              gte: start,
+              lte: end,
+            };
+            break;
+          }
+
+          case 'vencidas':
+            where.fecha_fin = { lt: new Date() };
+            where.estatus = { not: 'Atendido' };
+            break;
+
+          case 'asignadas_a_mi':
+            where.OR = [{ id_asignado: { contains: String(userId) } }];
+            break;
+
+          case 'creadas_por_mi':
+            where.OR = [{ id_responsable: userId }];
+            break;
+        }
+      }
+
 
       // Determinar ordenamiento
       const orderByClause: Record<string, string> = {};
@@ -89,6 +133,7 @@ export class NotificacionesController {
         }),
         prisma.tareas.count({ where }),
       ]);
+
 
       // Mapear tareas al formato de notificaciones con todos los campos
       const notificaciones = tareas.map(tarea => ({
