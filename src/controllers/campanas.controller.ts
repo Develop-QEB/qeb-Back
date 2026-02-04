@@ -2800,7 +2800,6 @@ export class CampanasController {
         nombre_proveedores,
         contenido,
         listado_inventario,
-        catorcena_entrega,
         creador,
         impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
         num_impresiones, // Total de impresiones (enviado desde frontend)
@@ -2873,28 +2872,12 @@ export class CampanasController {
       }
 
       // Determinar fecha_fin y estatus según el tipo de tarea
-      let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
+      let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       let estatusFinal = 'Pendiente';
 
       // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
       if (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
-      }
-
-      // Si hay catorcena_entrega, obtener fecha_fin de la catorcena seleccionada
-      // Aplica para: Revisión de artes, Impresión, Instalación, Testigo, Programación
-      if (catorcena_entrega && (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Instalación' || tipo === 'Testigo' || tipo === 'Programación')) {
-        const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
-        if (match) {
-          const numCatorcena = parseInt(match[1]);
-          const yearCatorcena = parseInt(match[2]);
-          const catorcena = await prisma.catorcenas.findFirst({
-            where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
-          });
-          if (catorcena?.fecha_fin) {
-            fechaFinFinal = new Date(catorcena.fecha_fin);
-          }
-        }
       }
 
       // Preparar datos de impresiones como JSON para almacenar en evidencia
@@ -2904,8 +2887,8 @@ export class CampanasController {
       // DEBUG: Log de todo el body para ver qué llega
       console.log('createTarea - tipo:', tipo, 'num_impresiones:', num_impresiones, 'impresiones:', JSON.stringify(impresiones));
 
-      if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
-        evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
+      if (tipo === 'Impresión' && impresiones) {
+        evidenciaData = JSON.stringify({ impresiones: impresiones || {} });
         // Usar num_impresiones enviado desde el frontend directamente
         if (num_impresiones !== undefined && num_impresiones !== null) {
           numImpresionesTotal = Number(num_impresiones);
