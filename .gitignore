@@ -34,3 +34,4 @@ prisma/dev.db-journal
 
 # Testing
 coverage/
+uploads/
