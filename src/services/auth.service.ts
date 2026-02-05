@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import prisma from '../utils/prisma';
 import { AuthResponse, JwtPayload, UserResponse } from '../types';
 
@@ -31,45 +32,41 @@ export class AuthService {
     // (el puesto y el rol son iguales excepto para Administrador)
     const user_role = data.puesto;
 
-    // Crear usuario con contraseña encriptada usando ENCRYPT() de MySQL
-    await prisma.$executeRaw`
-      INSERT INTO usuario (nombre, correo_electronico, user_password, area, puesto, user_role, created_at)
-      VALUES (
-        ${data.nombre},
-        ${data.correo},
-        ENCRYPT(${data.password}, CONCAT('$6$', SUBSTRING(SHA2(UUID(), 256), 1, 16))),
-        ${data.area},
-        ${data.puesto},
-        ${user_role},
-        NOW()
-      )
-    `;
+    // Crear usuario con contraseña hasheada con bcrypt
+    const hashedPassword = await bcrypt.hash(data.password, 10);
+
+    await prisma.usuario.create({
+      data: {
+        nombre: data.nombre,
+        correo_electronico: data.correo,
+        user_password: hashedPassword,
+        area: data.area,
+        puesto: data.puesto,
+        user_role: user_role,
+        created_at: new Date(),
+      },
+    });
 
     return { message: 'Usuario registrado correctamente' };
   }
 
   async login(email: string, password: string): Promise<AuthResponse> {
-    // Verificar credenciales usando ENCRYPT() de MySQL
-    const users = await prisma.$queryRaw<Array<{
-      id: number;
-      nombre: string;
-      correo_electronico: string;
-      user_password: string | null;
-      user_role: string;
-      area: string | null;
-      puesto: string | null;
-      foto_perfil: string | null;
-    }>>`
-      SELECT id, nombre, correo_electronico, user_password, user_role, area, puesto, foto_perfil
-      FROM usuario
-      WHERE correo_electronico = ${email}
-        AND deleted_at IS NULL
-        AND user_password = ENCRYPT(${password}, user_password)
-    `;
+    // Buscar usuario por email
+    const user = await prisma.usuario.findFirst({
+      where: {
+        correo_electronico: email,
+        deleted_at: null,
+      },
+    });
 
-    const user = users[0];
+    if (!user || !user.user_password) {
+      throw new Error('Credenciales invalidas');
+    }
 
-    if (!user) {
+    // Verificar contraseña con bcrypt
+    const isValid = await bcrypt.compare(password, user.user_password);
+
+    if (!isValid) {
       throw new Error('Credenciales invalidas');
     }
 
@@ -242,25 +239,35 @@ export class AuthService {
   }
 
   async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<void> {
-    // Verificar contraseña actual usando ENCRYPT() de MySQL
-    const users = await prisma.$queryRaw<Array<{ id: number }>>`
-      SELECT id FROM usuario
-      WHERE id = ${userId}
-        AND deleted_at IS NULL
-        AND user_password = ENCRYPT(${currentPassword}, user_password)
-    `;
+    // Buscar usuario por ID
+    const user = await prisma.usuario.findFirst({
+      where: {
+        id: userId,
+        deleted_at: null,
+      },
+    });
 
-    if (users.length === 0) {
+    if (!user || !user.user_password) {
       throw new Error('Contraseña actual incorrecta');
     }
 
-    // Actualizar con nueva contraseña usando ENCRYPT()
-    await prisma.$executeRaw`
-      UPDATE usuario
-      SET user_password = ENCRYPT(${newPassword}, CONCAT('$6$', SUBSTRING(SHA2(UUID(), 256), 1, 16))),
-          updated_at = NOW()
-      WHERE id = ${userId}
-    `;
+    // Verificar contraseña actual con bcrypt
+    const isValid = await bcrypt.compare(currentPassword, user.user_password);
+
+    if (!isValid) {
+      throw new Error('Contraseña actual incorrecta');
+    }
+
+    // Actualizar con nueva contraseña hasheada con bcrypt
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await prisma.usuario.update({
+      where: { id: userId },
+      data: {
+        user_password: hashedPassword,
+        updated_at: new Date(),
+      },
+    });
   }
 }
 
