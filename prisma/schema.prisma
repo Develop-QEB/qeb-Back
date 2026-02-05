@@ -204,7 +204,7 @@ model propuesta {
   id                       Int       @id @default(autoincrement())
   cliente_id               Int
   fecha                    DateTime  @default(now()) @db.Date
-  status                   String    @default("Pendiente") @db.VarChar(50)
+  status                   String    @default("Abierto") @db.VarChar(50)
   descripcion              String?   @db.Text
   precio                   Decimal?  @db.Decimal(10, 2)
   notas                    String?   @db.Text

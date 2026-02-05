@@ -563,8 +563,8 @@ export class PropuestasController {
           total,
           byStatus,
           // Keep legacy fields for compatibility
-          pendientes: byStatus['Pendiente'] || byStatus['Por aprobar'] || 0,
-          aprobadas: byStatus['Aprobada'] || byStatus['Activa'] || 0,
+          pendientes: byStatus['Abierto'] || byStatus['Pendiente'] || byStatus['Por aprobar'] || 0,
+          aprobadas: byStatus['Atendido'] || byStatus['Aprobada'] || byStatus['Activa'] || 0,
           rechazadas: byStatus['Rechazada'] || 0,
         },
       });
@@ -781,7 +781,7 @@ export class PropuestasController {
         where: { cotizacion_id: cotizacion.id },
       }) : null;
 
-      // Start transaction
+      // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
         // 1. Call stored procedure for reservas
         await tx.$executeRaw`CALL actualizar_reservas(${propuestaId})`;
@@ -796,7 +796,7 @@ export class PropuestasController {
         await tx.propuesta.update({
           where: { id: propuestaId },
           data: {
-            status: 'Activa',
+            status: 'Atendido',
             precio_simulado: precio_simulado || propuesta.precio_simulado,
             asignado: asignados || propuesta.asignado,
             id_asignado: id_asignados || propuesta.id_asignado,
@@ -955,7 +955,7 @@ export class PropuestasController {
             });
           }
         }
-      });
+      }, { timeout: 30000 });
 
       res.json({
         success: true,

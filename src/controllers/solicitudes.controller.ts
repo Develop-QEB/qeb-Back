@@ -1334,7 +1334,7 @@ export class SolicitudesController {
           data: {
             cliente_id,
             fecha: getMexicoDate(),
-            status: 'Pendiente',
+            status: 'Abierto',
             descripcion,
             notas,
             solicitud_id: solicitud.id,
