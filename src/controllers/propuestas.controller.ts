@@ -317,6 +317,71 @@ export class PropuestasController {
         });
       }
 
+      // si tiene el mismo status se salta 
+      let traficoIds: number[] = [];
+      if (status === 'Ajuste Cto Cliente') {
+        const usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } }
+            ],
+            deleted_at: null
+          },
+          select: { id: true, nombre: true }
+        });
+        traficoIds = usuariosTrafico.map(u => u.id);
+        
+        // tarea para usuarios de Tráfico
+        for (const usuarioTrafico of usuariosTrafico) {
+          if (usuarioTrafico.id !== userId) {
+            await prisma.tareas.create({
+              data: {
+                titulo: `Ajuste con cliente - ${nombrePropuesta}`,
+                descripcion: `${userName} cambió el estado a "Ajuste Cto Cliente"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
+                tipo: 'Ajuste Cto Cliente',
+                estatus: 'Pendiente',
+                id_responsable: usuarioTrafico.id,
+                responsable: usuarioTrafico.nombre,
+                id_solicitud: propuesta.solicitud_id?.toString() || '',
+                id_propuesta: propuestaId.toString(),
+                campania_id: campania?.id || null,
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                asignado: userName,
+                id_asignado: userId.toString(),
+              },
+            });
+          }
+        }
+      }
+
+      for (const responsableId of involucrados) {
+        if (status === 'Ajuste Cto Cliente' && traficoIds.includes(responsableId)) {
+          continue;
+        }
+        
+        await prisma.tareas.create({
+          data: {
+            titulo: tituloNotificacion,
+            descripcion: descripcionNotificacion,
+            tipo: 'Notificación',
+            estatus: 'Pendiente',
+            id_responsable: responsableId,
+            responsable: '',
+            id_solicitud: propuesta.solicitud_id?.toString() || '',
+            id_propuesta: propuestaId.toString(),
+            campania_id: campania?.id || null,
+            fecha_inicio: now,
+            fecha_fin: fechaFin,
+            asignado: userName,
+            id_asignado: userId.toString(),
+          },
+        });
+      }
+
       // Registrar en historial
       await prisma.historial.create({
         data: {
@@ -758,24 +823,91 @@ export class PropuestasController {
         }
 
         // 5. Create seguimiento task
-        if (solicitud && campania) {
-          await tx.tareas.create({
-            data: {
-              tipo: 'Seguimiento Campaña',
-              responsable: solicitud.nombre_usuario,
-              estatus: 'Pendientes',
-              descripcion: 'Ya se atendió la propuesta pero es necesario darle seguimiento',
-              titulo: campania.nombre,
-              id_propuesta: String(propuestaId),
-              id_responsable: solicitud.usuario_id || 0,
-              fecha_inicio: propuesta.fecha,
-              fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
-              asignado: asignados || propuesta.asignado,
-              id_asignado: id_asignados || propuesta.id_asignado,
-              campania_id: campania.id,
-              id_solicitud: String(propuesta.solicitud_id),
+        // if (solicitud && campania) {
+        //   await tx.tareas.create({
+        //     data: {
+        //       tipo: 'Seguimiento Campaña',
+        //       responsable: solicitud.nombre_usuario,
+        //       estatus: 'Pendientes',
+        //       descripcion: 'Ya se atendió la propuesta pero es necesario darle seguimiento',
+        //       titulo: campania.nombre,
+        //       id_propuesta: String(propuestaId),
+        //       id_responsable: solicitud.usuario_id || 0,
+        //       fecha_inicio: propuesta.fecha,
+        //       fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
+        //       asignado: asignados || propuesta.asignado,
+        //       id_asignado: id_asignados || propuesta.id_asignado,
+        //       campania_id: campania.id,
+        //       id_solicitud: String(propuesta.solicitud_id),
+        //     },
+        //   });
+        // }
+
+        // 5. Create seguimiento task
+        if (campania) {
+          const usuariosAnalista = await tx.usuario.findMany({
+            where: {
+              OR: [
+                { puesto: { contains: 'Analista' } },
+                { area: { contains: 'Analista' } }
+              ],
+              deleted_at: null
             },
+            select: { id: true, nombre: true }
           });
+
+          for (const usuarioAnalista of usuariosAnalista) {
+            await tx.tareas.create({
+              data: {
+                tipo: 'Seguimiento Campaña',
+                titulo: 'Seguimiento Campaña',
+                descripcion: `Dar seguimiento a la campaña: ${campania.nombre}`,
+                contenido: solicitud?.razon_social || '', 
+                estatus: 'Pendiente',
+                id_responsable: usuarioAnalista.id,
+                responsable: usuarioAnalista.nombre,
+                asignado: usuarioAnalista.nombre,
+                id_asignado: usuarioAnalista.id.toString(),
+                id_solicitud: String(propuesta.solicitud_id),
+                id_propuesta: String(propuestaId),
+                campania_id: campania.id,
+                fecha_inicio: propuesta.fecha,
+                fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
+              },
+            });
+          }
+
+          // notificaciones para asignados de la propuesta sin analistas
+          const asignadosPropuesta = propuesta.id_asignado ? propuesta.id_asignado.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id)) : [];
+          const analistaIds = usuariosAnalista.map(u => u.id);
+          const asignadosSinAnalistas = asignadosPropuesta.filter(id => !analistaIds.includes(id));
+
+          for (const asignadoId of asignadosSinAnalistas) {
+            const usuario = await tx.usuario.findUnique({
+              where: { id: asignadoId },
+              select: { nombre: true }
+            });
+
+            if (usuario) {
+              await tx.tareas.create({
+                data: {
+                  tipo: 'Notificación',
+                  titulo: `Campaña nueva - ${campania.nombre}`,
+                  descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
+                  estatus: 'Pendiente',
+                  id_responsable: asignadoId,
+                  responsable: usuario.nombre,
+                  asignado: usuario.nombre,
+                  id_asignado: asignadoId.toString(),
+                  id_solicitud: String(propuesta.solicitud_id),
+                  id_propuesta: String(propuestaId),
+                  campania_id: campania.id,
+                  fecha_inicio: new Date(),
+                  fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
+                },
+              });
+            }
+          }
         }
 
         // 6. Add historial entries

@@ -3008,31 +3008,123 @@ export class CampanasController {
           }).then(usuarioAsignado => {
             if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
               const htmlBody = `
-              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
-                  <h1 style="color: #ffffff; margin: 0; font-size: 28px;">QEB</h1>
-                  <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 12px;">OOH Management</p>
-                </div>
-                <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
-                  <h2 style="color: #1f2937; margin: 0 0 20px 0; font-size: 20px;">Nueva Tarea Asignada</h2>
-                  <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 15px 0;">
-                    Se te ha asignado la tarea <strong>${titulo || 'Nueva tarea'}</strong> para <strong>${tipo}</strong>: ${contenido || descripcion || ''}
-                  </p>
-                  <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${responsableNombre}</p>
-                  </div>
-                </div>
-                <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
-                  <p style="color: #9ca3af; font-size: 11px; margin: 0;">Mensaje automático del sistema QEB.</p>
-                </div>
-              </div>
-              `;
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              </head>
+              <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                  <tr>
+                    <td align="center">
+                      <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                        
+                        <!-- Header -->
+                        <tr>
+                          <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                            <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                          </td>
+                        </tr>
+
+                        <!-- Main Content -->
+                        <tr>
+                          <td style="padding: 40px;">
+                            
+                            <!-- Title -->
+                            <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Nueva Tarea Asignada</h2>
+                            <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                              Hola <strong style="color: #374151;">${usuarioAsignado.nombre}</strong>, se te ha asignado una nueva tarea.
+                            </p>
+
+                            <!-- Task Card -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                              <tr>
+                                <td style="padding: 20px;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td style="padding-bottom: 12px;">
+                                        <span style="display: inline-block; background-color: #8b5cf6; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">${tipo}</span>
+                                      </td>
+                                    </tr>
+                                    <tr>
+                                      <td>
+                                        <h3 style="color: #1f2937; margin: 0 0 8px 0; font-size: 18px; font-weight: 600;">${titulo || 'Nueva tarea'}</h3>
+                                        <p style="color: #6b7280; margin: 0; font-size: 14px; line-height: 1.5;">${contenido || descripcion || ''}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- Info Grid -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                              <tr>
+                                <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td width="24" valign="top">
+                                        <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📊</div>
+                                      </td>
+                                      <td style="padding-left: 12px;">
+                                        <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Campaña</p>
+                                        <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${campanaNombre}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                              
+                              <tr>
+                                <td style="padding: 12px 0;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td width="24" valign="top">
+                                        <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">✨</div>
+                                      </td>
+                                      <td style="padding-left: 12px;">
+                                        <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Creado por</p>
+                                        <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${responsableNombre}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- CTA Button -->
+                            <table width="100%" cellpadding="0" cellspacing="0">
+                              <tr>
+                                <td align="center">
+                                  <a href="https://app.qeb.mx/campanas/${campanaId}/tareas" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                                </td>
+                              </tr>
+                            </table>
+
+                          </td>
+                        </tr>
+
+                        <!-- Footer -->
+                        <tr>
+                          <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                            <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                            <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                          </td>
+                        </tr>
+
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </body>
+              </html>`;
 
               transporter.sendMail({
                 from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
                 to: usuarioAsignado.correo_electronico,
-                subject: `Tarea campaña ${campanaNombre}`,
+                subject: `Nueva tarea: ${titulo || tipo}`,
                 html: htmlBody,
               }).then(() => {
                 console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
@@ -3041,7 +3133,7 @@ export class CampanasController {
                   data: {
                     remitente: 'no-reply@qeb.mx',
                     destinatario: usuarioAsignado.correo_electronico,
-                    asunto: `Tarea campaña ${campanaNombre}`,
+                    asunto: `Nueva tarea: ${titulo || tipo}`,
                     cuerpo: htmlBody,
                   },
                 }).catch(err => console.error('Error guardando correo enviado:', err));

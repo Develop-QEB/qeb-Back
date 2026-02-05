@@ -1433,6 +1433,25 @@ export class SolicitudesController {
           tareasCreadas.push({ id: tarea.id, asignadoId: asignado.id, asignadoNombre: asignado.nombre });
         }
 
+        // 7.5 Crear tareas para cada asignado
+        await tx.tareas.create({
+          data: {
+            tipo: 'Seguimiento Solicitud',
+            titulo: 'Seguimiento Solicitud',
+            descripcion: nombre_campania, 
+            contenido: razon_social, 
+            estatus: 'Pendiente',
+            id_responsable: userId || 0,
+            responsable: userName,
+            asignado: userName,
+            id_asignado: userId?.toString() || '0',
+            id_solicitud: solicitud.id.toString(),
+            campania_id: campania.id,
+            fecha_inicio: getMexicoDate(), 
+            fecha_fin: new Date(fecha_fin), 
+          },
+        });
+
         // 8. Create solicitudCaras for each cara entry with authorization status
         const createdCaras = [];
         for (const cara of caras) {
@@ -1858,28 +1877,86 @@ export class SolicitudesController {
           data: { estatus: 'Atendido' },
         });
 
-        // Create new tarea for seguimiento propuesta
+        // Create new tareas after attending and seguimiento de propuesta
         if (propuesta) {
-          // Use new asignados if provided, otherwise use existing from solicitud
-          const tareaAsignado = asignados && asignados.length > 0 ? asignadoNombres : (solicitud.asignado || '');
-          const tareaIdAsignado = asignados && asignados.length > 0 ? asignadoIds : (solicitud.id_asignado || '');
-
+          const cotizacionData = await tx.cotizacion.findFirst({
+            where: { id_propuesta: propuesta.id },
+          });
+          const campaniaData = await tx.campania.findFirst({
+            where: { cotizacion_id: cotizacionData?.id },
+          });
+          const fechaFin = cotizacionData?.fecha_fin || solicitud.fecha || new Date();
+          
+          // Seguimiento Propuesta (asignado ORIGINAL )
+          const asignadoOriginal = solicitud.usuario_id || userId;
+          const nombreAsignadoOriginal = solicitud.nombre_usuario || userName || '';
+          
           await tx.tareas.create({
             data: {
               fecha_inicio: new Date(),
-              fecha_fin: solicitud.fecha || new Date(),
-              tipo: 'Seguimiento de propuesta',
-              responsable: solicitud.nombre_usuario || userName || '',
-              id_responsable: solicitud.usuario_id || userId,
-              asignado: tareaAsignado,
-              id_asignado: tareaIdAsignado,
-              estatus: 'Activo',
-              descripcion: `Seguimiento de propuesta: ${cotizacion?.nombre_campania || ''}`,
-              titulo: `Atender propuesta ${cotizacion?.nombre_campania || ''}`,
+              fecha_fin: fechaFin,
+              tipo: 'Seguimiento Propuesta',
+              responsable: nombreAsignadoOriginal,
+              id_responsable: asignadoOriginal,
+              asignado: nombreAsignadoOriginal,
+              id_asignado: asignadoOriginal.toString(),
+              estatus: 'Pendiente',
+              descripcion: `Dar seguimiento a la propuesta: ${cotizacionData?.nombre_campania || ''}`,
+              titulo: `Seguimiento Propuesta`,
               id_propuesta: propuesta.id.toString(),
               id_solicitud: solicitud.id.toString(),
+              campania_id: campaniaData?.id || null,
             },
           });
+
+          // Atender Propuesta (asignados de Tráfico)
+          const nuevosAsignadosIds = asignados && asignados.length > 0 
+            ? asignados.map((a: { id: number }) => a.id)
+            : [];
+          
+          // Obtener usuarios de Tráfico 
+          let usuariosTrafico: { id: number; nombre: string }[] = [];
+          if (nuevosAsignadosIds.length === 0) {
+            usuariosTrafico = await tx.usuario.findMany({
+              where: {
+                OR: [
+                  { puesto: { contains: 'Tráfico' } },
+                  { puesto: { contains: 'Trafico' } },
+                  { area: { contains: 'Tráfico' } },
+                  { area: { contains: 'Trafico' } }
+                ],
+                deleted_at: null
+              },
+              select: { id: true, nombre: true }
+            });
+          } else {
+            // obtener sus datos
+            usuariosTrafico = await tx.usuario.findMany({
+              where: { id: { in: nuevosAsignadosIds }, deleted_at: null },
+              select: { id: true, nombre: true }
+            });
+          }
+
+          //  tarea para usuario de Tráfico
+          for (const usuarioTrafico of usuariosTrafico) {
+            await tx.tareas.create({
+              data: {
+                fecha_inicio: new Date(),
+                fecha_fin: fechaFin,
+                tipo: 'Atender Propuesta',
+                responsable: usuarioTrafico.nombre,
+                id_responsable: usuarioTrafico.id,
+                asignado: usuarioTrafico.nombre,
+                id_asignado: usuarioTrafico.id.toString(),
+                estatus: 'Pendiente',
+                descripcion: `Atender propuesta: ${cotizacionData?.nombre_campania || ''}`,
+                titulo: `Atender Propuesta`,
+                id_propuesta: propuesta.id.toString(),
+                id_solicitud: solicitud.id.toString(),
+                campania_id: campaniaData?.id || null,
+              },
+            });
+          }
         }
 
         // Create historial for solicitud
