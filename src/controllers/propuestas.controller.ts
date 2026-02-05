@@ -752,7 +752,7 @@ export class PropuestasController {
           if (campania) {
             await tx.campania.update({
               where: { id: campania.id },
-              data: { status: 'Por iniciar' },
+              data: { status: 'Por iniciar', fecha_aprobacion: new Date() },
             });
           }
         }

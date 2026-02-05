@@ -117,7 +117,7 @@ export class CampanasController {
         LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         WHERE ${whereClause}
-        ORDER BY cm.id DESC
+        ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
         LIMIT ? OFFSET ?
       `;
 
@@ -3782,11 +3782,11 @@ export class CampanasController {
           )) AS FinSegmento,
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
-          rsv.archivo AS ArteUrl,
+          CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
           NULL AS OrigenArte,
-          inv.codigo_unico AS Unidad,
-          inv.tipo_de_cara AS Cara,
-          inv.municipio AS Ciudad,
+          CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
+          CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
+          CAST(inv.municipio AS CHAR(255)) AS Ciudad,
           CASE
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
             ELSE 'RENTA'
