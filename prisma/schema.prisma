@@ -191,13 +191,13 @@ model imagenes_digitales {
   id                 Int      @id @default(autoincrement())
   id_reserva         Int
   archivo            String   @db.VarChar(255)
-  archivo_data       String?  @db.LongText
   comentario         String   @db.Text
   aprobado_rechazado String   @db.VarChar(25)
   respuesta          String   @db.VarChar(255)
   spot               Int
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
+  archivo_data       String?  @db.LongText
 }
 
 model propuesta {
@@ -307,27 +307,27 @@ model tareas {
   id                 Int       @id @default(autoincrement())
   fecha_inicio       DateTime  @default(dbgenerated("(curdate())")) @db.DateTime(0)
   fecha_fin          DateTime  @default(now()) @db.DateTime(0)
-  created_at         DateTime? @default(now()) @db.Timestamp(0)
-  tipo               String?  @db.VarChar(50)
-  responsable        String?  @db.VarChar(50)
+  tipo               String?   @db.VarChar(50)
+  responsable        String?   @db.VarChar(50)
   id_responsable     Int
-  estatus            String?  @db.VarChar(50)
-  descripcion        String?  @db.VarChar(255)
-  titulo             String?  @db.VarChar(50)
-  contenido          String?  @db.VarChar(50)
+  estatus            String?   @db.VarChar(50)
+  descripcion        String?   @db.VarChar(255)
+  titulo             String?   @db.VarChar(50)
+  contenido          String?   @db.VarChar(50)
   campania_id        Int?
-  archivo            String?  @db.VarChar(1000)
-  id_solicitud       String   @db.VarChar(100)
-  id_propuesta       String?  @db.VarChar(100)
-  evidencia          String?  @db.VarChar(10000)
+  archivo            String?   @db.VarChar(1000)
+  id_solicitud       String    @db.VarChar(100)
+  id_propuesta       String?   @db.VarChar(100)
+  evidencia          String?   @db.VarChar(10000)
   proveedores_id     Int?
-  listado_inventario String?  @db.VarChar(255)
-  nombre_proveedores String?  @db.VarChar(255)
-  asignado           String?  @db.VarChar(255)
-  id_asignado        String?  @db.VarChar(255)
-  ids_reservas       String?  @db.Text
+  listado_inventario String?   @db.VarChar(255)
+  nombre_proveedores String?   @db.VarChar(255)
+  asignado           String?   @db.VarChar(255)
+  id_asignado        String?   @db.VarChar(255)
+  ids_reservas       String?   @db.Text
   num_impresiones    Int?
-  archivo_testigo    String?  @db.VarChar(1000)
+  archivo_testigo    String?   @db.VarChar(1000)
+  created_at         DateTime? @default(now()) @db.Timestamp(0)
 }
 
 model usuario {
@@ -362,8 +362,8 @@ model usuario_equipo {
   equipo_id  Int
   rol        String?   @db.VarChar(50)
   created_at DateTime? @default(now()) @db.Timestamp(0)
-  usuario    usuario   @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
   equipo     equipo    @relation(fields: [equipo_id], references: [id], onDelete: Cascade)
+  usuario    usuario   @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
 
   @@unique([usuario_id, equipo_id])
   @@index([usuario_id])
@@ -464,27 +464,26 @@ model vista_conteo_por_muebles {
   @@ignore
 }
 
+model tickets {
+  id             Int       @id @default(autoincrement())
+  titulo         String    @db.VarChar(255)
+  descripcion    String    @db.Text
+  imagen         String?   @db.LongText
+  status         String    @default("Nuevo") @db.VarChar(50)
+  prioridad      String    @default("Normal") @db.VarChar(20)
+  usuario_id     Int
+  usuario_nombre String    @db.VarChar(255)
+  usuario_email  String    @db.VarChar(255)
+  respuesta      String?   @db.Text
+  respondido_por String?   @db.VarChar(255)
+  respondido_at  DateTime? @db.DateTime(0)
+  created_at     DateTime  @default(now()) @db.DateTime(0)
+  updated_at     DateTime  @updatedAt @db.DateTime(0)
+
+  @@map("tickets")
+}
+
 enum proveedores_estado {
   activo
   inactivo
-}
-
-// Sistema de Tickets para soporte técnico
-model tickets {
-  id              Int       @id @default(autoincrement())
-  titulo          String    @db.VarChar(255)
-  descripcion     String    @db.Text
-  imagen          String?   @db.LongText // Base64 image
-  status          String    @default("Nuevo") @db.VarChar(50) // Nuevo, En Progreso, Resuelto, Cerrado
-  prioridad       String    @default("Normal") @db.VarChar(20) // Baja, Normal, Alta, Urgente
-  usuario_id      Int
-  usuario_nombre  String    @db.VarChar(255)
-  usuario_email   String    @db.VarChar(255)
-  respuesta       String?   @db.Text // Respuesta del programador
-  respondido_por  String?   @db.VarChar(255)
-  respondido_at   DateTime? @db.DateTime(0)
-  created_at      DateTime  @default(now()) @db.DateTime(0)
-  updated_at      DateTime  @updatedAt @db.DateTime(0)
-
-  @@map("tickets")
 }
