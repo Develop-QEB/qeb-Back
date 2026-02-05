@@ -91,16 +91,17 @@ model calendario {
 }
 
 model campania {
-  id            Int      @id @default(autoincrement())
-  cliente_id    Int
-  nombre        String   @db.VarChar(100)
-  fecha_inicio  DateTime @db.Date
-  fecha_fin     DateTime @db.Date
-  total_caras   String   @db.VarChar(255)
-  bonificacion  Int
-  status        String   @default("inactiva") @db.VarChar(50)
-  cotizacion_id Int?
-  articulo      String   @db.VarChar(20)
+  id               Int       @id @default(autoincrement())
+  cliente_id       Int
+  nombre           String    @db.VarChar(100)
+  fecha_inicio     DateTime  @db.Date
+  fecha_fin        DateTime  @db.Date
+  total_caras      String    @db.VarChar(255)
+  bonificacion     Int
+  status           String    @default("inactiva") @db.VarChar(50)
+  cotizacion_id    Int?
+  articulo         String    @db.VarChar(20)
+  fecha_aprobacion DateTime? @db.DateTime(0)
 }
 
 model cliente {
