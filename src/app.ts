@@ -41,6 +41,8 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
+// Responder preflights CORS inmediatamente sin pasar por otros middlewares
+app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
