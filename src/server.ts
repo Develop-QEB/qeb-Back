@@ -63,6 +63,17 @@ async function connectWithRetry(): Promise<void> {
 }
 
 async function main() {
+  // Inicializar Socket.io
+  initializeSocket(httpServer);
+  console.log('[Socket] WebSocket server inicializado');
+
+  // Arrancar servidor HTTP primero para responder health checks y CORS
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+
+  // Conectar a la base de datos con reintentos
   try {
     await connectWithRetry();
 
@@ -72,18 +83,9 @@ async function main() {
     // Programar limpieza periódica
     setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
-
-    // Inicializar Socket.io
-    initializeSocket(httpServer);
-    console.log('[Socket] WebSocket server inicializado');
-
-    httpServer.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    });
   } catch (error) {
-    console.error('Failed to start server after all retries:', error);
-    process.exit(1);
+    console.error('[DB] Could not connect to database after all retries:', error);
+    console.log('[DB] Server is running but database is unavailable. API requests will fail.');
   }
 }
 
