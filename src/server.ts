@@ -42,10 +42,29 @@ async function limpiarReservasExpiradas(): Promise<void> {
 // Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
 const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
 
+const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 5000; // 5 segundos entre reintentos
+
+async function connectWithRetry(): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await prisma.$connect();
+      console.log('Database connected successfully');
+      return;
+    } catch (error) {
+      console.error(`[DB] Connection attempt ${attempt}/${MAX_RETRIES} failed:`, (error as Error).message);
+      if (attempt === MAX_RETRIES) {
+        throw error;
+      }
+      console.log(`[DB] Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+}
+
 async function main() {
   try {
-    await prisma.$connect();
-    console.log('Database connected successfully');
+    await connectWithRetry();
 
     // Ejecutar limpieza inicial al arrancar
     await limpiarReservasExpiradas();
@@ -63,7 +82,7 @@ async function main() {
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('Failed to start server after all retries:', error);
     process.exit(1);
   }
 }
