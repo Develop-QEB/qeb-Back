@@ -129,6 +129,9 @@ model cliente {
   T2_U_Producto      String?   @db.VarChar(255)
   T2_U_ValidFrom     DateTime? @db.Date
   T2_U_ValidTo       DateTime? @db.Date
+  card_code          String?   @db.VarChar(50)
+  salesperson_code   Int?
+  sap_database       String?   @db.VarChar(10)
 }
 
 model comentarios {
@@ -278,6 +281,7 @@ model solicitud {
   tipo_archivo     String?   @db.VarChar(100)
   card_code        String?   @db.VarChar(50)
   salesperson_code Int?
+  sap_database     String?   @db.VarChar(10)
 }
 
 model solicitudCaras {
@@ -313,7 +317,7 @@ model tareas {
   estatus            String?   @db.VarChar(50)
   descripcion        String?   @db.VarChar(255)
   titulo             String?   @db.VarChar(50)
-  contenido          String?   @db.VarChar(50)
+  contenido          String?   @db.Text
   campania_id        Int?
   archivo            String?   @db.VarChar(1000)
   id_solicitud       String    @db.VarChar(100)

@@ -645,7 +645,7 @@ export class PropuestasController {
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
       // Si el cambio es a "Ajuste Cto Cliente", crear tareas específicas para Tráfico
-      if (status === 'Ajuste Cto Cliente') {
+      if (status === 'Ajuste Cto-Cliente') {
         const usuariosTrafico = await prisma.usuario.findMany({
           where: {
             OR: [
@@ -1219,8 +1219,10 @@ export class PropuestasController {
             cat.fecha_fin,
             COUNT(DISTINCT rsv.id) as num_caras
           FROM catorcenas cat
-          INNER JOIN solicitudCaras sc ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON (
+            cat.fecha_inicio <= sc.fin_periodo AND cat.fecha_fin >= sc.inicio_periodo
+          )
+          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           WHERE ct.id = ?
           GROUP BY cat.numero_catorcena, cat.año, cat.fecha_inicio, cat.fecha_fin
