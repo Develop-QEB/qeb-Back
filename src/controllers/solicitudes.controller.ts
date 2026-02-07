@@ -77,30 +77,10 @@ async function enviarCorreoTarea(
                 
                 <!-- Title -->
                 <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Nueva Tarea Asignada</h2>
-                <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
                   Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se te ha asignado una nueva tarea.
                 </p>
-
-                <!-- Task Card -->
-                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
-                  <tr>
-                    <td style="padding: 20px;">
-                      <table width="100%" cellpadding="0" cellspacing="0">
-                        <tr>
-                          <td style="padding-bottom: 12px;">
-                            <span style="display: inline-block; background-color: #8b5cf6; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">Campaña</span>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <h3 style="color: #1f2937; margin: 0 0 8px 0; font-size: 18px; font-weight: 600;">${titulo}</h3>
-                            <p style="color: #6b7280; margin: 0; font-size: 14px; line-height: 1.5;">${descripcion}</p>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
-                  </tr>
-                </table>
+                <h3 style="color: #8b5cf6; margin: 0 0 24px 0; font-size: 20px; font-weight: 700;">${descripcion}</h3>
 
                 <!-- Info Grid -->
                 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
@@ -183,7 +163,7 @@ async function enviarCorreoTarea(
                 <table width="100%" cellpadding="0" cellspacing="0">
                   <tr>
                     <td align="center">
-                      <a href="https://app.qeb.mx/solicitudes?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                      <a href="https://app.qeb.mx/solicitudes?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Solicitud</a>
                     </td>
                   </tr>
                 </table>
@@ -1408,32 +1388,8 @@ export class SolicitudesController {
             articulo,
           },
         });
-        
-        // 7. Create tareas for each asignado
-        const tareasCreadas: { id: number; asignadoId: number; asignadoNombre: string }[] = [];
 
-        for (const asignado of asignados) {
-          const tarea = await tx.tareas.create({
-            data: {
-              fecha_inicio: getMexicoDate(),
-              fecha_fin: new Date(fecha_fin),
-              tipo: 'Solicitud',
-              responsable: asignado.nombre,
-              id_responsable: asignado.id,
-              estatus: 'Pendiente',
-              descripcion: `Atender solicitud: ${nombre_campania}`,
-              titulo: nombre_campania,
-              campania_id: campania.id,
-              id_solicitud: solicitud.id.toString(),
-              id_propuesta: propuesta.id.toString(),
-              asignado: asignado.nombre,
-              id_asignado: asignado.id.toString(),
-            },
-          });
-          tareasCreadas.push({ id: tarea.id, asignadoId: asignado.id, asignadoNombre: asignado.nombre });
-        }
-
-        // 7.5 Crear tareas para cada asignado
+        // 7. Crear tareas para cada asignado
         await tx.tareas.create({
           data: {
             tipo: 'Seguimiento Solicitud',
@@ -1526,42 +1482,29 @@ export class SolicitudesController {
         ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
         : null;
 
-      const asignadoIds = asignados.map((a: { id: number }) => a.id);
-      const usuariosConEmail = await prisma.usuario.findMany({
-        where: { id: { in: asignadoIds } },
-        select: { id: true, correo_electronico: true },
-      });
-      const emailMap = new Map(usuariosConEmail.map(u => [u.id, u.correo_electronico]));
+      // Enviar correo al creador (quien tiene la tarea de Seguimiento Solicitud)
+      if (userId) {
+        const creadorConEmail = await prisma.usuario.findUnique({
+          where: { id: userId },
+          select: { correo_electronico: true },
+        });
 
-      for (const asignado of asignados) {
-        const email = emailMap.get(asignado.id);
-        if (email) {
-          const tareaAsignado = await prisma.tareas.findFirst({
-            where: {
-              id_solicitud: result.solicitud.id.toString(),
-              id_responsable: asignado.id,
-              tipo: 'Solicitud',
-            },
-            orderBy: { id: 'desc' },
-          });
-          
-          if (tareaAsignado) {
-            enviarCorreoTarea(
-              result.solicitud.id,
-              nombre_campania,
-              `Atender solicitud: ${nombre_campania}`,
-              new Date(fecha_fin),
-              email,
-              asignado.nombre,
-              {
-                cliente: razon_social,
-                producto: producto_nombre,
-                creador: userName,
-                periodoInicio: periodoInicioStr || undefined,
-                periodoFin: periodoFinStr || undefined,
-              }
-            ).catch(err => console.error('Error enviando correo:', err));
-          }
+        if (creadorConEmail?.correo_electronico) {
+          enviarCorreoTarea(
+            result.solicitud.id,
+            nombre_campania,
+            `Dar seguimiento a solicitud: ${nombre_campania}`,
+            new Date(fecha_fin),
+            creadorConEmail.correo_electronico,
+            userName,
+            {
+              cliente: razon_social,
+              producto: producto_nombre,
+              creador: userName,
+              periodoInicio: periodoInicioStr || undefined,
+              periodoFin: periodoFinStr || undefined,
+            }
+          ).catch(err => console.error('Error enviando correo:', err));
         }
       }
 
@@ -1909,15 +1852,18 @@ export class SolicitudesController {
             },
           });
 
-          // Atender Propuesta (asignados de Tráfico)
+          // Atender Propuesta 
           const nuevosAsignadosIds = asignados && asignados.length > 0 
             ? asignados.map((a: { id: number }) => a.id)
             : [];
-          
-          // Obtener usuarios de Tráfico 
-          let usuariosTrafico: { id: number; nombre: string }[] = [];
+
+          let usuariosTrafico: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+
+          // Construir condición de exclusión solo si hay creador
+          const excludeCreator = solicitud.usuario_id ? { not: solicitud.usuario_id } : {};
+
           if (nuevosAsignadosIds.length === 0) {
-            usuariosTrafico = await tx.usuario.findMany({
+            usuariosTrafico = await prisma.usuario.findMany({
               where: {
                 OR: [
                   { puesto: { contains: 'Tráfico' } },
@@ -1925,16 +1871,25 @@ export class SolicitudesController {
                   { area: { contains: 'Tráfico' } },
                   { area: { contains: 'Trafico' } }
                 ],
+                ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
                 deleted_at: null
               },
-              select: { id: true, nombre: true }
+              select: { id: true, nombre: true, correo_electronico: true }
             });
           } else {
-            // obtener sus datos
-            usuariosTrafico = await tx.usuario.findMany({
-              where: { id: { in: nuevosAsignadosIds }, deleted_at: null },
-              select: { id: true, nombre: true }
+            // Si hay asignados específicos, filtrar al creador manualmente después del query
+            const usuariosTraficoRaw = await prisma.usuario.findMany({
+              where: { 
+                id: { in: nuevosAsignadosIds },
+                deleted_at: null 
+              },
+              select: { id: true, nombre: true, correo_electronico: true }
             });
+            
+            // Filtrar al creador si existe
+            usuariosTrafico = solicitud.usuario_id 
+              ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
+              : usuariosTraficoRaw;
           }
 
           //  tarea para usuario de Tráfico
@@ -2003,6 +1958,120 @@ export class SolicitudesController {
           });
         }
       });
+
+      // Obtener catorcenas para el correo
+      const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta?.id },
+      });
+      const fechaFin = cotizacionData?.fecha_fin || solicitud.fecha || new Date();
+
+      const catorcenaInicio = cotizacionData?.fecha_inicio ? await prisma.catorcenas.findFirst({
+        where: {
+          fecha_inicio: { lte: cotizacionData.fecha_inicio },
+          fecha_fin: { gte: cotizacionData.fecha_inicio },
+        },
+      }) : null;
+
+      const catorcenaFin = await prisma.catorcenas.findFirst({
+        where: {
+          fecha_inicio: { lte: fechaFin },
+          fecha_fin: { gte: fechaFin },
+        },
+      });
+
+      const periodoInicioStr = catorcenaInicio 
+        ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}` 
+        : undefined;
+      const periodoFinStr = catorcenaFin 
+        ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
+        : undefined;
+
+      // Enviar correo al creador (Seguimiento Propuesta)
+      const asignadoOriginal = solicitud.usuario_id || userId;
+      const nombreAsignadoOriginal = solicitud.nombre_usuario || userName || '';
+
+      if (asignadoOriginal) {
+        const creador = await prisma.usuario.findUnique({
+          where: { id: asignadoOriginal },
+          select: { correo_electronico: true, nombre: true },
+        });
+
+        if (creador?.correo_electronico) {
+          enviarCorreoTarea(
+            solicitud.id,
+            cotizacionData?.nombre_campania || '',
+            `Dar seguimiento a la propuesta: ${cotizacionData?.nombre_campania || ''}`,
+            fechaFin,
+            creador.correo_electronico,
+            nombreAsignadoOriginal,
+            {
+              cliente: solicitud?.razon_social || undefined,
+              producto: solicitud?.producto_nombre || undefined,
+              creador: userName,
+              periodoInicio: periodoInicioStr,
+              periodoFin: periodoFinStr,
+            }
+          ).catch(err => console.error('Error enviando correo:', err));
+        }
+      }
+
+      // Enviar correo a usuarios de Tráfico (Atender Propuesta)
+      const nuevosAsignadosIds = asignados && asignados.length > 0 
+        ? asignados.map((a: { id: number }) => a.id)
+        : [];
+
+      let usuariosTrafico: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+
+      if (nuevosAsignadosIds.length === 0) {
+        usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } }
+            ],
+            ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
+            deleted_at: null
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+      } else {
+        const usuariosTraficoRaw = await prisma.usuario.findMany({
+          where: { 
+            id: { in: nuevosAsignadosIds },
+            deleted_at: null 
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+        
+        // Filtrar al creador si existe
+        usuariosTrafico = solicitud.usuario_id 
+          ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
+          : usuariosTraficoRaw;
+      }
+
+      for (const usuarioTrafico of usuariosTrafico) {
+        if (usuarioTrafico.correo_electronico) {
+          enviarCorreoTarea(
+            solicitud.id,
+            cotizacionData?.nombre_campania || '',
+            `Atender propuesta: ${cotizacionData?.nombre_campania || ''}`,
+            fechaFin,
+            usuarioTrafico.correo_electronico,
+            usuarioTrafico.nombre,
+            {
+              cliente: solicitud?.razon_social || undefined,
+              producto: solicitud?.producto_nombre || undefined,
+              creador: userName,
+              periodoInicio: periodoInicioStr,
+              periodoFin: periodoFinStr,
+            }
+          ).catch(err => console.error('Error enviando correo:', err));
+        }
+      }
+
+
 
       res.json({
         success: true,

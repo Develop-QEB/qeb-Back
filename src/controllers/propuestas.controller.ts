@@ -7,6 +7,354 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import nodemailer from 'nodemailer';
+
+// transporter
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: { rejectUnauthorized: false },
+});
+
+async function enviarCorreoTarea(
+  tareaId: number,
+  titulo: string,
+  descripcion: string,
+  fechaFin: Date,
+  destinatarioEmail: string,
+  destinatarioNombre: string,
+  datosAdicionales: {
+    cliente?: string;
+    producto?: string;
+    creador?: string;
+    periodoInicio?: string;
+    periodoFin?: string;
+  } = {}
+): Promise<void> {
+  const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+
+  const htmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+      <tr>
+        <td align="center">
+          <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
+            <tr>
+              <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+              </td>
+            </tr>
+
+            <!-- Main Content -->
+            <tr>
+              <td style="padding: 40px;">
+                
+                <!-- Title -->
+                <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Nueva Tarea Asignada</h2>
+                <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se te ha asignado una nueva tarea.
+                </p>
+                <h3 style="color: #8b5cf6; margin: 0 0 24px 0; font-size: 20px; font-weight: 700;">${descripcion}</h3>
+
+                <!-- Info Grid -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                  ${datosAdicionales.cliente ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">🏢</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Cliente</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.cliente}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+                  
+                  ${datosAdicionales.producto ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📦</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Producto</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.producto}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.creador ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">✨</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Creado por</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.creador}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📅</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Período</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">
+                              ${datosAdicionales.periodoInicio && datosAdicionales.periodoFin 
+                                ? `${datosAdicionales.periodoInicio} → ${datosAdicionales.periodoFin}` 
+                                : 'Sin período definido'}
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+
+                <!-- CTA Button -->
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="https://app.qeb.mx/solicitudes?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Solicitud</a>
+                    </td>
+                  </tr>
+                </table>
+
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+      to: destinatarioEmail,
+      subject: `Nueva tarea: ${titulo}`,
+      html: htmlBody,
+    });
+
+    await prisma.correos_enviados.create({
+      data: {
+        remitente: 'no-reply@qeb.mx',
+        destinatario: destinatarioEmail,
+        asunto: `Nueva tarea: ${titulo}`,
+        cuerpo: htmlBody,
+      },
+    });
+  }
+}
+
+async function enviarCorreoNotificacion(
+  solicitudId: number,
+  titulo: string,
+  descripcion: string,
+  destinatarioEmail: string,
+  destinatarioNombre: string,
+  datosAdicionales: {
+    accion?: string;
+    usuario?: string;
+    cliente?: string;
+  } = {}
+): Promise<void> {
+  const htmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+      <tr>
+        <td align="center">
+          <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
+            <tr>
+              <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+              </td>
+            </tr>
+
+            <!-- Main Content -->
+            <tr>
+              <td style="padding: 40px;">
+                
+                <!-- Title -->
+                <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                  <span style="display: inline-block; background-color: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">🔔 Notificación</span>
+                </div>
+                <h2 style="color: #1f2937; margin: 12px 0 8px 0; font-size: 20px; font-weight: 600;">${titulo}</h2>
+                <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, tienes una nueva notificación.
+                </p>
+
+                <!-- Notification Card -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #fffbeb; border-radius: 12px; border: 1px solid #fde68a; margin-bottom: 24px;">
+                  <tr>
+                    <td style="padding: 20px;">
+                      <p style="color: #92400e; margin: 0; font-size: 14px; line-height: 1.6;">${descripcion}</p>
+                    </td>
+                  </tr>
+                </table>
+
+                <!-- Info Grid -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                  ${datosAdicionales.usuario ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">👤</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Realizado por</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.usuario}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.cliente ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">🏢</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Cliente</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.cliente}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.accion ? `
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">⚡</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Acción</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.accion}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+                </table>
+
+                <!-- CTA Button -->
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="https://app.qeb.mx/solicitudes?viewId=${solicitudId}" style="display: inline-block; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(245, 158, 11, 0.4);">Ver en QEB</a>
+                    </td>
+                  </tr>
+                </table>
+
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+      to: destinatarioEmail,
+      subject: `🔔 ${titulo}`,
+      html: htmlBody,
+    });
+
+    await prisma.correos_enviados.create({
+      data: {
+        remitente: 'no-reply@qeb.mx',
+        destinatario: destinatarioEmail,
+        asunto: `🔔 ${titulo}`,
+        cuerpo: htmlBody,
+      },
+    });
+  }
+}
+
 
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -293,32 +641,10 @@ export class PropuestasController {
         involucrados.add(solicitud.usuario_id);
       }
 
-      // Crear notificación para cada involucrado
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-      for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            responsable: '',
-            id_solicitud: propuesta.solicitud_id?.toString() || '',
-            id_propuesta: propuestaId.toString(),
-            campania_id: campania?.id || null,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            asignado: userName,
-            id_asignado: userId.toString(),
-          },
-        });
-      }
-
-      // si tiene el mismo status se salta 
-      let traficoIds: number[] = [];
+      // Si el cambio es a "Ajuste Cto Cliente", crear tareas específicas para Tráfico
       if (status === 'Ajuste Cto Cliente') {
         const usuariosTrafico = await prisma.usuario.findMany({
           where: {
@@ -330,39 +656,78 @@ export class PropuestasController {
             ],
             deleted_at: null
           },
-          select: { id: true, nombre: true }
+          select: { id: true, nombre: true, correo_electronico: true }
         });
-        traficoIds = usuariosTrafico.map(u => u.id);
         
-        // tarea para usuarios de Tráfico
+        // Crear tarea para cada usuario de Tráfico
         for (const usuarioTrafico of usuariosTrafico) {
           if (usuarioTrafico.id !== userId) {
+            // Crear tarea
             await prisma.tareas.create({
               data: {
                 titulo: `Ajuste con cliente - ${nombrePropuesta}`,
-                descripcion: `${userName} cambió el estado a "Ajuste Cto Cliente"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
+                descripcion: `Ajustar cotización con cliente: ${nombrePropuesta}`,
                 tipo: 'Ajuste Cto Cliente',
                 estatus: 'Pendiente',
                 id_responsable: usuarioTrafico.id,
                 responsable: usuarioTrafico.nombre,
+                asignado: usuarioTrafico.nombre,
+                id_asignado: usuarioTrafico.id.toString(),
                 id_solicitud: propuesta.solicitud_id?.toString() || '',
                 id_propuesta: propuestaId.toString(),
                 campania_id: campania?.id || null,
                 fecha_inicio: now,
                 fecha_fin: fechaFin,
-                asignado: userName,
-                id_asignado: userId.toString(),
               },
             });
           }
         }
+
+        // Obtener catorcenas para el correo (DESPUÉS de la transacción)
+        const catorcenaInicio = cotizacion?.fecha_inicio ? await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: cotizacion.fecha_inicio },
+            fecha_fin: { gte: cotizacion.fecha_inicio },
+          },
+        }) : null;
+
+        const catorcenaFin = cotizacion?.fecha_fin ? await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: cotizacion.fecha_fin },
+            fecha_fin: { gte: cotizacion.fecha_fin },
+          },
+        }) : null;
+
+        const periodoInicioStr = catorcenaInicio 
+          ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}` 
+          : undefined;
+        const periodoFinStr = catorcenaFin 
+          ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
+          : undefined;
+
+        // Enviar correos a usuarios de Tráfico
+        for (const usuarioTrafico of usuariosTrafico) {
+          if (usuarioTrafico.id !== userId && usuarioTrafico.correo_electronico) {
+            enviarCorreoTarea(
+              propuesta.solicitud_id || 0,
+              nombrePropuesta,
+              `Ajustar cotización con cliente: ${nombrePropuesta}`,
+              fechaFin,
+              usuarioTrafico.correo_electronico,
+              usuarioTrafico.nombre,
+              {
+                cliente: solicitud?.razon_social || undefined,
+                creador: userName,
+                periodoInicio: periodoInicioStr,
+                periodoFin: periodoFinStr,
+              }
+            ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
       }
 
+      // Crear notificación estándar para el resto de involucrados
       for (const responsableId of involucrados) {
-        if (status === 'Ajuste Cto Cliente' && traficoIds.includes(responsableId)) {
-          continue;
-        }
-        
         await prisma.tareas.create({
           data: {
             titulo: tituloNotificacion,
@@ -845,70 +1210,114 @@ export class PropuestasController {
 
         // 5. Create seguimiento task
         if (campania) {
-          const usuariosAnalista = await tx.usuario.findMany({
-            where: {
-              OR: [
-                { puesto: { contains: 'Analista' } },
-                { area: { contains: 'Analista' } }
-              ],
-              deleted_at: null
+        // Obtener catorcenas incluidas en la campaña para el contenido de la tarea
+        const catorcenasQuery = `
+          SELECT DISTINCT
+            cat.numero_catorcena,
+            cat.año as anio,
+            cat.fecha_inicio,
+            cat.fecha_fin,
+            COUNT(DISTINCT rsv.id) as num_caras
+          FROM catorcenas cat
+          INNER JOIN solicitudCaras sc ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          WHERE ct.id = ?
+          GROUP BY cat.numero_catorcena, cat.año, cat.fecha_inicio, cat.fecha_fin
+          ORDER BY cat.año, cat.numero_catorcena
+        `;
+        const catorcenas = await tx.$queryRawUnsafe<{
+          numero_catorcena: number;
+          anio: number;
+          fecha_inicio: Date;
+          fecha_fin: Date;
+          num_caras: bigint;
+        }[]>(catorcenasQuery, cotizacion?.id);
+
+        // contenido HTML con tabla de catorcenas
+        const tablaCatorcenas = catorcenas && catorcenas.length > 0 ? catorcenas.map(cat => 
+          `Cat ${cat.numero_catorcena} - ${cat.anio}: ${new Date(cat.fecha_inicio).toLocaleDateString('es-MX')} a ${new Date(cat.fecha_fin).toLocaleDateString('es-MX')} (${Number(cat.num_caras)} caras)`
+        ).join('\n') : 'Sin catorcenas definidas';
+
+        const contenidoTarea = `
+      Cliente: ${solicitud?.razon_social || 'Sin cliente'}
+      Campaña: ${campania.nombre}
+      Fecha límite: ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString('es-MX') : 'Sin definir'}
+
+      CATORCENAS INCLUIDAS:
+      ${tablaCatorcenas}
+
+      Ver campaña: https://app.qeb.mx/campanas/${campania.id}
+        `.trim();
+
+        // Obtener usuarios del área de Analista
+        const usuariosAnalista = await tx.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Analista' } },
+              { area: { contains: 'Analista' } }
+            ],
+            deleted_at: null
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+
+        // Crear tarea "Seguimiento Campaña" para cada Analista
+        for (const usuarioAnalista of usuariosAnalista) {
+          await tx.tareas.create({
+            data: {
+              tipo: 'Seguimiento Campaña',
+              titulo: 'Seguimiento Campaña',
+              descripcion: `Dar seguimiento a la campaña: ${campania.nombre}`,
+              contenido: contenidoTarea, // ← AQUÍ está toda la info
+              estatus: 'Pendiente',
+              id_responsable: usuarioAnalista.id,
+              responsable: usuarioAnalista.nombre,
+              asignado: usuarioAnalista.nombre,
+              id_asignado: usuarioAnalista.id.toString(),
+              id_solicitud: String(propuesta.solicitud_id),
+              id_propuesta: String(propuestaId),
+              campania_id: campania.id,
+              fecha_inicio: propuesta.fecha,
+              fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
             },
-            select: { id: true, nombre: true }
+          });
+        }
+
+        // Crear notificaciones para asignados de la propuesta (excluyendo Analistas)
+        const asignadosPropuesta = propuesta.id_asignado 
+          ? propuesta.id_asignado.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id)) 
+          : [];
+        const analistaIds = usuariosAnalista.map(u => u.id);
+        const asignadosSinAnalistas = asignadosPropuesta.filter(id => !analistaIds.includes(id));
+
+        for (const asignadoId of asignadosSinAnalistas) {
+          const usuario = await tx.usuario.findUnique({
+            where: { id: asignadoId },
+            select: { nombre: true, correo_electronico: true }
           });
 
-          for (const usuarioAnalista of usuariosAnalista) {
+          if (usuario) {
             await tx.tareas.create({
               data: {
-                tipo: 'Seguimiento Campaña',
-                titulo: 'Seguimiento Campaña',
-                descripcion: `Dar seguimiento a la campaña: ${campania.nombre}`,
-                contenido: solicitud?.razon_social || '', 
+                tipo: 'Notificación',
+                titulo: `Campaña nueva - ${campania.nombre}`,
+                descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
                 estatus: 'Pendiente',
-                id_responsable: usuarioAnalista.id,
-                responsable: usuarioAnalista.nombre,
-                asignado: usuarioAnalista.nombre,
-                id_asignado: usuarioAnalista.id.toString(),
+                id_responsable: asignadoId,
+                responsable: usuario.nombre,
+                asignado: usuario.nombre,
+                id_asignado: asignadoId.toString(),
                 id_solicitud: String(propuesta.solicitud_id),
                 id_propuesta: String(propuestaId),
                 campania_id: campania.id,
-                fecha_inicio: propuesta.fecha,
-                fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
+                fecha_inicio: new Date(),
+                fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
               },
             });
           }
-
-          // notificaciones para asignados de la propuesta sin analistas
-          const asignadosPropuesta = propuesta.id_asignado ? propuesta.id_asignado.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id)) : [];
-          const analistaIds = usuariosAnalista.map(u => u.id);
-          const asignadosSinAnalistas = asignadosPropuesta.filter(id => !analistaIds.includes(id));
-
-          for (const asignadoId of asignadosSinAnalistas) {
-            const usuario = await tx.usuario.findUnique({
-              where: { id: asignadoId },
-              select: { nombre: true }
-            });
-
-            if (usuario) {
-              await tx.tareas.create({
-                data: {
-                  tipo: 'Notificación',
-                  titulo: `Campaña nueva - ${campania.nombre}`,
-                  descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
-                  estatus: 'Pendiente',
-                  id_responsable: asignadoId,
-                  responsable: usuario.nombre,
-                  asignado: usuario.nombre,
-                  id_asignado: asignadoId.toString(),
-                  id_solicitud: String(propuesta.solicitud_id),
-                  id_propuesta: String(propuestaId),
-                  campania_id: campania.id,
-                  fecha_inicio: new Date(),
-                  fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
-                },
-              });
-            }
-          }
         }
+      }
 
         // 6. Add historial entries
         await tx.historial.createMany({
@@ -956,6 +1365,90 @@ export class PropuestasController {
           }
         }
       }, { timeout: 30000 });
+
+      // Enviar correos a Analistas (Seguimiento Campaña)
+      if (campania) {
+        const usuariosAnalistaCorreo = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Analista' } },
+              { area: { contains: 'Analista' } }
+            ],
+            deleted_at: null
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+
+        // Obtener catorcenas para el correo
+        const catorcenaInicio = cotizacion?.fecha_inicio ? await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: cotizacion.fecha_inicio },
+            fecha_fin: { gte: cotizacion.fecha_inicio },
+          },
+        }) : null;
+
+        const catorcenaFin = cotizacion?.fecha_fin ? await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: cotizacion.fecha_fin },
+            fecha_fin: { gte: cotizacion.fecha_fin },
+          },
+        }) : null;
+
+        const periodoInicioStr = catorcenaInicio 
+          ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}` 
+          : undefined;
+        const periodoFinStr = catorcenaFin 
+          ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
+          : undefined;
+
+        for (const analista of usuariosAnalistaCorreo) {
+          if (analista.correo_electronico) {
+            enviarCorreoTarea(
+              propuesta.solicitud_id || 0,
+              campania.nombre,
+              `Dar seguimiento a la campaña: ${campania.nombre}`,
+              cotizacion?.fecha_fin || new Date(),
+              analista.correo_electronico,
+              analista.nombre,
+              {
+                cliente: solicitud?.razon_social || undefined,
+                creador: req.user?.nombre || 'Usuario',
+                periodoInicio: periodoInicioStr,
+                periodoFin: periodoFinStr,
+              }
+            ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
+
+        // Enviar notificaciones a asignados (excluyendo Analistas)
+        const asignadosPropuesta = propuesta.id_asignado 
+          ? propuesta.id_asignado.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id)) 
+          : [];
+        const analistaIds = usuariosAnalistaCorreo.map(u => u.id);
+        const asignadosSinAnalistas = asignadosPropuesta.filter(id => !analistaIds.includes(id));
+
+        for (const asignadoId of asignadosSinAnalistas) {
+          const usuario = await prisma.usuario.findUnique({
+            where: { id: asignadoId },
+            select: { nombre: true, correo_electronico: true }
+          });
+
+          if (usuario?.correo_electronico) {
+            enviarCorreoNotificacion(
+              propuesta.solicitud_id || 0,
+              `Campaña nueva - ${campania.nombre}`,
+              `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${periodoInicioStr || ''} - ${periodoFinStr || ''}`,
+              usuario.correo_electronico,
+              usuario.nombre,
+              {
+                accion: 'Campaña aprobada',
+                usuario: req.user?.nombre || 'Usuario',
+                cliente: solicitud?.razon_social || undefined,
+              }
+            ).catch(err => console.error('Error enviando correo notificación:', err));
+          }
+        }
+      }
 
       res.json({
         success: true,
