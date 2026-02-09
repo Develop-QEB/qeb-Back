@@ -317,7 +317,7 @@ model tareas {
   estatus            String?   @db.VarChar(50)
   descripcion        String?   @db.VarChar(255)
   titulo             String?   @db.VarChar(50)
-  contenido          String?   @db.VarChar(50)
+  contenido          String?   @db.Text
   campania_id        Int?
   archivo            String?   @db.VarChar(1000)
   id_solicitud       String    @db.VarChar(100)
