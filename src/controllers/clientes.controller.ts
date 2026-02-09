@@ -5,8 +5,16 @@ import { emitToClientes, emitToDashboard, SOCKET_EVENTS } from '../config/socket
 
 const SAP_API_URL = process.env.SAP_API_URL || 'https://binding-convinced-ride-foto.trycloudflare.com';
 
-// Cache for SAP data (15 minutes)
-let sapCache: { data: unknown[]; timestamp: number } | null = null;
+// SAP endpoints por base de datos
+const SAP_ENDPOINTS: Record<string, string> = {
+  CIMU: '/cuic',
+  TEST: '/cuic-test',
+  TRADE: '/cuic-trade',
+};
+
+// Cache por base de datos SAP (15 minutes)
+const sapCaches: Record<string, { data: unknown[]; timestamp: number }> = {};
+let sapCache: { data: unknown[]; timestamp: number } | null = null; // legacy
 const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
 
 export class ClientesController {
@@ -438,16 +446,16 @@ export class ClientesController {
     try {
       const clienteData = req.body;
 
-      // Check if CUIC already exists
+      // Check if CUIC already exists for this sap_database
       if (clienteData.CUIC) {
         const existing = await prisma.cliente.findFirst({
-          where: { CUIC: clienteData.CUIC },
+          where: { CUIC: clienteData.CUIC, sap_database: clienteData.sap_database || null },
         });
 
         if (existing) {
           res.status(400).json({
             success: false,
-            error: 'Ya existe un cliente con este CUIC',
+            error: `Ya existe un cliente con este CUIC en ${clienteData.sap_database || 'la base de datos'}`,
           });
           return;
         }
@@ -478,6 +486,9 @@ export class ClientesController {
           T2_U_Producto: clienteData.T2_U_Producto,
           T2_U_ValidFrom: clienteData.T2_U_ValidFrom ? new Date(clienteData.T2_U_ValidFrom) : null,
           T2_U_ValidTo: clienteData.T2_U_ValidTo ? new Date(clienteData.T2_U_ValidTo) : null,
+          sap_database: clienteData.sap_database || null,
+          card_code: clienteData.card_code || clienteData.ACA_U_SAPCode || null,
+          salesperson_code: clienteData.salesperson_code || clienteData.ASESOR_U_SAPCode_Original || null,
         },
       });
 
@@ -541,6 +552,86 @@ export class ClientesController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // Get SAP clients by specific database (CIMU, TEST, TRADE)
+  async getSAPClientesByDatabase(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const database = (req.params.database || 'CIMU').toUpperCase();
+      if (!['CIMU', 'TEST', 'TRADE'].includes(database)) {
+        res.status(400).json({ success: false, error: 'Database must be CIMU, TEST, or TRADE' });
+        return;
+      }
+
+      let sapClientes: unknown[] = [];
+      const now = Date.now();
+      const cache = sapCaches[database];
+      const useCache = cache && (now - cache.timestamp) < CACHE_DURATION;
+
+      if (useCache) {
+        console.log(`[SAP ${database}] Using cached data (${cache.data.length} items)`);
+        sapClientes = cache.data;
+      } else {
+        try {
+          const endpoint = SAP_ENDPOINTS[database];
+          const fullUrl = `${SAP_API_URL}${endpoint}`;
+          console.log(`[SAP ${database}] Fetching from: ${fullUrl}`);
+          const response = await fetch(fullUrl);
+          console.log(`[SAP ${database}] Response status: ${response.status}`);
+          if (response.ok) {
+            const sapData: any = await response.json();
+            if (Array.isArray(sapData)) sapClientes = sapData;
+            else if (sapData.value && Array.isArray(sapData.value)) sapClientes = sapData.value;
+            else if (sapData.data && Array.isArray(sapData.data)) sapClientes = sapData.data;
+            console.log(`[SAP ${database}] Got ${sapClientes.length} items from SAP`);
+            sapCaches[database] = { data: sapClientes, timestamp: now };
+          } else {
+            console.error(`[SAP ${database}] Response not OK: ${response.status} ${response.statusText}`);
+            if (cache) sapClientes = cache.data;
+          }
+        } catch (fetchError) {
+          console.error(`[SAP ${database}] Fetch error:`, fetchError);
+          if (cache) sapClientes = cache.data;
+        }
+      }
+
+      // Filter out clients already in local DB (any sap_database)
+      const dbCuics = await prisma.cliente.findMany({
+        select: { CUIC: true },
+        where: { CUIC: { not: null } },
+        distinct: ['CUIC'],
+      });
+      const dbCuicSet = new Set(dbCuics.map(c => c.CUIC));
+      console.log(`[SAP ${database}] DB has ${dbCuicSet.size} unique CUICs, SAP returned ${sapClientes.length} items`);
+
+      const filteredClientes = (sapClientes as Array<Record<string, unknown>>)
+        .filter(c => c.CUIC != null && !dbCuicSet.has(c.CUIC as number))
+        .sort((a, b) => ((b.CUIC as number) || 0) - ((a.CUIC as number) || 0));
+
+      // Apply search
+      const search = req.query.search as string;
+      let result = filteredClientes;
+      if (search) {
+        const searchLower = search.toLowerCase();
+        result = filteredClientes.filter(c =>
+          (c.T0_U_Cliente as string)?.toLowerCase().includes(searchLower) ||
+          (c.T0_U_RazonSocial as string)?.toLowerCase().includes(searchLower) ||
+          (c.T2_U_Marca as string)?.toLowerCase().includes(searchLower) ||
+          String(c.CUIC).includes(search)
+        );
+      }
+
+      res.json({
+        success: true,
+        data: result,
+        total: result.length,
+        cached: useCache,
+        database,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener clientes de SAP';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }

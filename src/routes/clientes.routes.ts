@@ -11,6 +11,7 @@ router.get('/full', clientesController.getAllFull.bind(clientesController));
 router.get('/stats', clientesController.getStats.bind(clientesController));
 router.get('/filter-options', clientesController.getFilterOptions.bind(clientesController));
 router.get('/sap', clientesController.getSAPClientes.bind(clientesController));
+router.get('/sap/:database', clientesController.getSAPClientesByDatabase.bind(clientesController));
 router.get('/cuics', clientesController.getAllCUICs.bind(clientesController));
 router.post('/', clientesController.create.bind(clientesController));
 router.get('/:id', clientesController.getById.bind(clientesController));

@@ -1243,6 +1243,7 @@ export class SolicitudesController {
         categoria_nombre,
         card_code, // SAP CardCode (ACA_U_SAPCode)
         salesperson_code, // SAP SalesPersonCode (ASESOR_U_SAPCode_Original)
+        sap_database, // CIMU, TEST, or TRADE
         // Campaign data
         nombre_campania,
         descripcion,
@@ -1315,6 +1316,7 @@ export class SolicitudesController {
             tipo_archivo,
             card_code: card_code || null,
             salesperson_code,
+            sap_database: sap_database || null,
           },
         });
 

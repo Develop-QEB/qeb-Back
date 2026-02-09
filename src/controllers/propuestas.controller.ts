@@ -79,6 +79,7 @@ export class PropuestasController {
           sl.nombre_usuario AS creador_nombre,
           sl.archivo AS archivo_solicitud,
           sl.marca_nombre,
+          sl.sap_database AS sap_database,
           cat_inicio.numero_catorcena AS catorcena_inicio,
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
