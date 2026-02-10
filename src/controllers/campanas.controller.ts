@@ -360,8 +360,8 @@ export class CampanasController {
         return;
       }
 
-      // Si intenta cambiar a "Activa" o similar status de aprobación, verificar autorizaciones
-      if (status === 'Activa' || status === 'En pauta') {
+      // Si intenta cambiar a "Aprobada" o similar status de aprobación, verificar autorizaciones
+      if (status === 'Aprobada' || status === 'En pauta') {
         // Get the propuesta linked to this campana
         if (campanaAnterior.cotizacion_id) {
           const cotizacion = await prisma.cotizacion.findUnique({
@@ -693,7 +693,7 @@ export class CampanasController {
     try {
       const [total, activas, inactivas] = await Promise.all([
         prisma.campania.count(),
-        prisma.campania.count({ where: { status: 'activa' } }),
+        prisma.campania.count({ where: { status: 'Aprobada' } }),
         prisma.campania.count({ where: { status: 'inactiva' } }),
       ]);
 
