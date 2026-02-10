@@ -503,13 +503,28 @@ export class NotificacionesController {
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
+      const userRole = req.user?.rol;
 
       const where: Record<string, unknown> = {};
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve stats de Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       const [total, activas, porTipo, porEstatus] = await Promise.all([
