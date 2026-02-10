@@ -45,6 +45,18 @@ export class NotificacionesController {
           }
         }
 
+        // Gerente Digital (Operaciones) también ve tareas de todos los Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
+          }
+        }
+
         where.OR = orConditions;
       }
 
@@ -521,6 +533,18 @@ export class NotificacionesController {
           for (const d of disenadores) {
             orConditions.push({ id_responsable: d.id });
             orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        // Gerente Digital (Operaciones) también ve stats de Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
           }
         }
 
