@@ -24,13 +24,28 @@ export class NotificacionesController {
       const quick = req.query.quick as string;
 
       const where: Record<string, unknown> = {};
+      const userRole = req.user?.rol;
 
       // Filtrar por usuario responsable o asignado
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve tareas de todos los Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       if (tipo) {
