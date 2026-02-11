@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
-
-const prisma = new PrismaClient();
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({

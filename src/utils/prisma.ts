@@ -7,9 +7,8 @@ const globalForPrisma = globalThis as unknown as {
 export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
-    // Solo loguear errores para reducir overhead
-    // 'query' genera mucho ruido y no es necesario en desarrollo normal
     log: ['error'],
+    datasourceUrl: process.env.DATABASE_URL,
   });
 
 // Guardar en global para reutilizar en hot-reloads (nodemon)
