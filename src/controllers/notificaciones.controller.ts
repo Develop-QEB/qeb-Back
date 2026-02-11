@@ -24,13 +24,40 @@ export class NotificacionesController {
       const quick = req.query.quick as string;
 
       const where: Record<string, unknown> = {};
+      const userRole = req.user?.rol;
 
       // Filtrar por usuario responsable o asignado
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve tareas de todos los Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        // Gerente Digital (Operaciones) también ve tareas de todos los Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       if (tipo) {
@@ -488,13 +515,40 @@ export class NotificacionesController {
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
+      const userRole = req.user?.rol;
 
       const where: Record<string, unknown> = {};
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve stats de Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        // Gerente Digital (Operaciones) también ve stats de Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       const [total, activas, porTipo, porEstatus] = await Promise.all([
