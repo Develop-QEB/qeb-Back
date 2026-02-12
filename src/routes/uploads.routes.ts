@@ -126,13 +126,12 @@ router.post('/arte', authMiddleware, upload.single('file'), async (req: Request,
   }
 });
 
-// Configurar multer para testigos
-const storageTestigos = multer.diskStorage({
+// Configurar multer en disco como fallback local para testigos
+const storageDiskTestigos = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, uploadDirTestigos);
   },
   filename: (_req, file, cb) => {
-    // Agregar timestamp para evitar colisiones
     const timestamp = Date.now();
     const sanitizedName = sanitizeFilename(file.originalname);
     const ext = path.extname(sanitizedName);
@@ -142,7 +141,7 @@ const storageTestigos = multer.diskStorage({
 });
 
 const uploadTestigo = multer({
-  storage: storageTestigos,
+  storage: isCloudinaryConfigured() ? multer.memoryStorage() : storageDiskTestigos,
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max
@@ -150,7 +149,7 @@ const uploadTestigo = multer({
 });
 
 // Endpoint para subir archivo de testigo
-router.post('/testigo', authMiddleware, uploadTestigo.single('file'), (req: Request, res: Response) => {
+router.post('/testigo', authMiddleware, uploadTestigo.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       res.status(400).json({
@@ -160,16 +159,42 @@ router.post('/testigo', authMiddleware, uploadTestigo.single('file'), (req: Requ
       return;
     }
 
-    // Construir la URL relativa del archivo (el frontend agregará el dominio correcto)
-    const fileUrl = `/uploads/testigos/${req.file.filename}`;
+    // Si Cloudinary está configurado, subir ahí
+    if (isCloudinaryConfigured() && req.file.buffer) {
+      const base64Data = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      const cloudResult = await uploadToCloudinary(base64Data, 'qeb/testigos', 'image');
 
-    console.log('Archivo testigo subido:', req.file.filename, '-> Path:', fileUrl);
+      if (cloudResult) {
+        console.log('Archivo testigo subido a Cloudinary:', req.file.originalname, '->', cloudResult.secure_url);
+        res.json({
+          success: true,
+          data: {
+            url: cloudResult.secure_url,
+            filename: req.file.originalname,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimetype: req.file.mimetype,
+          },
+        });
+        return;
+      }
+      console.warn('Cloudinary fallo para testigo. Archivo no guardado.');
+      res.status(500).json({
+        success: false,
+        error: 'Error al subir archivo de testigo a Cloudinary',
+      });
+      return;
+    }
+
+    // Fallback: archivo guardado en disco local
+    const fileUrl = `/uploads/testigos/${req.file.filename}`;
+    console.log('Archivo testigo subido localmente:', req.file.filename, '-> Path:', fileUrl);
 
     res.json({
       success: true,
       data: {
         url: fileUrl,
-        filename: req.file.filename,
+        filename: req.file.filename!,
         originalName: req.file.originalname,
         size: req.file.size,
         mimetype: req.file.mimetype,
