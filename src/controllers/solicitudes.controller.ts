@@ -42,7 +42,11 @@ async function enviarCorreoTarea(
     creador?: string;
     periodoInicio?: string;
     periodoFin?: string;
-  } = {}
+    idSolicitud?: number;
+    idPropuesta?: number;
+    idCampania?: number;
+  } = {},
+  linkUrl?: string
 ): Promise<void> {
   const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
     day: '2-digit',
@@ -80,7 +84,10 @@ async function enviarCorreoTarea(
                 <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
                   Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se te ha asignado una nueva tarea.
                 </p>
-                <h3 style="color: #8b5cf6; margin: 0 0 24px 0; font-size: 20px; font-weight: 700;">${descripcion}</h3>
+                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
+                  <p style="color: #6b7280; margin: 0 0 4px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Tarea</p>
+                  <p style="color: #1f2937; margin: 0; font-size: 16px; font-weight: 600;">${descripcion}</p>
+                </div>
 
                 <!-- Info Grid -->
                 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
@@ -159,11 +166,26 @@ async function enviarCorreoTarea(
                   </tr>
                 </table>
 
+                ${(datosAdicionales.idSolicitud || datosAdicionales.idPropuesta || datosAdicionales.idCampania) ? `
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 20px;">
+                  <tr>
+                    <td style="padding: 10px 14px; background-color: #f9fafb; border-radius: 8px;">
+                      <p style="color: #9ca3af; margin: 0 0 4px 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Referencia</p>
+                      <p style="color: #374151; margin: 0; font-size: 13px; font-weight: 500;">${[
+                        datosAdicionales.idSolicitud ? `Solicitud #${datosAdicionales.idSolicitud}` : '',
+                        datosAdicionales.idPropuesta ? `Propuesta #${datosAdicionales.idPropuesta}` : '',
+                        datosAdicionales.idCampania ? `Campaña #${datosAdicionales.idCampania}` : '',
+                      ].filter(Boolean).join('  ·  ')}</p>
+                    </td>
+                  </tr>
+                </table>
+                ` : ''}
+
                 <!-- CTA Button -->
                 <table width="100%" cellpadding="0" cellspacing="0">
                   <tr>
                     <td align="center">
-                      <a href="https://app.qeb.mx/solicitudes?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Solicitud</a>
+                      <a href="${linkUrl || `https://app.qeb.mx/solicitudes?viewId=${tareaId}`}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">${linkUrl ? 'Ver Propuesta' : 'Ver Solicitud'}</a>
                     </td>
                   </tr>
                 </table>
@@ -1505,6 +1527,7 @@ export class SolicitudesController {
               creador: userName,
               periodoInicio: periodoInicioStr || undefined,
               periodoFin: periodoFinStr || undefined,
+              idSolicitud: result.solicitud.id,
             }
           ).catch(err => console.error('Error enviando correo:', err));
         }
@@ -2012,7 +2035,9 @@ export class SolicitudesController {
               creador: userName,
               periodoInicio: periodoInicioStr,
               periodoFin: periodoFinStr,
-            }
+              idPropuesta: propuesta?.id || undefined,
+            },
+            `https://app.qeb.mx/propuestas?viewId=${propuesta?.id || ''}`
           ).catch(err => console.error('Error enviando correo:', err));
         }
       }
@@ -2068,7 +2093,9 @@ export class SolicitudesController {
               creador: userName,
               periodoInicio: periodoInicioStr,
               periodoFin: periodoFinStr,
-            }
+              idPropuesta: propuesta?.id || undefined,
+            },
+            `https://app.qeb.mx/propuestas?viewId=${propuesta?.id || ''}`
           ).catch(err => console.error('Error enviando correo:', err));
         }
       }

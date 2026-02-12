@@ -34,7 +34,11 @@ async function enviarCorreoTarea(
     creador?: string;
     periodoInicio?: string;
     periodoFin?: string;
-  } = {}
+    idSolicitud?: number;
+    idPropuesta?: number;
+    idCampania?: number;
+  } = {},
+  linkUrl?: string
 ): Promise<void> {
   const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
     day: '2-digit',
@@ -72,7 +76,10 @@ async function enviarCorreoTarea(
                 <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
                   Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se te ha asignado una nueva tarea.
                 </p>
-                <h3 style="color: #8b5cf6; margin: 0 0 24px 0; font-size: 20px; font-weight: 700;">${descripcion}</h3>
+                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
+                  <p style="color: #6b7280; margin: 0 0 4px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Tarea</p>
+                  <p style="color: #1f2937; margin: 0; font-size: 16px; font-weight: 600;">${descripcion}</p>
+                </div>
 
                 <!-- Info Grid -->
                 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
@@ -151,11 +158,26 @@ async function enviarCorreoTarea(
                   </tr>
                 </table>
 
+                ${(datosAdicionales.idSolicitud || datosAdicionales.idPropuesta || datosAdicionales.idCampania) ? `
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 20px;">
+                  <tr>
+                    <td style="padding: 10px 14px; background-color: #f9fafb; border-radius: 8px;">
+                      <p style="color: #9ca3af; margin: 0 0 4px 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Referencia</p>
+                      <p style="color: #374151; margin: 0; font-size: 13px; font-weight: 500;">${[
+                        datosAdicionales.idSolicitud ? `Solicitud ID #${datosAdicionales.idSolicitud}` : '',
+                        datosAdicionales.idPropuesta ? `Propuesta ID #${datosAdicionales.idPropuesta}` : '',
+                        datosAdicionales.idCampania ? `Campaña ID #${datosAdicionales.idCampania}` : '',
+                      ].filter(Boolean).join('  ·  ')}</p>
+                    </td>
+                  </tr>
+                </table>
+                ` : ''}
+
                 <!-- CTA Button -->
                 <table width="100%" cellpadding="0" cellspacing="0">
                   <tr>
                     <td align="center">
-                      <a href="https://app.qeb.mx/solicitudes?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Solicitud</a>
+                      <a href="${linkUrl || `https://app.qeb.mx/solicitudes?viewId=${tareaId}`}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">${datosAdicionales.idCampania ? 'Ver Campaña' : 'Ver Propuesta'}</a>
                     </td>
                   </tr>
                 </table>
@@ -666,8 +688,8 @@ export class PropuestasController {
             // Crear tarea
             await prisma.tareas.create({
               data: {
-                titulo: `Ajuste con cliente - ${nombrePropuesta}`,
-                descripcion: `Ajustar cotización con cliente: ${nombrePropuesta}`,
+                titulo: `Ajustar propuesta: ${nombrePropuesta}`,
+                descripcion: `Ajustar propuesta: ${nombrePropuesta}`,
                 tipo: 'Ajuste Cto Cliente',
                 estatus: 'Pendiente',
                 id_responsable: usuarioTrafico.id,
@@ -712,7 +734,7 @@ export class PropuestasController {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               nombrePropuesta,
-              `Ajustar cotización con cliente: ${nombrePropuesta}`,
+              `Ajustar propuesta: ${nombrePropuesta}`,
               fechaFin,
               usuarioTrafico.correo_electronico,
               usuarioTrafico.nombre,
@@ -721,9 +743,34 @@ export class PropuestasController {
                 creador: userName,
                 periodoInicio: periodoInicioStr,
                 periodoFin: periodoFinStr,
-              }
+                idPropuesta: propuestaId,
+              },
+              `https://app.qeb.mx/propuestas?viewId=${propuestaId}`
             ).catch(err => console.error('Error enviando correo:', err));
           }
+        }
+      }
+
+      // Si el cambio es de "Ajuste Cto-Cliente" a otro status, notificar al creador de la solicitud
+      if (statusAnterior === 'Ajuste Cto-Cliente' && solicitud?.usuario_id) {
+        const creador = await prisma.usuario.findUnique({
+          where: { id: solicitud.usuario_id },
+          select: { nombre: true, correo_electronico: true }
+        });
+
+        if (creador?.correo_electronico) {
+          enviarCorreoNotificacion(
+            propuesta.solicitud_id || 0,
+            `Propuesta atendida: ${nombrePropuesta}`,
+            `${userName} cambió el estado de la propuesta "${nombrePropuesta}" de "Ajuste Cto-Cliente" a "${status}"`,
+            creador.correo_electronico,
+            creador.nombre,
+            {
+              accion: 'Cambio de estado',
+              usuario: userName,
+              cliente: solicitud?.razon_social || undefined,
+            }
+          ).catch(err => console.error('Error enviando correo:', err));
         }
       }
 
@@ -1238,9 +1285,11 @@ export class PropuestasController {
         }[]>(catorcenasQuery, cotizacion?.id);
 
         // contenido HTML con tabla de catorcenas
-        const tablaCatorcenas = catorcenas && catorcenas.length > 0 ? catorcenas.map(cat => 
-          `Cat ${cat.numero_catorcena} - ${cat.anio}: ${new Date(cat.fecha_inicio).toLocaleDateString('es-MX')} a ${new Date(cat.fecha_fin).toLocaleDateString('es-MX')} (${Number(cat.num_caras)} caras)`
+        console.log('Catorcenas result:', JSON.stringify(catorcenas, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+        const tablaCatorcenas = catorcenas && catorcenas.length > 0 ? catorcenas.map(cat =>
+          `Cat ${cat.numero_catorcena}, ${new Date(cat.fecha_inicio).toLocaleDateString('es-MX')}, ${new Date(cat.fecha_fin).toLocaleDateString('es-MX')}`
         ).join('\n') : 'Sin catorcenas definidas';
+        console.log('tablaCatorcenas:', tablaCatorcenas);
 
         const contenidoTarea = `
       Cliente: ${solicitud?.razon_social || 'Sin cliente'}
@@ -1320,6 +1369,32 @@ export class PropuestasController {
             });
           }
         }
+
+        // Crear notificación "Campaña nueva" para Diseñadores
+        const usuariosDisenoDB = await tx.usuario.findMany({
+          where: { user_role: 'Diseñadores', deleted_at: null },
+          select: { id: true, nombre: true }
+        });
+
+        for (const disenador of usuariosDisenoDB) {
+          await tx.tareas.create({
+            data: {
+              tipo: 'Notificación',
+              titulo: `Campaña nueva - ${campania.nombre}`,
+              descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
+              estatus: 'Pendiente',
+              id_responsable: disenador.id,
+              responsable: disenador.nombre,
+              asignado: disenador.nombre,
+              id_asignado: disenador.id.toString(),
+              id_solicitud: String(propuesta.solicitud_id),
+              id_propuesta: String(propuestaId),
+              campania_id: campania.id,
+              fecha_inicio: new Date(),
+              fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            },
+          });
+        }
       }
 
         // 6. Add historial entries
@@ -1363,6 +1438,7 @@ export class PropuestasController {
                 fecha_inicio: propuesta.fecha,
                 fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
                 id_solicitud: String(propuesta.solicitud_id),
+                campania_id: campania?.id || null,
               },
             });
           }
@@ -1418,8 +1494,39 @@ export class PropuestasController {
                 creador: req.user?.nombre || 'Usuario',
                 periodoInicio: periodoInicioStr,
                 periodoFin: periodoFinStr,
-              }
+                idCampania: campania.id,
+              },
+              `https://app.qeb.mx/campanas/${campania.id}`
             ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
+
+        // Enviar correos a Diseñadores (Campaña nueva)
+        const usuariosDiseno = await prisma.usuario.findMany({
+          where: {
+            user_role: 'Diseñadores',
+            deleted_at: null
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+
+        for (const disenador of usuariosDiseno) {
+          if (disenador.correo_electronico) {
+            enviarCorreoTarea(
+              propuesta.solicitud_id || 0,
+              campania.nombre,
+              `Campaña nueva: ${campania.nombre}`,
+              cotizacion?.fecha_fin || new Date(),
+              disenador.correo_electronico,
+              disenador.nombre,
+              {
+                cliente: solicitud?.razon_social || undefined,
+                creador: req.user?.nombre || 'Usuario',
+                periodoInicio: periodoInicioStr,
+                periodoFin: periodoFinStr,
+                idCampania: campania.id,
+              }
+            ).catch(err => console.error('Error enviando correo a diseño:', err));
           }
         }
 

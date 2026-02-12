@@ -1,5 +1,17 @@
 import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import nodemailer from 'nodemailer';
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: { rejectUnauthorized: false },
+});
 
 // Plazas principales - todo lo demás es "OTRAS"
 const PLAZAS_PRINCIPALES = ['CIUDAD DE MEXICO', 'GUADALAJARA', 'MONTERREY'];
@@ -310,7 +322,7 @@ export async function crearTareasAutorizacion(
       puesto: { contains: 'DG' },
       deleted_at: null
     },
-    select: { id: true, nombre: true }
+    select: { id: true, nombre: true, correo_electronico: true }
   });
 
   const usuariosDcm = await prisma.usuario.findMany({
@@ -371,6 +383,20 @@ export async function crearTareasAutorizacion(
       tipo: 'Autorización DG',
       solicitudId
     });
+
+    // Enviar correo a usuarios DG
+    for (const usuario of usuariosDg) {
+      if (usuario.correo_electronico) {
+        enviarCorreoAutorizacion(
+          tareaDg.id,
+          `Autorización requerida - Solicitud #${solicitudId}`,
+          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
+          usuario.correo_electronico,
+          usuario.nombre,
+          responsableNombre
+        ).catch(err => console.error('Error enviando correo autorización DG:', err));
+      }
+    }
   }
 
   // Crear tarea para DCM si hay pendientes y no existe ya una tarea
@@ -630,6 +656,89 @@ export async function obtenerResumenAutorizacion(idquote: string): Promise<{
   };
 
   return conteo;
+}
+
+async function enviarCorreoAutorizacion(
+  tareaId: number,
+  titulo: string,
+  descripcion: string,
+  destinatarioEmail: string,
+  destinatarioNombre: string,
+  solicitadoPor: string
+): Promise<void> {
+  const htmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+      <tr>
+        <td align="center">
+          <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            <tr>
+              <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700;">QEB</h1>
+                <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 40px;">
+                <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Autorización Requerida</h2>
+                <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se requiere tu autorización.
+                </p>
+                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
+                  <p style="color: #6b7280; margin: 0 0 4px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Detalle</p>
+                  <p style="color: #1f2937; margin: 0; font-size: 16px; font-weight: 600;">${descripcion}</p>
+                </div>
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">👤</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase;">Solicitado por</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${solicitadoPor}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="https://app.qeb.mx/tareas?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+
+  await transporter.sendMail({
+    from: `"QEB Sistema" <${process.env.SMTP_USER}>`,
+    to: destinatarioEmail,
+    subject: `🔔 ${titulo}`,
+    html: htmlBody,
+  });
 }
 
 export default {
