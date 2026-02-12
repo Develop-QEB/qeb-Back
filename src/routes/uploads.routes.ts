@@ -3,10 +3,11 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { uploadToCloudinary, isCloudinaryConfigured } from '../config/cloudinary';
 
 const router = Router();
 
-// Asegurar que existe la carpeta de uploads para artes
+// Asegurar que existe la carpeta de uploads para artes (fallback local)
 const uploadDir = path.join(__dirname, '../../uploads/artes');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -29,13 +30,15 @@ const sanitizeFilename = (filename: string): string => {
     .replace(/^_|_$/g, ''); // Quitar guiones bajos al inicio/fin
 };
 
-// Configurar multer para guardar archivos con nombre original
-const storage = multer.diskStorage({
+// Configurar multer en memoria para arte (se sube a Cloudinary)
+const storageArte = multer.memoryStorage();
+
+// Configurar multer en disco como fallback local para arte
+const storageDiskArte = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, uploadDir);
   },
   filename: (_req, file, cb) => {
-    // Usar el nombre original del archivo (sanitizado)
     const sanitizedName = sanitizeFilename(file.originalname);
     cb(null, sanitizedName);
   },
@@ -51,8 +54,9 @@ const fileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFil
   }
 };
 
+// Usar memoryStorage si Cloudinary está configurado, diskStorage si no
 const upload = multer({
-  storage,
+  storage: isCloudinaryConfigured() ? storageArte : storageDiskArte,
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max
@@ -60,7 +64,7 @@ const upload = multer({
 });
 
 // Endpoint para subir archivo de arte
-router.post('/arte', authMiddleware, upload.single('file'), (req: Request, res: Response) => {
+router.post('/arte', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       res.status(400).json({
@@ -70,16 +74,43 @@ router.post('/arte', authMiddleware, upload.single('file'), (req: Request, res: 
       return;
     }
 
-    // Construir la URL relativa del archivo (el frontend agregará el dominio correcto)
-    const fileUrl = `/uploads/artes/${req.file.filename}`;
+    // Si Cloudinary está configurado, subir ahí
+    if (isCloudinaryConfigured() && req.file.buffer) {
+      const base64Data = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      const cloudResult = await uploadToCloudinary(base64Data, 'qeb/artes', 'image');
 
-    console.log('Archivo subido:', req.file.filename, '-> Path:', fileUrl);
+      if (cloudResult) {
+        console.log('Archivo subido a Cloudinary:', req.file.originalname, '->', cloudResult.secure_url);
+        res.json({
+          success: true,
+          data: {
+            url: cloudResult.secure_url,
+            filename: req.file.originalname,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimetype: req.file.mimetype,
+          },
+        });
+        return;
+      }
+      // Si falla Cloudinary, continuar con fallback local
+      console.warn('Cloudinary fallo, no hay fallback en memoria. Archivo no guardado.');
+      res.status(500).json({
+        success: false,
+        error: 'Error al subir archivo a Cloudinary',
+      });
+      return;
+    }
+
+    // Fallback: archivo guardado en disco local
+    const fileUrl = `/uploads/artes/${req.file.filename}`;
+    console.log('Archivo subido localmente:', req.file.filename, '-> Path:', fileUrl);
 
     res.json({
       success: true,
       data: {
         url: fileUrl,
-        filename: req.file.filename,
+        filename: req.file.filename!,
         originalName: req.file.originalname,
         size: req.file.size,
         mimetype: req.file.mimetype,
