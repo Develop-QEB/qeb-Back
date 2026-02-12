@@ -1,6 +1,7 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
+import { AuthRequest } from '../types';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
@@ -15,15 +16,6 @@ const transporter = nodemailer.createTransport({
     rejectUnauthorized: false,
   },
 });
-
-interface AuthRequest extends Request {
-  user?: {
-    id: number;
-    nombre: string;
-    correo_electronico: string;
-    rol: string;
-  };
-}
 
 // Obtener todos los tickets (para programadores)
 export const getAllTickets = async (req: AuthRequest, res: Response) => {
@@ -81,7 +73,7 @@ export const getAllTickets = async (req: AuthRequest, res: Response) => {
 // Obtener tickets del usuario actual
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.userId;
 
     if (!userId) {
       return res.status(401).json({ message: 'Usuario no autenticado' });
@@ -123,9 +115,9 @@ export const getTicketById = async (req: AuthRequest, res: Response) => {
 export const createTicket = async (req: AuthRequest, res: Response) => {
   try {
     const { titulo, descripcion, imagen, prioridad } = req.body;
-    const userId = req.user?.id;
+    const userId = req.user?.userId;
     const userName = req.user?.nombre || 'Usuario';
-    const userEmail = req.user?.correo_electronico || '';
+    const userEmail = req.user?.email || '';
 
     if (!userId) {
       return res.status(401).json({ message: 'Usuario no autenticado' });
