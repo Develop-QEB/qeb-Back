@@ -228,9 +228,38 @@ export class NotificacionesController {
         return;
       }
 
-      // Obtener comentarios de la tabla comentarios usando solicitud_id
-      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id: number }[] = [];
-      if (tarea.id_solicitud) {
+      // Obtener comentarios según el tipo de tarea
+      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id?: number; tarea_id?: number }[] = [];
+
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: usar tabla comentarios_revision_artes con tarea_id
+        const rawComentarios = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY fecha DESC
+        `;
+
+        // Obtener fotos de los autores
+        const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
+        const usuarios = autorIds.length > 0 ? await prisma.usuario.findMany({
+          where: { id: { in: autorIds } },
+          select: { id: true, nombre: true, foto_perfil: true },
+        }) : [];
+        const usuarioMap = new Map(usuarios.map(u => [u.id, { nombre: u.nombre, foto_perfil: u.foto_perfil }]));
+
+        comentarios = rawComentarios.map(c => ({
+          id: c.id,
+          autor_id: c.autor_id,
+          autor_nombre: c.autor_nombre || usuarioMap.get(c.autor_id)?.nombre || 'Usuario',
+          autor_foto: usuarioMap.get(c.autor_id)?.foto_perfil || null,
+          contenido: c.contenido,
+          fecha: c.fecha,
+          tarea_id: c.tarea_id,
+        }));
+      } else if (tarea.id_solicitud) {
+        // Para otras tareas: usar tabla comentarios con solicitud_id
         const solicitudId = parseInt(tarea.id_solicitud);
         const rawComentarios = await prisma.comentarios.findMany({
           where: { solicitud_id: solicitudId },
@@ -604,7 +633,7 @@ export class NotificacionesController {
       const { contenido } = req.body;
       const userId = req.user?.userId || 0;
 
-      // Obtener la tarea para conseguir su solicitud_id
+      // Obtener la tarea para determinar qué tabla de comentarios usar
       const tarea = await prisma.tareas.findUnique({
         where: { id: parseInt(id) },
       });
@@ -617,24 +646,74 @@ export class NotificacionesController {
         return;
       }
 
-      const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
+      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+      const userName = req.user?.nombre || 'Usuario';
 
-      const comentario = await prisma.comentarios.create({
-        data: {
-          autor_id: userId,
-          comentario: contenido,
-          creado_en: new Date(),
-          solicitud_id: solicitudId,
-          campania_id: tarea.campania_id || 0,
-          origen: 'tarea',
-        },
-      });
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: insertar en comentarios_revision_artes
+        // Obtener nombre del usuario desde la BD
+        const [userData] = await prisma.$queryRaw<{ nombre: string }[]>`
+          SELECT nombre FROM usuario WHERE id = ${userId}
+        `;
+        const autorNombre = userData?.nombre || userName;
+
+        await prisma.$executeRaw`
+          INSERT INTO comentarios_revision_artes (tarea_id, autor_id, autor_nombre, contenido, fecha)
+          VALUES (${tarea.id}, ${userId}, ${autorNombre}, ${contenido.trim()}, NOW())
+        `;
+
+        // Obtener el comentario recién insertado
+        const [comentario] = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY id DESC
+          LIMIT 1
+        `;
+
+        res.status(201).json({
+          success: true,
+          data: {
+            id: comentario.id,
+            autor_id: comentario.autor_id,
+            autor_nombre: comentario.autor_nombre,
+            contenido: comentario.contenido,
+            fecha: comentario.fecha,
+            tarea_id: comentario.tarea_id,
+          },
+        });
+      } else {
+        // Para otras tareas: insertar en tabla comentarios con solicitud_id
+        const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
+
+        const comentario = await prisma.comentarios.create({
+          data: {
+            autor_id: userId,
+            comentario: contenido,
+            creado_en: new Date(),
+            solicitud_id: solicitudId,
+            campania_id: tarea.campania_id || 0,
+            origen: 'tarea',
+          },
+        });
+
+        res.status(201).json({
+          success: true,
+          data: {
+            id: comentario.id,
+            autor_id: comentario.autor_id,
+            contenido: comentario.comentario,
+            fecha: comentario.creado_en,
+            solicitud_id: comentario.solicitud_id,
+          },
+        });
+      }
 
       // Crear notificaciones para todos los involucrados (excepto el autor)
-      const userName = req.user?.nombre || 'Usuario';
       const tituloTarea = tarea.titulo || 'Tarea';
       const tituloNotificacion = `Nuevo comentario en tarea: ${tituloTarea}`;
       const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+      const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
 
       // Obtener solicitud relacionada para el creador
       const solicitudData = solicitudId > 0
@@ -687,17 +766,6 @@ export class NotificacionesController {
           },
         });
       }
-
-      res.status(201).json({
-        success: true,
-        data: {
-          id: comentario.id,
-          autor_id: comentario.autor_id,
-          contenido: comentario.comentario,
-          fecha: comentario.creado_en,
-          solicitud_id: comentario.solicitud_id,
-        },
-      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
       res.status(500).json({
@@ -711,16 +779,51 @@ export class NotificacionesController {
     try {
       const { id } = req.params;
 
-      // Obtener la tarea para conseguir su solicitud_id
+      // Obtener la tarea para determinar qué tabla de comentarios usar
       const tarea = await prisma.tareas.findUnique({
         where: { id: parseInt(id) },
       });
 
-      if (!tarea || !tarea.id_solicitud) {
-        res.json({
-          success: true,
-          data: [],
-        });
+      if (!tarea) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: usar tabla comentarios_revision_artes
+        const rawComentarios = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY fecha DESC
+        `;
+
+        const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
+        const usuarios = autorIds.length > 0 ? await prisma.usuario.findMany({
+          where: { id: { in: autorIds } },
+          select: { id: true, foto_perfil: true },
+        }) : [];
+        const fotoMap = new Map(usuarios.map(u => [u.id, u.foto_perfil]));
+
+        const mappedComentarios = rawComentarios.map(c => ({
+          id: c.id,
+          autor_id: c.autor_id,
+          autor_nombre: c.autor_nombre || 'Usuario',
+          autor_foto: fotoMap.get(c.autor_id) || null,
+          contenido: c.contenido,
+          fecha: c.fecha,
+          tarea_id: c.tarea_id,
+        }));
+
+        res.json({ success: true, data: mappedComentarios });
+        return;
+      }
+
+      // Para otras tareas: usar tabla comentarios con solicitud_id
+      if (!tarea.id_solicitud) {
+        res.json({ success: true, data: [] });
         return;
       }
 
