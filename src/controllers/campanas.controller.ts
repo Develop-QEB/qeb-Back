@@ -3219,6 +3219,70 @@ export class CampanasController {
           estatus: tarea.estatus,
         });
       }
+
+      // Notificar al responsable por correo cuando la tarea pasa a "Atendido"
+      if (estatus === 'Atendido' && tarea.id_responsable) {
+        const userName = req.user?.nombre || 'Usuario';
+        prisma.usuario.findUnique({ where: { id: tarea.id_responsable } })
+          .then((responsable: any) => {
+            if (responsable?.correo_electronico) {
+              const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+              <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                  <tr><td align="center">
+                    <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                      <tr><td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                        <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700;">QEB</h1>
+                        <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                      </td></tr>
+                      <tr><td style="padding: 40px;">
+                        <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Tarea Atendida</h2>
+                        <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                          Hola <strong style="color: #374151;">${responsable.nombre}</strong>, la siguiente tarea ha sido marcada como <strong>Atendida</strong> por <strong>${userName}</strong>.
+                        </p>
+                        <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                          <tr><td style="padding: 20px;">
+                            <span style="display: inline-block; background-color: #10b981; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">Atendido</span>
+                            <h3 style="color: #1f2937; margin: 8px 0; font-size: 18px; font-weight: 600;">${tarea.titulo}</h3>
+                            <p style="color: #6b7280; margin: 0; font-size: 14px;">${tarea.tipo || ''}</p>
+                          </td></tr>
+                        </table>
+                        <table width="100%" cellpadding="0" cellspacing="0">
+                          <tr><td align="center">
+                            <a href="https://app.qeb.mx/campanas/${tarea.campania_id}/tareas" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                          </td></tr>
+                        </table>
+                      </td></tr>
+                      <tr><td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                        <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                        <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                      </td></tr>
+                    </table>
+                  </td></tr>
+                </table>
+              </body></html>`;
+
+              transporter.sendMail({
+                from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                to: responsable.correo_electronico,
+                subject: `Tarea atendida: ${tarea.titulo || tarea.tipo}`,
+                html: htmlBody,
+              }).then(() => {
+                console.log('Correo de tarea atendida enviado a:', responsable.correo_electronico);
+                prisma.correos_enviados.create({
+                  data: {
+                    remitente: 'no-reply@qeb.mx',
+                    destinatario: responsable.correo_electronico,
+                    asunto: `Tarea atendida: ${tarea.titulo || tarea.tipo}`,
+                    cuerpo: htmlBody,
+                  },
+                }).catch((err: any) => console.error('Error guardando correo enviado:', err));
+              }).catch((emailError: any) => {
+                console.error('Error enviando correo de tarea atendida:', emailError);
+              });
+            }
+          }).catch((err: any) => console.error('Error buscando responsable para correo:', err));
+      }
     } catch (error) {
       console.error('Error en updateTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
