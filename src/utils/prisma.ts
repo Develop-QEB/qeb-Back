@@ -1,11 +1,16 @@
 import { PrismaClient } from '@prisma/client';
 
-// Add connect_timeout to DATABASE_URL if not present
+// Ensure DATABASE_URL has proper timeout and pool settings
 function getDatasourceUrl(): string {
-  const url = process.env.DATABASE_URL || '';
-  if (url && !url.includes('connect_timeout')) {
-    const separator = url.includes('?') ? '&' : '?';
-    return `${url}${separator}connect_timeout=30&socket_timeout=30`;
+  let url = process.env.DATABASE_URL || '';
+  if (!url) return url;
+  // Increase connection_limit if too low (Hostinger allows more)
+  url = url.replace(/connection_limit=\d+/, 'connection_limit=10');
+  // Increase pool_timeout to avoid premature timeouts
+  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=30');
+  // Add connect_timeout if not present
+  if (!url.includes('connect_timeout')) {
+    url += '&connect_timeout=30&socket_timeout=30';
   }
   return url;
 }
@@ -33,7 +38,8 @@ const createPrismaClient = () => {
         const isConnectionError = message.includes("Can't reach database server") ||
           message.includes('Connection refused') ||
           message.includes('ETIMEDOUT') ||
-          message.includes('ECONNREFUSED');
+          message.includes('ECONNREFUSED') ||
+          message.includes('Timed out fetching a new connection from the connection pool');
 
         if (isConnectionError && attempt < MAX_RETRIES) {
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
