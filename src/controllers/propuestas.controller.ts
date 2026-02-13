@@ -1331,8 +1331,8 @@ export class PropuestasController {
               id_solicitud: String(propuesta.solicitud_id),
               id_propuesta: String(propuestaId),
               campania_id: campania.id,
-              fecha_inicio: propuesta.fecha,
-              fecha_fin: cotizacion?.fecha_fin || propuesta.fecha,
+              fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
+              fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
             },
           });
         }

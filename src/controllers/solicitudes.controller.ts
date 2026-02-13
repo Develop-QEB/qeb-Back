@@ -1871,16 +1871,18 @@ export class SolicitudesController {
           const campaniaData = await tx.campania.findFirst({
             where: { cotizacion_id: cotizacionData?.id },
           });
-          const fechaFin = cotizacionData?.fecha_fin || solicitud.fecha || new Date();
-          
+          const ahoraMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+          const fechaFinMx = new Date(ahoraMx);
+          fechaFinMx.setDate(fechaFinMx.getDate() + 7);
+
           // Seguimiento Propuesta (asignado ORIGINAL )
           const asignadoOriginal = solicitud.usuario_id || userId;
           const nombreAsignadoOriginal = solicitud.nombre_usuario || userName || '';
-          
+
           await tx.tareas.create({
             data: {
-              fecha_inicio: new Date(),
-              fecha_fin: fechaFin,
+              fecha_inicio: ahoraMx,
+              fecha_fin: fechaFinMx,
               tipo: 'Seguimiento Propuesta',
               responsable: nombreAsignadoOriginal,
               id_responsable: asignadoOriginal,
@@ -1939,8 +1941,8 @@ export class SolicitudesController {
           for (const usuarioTrafico of usuariosTrafico) {
             await tx.tareas.create({
               data: {
-                fecha_inicio: new Date(),
-                fecha_fin: fechaFin,
+                fecha_inicio: ahoraMx,
+                fecha_fin: fechaFinMx,
                 tipo: 'Atender Propuesta',
                 responsable: usuarioTrafico.nombre,
                 id_responsable: usuarioTrafico.id,
@@ -2530,7 +2532,7 @@ export class SolicitudesController {
         });
 
         if (usuariosTrafico.length > 0) {
-          const fechaFin = new Date();
+          const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
           fechaFin.setDate(fechaFin.getDate() + 7);
 
           for (const usuarioTrafico of usuariosTrafico) {

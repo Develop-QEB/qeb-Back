@@ -338,7 +338,7 @@ export async function crearTareasAutorizacion(
     usuariosDcm
   });
 
-  const fechaFin = new Date();
+  const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
   // Verificar si ya existen tareas pendientes para evitar duplicados
@@ -517,7 +517,9 @@ export async function aprobarCaras(
           id_solicitud: propuesta.solicitud_id.toString(),
           id_propuesta: propuestaId,
           id_asignado: solicitud.usuario_id.toString(),
-          asignado: solicitud.nombre_usuario || ''
+          asignado: solicitud.nombre_usuario || '',
+          fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
+          fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
         }
       });
 
@@ -595,7 +597,9 @@ export async function rechazarSolicitud(
         responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
         id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || ''
+        asignado: solicitud.nombre_usuario || '',
+        fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
+        fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
       }
     });
 
