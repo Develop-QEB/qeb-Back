@@ -950,24 +950,25 @@ export class PropuestasController {
 
   async getStats(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Get all status counts dynamically
-      const statusCounts = await prisma.propuesta.groupBy({
-        by: ['status'],
-        where: {
-          deleted_at: null,
-          NOT: {
-            status: { in: ['pendiente', 'Pendiente', 'Sin solicitud activa'] }
-          }
-        },
-        _count: { status: true },
-      });
+      // Count propuestas grouped by status, filtering only those with solicitud.status = 'Atendida'
+      // This matches the same filter used by getAll (soloAtendidas: true)
+      const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
+        SELECT pr.status, COUNT(*) as count
+        FROM propuesta pr
+        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        WHERE pr.deleted_at IS NULL
+          AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa')
+          AND sl.status = 'Atendida'
+        GROUP BY pr.status
+      `);
 
       const byStatus: Record<string, number> = {};
       let total = 0;
       statusCounts.forEach(item => {
         const status = item.status || 'Sin estado';
-        byStatus[status] = item._count.status;
-        total += item._count.status;
+        const count = Number(item.count);
+        byStatus[status] = count;
+        total += count;
       });
 
       res.json({
