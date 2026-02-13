@@ -2875,7 +2875,9 @@ export class CampanasController {
       }
 
       // Determinar fecha_fin y estatus según el tipo de tarea
-      const fechaFinFinal = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const fechaFinFinal = new Date(ahora);
+      fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
       // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
@@ -2929,7 +2931,7 @@ export class CampanasController {
           descripcion,
           tipo: tipo || 'Producción',
           estatus: estatusFinal,
-          fecha_inicio: new Date(),
+          fecha_inicio: ahora,
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
@@ -3220,10 +3222,11 @@ export class CampanasController {
         });
       }
 
-      // Notificar al responsable por correo cuando la tarea pasa a "Atendido"
-      if (estatus === 'Atendido' && tarea.id_responsable) {
+      // Notificar al asignado por correo cuando la tarea pasa a "Atendido"
+      if (estatus === 'Atendido' && tarea.id_asignado) {
         const userName = req.user?.nombre || 'Usuario';
-        prisma.usuario.findUnique({ where: { id: tarea.id_responsable } })
+        const asignadoId = parseInt(tarea.id_asignado);
+        if (!isNaN(asignadoId)) prisma.usuario.findUnique({ where: { id: asignadoId } })
           .then((responsable: any) => {
             if (responsable?.correo_electronico) {
               const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
