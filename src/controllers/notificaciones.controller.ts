@@ -423,6 +423,9 @@ export class NotificacionesController {
         data: updateData,
       });
 
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
+
       res.json({
         success: true,
         data: {
@@ -528,6 +531,9 @@ export class NotificacionesController {
       await prisma.tareas.delete({
         where: { id: parseInt(id) },
       });
+
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ELIMINADA, { tareaId: parseInt(id) });
 
       res.json({
         success: true,
@@ -768,6 +774,9 @@ export class NotificacionesController {
           },
         });
       }
+
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
       res.status(500).json({

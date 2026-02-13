@@ -2460,6 +2460,8 @@ export class CampanasController {
       });
       // También emitir INVENTARIO_ACTUALIZADO para refrescar todas las tablas
       emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
+      // Emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice (roles rotados en rechazo)
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { campanaId, status });
     } catch (error) {
       console.error('Error en updateArteStatus:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar estado de arte';
@@ -3010,6 +3012,8 @@ export class CampanasController {
         tipo: tarea.tipo,
         titulo: tarea.titulo,
       });
+      // También emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tarea.id, tipo: tarea.tipo });
 
       // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
       if ((tipo === 'Revision de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
@@ -3229,6 +3233,8 @@ export class CampanasController {
           estatus: tarea.estatus,
         });
       }
+      // También emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
 
       // Notificar al asignado por correo cuando la tarea pasa a "Atendido"
       if (estatus === 'Atendido' && tarea.id_asignado) {
