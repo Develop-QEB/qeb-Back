@@ -1485,68 +1485,13 @@ export class SolicitudesController {
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
-      // Obtener catorcenas para el período (fuera de la transacción)
-      const catorcenaInicio = await prisma.catorcenas.findFirst({
-        where: {
-          fecha_inicio: { lte: new Date(fecha_inicio) },
-          fecha_fin: { gte: new Date(fecha_inicio) },
-        },
-      });
-      const catorcenaFin = await prisma.catorcenas.findFirst({
-        where: {
-          fecha_inicio: { lte: new Date(fecha_fin) },
-          fecha_fin: { gte: new Date(fecha_fin) },
-        },
-      });
-
-      const periodoInicioStr = catorcenaInicio 
-        ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}` 
-        : null;
-      const periodoFinStr = catorcenaFin 
-        ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
-        : null;
-
-      // Enviar correo al creador (quien tiene la tarea de Seguimiento Solicitud)
-      if (userId) {
-        const creadorConEmail = await prisma.usuario.findUnique({
-          where: { id: userId },
-          select: { correo_electronico: true },
-        });
-
-        if (creadorConEmail?.correo_electronico) {
-          enviarCorreoTarea(
-            result.solicitud.id,
-            nombre_campania,
-            `Dar seguimiento a solicitud: ${nombre_campania}`,
-            new Date(fecha_fin),
-            creadorConEmail.correo_electronico,
-            userName,
-            {
-              cliente: razon_social,
-              producto: producto_nombre,
-              creador: userName,
-              periodoInicio: periodoInicioStr || undefined,
-              periodoFin: periodoFinStr || undefined,
-              idSolicitud: result.solicitud.id,
-            }
-          ).catch(err => console.error('Error enviando correo:', err));
-        }
-      }
-
-      // DESPUÉS de la transacción: verificar caras pendientes y crear tareas
-      // (igual que en update - fuera de la transacción para que pueda ver los datos)
-      const autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
-      console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
-
-      if (autorizacionInfo.tienePendientes && userId) {
-        await crearTareasAutorizacion(
-          result.solicitud.id,
-          result.propuesta.id,
-          userId,
-          userName,
-          autorizacionInfo.pendientesDg,
-          autorizacionInfo.pendientesDcm
-        );
+      // Verificar caras pendientes de autorización (no debe bloquear la respuesta)
+      let autorizacionInfo: { tienePendientes: boolean; pendientesDg: any[]; pendientesDcm: any[] } = { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
+      try {
+        autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
+        console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
+      } catch (err) {
+        console.error('[create] Error verificando pendientes (no-blocking):', err);
       }
 
       // Build message with authorization info
@@ -1556,6 +1501,7 @@ export class SolicitudesController {
         mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
       }
 
+      // SIEMPRE enviar respuesta exitosa si la transacción commiteó
       res.status(201).json({
         success: true,
         data: result,
@@ -1563,7 +1509,7 @@ export class SolicitudesController {
         autorizacion: autorizacionInfo,
       });
 
-      // Emitir eventos WebSocket
+      // Emitir eventos WebSocket (siempre, independiente de lógica post-transacción)
       emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_CREADA, {
         solicitud: result.solicitud,
         propuesta: result.propuesta,
@@ -1575,6 +1521,73 @@ export class SolicitudesController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'creada' });
+
+      // Lógica post-respuesta: tareas de autorización (no bloquea al usuario)
+      try {
+        if (autorizacionInfo.tienePendientes && userId) {
+          await crearTareasAutorizacion(
+            result.solicitud.id,
+            result.propuesta.id,
+            userId,
+            userName,
+            autorizacionInfo.pendientesDg,
+            autorizacionInfo.pendientesDcm
+          );
+        }
+      } catch (err) {
+        console.error('[create] Error creando tareas autorización (no-blocking):', err);
+      }
+
+      // Lógica post-respuesta: correo electrónico (no bloquea al usuario)
+      try {
+        const catorcenaInicio = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date(fecha_inicio) },
+            fecha_fin: { gte: new Date(fecha_inicio) },
+          },
+        });
+        const catorcenaFin = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date(fecha_fin) },
+            fecha_fin: { gte: new Date(fecha_fin) },
+          },
+        });
+
+        const periodoInicioStr = catorcenaInicio
+          ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}`
+          : null;
+        const periodoFinStr = catorcenaFin
+          ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}`
+          : null;
+
+        if (userId) {
+          const creadorConEmail = await prisma.usuario.findUnique({
+            where: { id: userId },
+            select: { correo_electronico: true },
+          });
+
+          if (creadorConEmail?.correo_electronico) {
+            enviarCorreoTarea(
+              result.solicitud.id,
+              nombre_campania,
+              `Dar seguimiento a solicitud: ${nombre_campania}`,
+              new Date(fecha_fin),
+              creadorConEmail.correo_electronico,
+              userName,
+              {
+                cliente: razon_social,
+                producto: producto_nombre,
+                creador: userName,
+                periodoInicio: periodoInicioStr || undefined,
+                periodoFin: periodoFinStr || undefined,
+                idSolicitud: result.solicitud.id,
+              }
+            ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
+      } catch (err) {
+        console.error('[create] Error obteniendo catorcenas/enviando correo (no-blocking):', err);
+      }
     } catch (error) {
       console.error('Error creating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al crear solicitud';
