@@ -7,6 +7,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { hasFullVisibility } from '../utils/permissions';
 import nodemailer from 'nodemailer';
 
 // transporter
@@ -405,6 +406,18 @@ export class PropuestasController {
         whereConditions += ` AND (pr.articulo LIKE ? OR pr.descripcion LIKE ? OR pr.asignado LIKE ? OR cl.T1_U_Cliente LIKE ?)`;
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Visibility filter: non-leadership roles only see records where they participate
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        whereConditions += ` AND (
+          FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+          OR sl.usuario_id = ?
+          OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+        )`;
+        params.push(String(userId), userId, String(userId));
       }
 
       // Get total count
@@ -948,8 +961,23 @@ export class PropuestasController {
     }
   }
 
-  async getStats(_req: AuthRequest, res: Response): Promise<void> {
+  async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      let visibilityClause = '';
+      const statsParams: (string | number)[] = [];
+      if (userId && !hasFullVisibility(userRol)) {
+        visibilityClause = `
+          AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id = ?
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
+        statsParams.push(String(userId), userId, String(userId));
+      }
+
       // Count propuestas grouped by status, filtering only those with solicitud.status = 'Atendida'
       // This matches the same filter used by getAll (soloAtendidas: true)
       const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
@@ -959,8 +987,9 @@ export class PropuestasController {
         WHERE pr.deleted_at IS NULL
           AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa')
           AND sl.status = 'Atendida'
+          ${visibilityClause}
         GROUP BY pr.status
-      `);
+      `, ...statsParams);
 
       const byStatus: Record<string, number> = {};
       let total = 0;
