@@ -2875,7 +2875,7 @@ export class CampanasController {
       }
 
       // Determinar fecha_fin y estatus según el tipo de tarea
-      let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const fechaFinFinal = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       let estatusFinal = 'Pendiente';
 
       // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
