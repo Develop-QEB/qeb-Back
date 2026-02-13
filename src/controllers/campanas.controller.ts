@@ -177,10 +177,18 @@ export class CampanasController {
         return;
       }
 
-      // Obtener info del cliente
-      const cliente = await prisma.cliente.findUnique({
+      // Obtener info del cliente - buscar por id, si no tiene datos buscar por CUIC
+      let cliente = await prisma.cliente.findUnique({
         where: { id: campana.cliente_id },
       });
+      // Si el cliente no tiene datos (campos NULL), intentar buscar por CUIC desde la solicitud
+      if (cliente && !cliente.T0_U_RazonSocial && !cliente.T0_U_Cliente) {
+        const cuic = cliente.CUIC || campana.cliente_id;
+        const clientePorCuic = await prisma.cliente.findFirst({
+          where: { CUIC: cuic, T0_U_RazonSocial: { not: null } },
+        });
+        if (clientePorCuic) cliente = clientePorCuic;
+      }
 
       // Obtener info de cotizacion si existe
       let cotizacion = null;
@@ -265,7 +273,7 @@ export class CampanasController {
         T0_U_IDAgencia: cliente?.T0_U_IDAgencia || null,
         T0_U_Agencia: solicitud?.agencia || cliente?.T0_U_Agencia || null,
         T0_U_Cliente: cliente?.T0_U_Cliente || null,
-        T0_U_RazonSocial: solicitud?.razon_social || cliente?.T0_U_RazonSocial || null,
+        T0_U_RazonSocial: cliente?.T0_U_RazonSocial || solicitud?.razon_social || null,
         T0_U_IDACA: cliente?.T0_U_IDACA || null,
         cuic: solicitud?.cuic ? parseInt(solicitud.cuic) : cliente?.CUIC || null,
         T1_U_Cliente: cliente?.T1_U_Cliente || null,
