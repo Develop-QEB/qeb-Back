@@ -4,10 +4,10 @@ import { PrismaClient } from '@prisma/client';
 function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  // Increase connection_limit if too low (Hostinger allows more)
-  url = url.replace(/connection_limit=\d+/, 'connection_limit=10');
+  // Increase connection_limit (Hostinger allows more)
+  url = url.replace(/connection_limit=\d+/, 'connection_limit=20');
   // Increase pool_timeout to avoid premature timeouts
-  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=30');
+  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=60');
   // Add connect_timeout if not present
   if (!url.includes('connect_timeout')) {
     url += '&connect_timeout=30&socket_timeout=30';
@@ -43,6 +43,8 @@ const createPrismaClient = () => {
 
         if (isConnectionError && attempt < MAX_RETRIES) {
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
+          // Force disconnect to release stale pool connections
+          try { await client.$disconnect(); } catch (_) { /* ignore */ }
           await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * attempt));
           continue;
         }
