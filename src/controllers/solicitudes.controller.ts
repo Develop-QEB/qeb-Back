@@ -9,6 +9,7 @@ import {
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { hasFullVisibility } from '../utils/permissions';
 import nodemailer from 'nodemailer';
 
 // Helper function to serialize BigInt values to numbers
@@ -457,6 +458,19 @@ export class SolicitudesController {
         };
       }
 
+      // Visibility filter: non-leadership roles only see their own records
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
+      }
+
       // Build orderBy
       let orderBy: Record<string, string> = { fecha: 'desc' };
       if (sortBy) {
@@ -864,6 +878,19 @@ export class SolicitudesController {
 
       const where: Record<string, unknown> = { deleted_at: null };
 
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
+      }
+
       // Apply date filters
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicio = await prisma.catorcenas.findFirst({
@@ -968,6 +995,19 @@ export class SolicitudesController {
       const where: Record<string, unknown> = {
         deleted_at: null,
       };
+
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
+      }
 
       if (status) {
         where.status = status;

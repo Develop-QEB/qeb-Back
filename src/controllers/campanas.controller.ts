@@ -11,6 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { hasFullVisibility } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 
 // Configurar transporter de nodemailer para envío de correos
@@ -75,6 +76,18 @@ export class CampanasController {
           conditions.push('YEAR(cm.fecha_inicio) >= ? AND YEAR(cm.fecha_fin) <= ?');
           params.push(yearInicio, yearFin);
         }
+      }
+
+      // Visibility filter: non-leadership roles only see campañas where they have tareas
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tareas t
+          WHERE t.campania_id = cm.id
+            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+        )`);
+        params.push(userId, String(userId));
       }
 
       const whereClause = conditions.join(' AND ');
@@ -697,20 +710,39 @@ export class CampanasController {
     }
   }
 
-  async getStats(_req: AuthRequest, res: Response): Promise<void> {
+  async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [total, activas, inactivas] = await Promise.all([
-        prisma.campania.count(),
-        prisma.campania.count({ where: { status: 'Aprobada' } }),
-        prisma.campania.count({ where: { status: 'inactiva' } }),
-      ]);
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      let visibilityClause = '';
+      const statsParams: (string | number)[] = [];
+      if (userId && !hasFullVisibility(userRol)) {
+        visibilityClause = `
+          AND EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`;
+        statsParams.push(userId, String(userId));
+      }
+
+      const rows = await prisma.$queryRawUnsafe<Array<{ total: bigint; activas: bigint; inactivas: bigint }>>(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN cm.status = 'Aprobada' THEN 1 ELSE 0 END) as activas,
+          SUM(CASE WHEN cm.status = 'inactiva' THEN 1 ELSE 0 END) as inactivas
+        FROM campania cm
+        WHERE 1=1 ${visibilityClause}
+      `, ...statsParams);
+
+      const row = rows[0];
 
       res.json({
         success: true,
         data: {
-          total,
-          activas,
-          inactivas,
+          total: Number(row?.total || 0),
+          activas: Number(row?.activas || 0),
+          inactivas: Number(row?.inactivas || 0),
         },
       });
     } catch (error) {
