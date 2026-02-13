@@ -4,10 +4,10 @@ import { PrismaClient } from '@prisma/client';
 function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  // Increase connection_limit (Hostinger allows more)
-  url = url.replace(/connection_limit=\d+/, 'connection_limit=20');
-  // Increase pool_timeout to avoid premature timeouts
-  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=60');
+  // Keep connection_limit low to avoid exhausting MySQL connections during deploys
+  url = url.replace(/connection_limit=\d+/, 'connection_limit=5');
+  // Pool timeout
+  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=30');
   // Add connect_timeout if not present
   if (!url.includes('connect_timeout')) {
     url += '&connect_timeout=30&socket_timeout=30';

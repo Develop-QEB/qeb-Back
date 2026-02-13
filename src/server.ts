@@ -89,15 +89,27 @@ async function main() {
   }
 }
 
-process.on('SIGINT', async () => {
-  await prisma.$disconnect();
+// Graceful shutdown: close HTTP server first (stop accepting requests), then disconnect DB
+async function gracefulShutdown(signal: string) {
+  console.log(`[Shutdown] ${signal} received, closing gracefully...`);
+  // 1. Stop accepting new connections
+  httpServer.close(() => {
+    console.log('[Shutdown] HTTP server closed');
+  });
+  // 2. Give pending requests a moment to finish
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  // 3. Disconnect Prisma to release all DB connections
+  try {
+    await prisma.$disconnect();
+    console.log('[Shutdown] Prisma disconnected');
+  } catch (err) {
+    console.error('[Shutdown] Error disconnecting Prisma:', err);
+  }
   process.exit(0);
-});
+}
 
-process.on('SIGTERM', async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 main();
 
