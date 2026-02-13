@@ -229,7 +229,7 @@ export class NotificacionesController {
       }
 
       // Obtener comentarios según el tipo de tarea
-      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
       const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
       let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id?: number; tarea_id?: number }[] = [];
 
@@ -647,7 +647,7 @@ export class NotificacionesController {
         return;
       }
 
-      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
       const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
       const userName = req.user?.nombre || 'Usuario';
 
@@ -791,7 +791,7 @@ export class NotificacionesController {
         return;
       }
 
-      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
       const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
 
       if (isArtReviewTask) {

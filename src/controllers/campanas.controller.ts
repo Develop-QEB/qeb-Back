@@ -2386,11 +2386,11 @@ export class CampanasController {
         }
       }
 
-      // Si es rechazo, intercambiar creador y asignado en la tarea de Revisión de artes
+      // Si es rechazo, intercambiar creador y asignado en la tarea de Revision de artes
       console.log('updateArteStatus - Status:', status, '- CampanaId:', campanaId);
       if (status === 'Rechazado') {
-        console.log('updateArteStatus - Buscando tareas de Revisión de artes para rotar roles...');
-        // Buscar la tarea de Revisión de artes que contiene estas reservas
+        console.log('updateArteStatus - Buscando tareas de Revision de artes para rotar roles...');
+        // Buscar la tarea de Revision de artes que contiene estas reservas
         const tareasRevision = await prisma.$queryRawUnsafe<{
           id: number;
           ids_reservas: string;
@@ -2402,7 +2402,7 @@ export class CampanasController {
           SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
           FROM tareas
           WHERE campania_id = ?
-          AND tipo = 'Revisión de artes'
+          AND tipo = 'Revision de artes'
           AND ids_reservas IS NOT NULL
           AND ids_reservas != ''
           AND estatus = 'Activo'
@@ -2845,11 +2845,11 @@ export class CampanasController {
         }
       }
 
-      if (tipo === 'Revisión de artes' || tipo === 'Corrección') {
+      if (tipo === 'Revision de artes' || tipo === 'Correccion') {
         if (!ids_reservas) {
           res.status(400).json({
             success: false,
-            error: 'Se requieren IDs de reservas para tareas de Revisión de artes',
+            error: 'Se requieren IDs de reservas para tareas de Revision de artes',
           });
           return;
         }
@@ -2888,8 +2888,8 @@ export class CampanasController {
       fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
-      // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
-      if (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Programación') {
+      // Para Revision de artes, Impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
       }
 
@@ -2965,13 +2965,13 @@ export class CampanasController {
           const placeholders = reservaIdArray.map(() => '?').join(',');
           // Determinar valor de tarea según tipo
           let tareaValue = tipo || 'Producción';
-          if (tipo === 'Revisión de artes') {
+          if (tipo === 'Revision de artes') {
             tareaValue = 'En revisión';
           } else if (tipo === 'Impresión') {
             tareaValue = 'Pedido Solicitado';
           } else if (tipo === 'Recepción') {
             tareaValue = 'Por Recibir';
-          } else if (tipo === 'Corrección') {
+          } else if (tipo === 'Correccion') {
             tareaValue = 'En corrección';
           } else if (tipo === 'Testigo') {
             tareaValue = 'Pendiente testigo';
@@ -3012,7 +3012,7 @@ export class CampanasController {
       });
 
       // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
-      if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
+      if ((tipo === 'Revision de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
           prisma.usuario.findUnique({
