@@ -1521,6 +1521,11 @@ export class SolicitudesController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'creada' });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+        solicitudId: result.solicitud.id,
+        campanaId: result.campania.id,
+        usuario: userName,
+      });
 
       // Lógica post-respuesta: tareas de autorización (no bloquea al usuario)
       try {
