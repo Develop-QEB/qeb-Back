@@ -229,7 +229,8 @@ export class NotificacionesController {
       }
 
       // Obtener comentarios según el tipo de tarea
-      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
       let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id?: number; tarea_id?: number }[] = [];
 
       if (isArtReviewTask) {
@@ -646,7 +647,8 @@ export class NotificacionesController {
         return;
       }
 
-      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
       const userName = req.user?.nombre || 'Usuario';
 
       if (isArtReviewTask) {
@@ -789,7 +791,8 @@ export class NotificacionesController {
         return;
       }
 
-      const isArtReviewTask = tarea.tipo === 'Revisión de artes' || tarea.tipo === 'Correccion';
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
 
       if (isArtReviewTask) {
         // Para tareas de Revisión de artes / Corrección: usar tabla comentarios_revision_artes
