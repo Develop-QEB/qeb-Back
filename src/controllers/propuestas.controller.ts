@@ -1203,14 +1203,14 @@ export class PropuestasController {
         // 2. Update tareas status
         await tx.tareas.updateMany({
           where: { id_propuesta: String(propuestaId) },
-          data: { estatus: 'Atendido' },
+          data: { estatus: 'Aprobada' },
         });
 
         // 3. Update propuesta
         await tx.propuesta.update({
           where: { id: propuestaId },
           data: {
-            status: 'Atendido',
+            status: 'Aprobada',
             precio_simulado: precio_simulado || propuesta.precio_simulado,
             asignado: asignados || propuesta.asignado,
             id_asignado: id_asignados || propuesta.id_asignado,
