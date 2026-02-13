@@ -93,6 +93,12 @@ app.use('/uploads', (req, res, next) => {
 import { propuestasController } from './controllers/propuestas.controller';
 app.get('/public/propuestas/:id', propuestasController.getPublicDetails.bind(propuestasController));
 
+// Evitar que el navegador cachee respuestas de la API
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 app.use('/api', routes);
 
 app.use(notFoundMiddleware);
