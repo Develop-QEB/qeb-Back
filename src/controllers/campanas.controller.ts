@@ -3864,8 +3864,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
-          AND rsv.estatus <> 'vendido'
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           AND sc.bonificacion > 0
           ${statusFilter}
           ${dateFilter}
@@ -3907,8 +3906,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
-          AND rsv.estatus <> 'vendido'
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           AND (sc.caras - sc.bonificacion) > 0
           ${statusFilter}
           ${dateFilter}
