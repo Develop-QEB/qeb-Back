@@ -11,6 +11,12 @@ export const authMiddleware = (
 ): void => {
   const authHeader = req.headers.authorization;
 
+  // Debug log para el endpoint de evaluar-autorizacion
+  if (req.path.includes('evaluar-autorizacion')) {
+    console.log('[AUTH] evaluar-autorizacion - Authorization header presente:', !!authHeader);
+    console.log('[AUTH] evaluar-autorizacion - Headers:', JSON.stringify(req.headers, null, 2));
+  }
+
   if (!authHeader) {
     res.status(401).json({
       success: false,
