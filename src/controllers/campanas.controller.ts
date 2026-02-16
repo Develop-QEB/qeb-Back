@@ -4010,9 +4010,9 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = sc.idquote
           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus NOT IN ('eliminada')
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           ${statusFilter}
           ${dateFilter}
         ORDER BY cm.id, sc.id, inv.id
