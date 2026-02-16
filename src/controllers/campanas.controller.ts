@@ -3855,7 +3855,7 @@ export class CampanasController {
           sc.id AS grupo_id,
           'bonificacion' AS tipo_fila
         FROM campania cm
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
@@ -3898,7 +3898,7 @@ export class CampanasController {
           sc.id AS grupo_id,
           'renta' AS tipo_fila
         FROM campania cm
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
