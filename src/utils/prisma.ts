@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { getMexicoDate } from './dateHelper';
 
 // Ensure DATABASE_URL has proper timeout and pool settings
 function getDatasourceUrl(): string {
@@ -51,6 +52,18 @@ const createPrismaClient = () => {
         throw error;
       }
     }
+  });
+
+  // Middleware: fechas de México y fecha_fin +7 días en tareas
+  client.$use(async (params, next) => {
+    if (params.model === 'tareas' && params.action === 'create') {
+      const now = getMexicoDate();
+      const fin = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      params.args.data.fecha_inicio = params.args.data.fecha_inicio || now;
+      params.args.data.created_at = params.args.data.created_at || now;
+      params.args.data.fecha_fin = fin;
+    }
+    return next(params);
   });
 
   return client;

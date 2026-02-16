@@ -483,6 +483,148 @@ export class CampanasController {
         },
       });
 
+      // --- Estatus manuales de bitácora ---
+      const nombreCampanaStatus = campana.nombre || `Campaña #${campanaId}`;
+
+      if (status === 'Ajuste CTO Cliente') {
+        // Tarea de ajuste para área de Tráfico
+        const usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } },
+            ],
+            deleted_at: null,
+          },
+          select: { id: true, nombre: true },
+        });
+
+        for (const u of usuariosTrafico) {
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Ajuste de campaña',
+              descripcion: `Ajuste CTO Cliente - ${nombreCampanaStatus}`,
+              tipo: 'Ajuste Cto Cliente',
+              estatus: 'Pendiente',
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              id_responsable: u.id,
+              responsable: u.nombre,
+              asignado: u.nombre,
+              id_asignado: u.id.toString(),
+              id_solicitud: solicitud?.id?.toString() || '',
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campanaId,
+            },
+          });
+        }
+
+        // Tarea de seguimiento para Analista (asignados de la propuesta)
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            const analista = await prisma.usuario.findUnique({ where: { id: analistaId }, select: { nombre: true } });
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Seguimiento ajuste de campaña',
+                descripcion: `Seguimiento Ajuste CTO Cliente - ${nombreCampanaStatus}`,
+                tipo: 'Seguimiento',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: analista?.nombre || '',
+                asignado: analista?.nombre || '',
+                id_asignado: analistaId.toString(),
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+              },
+            });
+          }
+        }
+      }
+
+      if (status === 'Ajuste Comercial') {
+        // Tarea de ajuste para el asesor (creador de la solicitud)
+        if (solicitud?.usuario_id) {
+          const asesor = await prisma.usuario.findUnique({ where: { id: solicitud.usuario_id }, select: { nombre: true } });
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Ajuste de campaña',
+              descripcion: `Ajuste Comercial - ${nombreCampanaStatus}`,
+              tipo: 'Ajuste Comercial',
+              estatus: 'Pendiente',
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              id_responsable: solicitud.usuario_id,
+              responsable: asesor?.nombre || '',
+              asignado: asesor?.nombre || '',
+              id_asignado: solicitud.usuario_id.toString(),
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campanaId,
+            },
+          });
+        }
+
+        // Tarea de seguimiento para Analista
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            const analista = await prisma.usuario.findUnique({ where: { id: analistaId }, select: { nombre: true } });
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Seguimiento ajuste de campaña',
+                descripcion: `Seguimiento Ajuste Comercial - ${nombreCampanaStatus}`,
+                tipo: 'Seguimiento',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: analista?.nombre || '',
+                asignado: analista?.nombre || '',
+                id_asignado: analistaId.toString(),
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+              },
+            });
+          }
+        }
+      }
+
+      if (status === 'Atendido') {
+        // Notificación al Analista asignado
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            await prisma.tareas.create({
+              data: {
+                titulo: `Campaña atendida: ${nombreCampanaStatus}`,
+                descripcion: `${userName} marcó la campaña como Atendido`,
+                tipo: 'Notificación',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: '',
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+                asignado: userName,
+                id_asignado: userId.toString(),
+              },
+            });
+          }
+        }
+      }
+
       res.json({
         success: true,
         data: campana,
@@ -3249,6 +3391,32 @@ export class CampanasController {
             data: { instalado: true },
           });
           console.log(`Testigo completado: ${reservaIds.length} reservas marcadas como validadas`);
+        }
+      }
+
+      // Si es tarea de ajuste y se finaliza, verificar si todas las hermanas ya están finalizadas
+      if (
+        ['Atendido', 'Completado'].includes(tarea.estatus || '') &&
+        ['Ajuste Cto Cliente', 'Ajuste de Caras'].includes(tarea.tipo || '') &&
+        tarea.id_propuesta
+      ) {
+        const tareasHermanas = await prisma.tareas.findMany({
+          where: {
+            id_propuesta: tarea.id_propuesta,
+            tipo: tarea.tipo,
+          },
+          select: { estatus: true },
+        });
+
+        const todasFinalizadas = tareasHermanas.every(t =>
+          ['Atendido', 'Completado', 'Cancelado'].includes(t.estatus || '')
+        );
+
+        if (todasFinalizadas) {
+          await prisma.propuesta.update({
+            where: { id: parseInt(tarea.id_propuesta) },
+            data: { status: 'Atendida', updated_at: new Date() },
+          });
         }
       }
 
