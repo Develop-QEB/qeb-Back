@@ -8,7 +8,11 @@ function getDatasourceUrl(): string {
 
   // Strip any existing query params and add fresh ones
   const baseUrl = url.split('?')[0];
-  return `${baseUrl}?connection_limit=15&pool_timeout=60&connect_timeout=30&socket_timeout=30`;
+  const finalUrl = `${baseUrl}?connection_limit=15&pool_timeout=60&connect_timeout=30&socket_timeout=30`;
+  // Log para debug (oculta password)
+  const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
+  console.log('[Prisma] Using datasource URL:', safeUrl);
+  return finalUrl;
 }
 
 const globalForPrisma = globalThis as unknown as {
