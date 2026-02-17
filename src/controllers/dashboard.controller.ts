@@ -632,7 +632,9 @@ export class DashboardController {
         estatus: estatusFiltro,
         page = '1',
         limit = '50',
+        includeCoords,
       } = req.query;
+      const wantCoords = includeCoords === 'true';
 
       const pageNum = parseInt(page as string) || 1;
       const limitNum = parseInt(limit as string) || 50;
@@ -802,16 +804,18 @@ export class DashboardController {
       const totalPages = Math.ceil(total / limitNum);
       const paginatedResults = allResults.slice(skip, skip + limitNum);
 
-      // Todas las coordenadas para heatmap y pines
-      const allCoords = allResults
-        .filter((inv) => inv.latitud && inv.longitud)
-        .map((inv) => ({
-          id: inv.id,
-          lat: inv.latitud as number,
-          lng: inv.longitud as number,
-          plaza: inv.plaza,
-          estatus: inv.estatus,
-        }));
+      // Coordenadas solo si se solicitan explícitamente (evita respuestas de 1.5MB+)
+      const allCoords = wantCoords
+        ? allResults
+            .filter((inv) => inv.latitud && inv.longitud)
+            .map((inv) => ({
+              id: inv.id,
+              lat: inv.latitud as number,
+              lng: inv.longitud as number,
+              plaza: inv.plaza,
+              estatus: inv.estatus,
+            }))
+        : [];
 
       res.json({
         success: true,
@@ -843,7 +847,7 @@ export class DashboardController {
             lat: data.lat,
             lng: data.lng,
           })).sort((a, b) => b.count - a.count),
-          // Todas las coordenadas para pines/heatmap
+          // Coordenadas para pines/heatmap (solo con includeCoords=true)
           allCoords,
         },
       });
