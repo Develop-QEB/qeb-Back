@@ -1037,7 +1037,24 @@ export class CampanasController {
 
       console.log('Fetching inventario con APS for campana:', campanaId);
 
-      // Query principal SIN los LEFT JOIN tareas con FIND_IN_SET (eran el cuello de botella)
+      // Paso 1: Obtener id_propuesta de la campaña (query instant con PKs)
+      const campData = await prisma.$queryRawUnsafe(`
+        SELECT ct.id_propuesta
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        WHERE cm.id = ?
+      `, campanaId) as any[];
+
+      if (!campData.length) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const idPropuesta = campData[0].id_propuesta;
+
+      // Paso 2: Query principal - parte desde solicitudCaras filtrado por idquote (subset pequeño)
+      // Sin JOIN a campania/cotizacion (ya lo resolvimos arriba)
+      // Sin LEFT JOIN catorcenas BETWEEN (se calcula en código)
       const query = `
         SELECT
           rsv.id as rsv_ids,
@@ -1069,26 +1086,21 @@ export class CampanasController {
           sc.tipo as tipo_medio,
           sc.inicio_periodo,
           sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
           1 AS caras_totales,
           rsv.arte_aprobado,
           rsv.instalado
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
         WHERE
-          cm.id = ?
+          sc.idquote = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         ORDER BY rsv.id DESC
       `;
 
-      // Query separada para tareas de esta campaña (solo 1 query, sin FIND_IN_SET)
+      // Paso 3: Tareas y catorcenas en paralelo
       const tareasQuery = `
         SELECT id, tipo, estatus, ids_reservas
         FROM tareas
@@ -1096,13 +1108,21 @@ export class CampanasController {
           AND tipo IN ('Impresión', 'Recepción')
       `;
 
-      const [inventario, tareas] = await Promise.all([
-        prisma.$queryRawUnsafe(query, campanaId),
+      const catorcenasQuery = `
+        SELECT numero_catorcena, año as anio_catorcena, fecha_inicio, fecha_fin
+        FROM catorcenas
+        ORDER BY fecha_inicio
+      `;
+
+      const [inventario, tareas, catorcenas] = await Promise.all([
+        prisma.$queryRawUnsafe(query, idPropuesta),
         prisma.$queryRawUnsafe(tareasQuery, campanaId),
+        prisma.$queryRawUnsafe(catorcenasQuery),
       ]);
 
       const inventarioArr = inventario as any[];
       const tareasArr = tareas as any[];
+      const catorcenasArr = catorcenas as any[];
 
       // Indexar tareas por reserva_id para lookup O(1)
       const impresionByReserva = new Map<number, any>();
@@ -1117,12 +1137,13 @@ export class CampanasController {
         }
       }
 
-      // Calcular estatus_arte en código
+      // Calcular estatus_arte y catorcena en código
       const inventarioConEstatus = inventarioArr.map((row: any) => {
         const rsvId = Number(row.rsv_ids);
         const tImpresion = impresionByReserva.get(rsvId);
         const tRecepcion = recepcionByReserva.get(rsvId);
 
+        // estatus_arte
         let estatus_arte: string;
         if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
@@ -1138,7 +1159,21 @@ export class CampanasController {
           estatus_arte = 'Carga Artes';
         }
 
-        return { ...row, estatus_arte };
+        // catorcena matching
+        let numero_catorcena = null;
+        let anio_catorcena = null;
+        if (row.inicio_periodo) {
+          const inicio = new Date(row.inicio_periodo);
+          for (const cat of catorcenasArr) {
+            if (inicio >= new Date(cat.fecha_inicio) && inicio <= new Date(cat.fecha_fin)) {
+              numero_catorcena = cat.numero_catorcena;
+              anio_catorcena = cat.anio_catorcena;
+              break;
+            }
+          }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena };
       });
 
       console.log('Inventario con APS result count:', inventarioConEstatus.length);
