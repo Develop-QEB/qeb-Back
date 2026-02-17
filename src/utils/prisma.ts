@@ -1,15 +1,10 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Ensure DATABASE_URL has proper timeout and pool settings
+// Add connect/socket timeout if not already present in DATABASE_URL
 function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  // Connection pool: 15 connections to handle concurrent requests (dashboard loads ~17 at once)
-  url = url.replace(/connection_limit=\d+/, 'connection_limit=15');
-  // Pool timeout: 60s to avoid premature timeouts under load
-  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=60');
-  // Add connect_timeout if not present
   if (!url.includes('connect_timeout')) {
     url += '&connect_timeout=30&socket_timeout=30';
   }
