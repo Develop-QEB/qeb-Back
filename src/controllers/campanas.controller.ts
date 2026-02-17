@@ -1037,6 +1037,7 @@ export class CampanasController {
 
       console.log('Fetching inventario con APS for campana:', campanaId);
 
+      // Query principal SIN los LEFT JOIN tareas con FIND_IN_SET (eran el cuello de botella)
       const query = `
         SELECT
           rsv.id as rsv_ids,
@@ -1072,16 +1073,7 @@ export class CampanasController {
           cat.año as anio_catorcena,
           1 AS caras_totales,
           rsv.arte_aprobado,
-          rsv.instalado,
-          -- Calcular estatus de arte basado en el flujo
-          CASE
-            WHEN rsv.instalado = 1 THEN 'Instalado'
-            WHEN t_recepcion.id IS NOT NULL AND t_recepcion.estatus = 'Completado' THEN 'Artes Recibidos'
-            WHEN t_impresion.id IS NOT NULL AND t_impresion.estatus IN ('Activo', 'Atendido') THEN 'En Impresion'
-            WHEN rsv.arte_aprobado = 'aprobado' THEN 'Artes Aprobados'
-            WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'Revision Artes'
-            ELSE 'Carga Artes'
-          END as estatus_arte
+          rsv.instalado
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -1089,12 +1081,6 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
-            AND t_impresion.tipo = 'Impresión'
-            AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
-          LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
-            AND t_recepcion.tipo = 'Recepción'
-            AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
@@ -1102,12 +1088,63 @@ export class CampanasController {
         ORDER BY rsv.id DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      // Query separada para tareas de esta campaña (solo 1 query, sin FIND_IN_SET)
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Impresión', 'Recepción')
+      `;
 
-      console.log('Inventario con APS result count:', Array.isArray(inventario) ? inventario.length : 0);
+      const [inventario, tareas] = await Promise.all([
+        prisma.$queryRawUnsafe(query, campanaId),
+        prisma.$queryRawUnsafe(tareasQuery, campanaId),
+      ]);
+
+      const inventarioArr = inventario as any[];
+      const tareasArr = tareas as any[];
+
+      // Indexar tareas por reserva_id para lookup O(1)
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva : recepcionByReserva;
+        for (const rsvId of ids) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      // Calcular estatus_arte en código
+      const inventarioConEstatus = inventarioArr.map((row: any) => {
+        const rsvId = Number(row.rsv_ids);
+        const tImpresion = impresionByReserva.get(rsvId);
+        const tRecepcion = recepcionByReserva.get(rsvId);
+
+        let estatus_arte: string;
+        if (Number(row.instalado) === 1) {
+          estatus_arte = 'Instalado';
+        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+          estatus_arte = 'Artes Recibidos';
+        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+          estatus_arte = 'En Impresion';
+        } else if (row.arte_aprobado === 'aprobado') {
+          estatus_arte = 'Artes Aprobados';
+        } else if (row.archivo != null && row.archivo !== '') {
+          estatus_arte = 'Revision Artes';
+        } else {
+          estatus_arte = 'Carga Artes';
+        }
+
+        return { ...row, estatus_arte };
+      });
+
+      console.log('Inventario con APS result count:', inventarioConEstatus.length);
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
       ));
 
