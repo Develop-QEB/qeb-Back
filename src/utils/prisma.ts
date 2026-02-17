@@ -3,12 +3,12 @@ import { getMexicoDate } from './dateHelper';
 
 // Add connect/socket timeout if not already present in DATABASE_URL
 function getDatasourceUrl(): string {
-  let url = process.env.DATABASE_URL || '';
+  const url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  if (!url.includes('connect_timeout')) {
-    url += '&connect_timeout=30&socket_timeout=30';
-  }
-  return url;
+
+  // Strip any existing query params and add fresh ones
+  const baseUrl = url.split('?')[0];
+  return `${baseUrl}?connection_limit=15&pool_timeout=60&connect_timeout=30&socket_timeout=30`;
 }
 
 const globalForPrisma = globalThis as unknown as {
