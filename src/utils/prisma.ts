@@ -30,11 +30,12 @@ const createPrismaClient = () => {
         return await next(params);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
+        // Only retry on actual DB connection errors, NOT pool exhaustion
+        // Retrying pool timeouts makes it worse by adding more demand
         const isConnectionError = message.includes("Can't reach database server") ||
           message.includes('Connection refused') ||
           message.includes('ETIMEDOUT') ||
-          message.includes('ECONNREFUSED') ||
-          message.includes('Timed out fetching a new connection from the connection pool');
+          message.includes('ECONNREFUSED');
 
         if (isConnectionError && attempt < MAX_RETRIES) {
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
