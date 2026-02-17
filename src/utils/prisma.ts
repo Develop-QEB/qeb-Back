@@ -5,10 +5,10 @@ import { getMexicoDate } from './dateHelper';
 function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  // Keep connection_limit low to avoid exhausting MySQL connections during deploys
-  url = url.replace(/connection_limit=\d+/, 'connection_limit=5');
-  // Pool timeout
-  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=30');
+  // Connection pool: 15 connections to handle concurrent requests (dashboard loads ~17 at once)
+  url = url.replace(/connection_limit=\d+/, 'connection_limit=15');
+  // Pool timeout: 60s to avoid premature timeouts under load
+  url = url.replace(/pool_timeout=\d+/, 'pool_timeout=60');
   // Add connect_timeout if not present
   if (!url.includes('connect_timeout')) {
     url += '&connect_timeout=30&socket_timeout=30';
@@ -44,8 +44,6 @@ const createPrismaClient = () => {
 
         if (isConnectionError && attempt < MAX_RETRIES) {
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
-          // Force disconnect to release stale pool connections
-          try { await client.$disconnect(); } catch (_) { /* ignore */ }
           await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * attempt));
           continue;
         }
