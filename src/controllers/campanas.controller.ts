@@ -59,22 +59,21 @@ export class CampanasController {
         params.push(searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
-      // Year/catorcena filters using fecha_inicio
+      // Year/catorcena filters - overlap logic (campaign active during selected period)
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
-          // Get date range from catorcenas
           conditions.push(`
-            cm.fecha_inicio >= (
-              SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-            )
-            AND cm.fecha_fin <= (
+            cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
+            AND cm.fecha_fin >= (
+              SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+            )
           `);
-          params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
         } else {
-          conditions.push('YEAR(cm.fecha_inicio) >= ? AND YEAR(cm.fecha_fin) <= ?');
-          params.push(yearInicio, yearFin);
+          conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
+          params.push(yearFin, yearInicio);
         }
       }
 
@@ -112,6 +111,7 @@ export class CampanasController {
           cat_ini.año as catorcena_inicio_anio,
           cat_fin.numero_catorcena as catorcena_fin_num,
           cat_fin.año as catorcena_fin_anio,
+          ct.id_propuesta as propuesta_id,
           CASE
             WHEN EXISTS (
               SELECT 1
