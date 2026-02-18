@@ -42,22 +42,25 @@ async function limpiarReservasExpiradas(): Promise<void> {
 // Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
 const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 5000; // 5 segundos entre reintentos
+const MAX_RETRIES = 10;
+const BASE_DELAY_MS = 2000;
 
 async function connectWithRetry(): Promise<void> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await prisma.$connect();
-      console.log('Database connected successfully');
+      console.log('[DB] Connected successfully');
       return;
     } catch (error) {
-      console.error(`[DB] Connection attempt ${attempt}/${MAX_RETRIES} failed:`, (error as Error).message);
+      const msg = (error as Error).message?.split('\n')[0] || 'Unknown error';
+      console.error(`[DB] Attempt ${attempt}/${MAX_RETRIES} failed: ${msg}`);
       if (attempt === MAX_RETRIES) {
         throw error;
       }
-      console.log(`[DB] Retrying in ${RETRY_DELAY_MS / 1000}s...`);
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      // Exponential backoff: 2s, 4s, 6s, 8s... capped at 15s
+      const delay = Math.min(BASE_DELAY_MS * attempt, 15000);
+      console.log(`[DB] Retrying in ${delay / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 }

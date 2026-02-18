@@ -8,28 +8,37 @@ function getDatasourceUrl(): string {
 
   const defaults: Record<string, string> = {
     connection_limit: '5',
-    pool_timeout: '30',
-    connect_timeout: '30',
-    socket_timeout: '30',
+    pool_timeout: '10',
+    connect_timeout: '10',
+    socket_timeout: '10',
   };
 
-  // Minimum values - override if existing value is too low
-  const minimums: Record<string, number> = {
-    connection_limit: 5,
-    pool_timeout: 20,
+  // Enforce sane ranges: min and max
+  const ranges: Record<string, { min: number; max: number }> = {
+    connection_limit: { min: 5, max: 20 },
+    pool_timeout: { min: 5, max: 15 },
+    connect_timeout: { min: 5, max: 10 },
+    socket_timeout: { min: 5, max: 15 },
   };
 
   // Parse existing params
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // Add missing params and enforce minimums
+  // Add missing params and enforce ranges
   for (const [key, value] of Object.entries(defaults)) {
     if (!existing.has(key)) {
       existing.set(key, value);
-    } else if (minimums[key] && parseInt(existing.get(key) || '0') < minimums[key]) {
-      console.log(`[Prisma] Bumping ${key} from ${existing.get(key)} to ${minimums[key]} (minimum)`);
-      existing.set(key, minimums[key].toString());
+    } else if (ranges[key]) {
+      const current = parseInt(existing.get(key) || '0');
+      const { min, max } = ranges[key];
+      if (current < min) {
+        console.log(`[Prisma] ${key}: ${current} → ${min} (too low)`);
+        existing.set(key, min.toString());
+      } else if (current > max) {
+        console.log(`[Prisma] ${key}: ${current} → ${max} (too high)`);
+        existing.set(key, max.toString());
+      }
     }
   }
 
