@@ -1,26 +1,35 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Only add missing params to DATABASE_URL, never override existing ones
+// Ensure DATABASE_URL has sane pool params, enforcing minimums
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
   const defaults: Record<string, string> = {
-    connection_limit: '10',
-    pool_timeout: '60',
+    connection_limit: '5',
+    pool_timeout: '30',
     connect_timeout: '30',
     socket_timeout: '30',
+  };
+
+  // Minimum values - override if existing value is too low
+  const minimums: Record<string, number> = {
+    connection_limit: 5,
+    pool_timeout: 20,
   };
 
   // Parse existing params
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // Only add params that are missing
+  // Add missing params and enforce minimums
   for (const [key, value] of Object.entries(defaults)) {
     if (!existing.has(key)) {
       existing.set(key, value);
+    } else if (minimums[key] && parseInt(existing.get(key) || '0') < minimums[key]) {
+      console.log(`[Prisma] Bumping ${key} from ${existing.get(key)} to ${minimums[key]} (minimum)`);
+      existing.set(key, minimums[key].toString());
     }
   }
 
