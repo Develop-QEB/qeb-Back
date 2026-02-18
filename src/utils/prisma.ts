@@ -1,15 +1,30 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Add connect/socket timeout if not already present in DATABASE_URL
+// Only add missing params to DATABASE_URL, never override existing ones
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  // Strip any existing query params and add fresh ones
-  const baseUrl = url.split('?')[0];
-  const finalUrl = `${baseUrl}?connection_limit=15&pool_timeout=60&connect_timeout=30&socket_timeout=30`;
-  // Log para debug (oculta password)
+  const defaults: Record<string, string> = {
+    connection_limit: '10',
+    pool_timeout: '60',
+    connect_timeout: '30',
+    socket_timeout: '30',
+  };
+
+  // Parse existing params
+  const [base, queryString] = url.split('?');
+  const existing = new URLSearchParams(queryString || '');
+
+  // Only add params that are missing
+  for (const [key, value] of Object.entries(defaults)) {
+    if (!existing.has(key)) {
+      existing.set(key, value);
+    }
+  }
+
+  const finalUrl = `${base}?${existing.toString()}`;
   const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
   console.log('[Prisma] Using datasource URL:', safeUrl);
   return finalUrl;
