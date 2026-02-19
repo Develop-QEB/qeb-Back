@@ -4249,6 +4249,8 @@ export class CampanasController {
           rsv.id AS CodigoArte,
           CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
           NULL AS OrigenArte,
+          rsv.id AS rsv_id,
+          inv.tradicional_digital AS tradicional_digital,
           CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
           CAST(inv.municipio AS CHAR(255)) AS Ciudad,
@@ -4279,7 +4281,104 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params);
 
-      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
+      const dataArr = data as any[];
+
+      // Collect unique campania_ids and rsv_ids from results
+      const campaniaIds = [...new Set(dataArr.map((r: any) => Number(r.CodigoContrato)).filter(Boolean))];
+      const rsvIds = [...new Set(dataArr.map((r: any) => Number(r.rsv_id)).filter(Boolean))];
+
+      // Query tareas (Programación e Instalación) for these campaigns
+      let tareasArr: any[] = [];
+      if (campaniaIds.length > 0) {
+        const placeholdersCamp = campaniaIds.map(() => '?').join(',');
+        const tareasQuery = `
+          SELECT id, tipo, evidencia, contenido, ids_reservas, campania_id
+          FROM tareas
+          WHERE campania_id IN (${placeholdersCamp})
+            AND tipo IN ('Programación', 'Instalación')
+        `;
+        tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
+      }
+
+      // Query imagenes_digitales count per reserva
+      let artesCountMap = new Map<number, number>();
+      if (rsvIds.length > 0) {
+        const placeholdersRsv = rsvIds.map(() => '?').join(',');
+        const artesCountQuery = `
+          SELECT id_reserva, COUNT(*) as total_artes
+          FROM imagenes_digitales
+          WHERE id_reserva IN (${placeholdersRsv})
+          GROUP BY id_reserva
+        `;
+        const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
+        for (const row of artesCountArr) {
+          artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
+        }
+      }
+
+      // Index tareas by reserva_id
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).replace(/\*/g, ',').split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Programación' ? programacionByReserva : instalacionByReserva;
+        for (const rsvId of ids) {
+          if (!map.has(rsvId)) map.set(rsvId, tarea);
+        }
+      }
+
+      // Map indicaciones and extra fields to each row
+      const enrichedData = dataArr.map((row: any) => {
+        const rsvId = Number(row.rsv_id);
+        let indicaciones: string | null = null;
+
+        const isDigital = row.tradicional_digital === 'Digital';
+
+        if (isDigital) {
+          // Digital: indicaciones from Programación task evidencia JSON
+          const tProgramacion = programacionByReserva.get(rsvId);
+          if (tProgramacion && tProgramacion.evidencia) {
+            try {
+              const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+                ? JSON.parse(tProgramacion.evidencia)
+                : tProgramacion.evidencia;
+              if (evidenciaJson.indicaciones && row.ArteUrl) {
+                // Try exact match first, then try by filename
+                indicaciones = evidenciaJson.indicaciones[row.ArteUrl] || null;
+                if (!indicaciones) {
+                  // Try matching by path variants
+                  for (const [key, val] of Object.entries(evidenciaJson.indicaciones)) {
+                    if (key && row.ArteUrl && (key.includes(row.ArteUrl) || row.ArteUrl.includes(key))) {
+                      indicaciones = val as string;
+                      break;
+                    }
+                  }
+                }
+              }
+              // Fallback to general indicaciones string
+              if (!indicaciones && typeof evidenciaJson.indicaciones === 'string') {
+                indicaciones = evidenciaJson.indicaciones;
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        } else {
+          // Tradicional: indicaciones from Instalación task contenido
+          const tInstalacion = instalacionByReserva.get(rsvId);
+          if (tInstalacion && tInstalacion.contenido) {
+            indicaciones = String(tInstalacion.contenido);
+          }
+        }
+
+        return {
+          ...row,
+          indicaciones,
+          num_artes_digitales: artesCountMap.get(rsvId) || 0,
+        };
+      });
+
+      const dataSerializable = JSON.parse(JSON.stringify(enrichedData, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
       ));
 
