@@ -176,7 +176,7 @@ export class UsuariosController {
       }
 
       const { id } = req.params;
-      const { nombre, area, puesto, rol } = req.body;
+      const { nombre, correo_electronico, area, puesto, rol } = req.body;
 
       const usuario = await prisma.usuario.findFirst({
         where: {
@@ -197,6 +197,7 @@ export class UsuariosController {
         where: { id: parseInt(id) },
         data: {
           ...(nombre !== undefined && { nombre }),
+          ...(correo_electronico !== undefined && { correo_electronico }),
           ...(area !== undefined && { area }),
           ...(puesto !== undefined && { puesto }),
           ...(rol !== undefined && { user_role: rol }),
