@@ -164,6 +164,7 @@ model cotizacion {
   id_propuesta         Int
   fecha_expiracion     DateTime? @db.Date
   articulo             String    @db.VarChar(20)
+  tipo_periodo         String?   @default("catorcena") @db.VarChar(20)
 }
 
 model espacio_inventario {

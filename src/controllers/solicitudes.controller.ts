@@ -1303,6 +1303,8 @@ export class SolicitudesController {
         tipo_archivo,
         // IMU
         IMU,
+        // Tipo de periodo (catorcena o personalizado)
+        tipo_periodo,
         // Caras data (array)
         caras,
       } = req.body;
@@ -1411,6 +1413,7 @@ export class SolicitudesController {
             status: 'Pendiente',
             id_propuesta: propuesta.id,
             articulo,
+            tipo_periodo: tipo_periodo || 'catorcena',
           },
         });
 
@@ -2231,6 +2234,7 @@ export class SolicitudesController {
         archivo,
         tipo_archivo,
         IMU,
+        tipo_periodo,
         caras,
       } = req.body;
 
@@ -2330,6 +2334,7 @@ export class SolicitudesController {
               precio: totalInversion,
               contacto: asignadosStr,
               articulo,
+              tipo_periodo: tipo_periodo || 'catorcena',
             },
           });
         }

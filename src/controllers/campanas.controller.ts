@@ -112,6 +112,7 @@ export class CampanasController {
           cat_fin.numero_catorcena as catorcena_fin_num,
           cat_fin.año as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
+          ct.tipo_periodo as tipo_periodo,
           CASE
             WHEN EXISTS (
               SELECT 1
@@ -314,6 +315,7 @@ export class CampanasController {
         catorcena_fin_num: catorcenas.catorcena_fin_num || null,
         catorcena_fin_anio: catorcenas.catorcena_fin_anio || null,
         // Info de cotizacion
+        tipo_periodo: cotizacion?.tipo_periodo || 'catorcena',
         user_id: cotizacion?.user_id || null,
         clientes_id: cotizacion?.clientes_id || null,
         nombre_campania: cotizacion?.nombre_campania || null,

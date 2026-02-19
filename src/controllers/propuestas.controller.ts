@@ -466,7 +466,8 @@ export class PropuestasController {
           cat_inicio.numero_catorcena AS catorcena_inicio,
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
-          cat_fin.año AS anio_fin
+          cat_fin.año AS anio_fin,
+          ct.tipo_periodo AS tipo_periodo
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -498,6 +499,7 @@ export class PropuestasController {
         anio_inicio: p.anio_inicio ? Number(p.anio_inicio) : null,
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
+        tipo_periodo: p.tipo_periodo || 'catorcena',
       }));
 
       res.json({
