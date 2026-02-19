@@ -1088,7 +1088,11 @@ export class CampanasController {
           sc.fin_periodo,
           1 AS caras_totales,
           rsv.arte_aprobado,
-          rsv.instalado
+          rsv.instalado,
+          sc.formato,
+          sc.tarifa_publica as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -1102,10 +1106,10 @@ export class CampanasController {
 
       // Paso 3: Tareas y catorcenas en paralelo
       const tareasQuery = `
-        SELECT id, tipo, estatus, ids_reservas
+        SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción')
+          AND tipo IN ('Impresión', 'Recepción', 'Programación')
       `;
 
       const catorcenasQuery = `
@@ -1127,11 +1131,14 @@ export class CampanasController {
       // Indexar tareas por reserva_id para lookup O(1)
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
 
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva : recepcionByReserva;
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+                  : tarea.tipo === 'Programación' ? programacionByReserva
+                  : recepcionByReserva;
         for (const rsvId of ids) {
           map.set(rsvId, tarea);
         }
@@ -1173,7 +1180,19 @@ export class CampanasController {
           }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena };
+        // Indicaciones de programación desde la tarea
+        const tProgramacion = programacionByReserva.get(rsvId);
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia)
+              : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion };
       });
 
       console.log('Inventario con APS result count:', inventarioConEstatus.length);
