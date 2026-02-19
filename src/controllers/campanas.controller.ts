@@ -1090,7 +1090,11 @@ export class CampanasController {
           sc.fin_periodo,
           1 AS caras_totales,
           rsv.arte_aprobado,
-          rsv.instalado
+          rsv.instalado,
+          sc.formato,
+          sc.tarifa_publica as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -1104,10 +1108,10 @@ export class CampanasController {
 
       // Paso 3: Tareas y catorcenas en paralelo
       const tareasQuery = `
-        SELECT id, tipo, estatus, ids_reservas
+        SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción')
+          AND tipo IN ('Impresión', 'Recepción', 'Programación')
       `;
 
       const catorcenasQuery = `
@@ -1129,11 +1133,14 @@ export class CampanasController {
       // Indexar tareas por reserva_id para lookup O(1)
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
 
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva : recepcionByReserva;
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : recepcionByReserva;
         for (const rsvId of ids) {
           map.set(rsvId, tarea);
         }
@@ -1175,7 +1182,19 @@ export class CampanasController {
           }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena };
+        // Indicaciones de programación desde la tarea
+        const tProgramacion = programacionByReserva.get(rsvId);
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia)
+              : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion };
       });
 
       console.log('Inventario con APS result count:', inventarioConEstatus.length);
@@ -3227,6 +3246,8 @@ export class CampanasController {
             tareaValue = 'Pendiente testigo';
           } else if (tipo === 'Programación') {
             tareaValue = 'En programación';
+          } else if (tipo === 'Orden de Programación') {
+            tareaValue = 'Orden de programación';
           } else if (tipo === 'Instalación') {
             tareaValue = 'Pendiente instalación';
           }
@@ -3455,6 +3476,31 @@ export class CampanasController {
         data: updateData,
       });
 
+      // Si es una tarea de Programación que se completa y tiene orden padre, auto-finalizar la orden
+      if (tarea.tipo === 'Programación' && estatus === 'Completado' && tarea.evidencia) {
+        try {
+          const ev = JSON.parse(tarea.evidencia);
+          if (ev.orden_programacion_id) {
+            await prisma.tareas.update({
+              where: { id: ev.orden_programacion_id },
+              data: { estatus: 'Finalizada' },
+            });
+            console.log(`Orden de Programación ${ev.orden_programacion_id} auto-finalizada`);
+
+            // Emitir evento WebSocket para la orden actualizada
+            if (tarea.campania_id) {
+              emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+                tareaId: ev.orden_programacion_id,
+                campanaId: tarea.campania_id,
+                estatus: 'Finalizada',
+              });
+            }
+          }
+        } catch (e) {
+          console.error('Error auto-finalizando orden de programación:', e);
+        }
+      }
+
       // Si es una tarea de tipo Testigo y se está completando, actualizar el estado de instalación a validado
       if (tipo === 'Testigo' && estatus === 'Completado' && tarea.ids_reservas) {
         const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
@@ -3581,6 +3627,130 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * Enviar una Orden de Programación: crea tarea hija "Programación" para Operaciones
+   */
+  async enviarOrdenProgramacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, tareaId } = req.params;
+      const campanaId = parseInt(id);
+      const tareaIdNum = parseInt(tareaId);
+
+      // Buscar la orden de programación
+      const orden = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!orden) {
+        res.status(404).json({ success: false, error: 'Orden de Programación no encontrada' });
+        return;
+      }
+
+      if (orden.tipo !== 'Orden de Programación') {
+        res.status(400).json({ success: false, error: 'La tarea no es de tipo Orden de Programación' });
+        return;
+      }
+
+      if (orden.estatus !== 'Pendiente') {
+        res.status(400).json({ success: false, error: 'La orden ya fue enviada' });
+        return;
+      }
+
+      // Parsear evidencia de la orden
+      let evidenciaOrden: any = {};
+      try {
+        if (orden.evidencia) {
+          evidenciaOrden = JSON.parse(orden.evidencia);
+        }
+      } catch (e) {
+        console.error('Error parsing orden evidencia:', e);
+      }
+
+      // Crear tarea hija de tipo "Programación"
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const childEvidencia = JSON.stringify({
+        ...evidenciaOrden,
+        programados: {},
+        orden_programacion_id: tareaIdNum,
+      });
+
+      const tareaProgramacion = await prisma.tareas.create({
+        data: {
+          titulo: orden.titulo || 'Programación',
+          descripcion: orden.descripcion || null,
+          tipo: 'Programación',
+          estatus: 'Activo',
+          fecha_inicio: ahora,
+          fecha_fin: orden.fecha_fin,
+          id_responsable: req.user?.userId || 0,
+          responsable: req.user?.nombre || '',
+          asignado: orden.asignado || null,
+          id_asignado: orden.id_asignado || null,
+          id_solicitud: orden.id_solicitud || '',
+          id_propuesta: orden.id_propuesta || '',
+          campania_id: campanaId,
+          ids_reservas: orden.ids_reservas || null,
+          listado_inventario: orden.listado_inventario || null,
+          evidencia: childEvidencia,
+        },
+      });
+
+      // Actualizar reservas: tarea = 'En programación'
+      if (orden.ids_reservas) {
+        const reservaIdArray = orden.ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
+        if (reservaIdArray.length > 0) {
+          const placeholders = reservaIdArray.map(() => '?').join(',');
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
+            'En programación',
+            ...reservaIdArray
+          );
+        }
+      }
+
+      // Actualizar la orden: estatus = 'Enviada', agregar ID de la tarea hija
+      const ordenEvidenciaActualizada = JSON.stringify({
+        ...evidenciaOrden,
+        tarea_programacion_id: tareaProgramacion.id,
+      });
+
+      await prisma.tareas.update({
+        where: { id: tareaIdNum },
+        data: {
+          estatus: 'Enviada',
+          evidencia: ordenEvidenciaActualizada,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          orden: { id: tareaIdNum, estatus: 'Enviada' },
+          programacion: { id: tareaProgramacion.id, estatus: 'Activo' },
+        },
+      });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+        tareaId: tareaIdNum,
+        campanaId,
+        estatus: 'Enviada',
+      });
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tareaProgramacion.id,
+        campanaId,
+        tipo: 'Programación',
+        titulo: tareaProgramacion.titulo,
+      });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaProgramacion.id, tipo: 'Programación' });
+
+    } catch (error) {
+      console.error('Error en enviarOrdenProgramacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al enviar orden de programación';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
@@ -4232,6 +4402,8 @@ export class CampanasController {
           rsv.id AS CodigoArte,
           CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
           NULL AS OrigenArte,
+          rsv.id AS rsv_id,
+          inv.tradicional_digital AS tradicional_digital,
           CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
           CAST(inv.municipio AS CHAR(255)) AS Ciudad,
@@ -4262,7 +4434,104 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params);
 
-      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
+      const dataArr = data as any[];
+
+      // Collect unique campania_ids and rsv_ids from results
+      const campaniaIds = [...new Set(dataArr.map((r: any) => Number(r.CodigoContrato)).filter(Boolean))];
+      const rsvIds = [...new Set(dataArr.map((r: any) => Number(r.rsv_id)).filter(Boolean))];
+
+      // Query tareas (Programación e Instalación) for these campaigns
+      let tareasArr: any[] = [];
+      if (campaniaIds.length > 0) {
+        const placeholdersCamp = campaniaIds.map(() => '?').join(',');
+        const tareasQuery = `
+          SELECT id, tipo, evidencia, contenido, ids_reservas, campania_id
+          FROM tareas
+          WHERE campania_id IN (${placeholdersCamp})
+            AND tipo IN ('Programación', 'Instalación')
+        `;
+        tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
+      }
+
+      // Query imagenes_digitales count per reserva
+      let artesCountMap = new Map<number, number>();
+      if (rsvIds.length > 0) {
+        const placeholdersRsv = rsvIds.map(() => '?').join(',');
+        const artesCountQuery = `
+          SELECT id_reserva, COUNT(*) as total_artes
+          FROM imagenes_digitales
+          WHERE id_reserva IN (${placeholdersRsv})
+          GROUP BY id_reserva
+        `;
+        const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
+        for (const row of artesCountArr) {
+          artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
+        }
+      }
+
+      // Index tareas by reserva_id
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).replace(/\*/g, ',').split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva : instalacionByReserva;
+        for (const rsvId of ids) {
+          if (!map.has(rsvId)) map.set(rsvId, tarea);
+        }
+      }
+
+      // Map indicaciones and extra fields to each row
+      const enrichedData = dataArr.map((row: any) => {
+        const rsvId = Number(row.rsv_id);
+        let indicaciones: string | null = null;
+
+        const isDigital = row.tradicional_digital === 'Digital';
+
+        if (isDigital) {
+          // Digital: indicaciones from Programación task evidencia JSON
+          const tProgramacion = programacionByReserva.get(rsvId);
+          if (tProgramacion && tProgramacion.evidencia) {
+            try {
+              const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+                ? JSON.parse(tProgramacion.evidencia)
+                : tProgramacion.evidencia;
+              if (evidenciaJson.indicaciones && row.ArteUrl) {
+                // Try exact match first, then try by filename
+                indicaciones = evidenciaJson.indicaciones[row.ArteUrl] || null;
+                if (!indicaciones) {
+                  // Try matching by path variants
+                  for (const [key, val] of Object.entries(evidenciaJson.indicaciones)) {
+                    if (key && row.ArteUrl && (key.includes(row.ArteUrl) || row.ArteUrl.includes(key))) {
+                      indicaciones = val as string;
+                      break;
+                    }
+                  }
+                }
+              }
+              // Fallback to general indicaciones string
+              if (!indicaciones && typeof evidenciaJson.indicaciones === 'string') {
+                indicaciones = evidenciaJson.indicaciones;
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        } else {
+          // Tradicional: indicaciones from Instalación task contenido
+          const tInstalacion = instalacionByReserva.get(rsvId);
+          if (tInstalacion && tInstalacion.contenido) {
+            indicaciones = String(tInstalacion.contenido);
+          }
+        }
+
+        return {
+          ...row,
+          indicaciones,
+          num_artes_digitales: artesCountMap.get(rsvId) || 0,
+        };
+      });
+
+      const dataSerializable = JSON.parse(JSON.stringify(enrichedData, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
       ));
 

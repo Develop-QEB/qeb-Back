@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Ensure DATABASE_URL has sane pool params, enforcing minimums
+// Ensure DATABASE_URL has sensible pool defaults (without overriding .env values)
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
@@ -9,36 +9,18 @@ function getDatasourceUrl(): string {
   const defaults: Record<string, string> = {
     connection_limit: '5',
     pool_timeout: '10',
-    connect_timeout: '10',
-    socket_timeout: '10',
+    connect_timeout: '15',
+    socket_timeout: '15',
   };
 
-  // Enforce sane ranges: min and max
-  const ranges: Record<string, { min: number; max: number }> = {
-    connection_limit: { min: 5, max: 20 },
-    pool_timeout: { min: 5, max: 15 },
-    connect_timeout: { min: 5, max: 10 },
-    socket_timeout: { min: 5, max: 15 },
-  };
-
-  // Parse existing params
+  // Parse existing params properly with URLSearchParams
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // Add missing params and enforce ranges
+  // Only add missing params — never override values already set in .env
   for (const [key, value] of Object.entries(defaults)) {
     if (!existing.has(key)) {
       existing.set(key, value);
-    } else if (ranges[key]) {
-      const current = parseInt(existing.get(key) || '0');
-      const { min, max } = ranges[key];
-      if (current < min) {
-        console.log(`[Prisma] ${key}: ${current} → ${min} (too low)`);
-        existing.set(key, min.toString());
-      } else if (current > max) {
-        console.log(`[Prisma] ${key}: ${current} → ${max} (too high)`);
-        existing.set(key, max.toString());
-      }
     }
   }
 
@@ -68,11 +50,11 @@ const createPrismaClient = () => {
         return await next(params);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
+        // Only retry real connection errors — NOT pool exhaustion (retrying makes it worse)
         const isConnectionError = message.includes("Can't reach database server") ||
           message.includes('Connection refused') ||
           message.includes('ETIMEDOUT') ||
-          message.includes('ECONNREFUSED') ||
-          message.includes('Timed out fetching a new connection from the connection pool');
+          message.includes('ECONNREFUSED');
 
         if (isConnectionError && attempt < MAX_RETRIES) {
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
