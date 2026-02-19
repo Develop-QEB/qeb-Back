@@ -1,12 +1,24 @@
 import { PrismaClient } from '@prisma/client';
 
-// Add connect/socket timeout if not already present in DATABASE_URL
+// Ensure DATABASE_URL has proper pool and timeout settings
 function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
-  if (!url.includes('connect_timeout')) {
-    url += '&connect_timeout=30&socket_timeout=30';
+
+  const separator = url.includes('?') ? '&' : '?';
+  const params: string[] = [];
+
+  // Connection pool: 10 connections, 30s wait for available connection
+  if (!url.includes('connection_limit')) params.push('connection_limit=10');
+  if (!url.includes('pool_timeout')) params.push('pool_timeout=30');
+  // TCP-level timeouts for slow/unreachable DB
+  if (!url.includes('connect_timeout')) params.push('connect_timeout=30');
+  if (!url.includes('socket_timeout')) params.push('socket_timeout=30');
+
+  if (params.length > 0) {
+    url += separator + params.join('&');
   }
+
   return url;
 }
 
