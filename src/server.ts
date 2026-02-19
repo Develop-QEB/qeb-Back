@@ -42,21 +42,20 @@ async function limpiarReservasExpiradas(): Promise<void> {
 // Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
 const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 5000; // 5 segundos entre reintentos
-
-async function connectWithRetry(): Promise<void> {
+// Verify DB connectivity with a single lightweight query (does NOT pre-allocate the entire pool)
+async function verifyDbConnection(): Promise<void> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 3000;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await prisma.$connect();
-      console.log('Database connected successfully');
+      await prisma.$queryRaw`SELECT 1`;
+      console.log('[DB] Database connected successfully');
       return;
     } catch (error) {
       console.error(`[DB] Connection attempt ${attempt}/${MAX_RETRIES} failed:`, (error as Error).message);
       if (attempt === MAX_RETRIES) {
         throw error;
       }
-      console.log(`[DB] Retrying in ${RETRY_DELAY_MS / 1000}s...`);
       await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
@@ -73,9 +72,9 @@ async function main() {
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   });
 
-  // Conectar a la base de datos con reintentos
+  // Verify DB connectivity (lazy - only opens 1 connection, not the whole pool)
   try {
-    await connectWithRetry();
+    await verifyDbConnection();
 
     // Ejecutar limpieza inicial al arrancar
     await limpiarReservasExpiradas();
@@ -89,23 +88,22 @@ async function main() {
   }
 }
 
-// Graceful shutdown: close HTTP server first (stop accepting requests), then disconnect DB
+// Graceful shutdown: disconnect DB immediately, then close HTTP
 async function gracefulShutdown(signal: string) {
   console.log(`[Shutdown] ${signal} received, closing gracefully...`);
-  // 1. Stop accepting new connections
-  httpServer.close(() => {
-    console.log('[Shutdown] HTTP server closed');
-  });
-  // 2. Give pending requests a moment to finish
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  // 3. Disconnect Prisma to release all DB connections
+  // 1. Disconnect Prisma FIRST to release DB connections immediately
   try {
     await prisma.$disconnect();
     console.log('[Shutdown] Prisma disconnected');
   } catch (err) {
     console.error('[Shutdown] Error disconnecting Prisma:', err);
   }
-  process.exit(0);
+  // 2. Close HTTP server
+  httpServer.close(() => {
+    console.log('[Shutdown] HTTP server closed');
+  });
+  // 3. Force exit after 3s if still hanging
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
