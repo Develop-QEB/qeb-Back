@@ -1948,7 +1948,7 @@ export class SolicitudesController {
           const excludeCreator = solicitud.usuario_id ? { not: solicitud.usuario_id } : {};
 
           if (nuevosAsignadosIds.length === 0) {
-            usuariosTrafico = await prisma.usuario.findMany({
+            usuariosTrafico = await tx.usuario.findMany({
               where: {
                 OR: [
                   { puesto: { contains: 'Tráfico' } },
@@ -1963,10 +1963,10 @@ export class SolicitudesController {
             });
           } else {
             // Si hay asignados específicos, filtrar al creador manualmente después del query
-            const usuariosTraficoRaw = await prisma.usuario.findMany({
-              where: { 
+            const usuariosTraficoRaw = await tx.usuario.findMany({
+              where: {
                 id: { in: nuevosAsignadosIds },
-                deleted_at: null 
+                deleted_at: null
               },
               select: { id: true, nombre: true, correo_electronico: true }
             });
@@ -2042,7 +2042,7 @@ export class SolicitudesController {
             },
           });
         }
-      });
+      }, { timeout: 30000 });
 
       // Obtener catorcenas para el correo
       const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({
