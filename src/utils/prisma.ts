@@ -7,8 +7,8 @@ function getDatasourceUrl(): string {
   if (!url) return url;
 
   const defaults: Record<string, string> = {
-    connection_limit: '5',
-    pool_timeout: '10',
+    connection_limit: '10',
+    pool_timeout: '30',
     connect_timeout: '15',
     socket_timeout: '15',
   };
@@ -17,9 +17,13 @@ function getDatasourceUrl(): string {
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // Only add missing params — never override values already set in .env
+  // Always enforce minimum connection_limit and pool_timeout
   for (const [key, value] of Object.entries(defaults)) {
     if (!existing.has(key)) {
+      existing.set(key, value);
+    } else if (key === 'connection_limit' && parseInt(existing.get(key)!) < 10) {
+      existing.set(key, value);
+    } else if (key === 'pool_timeout' && parseInt(existing.get(key)!) < 30) {
       existing.set(key, value);
     }
   }
