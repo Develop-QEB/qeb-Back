@@ -1,32 +1,19 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Ensure DATABASE_URL has sensible pool defaults (without overriding .env values)
+// Build datasource URL with forced pool settings
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  const defaults: Record<string, string> = {
-    connection_limit: '10',
-    pool_timeout: '30',
-    connect_timeout: '15',
-    socket_timeout: '15',
-  };
-
-  // Parse existing params properly with URLSearchParams
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // Always enforce minimum connection_limit and pool_timeout
-  for (const [key, value] of Object.entries(defaults)) {
-    if (!existing.has(key)) {
-      existing.set(key, value);
-    } else if (key === 'connection_limit' && parseInt(existing.get(key)!) < 10) {
-      existing.set(key, value);
-    } else if (key === 'pool_timeout' && parseInt(existing.get(key)!) < 30) {
-      existing.set(key, value);
-    }
-  }
+  // FORCE these values — always override whatever is in the URL
+  existing.set('connection_limit', '5');
+  existing.set('pool_timeout', '20');
+  existing.set('connect_timeout', '10');
+  existing.set('socket_timeout', '10');
 
   const finalUrl = `${base}?${existing.toString()}`;
   const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
@@ -81,6 +68,11 @@ const createPrismaClient = () => {
     }
     return next(params);
   });
+
+  // Test connection on startup
+  client.$connect()
+    .then(() => console.log('[Prisma] Connected to database successfully'))
+    .catch((err: Error) => console.error('[Prisma] Failed to connect:', err.message));
 
   return client;
 };
