@@ -68,6 +68,7 @@ router.get('/:id/tareas', campanasController.getTareas.bind(campanasController))
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
 router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
 router.post('/:id/tareas/:tareaId/enviar-orden-programacion', campanasController.enviarOrdenProgramacion.bind(campanasController));
+router.post('/:id/tareas/:tareaId/activar-orden-instalacion', campanasController.activarOrdenInstalacion.bind(campanasController));
 router.delete('/:id/tareas/:tareaId', campanasController.deleteTarea.bind(campanasController));
 
 export default router;

@@ -1140,6 +1140,7 @@ export class CampanasController {
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const map = tarea.tipo === 'Impresión' ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? recepcionByReserva
                   : recepcionByReserva;
         for (const rsvId of ids) {
           map.set(rsvId, tarea);
@@ -3250,6 +3251,8 @@ export class CampanasController {
             tareaValue = 'Orden de programación';
           } else if (tipo === 'Instalación') {
             tareaValue = 'Pendiente instalación';
+          } else if (tipo === 'Orden de Instalación') {
+            tareaValue = 'Orden de instalación';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
@@ -3498,6 +3501,31 @@ export class CampanasController {
           }
         } catch (e) {
           console.error('Error auto-finalizando orden de programación:', e);
+        }
+      }
+
+      // Si es una tarea de Instalación que se completa y tiene orden padre, auto-finalizar la orden
+      if (tarea.tipo === 'Instalación' && estatus === 'Completado' && tarea.evidencia) {
+        try {
+          const ev = JSON.parse(tarea.evidencia);
+          if (ev.orden_instalacion_id) {
+            await prisma.tareas.update({
+              where: { id: ev.orden_instalacion_id },
+              data: { estatus: 'Finalizada' },
+            });
+            console.log(`Orden de Instalación ${ev.orden_instalacion_id} auto-finalizada`);
+
+            // Emitir evento WebSocket para la orden actualizada
+            if (tarea.campania_id) {
+              emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+                tareaId: ev.orden_instalacion_id,
+                campanaId: tarea.campania_id,
+                estatus: 'Finalizada',
+              });
+            }
+          }
+        } catch (e) {
+          console.error('Error auto-finalizando orden de instalación:', e);
         }
       }
 
@@ -3750,6 +3778,129 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en enviarOrdenProgramacion:', error);
       const message = error instanceof Error ? error.message : 'Error al enviar orden de programación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Activar una Orden de Instalación: crea tarea hija "Instalación" para Operaciones
+   */
+  async activarOrdenInstalacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, tareaId } = req.params;
+      const campanaId = parseInt(id);
+      const tareaIdNum = parseInt(tareaId);
+
+      // Buscar la orden de instalación
+      const orden = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!orden) {
+        res.status(404).json({ success: false, error: 'Orden de Instalación no encontrada' });
+        return;
+      }
+
+      if (orden.tipo !== 'Orden de Instalación') {
+        res.status(400).json({ success: false, error: 'La tarea no es de tipo Orden de Instalación' });
+        return;
+      }
+
+      if (orden.estatus !== 'Pendiente') {
+        res.status(400).json({ success: false, error: 'La orden ya fue activada' });
+        return;
+      }
+
+      // Parsear evidencia de la orden
+      let evidenciaOrden: any = {};
+      try {
+        if (orden.evidencia) {
+          evidenciaOrden = JSON.parse(orden.evidencia);
+        }
+      } catch (e) {
+        console.error('Error parsing orden evidencia:', e);
+      }
+
+      // Crear tarea hija de tipo "Instalación"
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const childEvidencia = JSON.stringify({
+        ...evidenciaOrden,
+        orden_instalacion_id: tareaIdNum,
+      });
+
+      const tareaInstalacion = await prisma.tareas.create({
+        data: {
+          titulo: orden.titulo || 'Instalación',
+          descripcion: orden.descripcion || null,
+          tipo: 'Instalación',
+          estatus: 'Activo',
+          fecha_inicio: ahora,
+          fecha_fin: orden.fecha_fin,
+          id_responsable: req.user?.userId || 0,
+          responsable: req.user?.nombre || '',
+          asignado: orden.asignado || null,
+          id_asignado: orden.id_asignado || null,
+          id_solicitud: orden.id_solicitud || '',
+          id_propuesta: orden.id_propuesta || '',
+          campania_id: campanaId,
+          ids_reservas: orden.ids_reservas || null,
+          listado_inventario: orden.listado_inventario || null,
+          evidencia: childEvidencia,
+        },
+      });
+
+      // Actualizar reservas: tarea = 'Pendiente instalación'
+      if (orden.ids_reservas) {
+        const reservaIdArray = orden.ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
+        if (reservaIdArray.length > 0) {
+          const placeholders = reservaIdArray.map(() => '?').join(',');
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
+            'Pendiente instalación',
+            ...reservaIdArray
+          );
+        }
+      }
+
+      // Actualizar la orden: estatus = 'Activada', agregar ID de la tarea hija
+      const ordenEvidenciaActualizada = JSON.stringify({
+        ...evidenciaOrden,
+        tarea_instalacion_id: tareaInstalacion.id,
+      });
+
+      await prisma.tareas.update({
+        where: { id: tareaIdNum },
+        data: {
+          estatus: 'Activada',
+          evidencia: ordenEvidenciaActualizada,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          orden: { id: tareaIdNum, estatus: 'Activada' },
+          instalacion: { id: tareaInstalacion.id, estatus: 'Activo' },
+        },
+      });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+        tareaId: tareaIdNum,
+        campanaId,
+        estatus: 'Activada',
+      });
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tareaInstalacion.id,
+        campanaId,
+        tipo: 'Instalación',
+        titulo: tareaInstalacion.titulo,
+      });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaInstalacion.id, tipo: 'Instalación' });
+
+    } catch (error) {
+      console.error('Error en activarOrdenInstalacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al activar orden de instalación';
       res.status(500).json({ success: false, error: message });
     }
   }
@@ -4476,7 +4627,9 @@ export class CampanasController {
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).replace(/\*/g, ',').split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva : instalacionByReserva;
+        const map = (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : instalacionByReserva;
         for (const rsvId of ids) {
           if (!map.has(rsvId)) map.set(rsvId, tarea);
         }
