@@ -88,6 +88,8 @@ export class InventariosController {
 
       if (estatus) {
         where.estatus = estatus;
+      } else {
+        where.estatus = { not: 'Bloqueado' };
       }
 
       if (plaza) {
@@ -286,6 +288,7 @@ export class InventariosController {
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
+        estatus: { not: 'Bloqueado' },
       };
 
       // Filter by city (plaza) - puede ser múltiples ciudades separadas por coma
@@ -1041,6 +1044,117 @@ export class InventariosController {
         success: false,
         error: message,
       });
+    }
+  }
+  // Create a new inventario
+  async create(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const data = req.body;
+      const inventario = await prisma.inventarios.create({
+        data: {
+          codigo_unico: data.codigo_unico || null,
+          ubicacion: data.ubicacion || null,
+          tipo_de_cara: data.tipo_de_cara || null,
+          cara: data.cara || null,
+          mueble: data.mueble || null,
+          latitud: parseFloat(data.latitud) || 0,
+          longitud: parseFloat(data.longitud) || 0,
+          plaza: data.plaza || null,
+          estado: data.estado || null,
+          municipio: data.municipio || null,
+          cp: data.cp ? parseInt(data.cp) : null,
+          tradicional_digital: data.tradicional_digital || null,
+          sentido: data.sentido || null,
+          tipo_de_mueble: data.tipo_de_mueble || null,
+          ancho: parseFloat(data.ancho) || 0,
+          alto: parseFloat(data.alto) || 0,
+          nivel_socioeconomico: data.nivel_socioeconomico || null,
+          total_espacios: data.total_espacios ? parseInt(data.total_espacios) : null,
+          estatus: data.estatus || 'Disponible',
+          codigo: data.codigo || null,
+          isla: data.isla || null,
+          mueble_isla: data.mueble_isla || null,
+          entre_calle_1: data.entre_calle_1 || null,
+          entre_calle_2: data.entre_calle_2 || null,
+          orientacion: data.orientacion || null,
+          tarifa_piso: data.tarifa_piso ? parseFloat(data.tarifa_piso) : null,
+          tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : null,
+        },
+      });
+      res.json({ success: true, data: inventario });
+    } catch (error) {
+      console.error('Error creating inventario:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Update an existing inventario
+  async update(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id);
+      const data = req.body;
+
+      const updateData: Record<string, unknown> = {};
+      if (data.codigo_unico !== undefined) updateData.codigo_unico = data.codigo_unico || null;
+      if (data.ubicacion !== undefined) updateData.ubicacion = data.ubicacion || null;
+      if (data.tipo_de_cara !== undefined) updateData.tipo_de_cara = data.tipo_de_cara || null;
+      if (data.cara !== undefined) updateData.cara = data.cara || null;
+      if (data.mueble !== undefined) updateData.mueble = data.mueble || null;
+      if (data.latitud !== undefined) updateData.latitud = parseFloat(data.latitud) || 0;
+      if (data.longitud !== undefined) updateData.longitud = parseFloat(data.longitud) || 0;
+      if (data.plaza !== undefined) updateData.plaza = data.plaza || null;
+      if (data.estado !== undefined) updateData.estado = data.estado || null;
+      if (data.municipio !== undefined) updateData.municipio = data.municipio || null;
+      if (data.cp !== undefined) updateData.cp = data.cp ? parseInt(data.cp) : null;
+      if (data.tradicional_digital !== undefined) updateData.tradicional_digital = data.tradicional_digital || null;
+      if (data.sentido !== undefined) updateData.sentido = data.sentido || null;
+      if (data.tipo_de_mueble !== undefined) updateData.tipo_de_mueble = data.tipo_de_mueble || null;
+      if (data.ancho !== undefined) updateData.ancho = parseFloat(data.ancho) || 0;
+      if (data.alto !== undefined) updateData.alto = parseFloat(data.alto) || 0;
+      if (data.nivel_socioeconomico !== undefined) updateData.nivel_socioeconomico = data.nivel_socioeconomico || null;
+      if (data.total_espacios !== undefined) updateData.total_espacios = data.total_espacios ? parseInt(data.total_espacios) : null;
+      if (data.estatus !== undefined) updateData.estatus = data.estatus || null;
+      if (data.codigo !== undefined) updateData.codigo = data.codigo || null;
+      if (data.isla !== undefined) updateData.isla = data.isla || null;
+      if (data.mueble_isla !== undefined) updateData.mueble_isla = data.mueble_isla || null;
+      if (data.entre_calle_1 !== undefined) updateData.entre_calle_1 = data.entre_calle_1 || null;
+      if (data.entre_calle_2 !== undefined) updateData.entre_calle_2 = data.entre_calle_2 || null;
+      if (data.orientacion !== undefined) updateData.orientacion = data.orientacion || null;
+      if (data.tarifa_piso !== undefined) updateData.tarifa_piso = data.tarifa_piso ? parseFloat(data.tarifa_piso) : null;
+      if (data.tarifa_publica !== undefined) updateData.tarifa_publica = data.tarifa_publica ? parseFloat(data.tarifa_publica) : null;
+
+      const inventario = await prisma.inventarios.update({
+        where: { id },
+        data: updateData,
+      });
+      res.json({ success: true, data: inventario });
+    } catch (error) {
+      console.error('Error updating inventario:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Toggle block/unblock inventario
+  async toggleBlock(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id);
+      const inventario = await prisma.inventarios.findUnique({ where: { id } });
+      if (!inventario) {
+        res.status(404).json({ success: false, error: 'Inventario no encontrado' });
+        return;
+      }
+      const newEstatus = inventario.estatus === 'Bloqueado' ? 'Disponible' : 'Bloqueado';
+      const updated = await prisma.inventarios.update({
+        where: { id },
+        data: { estatus: newEstatus },
+      });
+      res.json({ success: true, data: updated });
+    } catch (error) {
+      console.error('Error toggling block:', error);
+      const message = error instanceof Error ? error.message : 'Error al bloquear/desbloquear inventario';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }

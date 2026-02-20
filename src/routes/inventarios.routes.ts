@@ -25,6 +25,11 @@ router.get('/nse', inventariosController.getNSE.bind(inventariosController));
 router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.bind(inventariosController));
 router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
 
+// CRUD
+router.post('/', inventariosController.create.bind(inventariosController));
+router.put('/:id', inventariosController.update.bind(inventariosController));
+router.patch('/:id/toggle-block', inventariosController.toggleBlock.bind(inventariosController));
+
 router.get('/:id/historial', inventariosController.getHistorial.bind(inventariosController));
 router.get('/:id', inventariosController.getById.bind(inventariosController));
 

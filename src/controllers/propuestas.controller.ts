@@ -1920,19 +1920,27 @@ export class PropuestasController {
         return;
       }
 
-      // Check for pending authorizations - block inventory assignment if there are pending caras
-      const autorizacion = await verificarCarasPendientes(propuestaId.toString());
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        res.status(400).json({
-          success: false,
-          error: `No se puede asignar inventario. ${totalPendientes} cara(s) están pendientes de autorización.`,
-          autorizacion: {
-            pendientesDg: autorizacion.pendientesDg.length,
-            pendientesDcm: autorizacion.pendientesDcm.length
-          }
+      // Check authorization only for the specific cara being reserved (not all caras in propuesta)
+      if (solicitudCaraId) {
+        const caraToReserve = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId) },
+          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
         });
-        return;
+        if (caraToReserve) {
+          const pendingDg = caraToReserve.autorizacion_dg === 'pendiente';
+          const pendingDcm = caraToReserve.autorizacion_dcm === 'pendiente';
+          if (pendingDg || pendingDcm) {
+            const reasons = [];
+            if (pendingDg) reasons.push('Dirección General');
+            if (pendingDcm) reasons.push('DCM');
+            res.status(400).json({
+              success: false,
+              error: `No se puede asignar inventario a esta cara. Pendiente de autorización: ${reasons.join(' y ')}.`,
+              autorizacion: { pendientesDg: pendingDg ? 1 : 0, pendientesDcm: pendingDcm ? 1 : 0 }
+            });
+            return;
+          }
+        }
       }
 
       // Create calendario entry
