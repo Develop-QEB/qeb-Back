@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Build datasource URL with forced pool settings
+// Build datasource URL with forced pool settings (tuned for Hostinger shared hosting)
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
@@ -9,11 +9,11 @@ function getDatasourceUrl(): string {
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // FORCE these values — always override whatever is in the URL
+  // FORCE these values — Hostinger shared hosting needs generous timeouts
   existing.set('connection_limit', '5');
-  existing.set('pool_timeout', '20');
-  existing.set('connect_timeout', '10');
-  existing.set('socket_timeout', '10');
+  existing.set('pool_timeout', '30');
+  existing.set('connect_timeout', '30');
+  existing.set('socket_timeout', '30');
 
   const finalUrl = `${base}?${existing.toString()}`;
   const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
@@ -31,10 +31,10 @@ const createPrismaClient = () => {
     datasourceUrl: getDatasourceUrl(),
   });
 
-  // Retry middleware for transient connection errors
+  // Retry middleware for transient connection errors (Hostinger drops connections frequently)
   client.$use(async (params, next) => {
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY = 2000; // 2 seconds
+    const MAX_RETRIES = 5;
+    const BASE_DELAY = 3000; // 3 seconds
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -45,11 +45,13 @@ const createPrismaClient = () => {
         const isConnectionError = message.includes("Can't reach database server") ||
           message.includes('Connection refused') ||
           message.includes('ETIMEDOUT') ||
-          message.includes('ECONNREFUSED');
+          message.includes('ECONNREFUSED') ||
+          message.includes('Connection lost');
 
         if (isConnectionError && attempt < MAX_RETRIES) {
-          console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * attempt));
+          const delay = BASE_DELAY * attempt; // 3s, 6s, 9s, 12s
+          console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
         throw error;
@@ -69,10 +71,33 @@ const createPrismaClient = () => {
     return next(params);
   });
 
-  // Test connection on startup
-  client.$connect()
-    .then(() => console.log('[Prisma] Connected to database successfully'))
-    .catch((err: Error) => console.error('[Prisma] Failed to connect:', err.message));
+  // Test connection on startup with retries
+  const connectWithRetry = async (retries = 5, delay = 5000) => {
+    for (let i = 1; i <= retries; i++) {
+      try {
+        await client.$connect();
+        console.log('[Prisma] Connected to database successfully');
+        return;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[Prisma] Connection attempt ${i}/${retries} failed: ${msg}`);
+        if (i < retries) await new Promise(r => setTimeout(r, delay * i));
+      }
+    }
+    console.error('[Prisma] All connection attempts failed — queries will retry on demand');
+  };
+  connectWithRetry();
+
+  // Keepalive: ping DB every 4 minutes to prevent Hostinger from dropping idle connections
+  setInterval(async () => {
+    try {
+      await client.$queryRaw`SELECT 1`;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[Prisma] Keepalive ping failed:', msg);
+      try { await client.$connect(); } catch (_) { /* will retry on next ping */ }
+    }
+  }, 4 * 60 * 1000);
 
   return client;
 };
