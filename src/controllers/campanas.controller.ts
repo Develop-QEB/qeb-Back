@@ -1037,26 +1037,7 @@ export class CampanasController {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
-      console.log('Fetching inventario con APS for campana:', campanaId);
-
-      // Paso 1: Obtener id_propuesta de la campaña (query instant con PKs)
-      const campData = await prisma.$queryRawUnsafe(`
-        SELECT ct.id_propuesta
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-        WHERE cm.id = ?
-      `, campanaId) as any[];
-
-      if (!campData.length) {
-        res.json({ success: true, data: [] });
-        return;
-      }
-
-      const idPropuesta = campData[0].id_propuesta;
-
-      // Paso 2: Query principal - parte desde solicitudCaras filtrado por idquote (subset pequeño)
-      // Sin JOIN a campania/cotizacion (ya lo resolvimos arriba)
-      // Sin LEFT JOIN catorcenas BETWEEN (se calcula en código)
+      // Query principal con subquery para id_propuesta (elimina 1 round trip a DB)
       const query = `
         SELECT
           rsv.id as rsv_ids,
@@ -1100,13 +1081,18 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
         WHERE
-          sc.idquote = ?
+          sc.idquote = (
+            SELECT ct.id_propuesta
+            FROM campania cm
+              INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            WHERE cm.id = ?
+            LIMIT 1
+          )
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         ORDER BY rsv.id DESC
       `;
 
-      // Paso 3: Tareas y catorcenas en paralelo
       const tareasQuery = `
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
@@ -1120,8 +1106,9 @@ export class CampanasController {
         ORDER BY fecha_inicio
       `;
 
+      // Las 3 queries en paralelo (antes era 1 secuencial + 2 paralelo)
       const [inventario, tareas, catorcenas] = await Promise.all([
-        prisma.$queryRawUnsafe(query, idPropuesta),
+        prisma.$queryRawUnsafe(query, campanaId),
         prisma.$queryRawUnsafe(tareasQuery, campanaId),
         prisma.$queryRawUnsafe(catorcenasQuery),
       ]);
@@ -1129,6 +1116,11 @@ export class CampanasController {
       const inventarioArr = inventario as any[];
       const tareasArr = tareas as any[];
       const catorcenasArr = catorcenas as any[];
+
+      if (!inventarioArr.length) {
+        res.json({ success: true, data: [] });
+        return;
+      }
 
       // Indexar tareas por reserva_id para lookup O(1)
       const impresionByReserva = new Map<number, any>();
@@ -1145,6 +1137,33 @@ export class CampanasController {
         for (const rsvId of ids) {
           map.set(rsvId, tarea);
         }
+      }
+
+      // Pre-computar timestamps de catorcenas ordenadas para búsqueda binaria O(log n)
+      const catorcenaRanges = catorcenasArr.map((cat: any) => ({
+        inicio: new Date(cat.fecha_inicio).getTime(),
+        fin: new Date(cat.fecha_fin).getTime(),
+        numero_catorcena: cat.numero_catorcena,
+        anio_catorcena: cat.anio_catorcena,
+      }));
+
+      function findCatorcena(fecha: Date) {
+        const ts = fecha.getTime();
+        let lo = 0, hi = catorcenaRanges.length - 1;
+        let result = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (catorcenaRanges[mid].inicio <= ts) {
+            result = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (result >= 0 && ts <= catorcenaRanges[result].fin) {
+          return catorcenaRanges[result];
+        }
+        return null;
       }
 
       // Calcular estatus_arte y catorcena en código
@@ -1169,17 +1188,14 @@ export class CampanasController {
           estatus_arte = 'Carga Artes';
         }
 
-        // catorcena matching
+        // catorcena matching con búsqueda binaria
         let numero_catorcena = null;
         let anio_catorcena = null;
         if (row.inicio_periodo) {
-          const inicio = new Date(row.inicio_periodo);
-          for (const cat of catorcenasArr) {
-            if (inicio >= new Date(cat.fecha_inicio) && inicio <= new Date(cat.fecha_fin)) {
-              numero_catorcena = cat.numero_catorcena;
-              anio_catorcena = cat.anio_catorcena;
-              break;
-            }
+          const cat = findCatorcena(new Date(row.inicio_periodo));
+          if (cat) {
+            numero_catorcena = cat.numero_catorcena;
+            anio_catorcena = cat.anio_catorcena;
           }
         }
 
@@ -1197,8 +1213,6 @@ export class CampanasController {
 
         return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion };
       });
-
-      console.log('Inventario con APS result count:', inventarioConEstatus.length);
 
       // Convertir BigInt a Number para que JSON.stringify funcione
       const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
