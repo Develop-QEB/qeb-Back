@@ -10,7 +10,7 @@ function getDatasourceUrl(): string {
   const existing = new URLSearchParams(queryString || '');
 
   // FORCE these values — Hostinger shared hosting needs generous timeouts
-  existing.set('connection_limit', '10');
+  existing.set('connection_limit', '15');
   existing.set('pool_timeout', '30');
   existing.set('connect_timeout', '30');
   existing.set('socket_timeout', '30');
@@ -71,23 +71,6 @@ const createPrismaClient = () => {
     return next(params);
   });
 
-  // Test connection on startup with retries
-  const connectWithRetry = async (retries = 5, delay = 5000) => {
-    for (let i = 1; i <= retries; i++) {
-      try {
-        await client.$connect();
-        console.log('[Prisma] Connected to database successfully');
-        return;
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[Prisma] Connection attempt ${i}/${retries} failed: ${msg}`);
-        if (i < retries) await new Promise(r => setTimeout(r, delay * i));
-      }
-    }
-    console.error('[Prisma] All connection attempts failed — queries will retry on demand');
-  };
-  connectWithRetry();
-
   // Keepalive: ping DB every 4 minutes to prevent Hostinger from dropping idle connections
   setInterval(async () => {
     try {
@@ -95,7 +78,6 @@ const createPrismaClient = () => {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn('[Prisma] Keepalive ping failed:', msg);
-      try { await client.$connect(); } catch (_) { /* will retry on next ping */ }
     }
   }, 4 * 60 * 1000);
 
