@@ -1039,7 +1039,7 @@ export class CampanasController {
 
       // Query principal con subquery para id_propuesta (elimina 1 round trip a DB)
       const query = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           rsv.id as rsv_ids,
           i.id,
           i.codigo_unico,
@@ -1106,11 +1106,19 @@ export class CampanasController {
         ORDER BY fecha_inicio
       `;
 
-      // Las 3 queries en paralelo (antes era 1 secuencial + 2 paralelo)
-      const [inventario, tareas, catorcenas] = await Promise.all([
-        prisma.$queryRawUnsafe(query, campanaId),
-        prisma.$queryRawUnsafe(tareasQuery, campanaId),
-        prisma.$queryRawUnsafe(catorcenasQuery),
+      // Las 3 queries en paralelo con timeout de 45s para no colgar el servidor
+      const QUERY_TIMEOUT = 45000;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Query timeout: las consultas tardaron más de 45s')), QUERY_TIMEOUT)
+      );
+
+      const [inventario, tareas, catorcenas] = await Promise.race([
+        Promise.all([
+          prisma.$queryRawUnsafe(query, campanaId),
+          prisma.$queryRawUnsafe(tareasQuery, campanaId),
+          prisma.$queryRawUnsafe(catorcenasQuery),
+        ]),
+        timeoutPromise as never,
       ]);
 
       const inventarioArr = inventario as any[];
