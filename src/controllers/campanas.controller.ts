@@ -39,6 +39,7 @@ export class CampanasController {
       const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
 
       // Build WHERE conditions
       // Excluir campañas 'inactiva' (propuestas no aprobadas) a menos que se filtre explícitamente por ese status
@@ -51,6 +52,11 @@ export class CampanasController {
       } else {
         // Si no se especifica status, excluir las inactivas (propuestas aún no aprobadas)
         conditions.push("cm.status != 'inactiva'");
+      }
+
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        conditions.push("COALESCE(ct.tipo_periodo, 'catorcena') = ?");
+        params.push(tipoPeriodo);
       }
 
       if (search) {
@@ -4432,7 +4438,11 @@ export class CampanasController {
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
-          'BONIFICACION' AS negociacion,
+          CASE
+            WHEN sc.cortesia = 1 THEN 'CORTESIA'
+            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
+            ELSE 'BONIFICACION'
+          END AS negociacion,
           sc.bonificacion AS caras,
           0 AS tarifa,
           0 AS monto_total,
@@ -4556,7 +4566,10 @@ export class CampanasController {
           cm.nombre AS Campania,
           cliente.T1_U_Cliente AS Anunciante,
           CASE
-            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
+            WHEN sc.articulo LIKE 'RT%' THEN 'RENTA'
+            WHEN sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 'BONIFICACION'
+            WHEN sc.articulo LIKE 'CT%' THEN 'CORTESIA'
+            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             ELSE 'RENTA'
           END AS Operacion,
           cm.id AS CodigoContrato,
@@ -4581,6 +4594,7 @@ export class CampanasController {
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
           CAST(inv.municipio AS CHAR(255)) AS Ciudad,
           CASE
+            WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
             ELSE 'RENTA'
           END AS TipoDistribucion,
@@ -4589,7 +4603,8 @@ export class CampanasController {
           sc.fin_periodo AS fecha_fin,
           cm.status AS status_campania,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
-          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
+          sc.cortesia
         FROM reservas rsv
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -5222,7 +5237,7 @@ export class CampanasController {
       const updateData: any = {
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo,
+        tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
         bonificacion: data.bonificacion,
         caras: data.caras,
@@ -5343,7 +5358,7 @@ export class CampanasController {
         idquote: String(cotizacion.id_propuesta),
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo,
+        tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
         bonificacion: data.bonificacion,
         caras: data.caras,

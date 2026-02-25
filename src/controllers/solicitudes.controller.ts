@@ -401,6 +401,7 @@ export class SolicitudesController {
       const sortBy = req.query.sortBy as string;
       const sortOrder = (req.query.sortOrder as string) || 'desc';
       const groupBy = req.query.groupBy as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -487,6 +488,55 @@ export class SolicitudesController {
         prisma.solicitud.count({ where }),
       ]);
 
+      // Enrich solicitudes with cotizacion data (tipo_periodo, dates, catorcenas)
+      let enrichedSolicitudes: unknown[] = solicitudes;
+      const solicitudIds = solicitudes.map(s => s.id);
+      if (solicitudIds.length > 0) {
+        const placeholders = solicitudIds.map(() => '?').join(',');
+        const enrichmentData = await prisma.$queryRawUnsafe<any[]>(`
+          SELECT
+            s.id as solicitud_id,
+            ct.tipo_periodo,
+            ct.fecha_inicio as periodo_fecha_inicio,
+            ct.fecha_fin as periodo_fecha_fin,
+            cat_ini.numero_catorcena as catorcena_inicio,
+            cat_ini.año as anio_inicio,
+            cat_fin.numero_catorcena as catorcena_fin,
+            cat_fin.año as anio_fin
+          FROM solicitud s
+          LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+          LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+          WHERE s.id IN (${placeholders})
+          GROUP BY s.id
+        `, ...solicitudIds);
+
+        const enrichMap = new Map(enrichmentData.map((e: any) => [Number(e.solicitud_id), e]));
+
+        enrichedSolicitudes = solicitudes.map(s => {
+          const extra = enrichMap.get(s.id);
+          return {
+            ...s,
+            tipo_periodo: extra?.tipo_periodo || null,
+            periodo_fecha_inicio: extra?.periodo_fecha_inicio || null,
+            periodo_fecha_fin: extra?.periodo_fecha_fin || null,
+            catorcena_inicio: extra?.catorcena_inicio ? Number(extra.catorcena_inicio) : null,
+            anio_inicio: extra?.anio_inicio ? Number(extra.anio_inicio) : null,
+            catorcena_fin: extra?.catorcena_fin ? Number(extra.catorcena_fin) : null,
+            anio_fin: extra?.anio_fin ? Number(extra.anio_fin) : null,
+          };
+        });
+
+        // Filter by tipoPeriodo if requested
+        if (tipoPeriodo && tipoPeriodo !== 'todas') {
+          enrichedSolicitudes = enrichedSolicitudes.filter((s: any) => {
+            const tp = s.tipo_periodo || 'catorcena';
+            return tp === tipoPeriodo;
+          });
+        }
+      }
+
       // Group data if requested
       let groupedData = null;
       if (groupBy && ['status', 'marca_nombre', 'asignado', 'razon_social'].includes(groupBy)) {
@@ -500,7 +550,7 @@ export class SolicitudesController {
 
       res.json({
         success: true,
-        data: solicitudes,
+        data: enrichedSolicitudes,
         groupedData,
         pagination: {
           page,
@@ -1495,7 +1545,7 @@ export class SolicitudesController {
               idquote: propuesta.id.toString(),
               ciudad: cara.ciudad,
               estados: cara.estado,
-              tipo: cara.tipo,
+              tipo: cara.tipo || 'Tradicional',
               flujo: cara.flujo || 'Ambos',
               bonificacion: cara.bonificacion || 0,
               caras: cara.caras,
@@ -1511,9 +1561,24 @@ export class SolicitudesController {
               descuento: cara.descuento || 0,
               autorizacion_dg: estadoResult.autorizacion_dg,
               autorizacion_dcm: estadoResult.autorizacion_dcm,
+              cortesia: (cara.articulo || articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
             },
           });
           createdCaras.push(solicitudCara);
+        }
+
+        // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+        const totalCarasGlobal = caras.reduce((acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0), 0);
+        if (totalCarasGlobal % 2 !== 0) {
+          for (const createdCara of createdCaras) {
+            if (createdCara.autorizacion_dg !== 'pendiente') {
+              await tx.solicitudCaras.update({
+                where: { id: createdCara.id },
+                data: { autorizacion_dg: 'pendiente' },
+              });
+            }
+          }
+          console.log(`[create] Total caras impar (${totalCarasGlobal}), todas las caras requieren autorización DG`);
         }
 
         return {
@@ -2380,7 +2445,7 @@ export class SolicitudesController {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
                 estados: cara.estado,
-                tipo: cara.tipo,
+                tipo: cara.tipo || 'Tradicional',
                 flujo: cara.flujo || 'Ambos',
                 bonificacion: cara.bonificacion || 0,
                 caras: cara.caras,

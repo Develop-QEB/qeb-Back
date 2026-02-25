@@ -387,6 +387,7 @@ export class PropuestasController {
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
+      const tipoPeriodo = req.query.tipoPeriodo as string;
 
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
@@ -400,6 +401,11 @@ export class PropuestasController {
       if (status) {
         whereConditions += ` AND pr.status = ?`;
         params.push(status);
+      }
+
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`;
+        params.push(tipoPeriodo);
       }
 
       if (search) {
@@ -2811,6 +2817,7 @@ export class PropuestasController {
           descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
+          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
 
@@ -2902,7 +2909,7 @@ export class PropuestasController {
           idquote: id, // Link to propuesta
           ciudad,
           estados,
-          tipo,
+          tipo: tipo || 'Tradicional',
           flujo,
           bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
           caras: caras ? parseInt(caras) : 0,
@@ -2918,6 +2925,7 @@ export class PropuestasController {
           descuento: descuento ? parseFloat(descuento) : 0,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
+          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
 

@@ -309,6 +309,7 @@ model solicitudCaras {
   descuento            Decimal? @db.Decimal(5, 2)
   autorizacion_dg      String?  @default("aprobado") @db.VarChar(20)
   autorizacion_dcm     String?  @default("aprobado") @db.VarChar(20)
+  cortesia             Int?     @default(0)
 
   @@index([idquote])
 }
