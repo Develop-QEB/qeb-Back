@@ -119,6 +119,7 @@ export class CampanasController {
           cat_fin.año as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
+          pr.inversion as inversion,
           CASE
             WHEN EXISTS (
               SELECT 1
@@ -1063,12 +1064,18 @@ export class CampanasController {
           rsv.estatus as estatus_reserva,
           rsv.archivo,
           rsv.calendario_id,
+          rsv.arte_aprobado,
+          rsv.instalado,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           sc.id AS solicitud_caras_id,
           sc.articulo,
           sc.tipo as tipo_medio,
           sc.inicio_periodo,
           sc.fin_periodo,
+          sc.formato,
+          sc.tarifa_publica as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           1 AS caras_totales
@@ -1085,12 +1092,93 @@ export class CampanasController {
         ORDER BY rsv.id DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+      `;
 
-      console.log('Inventario result count:', Array.isArray(inventario) ? inventario.length : 0);
+      const [inventario, tareas] = await Promise.all([
+        prisma.$queryRawUnsafe(query, campanaId),
+        prisma.$queryRawUnsafe(tareasQuery, campanaId),
+      ]);
+
+      const inventarioArr = inventario as any[];
+      const tareasArr = tareas as any[];
+
+      if (!inventarioArr.length) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Indexar tareas por reserva_id
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
+        for (const rsvId of ids) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      const inventarioConEstatus = inventarioArr.map((row: any) => {
+        const rsvId = Number(row.rsv_ids);
+        const tImpresion = impresionByReserva.get(rsvId);
+        const tRecepcion = recepcionByReserva.get(rsvId);
+
+        let estatus_arte: string;
+        if (Number(row.instalado) === 1) {
+          estatus_arte = 'Instalado';
+        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+          estatus_arte = 'Artes Recibidos';
+        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+          estatus_arte = 'En Impresion';
+        } else if (row.arte_aprobado === 'aprobado') {
+          estatus_arte = 'Artes Aprobados';
+        } else if (row.archivo != null && row.archivo !== '') {
+          estatus_arte = 'Revision Artes';
+        } else {
+          estatus_arte = 'Carga Artes';
+        }
+
+        // Indicaciones de programación
+        const tProgramacion = programacionByReserva.get(rsvId);
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia)
+              : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        // Indicaciones de instalación
+        const tInstalacion = instalacionByReserva.get(rsvId);
+        let indicaciones_instalacion: string | null = null;
+        if (tInstalacion && tInstalacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tInstalacion.evidencia === 'string'
+              ? JSON.parse(tInstalacion.evidencia)
+              : tInstalacion.evidencia;
+            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion };
+      });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
       ));
 
@@ -1173,7 +1261,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción', 'Programación')
+          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -1210,13 +1298,14 @@ export class CampanasController {
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
       const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
 
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const map = tarea.tipo === 'Impresión' ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
-                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? recepcionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
                   : recepcionByReserva;
         for (const rsvId of ids) {
           map.set(rsvId, tarea);
@@ -1295,7 +1384,19 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion };
+        // Indicaciones de instalación desde la tarea
+        const tInstalacion = instalacionByReserva.get(rsvId);
+        let indicaciones_instalacion: string | null = null;
+        if (tInstalacion && tInstalacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tInstalacion.evidencia === 'string'
+              ? JSON.parse(tInstalacion.evidencia)
+              : tInstalacion.evidencia;
+            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
