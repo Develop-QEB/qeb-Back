@@ -9,9 +9,9 @@ function getDatasourceUrl(): string {
   const [base, queryString] = url.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // FORCE these values — Hostinger shared hosting needs generous timeouts
-  existing.set('connection_limit', '20');
-  existing.set('pool_timeout', '60');
+  // FORCE these values — Hostinger shared hosting needs conservative limits
+  existing.set('connection_limit', '5');
+  existing.set('pool_timeout', '30');
   existing.set('connect_timeout', '30');
   existing.set('socket_timeout', '30');
 
