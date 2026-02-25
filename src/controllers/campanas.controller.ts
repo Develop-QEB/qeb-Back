@@ -862,37 +862,107 @@ export class CampanasController {
 
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
-      let visibilityClause = '';
-      const statsParams: (string | number)[] = [];
-      if (userId && !hasFullVisibility(userRol)) {
-        visibilityClause = `
-          AND EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-          )`;
-        statsParams.push(userId, String(userId));
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+
+      // Build WHERE — same logic as getAll
+      const conditions: string[] = ['cm.id IS NOT NULL'];
+      const params: (string | number)[] = [];
+
+      if (status) {
+        conditions.push('cm.status = ?');
+        params.push(status);
+      } else {
+        conditions.push("cm.status != 'inactiva'");
       }
 
-      const rows = await prisma.$queryRawUnsafe<Array<{ total: bigint; activas: bigint; inactivas: bigint }>>(`
-        SELECT
-          COUNT(*) as total,
-          SUM(CASE WHEN cm.status = 'Aprobada' THEN 1 ELSE 0 END) as activas,
-          SUM(CASE WHEN cm.status = 'inactiva' THEN 1 ELSE 0 END) as inactivas
-        FROM campania cm
-        WHERE 1=1 ${visibilityClause}
-      `, ...statsParams);
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        conditions.push("COALESCE(ct.tipo_periodo, 'catorcena') = ?");
+        params.push(tipoPeriodo);
+      }
 
-      const row = rows[0];
+      if (search) {
+        conditions.push('(cm.nombre LIKE ? OR cm.articulo LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      if (yearInicio && yearFin) {
+        if (catorcenaInicio && catorcenaFin) {
+          conditions.push(`
+            cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+            AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          `);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+        } else {
+          conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
+          params.push(yearFin, yearInicio);
+        }
+      }
+
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tareas t
+          WHERE t.campania_id = cm.id
+            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+        )`);
+        params.push(userId, String(userId));
+      }
+
+      const whereClause = conditions.join(' AND ');
+
+      // Total + status breakdown + APS count in a single query
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        status: string | null;
+        cnt: bigint;
+        con_aps: bigint;
+      }>>(`
+        SELECT
+          cm.status,
+          COUNT(*) as cnt,
+          SUM(CASE
+            WHEN EXISTS (
+              SELECT 1 FROM cotizacion ct2
+              INNER JOIN solicitudCaras sc2 ON sc2.idquote = ct2.id_propuesta
+              INNER JOIN reservas rsv2 ON rsv2.solicitudCaras_id = sc2.id AND rsv2.deleted_at IS NULL
+              WHERE ct2.id = cm.cotizacion_id AND rsv2.APS IS NOT NULL AND rsv2.APS > 0
+            ) THEN 1 ELSE 0
+          END) as con_aps
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        WHERE ${whereClause}
+        GROUP BY cm.status
+      `, ...params);
+
+      const byStatus: Record<string, number> = {};
+      let total = 0;
+      let conAps = 0;
+      for (const row of rows) {
+        const s = row.status || 'Sin status';
+        const cnt = Number(row.cnt);
+        byStatus[s] = cnt;
+        total += cnt;
+        conAps += Number(row.con_aps);
+      }
 
       res.json({
         success: true,
         data: {
-          total: Number(row?.total || 0),
-          activas: Number(row?.activas || 0),
-          inactivas: Number(row?.inactivas || 0),
+          total,
+          activas: byStatus['Aprobada'] || 0,
+          inactivas: byStatus['inactiva'] || 0,
+          byStatus,
+          conAps,
+          sinAps: total - conAps,
         },
       });
     } catch (error) {

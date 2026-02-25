@@ -52,9 +52,47 @@ export class InventariosController {
         prisma.inventarios.count({ where }),
       ]);
 
+      // Compute real status: check reservas for today
+      const invIds = inventarios.map(i => i.id);
+      let reservedMap: Record<number, string> = {};
+      if (invIds.length > 0) {
+        const placeholders = invIds.map(() => '?').join(',');
+        const rows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number; estatus: string }>>(
+          `SELECT DISTINCT ei.inventario_id, rsv.estatus
+           FROM reservas rsv
+           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+           INNER JOIN calendario cal ON cal.id = rsv.calendario_id
+           WHERE ei.inventario_id IN (${placeholders})
+             AND rsv.deleted_at IS NULL
+             AND cal.deleted_at IS NULL
+             AND cal.fecha_inicio <= CURDATE()
+             AND cal.fecha_fin >= CURDATE()
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+          ...invIds
+        );
+        for (const row of rows) {
+          // Priority: Vendido > Reservado/Bonificado
+          const current = reservedMap[row.inventario_id];
+          if (!current || row.estatus === 'Vendido') {
+            reservedMap[row.inventario_id] = row.estatus;
+          }
+        }
+      }
+
+      const dataWithRealStatus = inventarios.map(inv => {
+        const reservaEstatus = reservedMap[inv.id];
+        let estatus_real = inv.estatus || 'Disponible';
+        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+          if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
+          else if (reservaEstatus) estatus_real = 'Reservado';
+          else estatus_real = 'Disponible';
+        }
+        return { ...inv, estatus_real };
+      });
+
       res.json({
         success: true,
-        data: inventarios,
+        data: dataWithRealStatus,
         pagination: {
           page,
           limit,
@@ -160,19 +198,42 @@ export class InventariosController {
     }
   }
 
-  async getStats(_req: AuthRequest, res: Response): Promise<void> {
+  async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [total, disponibles, ocupados, mantenimiento, byTipo, byPlaza] = await Promise.all([
-        prisma.inventarios.count(),
-        prisma.inventarios.count({ where: { estatus: 'Disponible' } }),
-        prisma.inventarios.count({ where: { estatus: 'Ocupado' } }),
-        prisma.inventarios.count({ where: { estatus: 'Mantenimiento' } }),
+      const search = req.query.search as string;
+      const tipo = req.query.tipo as string;
+      const estatus = req.query.estatus as string;
+      const plaza = req.query.plaza as string;
+
+      // Build Prisma where filter — same logic as getAll
+      const where: Record<string, unknown> = {};
+      if (search) {
+        where.OR = [
+          { clave: { contains: search } },
+          { nombre_del_mueble: { contains: search } },
+          { ubicacion: { contains: search } },
+          { plaza: { contains: search } },
+        ];
+      }
+      if (tipo) where.tipo_de_mueble = tipo;
+      if (estatus) where.estatus = estatus;
+      if (plaza) where.plaza = plaza;
+
+      const [total, disponibles, ocupados, mantenimiento, reservados, bloqueados, byTipo, byPlaza] = await Promise.all([
+        prisma.inventarios.count({ where }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Disponible' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Ocupado' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Mantenimiento' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Reservado' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Bloqueado' } }),
         prisma.inventarios.groupBy({
           by: ['tipo_de_mueble'],
+          where,
           _count: { id: true },
         }),
         prisma.inventarios.groupBy({
           by: ['plaza'],
+          where,
           _count: { id: true },
         }),
       ]);
@@ -184,6 +245,8 @@ export class InventariosController {
           disponibles,
           ocupados,
           mantenimiento,
+          reservados,
+          bloqueados,
           porTipo: byTipo
             .filter((item) => item.tipo_de_mueble)
             .map((item) => ({
