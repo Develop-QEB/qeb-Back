@@ -42,16 +42,33 @@ app.use(cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
+// Log ALL incoming requests for debugging
+app.use((req, res, next) => {
+  console.log(`[REQUEST] ${req.method} ${req.url}`);
+  next();
+});
 app.use(morgan('dev'));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Aumentar límite para soportar archivos base64 (videos pueden ser grandes)
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Servir archivos estáticos de uploads
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// Servir archivos estáticos de uploads con CORS permisivo para imágenes
+app.use('/uploads', (req, res, next) => {
+  // Headers para permitir acceso desde cualquier origen (imágenes públicas)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+}, express.static(path.join(__dirname, '../uploads'), {
+  // Establecer cache para mejor rendimiento
+  maxAge: '1d',
+  // Permitir que las imágenes se carguen incluso si el path no coincide exactamente
+  fallthrough: true,
+}));
 
 // Public route for client propuesta view (no auth required)
 import { propuestasController } from './controllers/propuestas.controller';

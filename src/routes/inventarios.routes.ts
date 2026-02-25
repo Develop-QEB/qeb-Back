@@ -4,6 +4,9 @@ import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
+// Endpoint temporal sin autenticación para arreglar reservas huérfanas (remover después)
+router.post('/reservas/arreglar-huerfanas', inventariosController.arreglarReservasHuerfanas.bind(inventariosController));
+
 router.use(authMiddleware);
 
 router.get('/', inventariosController.getAll.bind(inventariosController));
@@ -17,6 +20,11 @@ router.get('/estados', inventariosController.getEstados.bind(inventariosControll
 router.get('/ciudades', inventariosController.getCiudadesByEstado.bind(inventariosController));
 router.get('/formatos', inventariosController.getFormatosByCiudad.bind(inventariosController));
 router.get('/nse', inventariosController.getNSE.bind(inventariosController));
+
+// Espacios digitales
+router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.bind(inventariosController));
+router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
+
 router.get('/:id/historial', inventariosController.getHistorial.bind(inventariosController));
 router.get('/:id', inventariosController.getById.bind(inventariosController));
 

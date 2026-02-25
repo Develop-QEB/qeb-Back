@@ -1,8 +1,17 @@
 import { Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import prisma from '../utils/prisma';
 import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
 import nodemailer from 'nodemailer';
+import {
+  calcularEstadoAutorizacion,
+  verificarCarasPendientes,
+  crearTareasAutorizacion
+} from '../services/autorizacion.service';
+import { emitToCampana, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { uploadToCloudinary } from '../config/cloudinary';
 
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
@@ -305,6 +314,9 @@ export class CampanasController {
         inversion: propuesta?.inversion || null,
         comentario_cambio_status: propuesta?.comentario_cambio_status || null,
         updated_at: propuesta?.updated_at || null,
+        // Info de SAP desde solicitud
+        card_code: solicitud?.card_code || null,
+        salesperson_code: solicitud?.salesperson_code || null,
         // Comentarios
         comentarios,
       };
@@ -343,6 +355,32 @@ export class CampanasController {
       if (!campanaAnterior) {
         res.status(404).json({ success: false, error: 'Campaña no encontrada' });
         return;
+      }
+
+      // Si intenta cambiar a "Activa" o similar status de aprobación, verificar autorizaciones
+      if (status === 'Activa' || status === 'En pauta') {
+        // Get the propuesta linked to this campana
+        if (campanaAnterior.cotizacion_id) {
+          const cotizacion = await prisma.cotizacion.findUnique({
+            where: { id: campanaAnterior.cotizacion_id },
+            select: { id_propuesta: true }
+          });
+          if (cotizacion?.id_propuesta) {
+            const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+            if (autorizacion.tienePendientes) {
+              const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+              res.status(400).json({
+                success: false,
+                error: `No se puede activar la campaña. ${totalPendientes} cara(s) están pendientes de autorización.`,
+                autorizacion: {
+                  pendientesDg: autorizacion.pendientesDg.length,
+                  pendientesDcm: autorizacion.pendientesDcm.length
+                }
+              });
+              return;
+            }
+          }
+        }
       }
 
       const statusAnterior = campanaAnterior.status;
@@ -1138,7 +1176,7 @@ export class CampanasController {
           inv.tradicional_digital,
 
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(
               SUBSTRING_INDEX(inv.codigo_unico, '_', 1),
               '_completo_',
@@ -1148,7 +1186,7 @@ export class CampanasController {
           END as codigo_unico_display,
 
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN 'Completo'
             ELSE inv.tipo_de_cara
           END as tipo_de_cara_display,
@@ -1176,13 +1214,13 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          MAX(sol.IMU) AS IMU,
+          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = sc.idquote LIMIT 1) AS IMU,
 
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
 
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
@@ -1190,16 +1228,14 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          INNER JOIN solicitud sol ON sol.cliente_id = cm.cliente_id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND inv.tradicional_digital = 'Tradicional'
           AND rsv.archivo IS NOT NULL
           AND rsv.archivo != ''
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1297,21 +1333,36 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const formato = req.query.formato as string || 'Tradicional';
 
-      console.log('Fetching inventario sin arte for campana:', campanaId, 'formato:', formato);
+      console.log('Fetching inventario sin arte for campana:', campanaId);
 
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_id,
-          inv.*,
+          inv.id,
+          inv.codigo_unico,
+          inv.ubicacion,
+          inv.tipo_de_cara,
+          inv.cara,
+          inv.mueble,
+          inv.latitud,
+          inv.longitud,
+          inv.plaza,
+          inv.estado,
+          inv.municipio,
+          inv.tipo_de_mueble,
+          inv.ancho,
+          inv.alto,
+          inv.nivel_socioeconomico,
+          inv.tarifa_publica,
+          inv.tradicional_digital,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
             ELSE inv.codigo_unico
           END as codigo_unico_display,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
             ELSE inv.tipo_de_cara
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
@@ -1326,9 +1377,9 @@ export class CampanasController {
           COUNT(DISTINCT rsv.id) AS caras_totales,
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
-          cat.numero_catorcena,
-          cat.año AS anio_catorcena,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
@@ -1343,14 +1394,13 @@ export class CampanasController {
           AND rsv.deleted_at IS NULL
           AND rsv.archivo IS NULL
           AND imDig.id_reserva IS NULL
-          AND inv.tradicional_digital = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
 
       console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
@@ -1373,16 +1423,15 @@ export class CampanasController {
   }
 
   /**
-   * Obtener inventario para validación de testigos (instalaciones)
-   * Muestra items donde arte_aprobado = 'Aprobado' o ya tienen testigo
+   * Obtener inventario para validación de instalaciones
+   * Muestra items que forman parte de una tarea de tipo 'Instalación'
    */
   async getInventarioTestigos(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const formato = req.query.formato as string || 'Tradicional';
 
-      console.log('Fetching inventario testigos for campana:', campanaId);
+      console.log('Fetching inventario para instalaciones campana:', campanaId);
 
       const query = `
         SELECT
@@ -1403,10 +1452,14 @@ export class CampanasController {
           inv.tarifa_publica,
           inv.tradicional_digital,
           CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
             ELSE inv.codigo_unico
           END as codigo_unico_display,
+          CASE
+            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE inv.tipo_de_cara
+          END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           MAX(rsv.estatus) AS estatus,
           MAX(rsv.arte_aprobado) AS arte_aprobado,
@@ -1415,33 +1468,40 @@ export class CampanasController {
           MAX(rsv.instalado) AS instalado,
           MAX(rsv.tarea) AS tarea,
           MAX(rsv.APS) AS APS,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
+          MAX(rsv.comentario_rechazo) AS comentario_rechazo,
+          MAX(sc.id) AS solicitudCarasId,
+          MAX(sc.id) AS grupo,
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MAX(sc.fin_periodo) AS fin_periodo,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
           COUNT(DISTINCT rsv.id) AS caras_totales,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id,
+          MAX(tr.id) AS tarea_instalacion_id,
+          MAX(tr.titulo) AS tarea_instalacion_titulo,
+          MAX(tr.estatus) AS tarea_instalacion_estatus
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN tareas tr ON tr.campania_id = cm.id
+            AND tr.tipo = 'Instalación'
+            AND FIND_IN_SET(rsv.id, REPLACE(tr.ids_reservas, ' ', '')) > 0
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND inv.tradicional_digital = ?
-          AND rsv.arte_aprobado = 'Aprobado'
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId, formato);
+      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
 
-      console.log('Inventario testigos result count:', Array.isArray(inventario) ? inventario.length : 0);
+      console.log('Inventario instalaciones result count:', Array.isArray(inventario) ? inventario.length : 0);
 
       const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
         typeof value === 'bigint' ? Number(value) : value
@@ -1453,7 +1513,7 @@ export class CampanasController {
       });
     } catch (error) {
       console.error('Error en getInventarioTestigos:', error);
-      const message = error instanceof Error ? error.message : 'Error al obtener inventario para testigos';
+      const message = error instanceof Error ? error.message : 'Error al obtener inventario para instalaciones';
       res.status(500).json({
         success: false,
         error: message,
@@ -1508,6 +1568,13 @@ export class CampanasController {
 
         await prisma.$executeRawUnsafe(updateDirectQuery, ...reservaIds);
 
+        // Eliminar registros de imagenes_digitales para estas reservas
+        const deleteImagenesQuery = `
+          DELETE FROM imagenes_digitales
+          WHERE id_reserva IN (${placeholders})
+        `;
+        await prisma.$executeRawUnsafe(deleteImagenesQuery, ...reservaIds);
+
         // Actualizar reservas del mismo grupo_completo
         if (grupoIds.length > 0) {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
@@ -1518,6 +1585,61 @@ export class CampanasController {
           `;
 
           await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
+
+          // También eliminar imagenes_digitales de reservas del mismo grupo
+          const deleteImagenesGrupoQuery = `
+            DELETE FROM imagenes_digitales
+            WHERE id_reserva IN (
+              SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})
+            )
+          `;
+          await prisma.$executeRawUnsafe(deleteImagenesGrupoQuery, ...grupoIds);
+        }
+
+        // Eliminar reservas de las tareas asociadas
+        // Obtener todas las reservas afectadas (incluyendo las del grupo)
+        let allAffectedReservaIds = [...reservaIds];
+        if (grupoIds.length > 0) {
+          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+          const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+          const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+          allAffectedReservaIds = [...new Set([...allAffectedReservaIds, ...grupoReservas.map(r => r.id)])];
+        }
+
+        // Buscar tareas que contengan estas reservas
+        const tareasQuery = `
+          SELECT id, ids_reservas
+          FROM tareas
+          WHERE campania_id = ?
+          AND ids_reservas IS NOT NULL
+          AND ids_reservas != ''
+        `;
+        const tareas = await prisma.$queryRawUnsafe<{ id: number; ids_reservas: string }[]>(tareasQuery, campanaId);
+
+        for (const tarea of tareas) {
+          // Parsear los IDs de reservas de la tarea (pueden estar separados por coma o asterisco)
+          const tareaReservaIds = tarea.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+          // Filtrar los IDs que NO están siendo limpiados
+          const remainingIds = tareaReservaIds.filter(id => !allAffectedReservaIds.includes(id));
+
+          if (remainingIds.length === 0) {
+            // Si no quedan reservas, eliminar la tarea
+            await prisma.tareas.delete({ where: { id: tarea.id } });
+            console.log(`Tarea ${tarea.id} eliminada porque ya no tiene reservas asignadas`);
+          } else if (remainingIds.length !== tareaReservaIds.length) {
+            // Si quedan algunas reservas, actualizar la tarea
+            const newIdsReservas = remainingIds.join(',');
+            await prisma.tareas.update({
+              where: { id: tarea.id },
+              data: { ids_reservas: newIdsReservas }
+            });
+            console.log(`Tarea ${tarea.id} actualizada: ${tareaReservaIds.length} -> ${remainingIds.length} reservas`);
+          }
         }
 
         // Registrar en historial
@@ -1601,9 +1723,468 @@ export class CampanasController {
           affected: reservaIds.length,
         },
       });
+
+      // Emitir evento WebSocket para actualizar tablas de Gestión de Artes en tiempo real
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds,
+        tipo: isClearing ? 'limpiar' : 'asignar',
+        usuario: userName,
+      });
     } catch (error) {
       console.error('Error en assignArte:', error);
       const message = error instanceof Error ? error.message : 'Error al asignar arte';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Asignar arte digital (múltiples archivos para rotación)
+   */
+  async assignArteDigital(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivos } = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!archivos || !Array.isArray(archivos) || archivos.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de archivos',
+        });
+        return;
+      }
+
+      console.log(`assignArteDigital - campanaId: ${campanaId}, reservaIds: ${reservaIds.length}, archivos: ${archivos.length}`);
+
+      // Obtener los grupo_completo_id de las reservas seleccionadas
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Obtener todas las reservas afectadas (incluyendo las del grupo)
+      let allReservaIds = [...reservaIds];
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+        const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+        allReservaIds = [...new Set([...allReservaIds, ...grupoReservas.map(r => r.id)])];
+      }
+
+      // Primero, eliminar registros anteriores de imagenes_digitales para estas reservas
+      const deleteOldQuery = `DELETE FROM imagenes_digitales WHERE id_reserva IN (${allReservaIds.map(() => '?').join(',')})`;
+      await prisma.$executeRawUnsafe(deleteOldQuery, ...allReservaIds);
+
+      // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
+      const savedFiles: string[] = [];
+      for (const archivo of archivos) {
+        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+
+        // Extraer extensión del nombre o del tipo MIME
+        let extension = nombre.split('.').pop() || 'jpg';
+        if (tipo === 'video' && !['mp4', 'mov', 'webm', 'avi'].includes(extension.toLowerCase())) {
+          extension = 'mp4';
+        }
+
+        // Generar nombre único para referencia
+        const timestamp = Date.now();
+        const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
+
+        // Intentar subir a Cloudinary, si falla usar base64 directamente
+        const resourceType = tipo === 'video' ? 'video' : 'image';
+        const cloudinaryResult = await uploadToCloudinary(
+          base64Data,
+          `qeb/campana-${campanaId}/digitales`,
+          resourceType
+        );
+
+        // Usar URL de Cloudinary si está disponible, sino usar base64
+        const archivoData = cloudinaryResult?.secure_url || base64Data;
+
+        // Guardar la referencia
+        savedFiles.push(archivoData);
+
+        // Insertar registro en imagenes_digitales para cada reserva
+        for (const reservaId of allReservaIds) {
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, uniqueFilename, archivoData, spot);
+        }
+      }
+
+      // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
+      const firstFileUrl = savedFiles[0] || '';
+      const updateReservasQuery = `
+        UPDATE reservas
+        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        WHERE id IN (${allReservaIds.map(() => '?').join(',')})
+      `;
+      await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte Digital',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Asignación',
+              fecha_hora: new Date(),
+              detalles: `${userName} asignó ${archivos.length} archivo(s) digital(es) a ${allReservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte digital asignado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
+          affected: allReservaIds.length,
+          files: savedFiles,
+        },
+      });
+
+      // Emitir evento WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds: allReservaIds,
+        tipo: 'digital',
+        usuario: userName,
+        archivosCount: archivos.length,
+      });
+    } catch (error) {
+      console.error('Error en assignArteDigital:', error);
+      const message = error instanceof Error ? error.message : 'Error al asignar arte digital';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Agregar archivos digitales SIN eliminar los existentes
+   * Útil para editar/añadir archivos manteniendo los que ya están
+   */
+  async addArteDigital(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivos } = req.body;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de reservaIds',
+        });
+        return;
+      }
+
+      if (!archivos || !Array.isArray(archivos) || archivos.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de archivos',
+        });
+        return;
+      }
+
+      // Obtener grupos de las reservas para aplicar a todo el grupo
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const gruposQuery = `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`;
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      let allReservaIds = [...reservaIds];
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+        const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+        allReservaIds = [...new Set([...allReservaIds, ...grupoReservas.map(r => r.id)])];
+      }
+
+      // NO eliminamos archivos existentes - solo agregamos nuevos
+
+      // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
+      const savedFiles: string[] = [];
+      for (const archivo of archivos) {
+        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+
+        // Extraer extensión del nombre o del tipo MIME
+        let extension = nombre.split('.').pop() || 'jpg';
+        if (tipo === 'video' && !['mp4', 'mov', 'webm', 'avi'].includes(extension.toLowerCase())) {
+          extension = 'mp4';
+        }
+
+        // Generar nombre único para referencia
+        const timestamp = Date.now();
+        const uniqueFilename = `digital-${campanaId}-${timestamp}-${spot}.${extension}`;
+
+        // Intentar subir a Cloudinary, si falla usar base64 directamente
+        const resourceType = tipo === 'video' ? 'video' : 'image';
+        const cloudinaryResult = await uploadToCloudinary(
+          base64Data,
+          `qeb/campana-${campanaId}/digitales`,
+          resourceType
+        );
+
+        // Usar URL de Cloudinary si está disponible, sino usar base64
+        const archivoData = cloudinaryResult?.secure_url || base64Data;
+
+        // Guardar la referencia
+        savedFiles.push(archivoData);
+
+        // Insertar registro en imagenes_digitales para cada reserva
+        for (const reservaId of allReservaIds) {
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
+          `, reservaId, uniqueFilename, archivoData, spot);
+        }
+      }
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte Digital',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Adición',
+              fecha_hora: new Date(),
+              detalles: `${userName} agregó ${archivos.length} archivo(s) digital(es) a ${allReservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte digital agregado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
+          affected: allReservaIds.length,
+          files: savedFiles,
+        },
+      });
+
+      // Emitir evento WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds: allReservaIds,
+        tipo: 'digital',
+        usuario: userName,
+        archivosCount: archivos.length,
+      });
+    } catch (error) {
+      console.error('Error en addArteDigital:', error);
+      const message = error instanceof Error ? error.message : 'Error al agregar arte digital';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener imágenes digitales de una reserva
+   */
+  async getImagenesDigitales(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, reservaId } = req.params;
+      const campanaId = parseInt(id);
+
+      // Soportar múltiples reserva IDs separados por coma
+      const reservaIds = reservaId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+      if (reservaIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'ID de reserva inválido',
+        });
+        return;
+      }
+
+      // Obtener imágenes digitales ordenadas por spot para todas las reservas
+      // Usar DISTINCT para evitar duplicados si el mismo archivo está asociado a múltiples reservas
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const imagenes = await prisma.$queryRawUnsafe<{
+        id: number;
+        id_reserva: number;
+        archivo: string;
+        archivo_data: string | null;
+        comentario: string;
+        aprobado_rechazado: string;
+        respuesta: string;
+        spot: number;
+        fecha_testigo: Date;
+        imagen_testigo: string;
+      }[]>(`
+        SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
+               comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+        FROM imagenes_digitales
+        WHERE id_reserva IN (${placeholders})
+        GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+        ORDER BY spot ASC
+      `, ...reservaIds);
+
+      res.json({
+        success: true,
+        data: imagenes.map(img => ({
+          id: img.id,
+          idReserva: img.id_reserva,
+          archivo: img.archivo,
+          archivoData: img.archivo_data, // Base64 data URL
+          comentario: img.comentario,
+          estado: img.aprobado_rechazado,
+          respuesta: img.respuesta,
+          spot: img.spot,
+          tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getImagenesDigitales:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener imágenes digitales';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Obtener resumen de archivos digitales por reserva para toda la campaña
+   * Devuelve cantidad de imágenes y videos por cada reserva
+   */
+  async getDigitalFileSummaries(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      if (isNaN(campanaId)) {
+        res.status(400).json({
+          success: false,
+          error: 'ID de campaña inválido',
+        });
+        return;
+      }
+
+      // Obtener todas las reservas digitales de la campaña con conteo de archivos
+      // Join path: imagenes_digitales -> reservas -> solicitudCaras -> cotizacion -> campania
+      const summaries = await prisma.$queryRaw<{
+        id_reserva: number;
+        total_archivos: number;
+        count_imagenes: number;
+        count_videos: number;
+      }[]>`
+        SELECT
+          img.id_reserva,
+          COUNT(*) as total_archivos,
+          SUM(CASE WHEN LOWER(img.archivo) REGEXP '\\.(jpg|jpeg|png|gif|webp|bmp)$' THEN 1 ELSE 0 END) as count_imagenes,
+          SUM(CASE WHEN LOWER(img.archivo) REGEXP '\\.(mp4|mov|avi|webm|mkv|wmv)$' THEN 1 ELSE 0 END) as count_videos
+        FROM imagenes_digitales img
+        INNER JOIN reservas r ON r.id = img.id_reserva
+        INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+        INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ${campanaId}
+        GROUP BY img.id_reserva
+      `;
+
+      res.json({
+        success: true,
+        data: summaries.map(s => ({
+          idReserva: Number(s.id_reserva),
+          totalArchivos: Number(s.total_archivos),
+          countImagenes: Number(s.count_imagenes),
+          countVideos: Number(s.count_videos),
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getDigitalFileSummaries:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener resumen de archivos digitales';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  /**
+   * Eliminar archivos digitales por IDs o por archivo paths + reservaIds
+   * Soporta dos modos:
+   * 1. Por imageIds: elimina registros específicos por ID
+   * 2. Por archivos + reservaIds: elimina todos los registros que coincidan con esos archivos en esas reservas
+   */
+  async deleteImagenesDigitales(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { imageIds, archivos, reservaIds } = req.body;
+
+      // Modo 2: Eliminar por archivo paths y reservaIds (para eliminar de múltiples items)
+      if (archivos && Array.isArray(archivos) && archivos.length > 0 &&
+          reservaIds && Array.isArray(reservaIds) && reservaIds.length > 0) {
+
+        // Construir query para eliminar archivos que coincidan con los paths en las reservas especificadas
+        const archivoPlaceholders = archivos.map(() => '?').join(',');
+        const reservaPlaceholders = reservaIds.map(() => '?').join(',');
+        const deleteQuery = `
+          DELETE FROM imagenes_digitales
+          WHERE archivo IN (${archivoPlaceholders})
+          AND id_reserva IN (${reservaPlaceholders})
+        `;
+        await prisma.$executeRawUnsafe(deleteQuery, ...archivos, ...reservaIds);
+
+        res.json({
+          success: true,
+          message: `Se eliminaron archivos digitales de ${reservaIds.length} reserva(s)`,
+        });
+        return;
+      }
+
+      // Modo 1: Eliminar por imageIds (comportamiento original)
+      if (!imageIds || !Array.isArray(imageIds) || imageIds.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de imageIds, o archivos + reservaIds',
+        });
+        return;
+      }
+
+      const placeholders = imageIds.map(() => '?').join(',');
+      const deleteQuery = `DELETE FROM imagenes_digitales WHERE id IN (${placeholders})`;
+      await prisma.$executeRawUnsafe(deleteQuery, ...imageIds);
+
+      res.json({
+        success: true,
+        message: `Se eliminaron ${imageIds.length} archivo(s) digital(es)`,
+      });
+    } catch (error) {
+      console.error('Error en deleteImagenesDigitales:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar archivos digitales';
       res.status(500).json({
         success: false,
         error: message,
@@ -1630,10 +2211,10 @@ export class CampanasController {
         return;
       }
 
-      if (!status || !['Aprobado', 'Rechazado'].includes(status)) {
+      if (!status || !['Aprobado', 'Rechazado', 'Pendiente'].includes(status)) {
         res.status(400).json({
           success: false,
-          error: 'Status debe ser "Aprobado" o "Rechazado"',
+          error: 'Status debe ser "Aprobado", "Rechazado" o "Pendiente"',
         });
         return;
       }
@@ -1653,14 +2234,26 @@ export class CampanasController {
       const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
       const grupoIds = grupos.map(g => g.grupo_completo_id);
 
-      // Construir query de actualización
-      const updateFields = status === 'Rechazado' && comentarioRechazo
-        ? `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`
-        : `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+      // Construir query de actualización según el estado
+      let updateFields: string;
+      let updateParams: (string | number)[];
 
-      const updateParams = status === 'Rechazado' && comentarioRechazo
-        ? [status, comentarioRechazo, ...reservaIds]
-        : [status, ...reservaIds];
+      if (status === 'Rechazado') {
+        if (comentarioRechazo) {
+          updateFields = `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`;
+          updateParams = [status, comentarioRechazo, ...reservaIds];
+        } else {
+          updateFields = `arte_aprobado = ?, estatus = 'Arte Rechazado'`;
+          updateParams = [status, ...reservaIds];
+        }
+      } else if (status === 'Pendiente') {
+        updateFields = `arte_aprobado = ?, estatus = 'En Arte'`;
+        updateParams = [status, ...reservaIds];
+      } else {
+        // Aprobado
+        updateFields = `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+        updateParams = [status, ...reservaIds];
+      }
 
       // Actualizar reservas directas
       const updateDirectQuery = `
@@ -1674,9 +2267,17 @@ export class CampanasController {
       // Actualizar reservas del mismo grupo
       if (grupoIds.length > 0) {
         const grupoPlaceholders = grupoIds.map(() => '?').join(',');
-        const grupoParams = status === 'Rechazado' && comentarioRechazo
-          ? [status, comentarioRechazo, ...grupoIds]
-          : [status, ...grupoIds];
+        let grupoParams: (string | number)[];
+
+        if (status === 'Rechazado') {
+          if (comentarioRechazo) {
+            grupoParams = [status, comentarioRechazo, ...grupoIds];
+          } else {
+            grupoParams = [status, ...grupoIds];
+          }
+        } else {
+          grupoParams = [status, ...grupoIds];
+        }
 
         const updateGruposQuery = `
           UPDATE reservas
@@ -1704,6 +2305,62 @@ export class CampanasController {
         }
       }
 
+      // Si es rechazo, intercambiar creador y asignado en la tarea de Revisión de artes
+      console.log('updateArteStatus - Status:', status, '- CampanaId:', campanaId);
+      if (status === 'Rechazado') {
+        console.log('updateArteStatus - Buscando tareas de Revisión de artes para rotar roles...');
+        // Buscar la tarea de Revisión de artes que contiene estas reservas
+        const tareasRevision = await prisma.$queryRawUnsafe<{
+          id: number;
+          ids_reservas: string;
+          responsable: string | null;
+          id_responsable: number;
+          asignado: string | null;
+          id_asignado: string | null;
+        }[]>(`
+          SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
+          FROM tareas
+          WHERE campania_id = ?
+          AND tipo = 'Revisión de artes'
+          AND ids_reservas IS NOT NULL
+          AND ids_reservas != ''
+          AND estatus = 'Activo'
+        `, campanaId);
+
+        console.log('updateArteStatus - Tareas encontradas:', tareasRevision.length, tareasRevision);
+
+        // Encontrar la tarea que contiene alguna de las reservas rechazadas
+        for (const tarea of tareasRevision) {
+          const tareaReservaIds = tarea.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+          const tieneReservasRechazadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
+
+          if (tieneReservasRechazadas) {
+            // Rotar: el asignado original se vuelve creador, el creador original se vuelve asignado
+            const nuevoResponsable = tarea.asignado;
+            const nuevoIdResponsable = tarea.id_asignado ? parseInt(tarea.id_asignado) : tarea.id_responsable;
+            const nuevoAsignado = tarea.responsable;
+            const nuevoIdAsignado = String(tarea.id_responsable);
+
+            await prisma.tareas.update({
+              where: { id: tarea.id },
+              data: {
+                responsable: nuevoResponsable,
+                id_responsable: nuevoIdResponsable,
+                asignado: nuevoAsignado,
+                id_asignado: nuevoIdAsignado,
+              },
+            });
+
+            console.log(`Tarea ${tarea.id} - Roles rotados: Creador ahora es ${nuevoResponsable}, Asignado ahora es ${nuevoAsignado}`);
+          }
+        }
+      }
+
       res.json({
         success: true,
         data: {
@@ -1711,6 +2368,17 @@ export class CampanasController {
           affected: reservaIds.length,
         },
       });
+
+      // Emitir evento WebSocket para actualizar tablas de Gestión de Artes en tiempo real
+      const socketEvent = status === 'Aprobado' ? SOCKET_EVENTS.ARTE_APROBADO : SOCKET_EVENTS.ARTE_RECHAZADO;
+      emitToCampana(campanaId, socketEvent, {
+        campanaId,
+        reservaIds,
+        status,
+        usuario: userName,
+      });
+      // También emitir INVENTARIO_ACTUALIZADO para refrescar todas las tablas
+      emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
     } catch (error) {
       console.error('Error en updateArteStatus:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar estado de arte';
@@ -1805,6 +2473,70 @@ export class CampanasController {
   }
 
   /**
+   * Verificar si reservas tienen tareas asociadas (para confirmar antes de limpiar arte)
+   */
+  async checkReservasTareas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds } = req.body;
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.json({ success: true, data: { hasTareas: false, tareas: [] } });
+        return;
+      }
+
+      // Buscar tareas que contengan estas reservas (excluir completadas, atendidas y canceladas)
+      const tareasQuery = `
+        SELECT id, titulo, tipo, estatus, ids_reservas, responsable
+        FROM tareas
+        WHERE campania_id = ?
+        AND ids_reservas IS NOT NULL
+        AND ids_reservas != ''
+        AND estatus NOT IN ('Atendido', 'Cancelado', 'Completado')
+      `;
+      const tareas = await prisma.$queryRawUnsafe<{
+        id: number;
+        titulo: string | null;
+        tipo: string | null;
+        estatus: string | null;
+        ids_reservas: string;
+        responsable: string | null;
+      }[]>(tareasQuery, campanaId);
+
+      // Filtrar solo las tareas que contienen alguna de las reservas
+      const tareasAfectadas = tareas.filter(tarea => {
+        const tareaReservaIds = tarea.ids_reservas
+          .replace(/\*/g, ',')
+          .split(',')
+          .map(id => parseInt(id.trim()))
+          .filter(id => !isNaN(id));
+        return reservaIds.some((rid: number) => tareaReservaIds.includes(rid));
+      });
+
+      res.json({
+        success: true,
+        data: {
+          hasTareas: tareasAfectadas.length > 0,
+          tareas: tareasAfectadas.map(t => ({
+            id: t.id,
+            titulo: t.titulo,
+            tipo: t.tipo,
+            estatus: t.estatus,
+            responsable: t.responsable
+          }))
+        }
+      });
+    } catch (error) {
+      console.error('Error en checkReservasTareas:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error al verificar tareas de reservas'
+      });
+    }
+  }
+
+  /**
    * Obtener tareas de una campaña específica (versión completa con JOINs)
    */
   async getTareas(req: AuthRequest, res: Response): Promise<void> {
@@ -1842,6 +2574,8 @@ export class CampanasController {
           listado_inventario: string | null;
           proveedores_id: number | null;
           nombre_proveedores: string | null;
+          num_impresiones: number | null;
+          archivo_testigo: string | null;
           nombre: string | null;
           correo_electronico: string | null;
           inventario_id: string | null;
@@ -1898,6 +2632,8 @@ export class CampanasController {
           listado_inventario: t.listado_inventario,
           proveedores_id: t.proveedores_id,
           nombre_proveedores: t.nombre_proveedores,
+          num_impresiones: t.num_impresiones,
+          archivo_testigo: t.archivo_testigo,
           inventario_id: t.inventario_id,
           APS: t.APS,
           tarea_reserva: t.tarea_reserva,
@@ -1956,6 +2692,7 @@ export class CampanasController {
         listado_inventario: t.listado_inventario,
         proveedores_id: t.proveedores_id,
         nombre_proveedores: t.nombre_proveedores,
+        num_impresiones: t.num_impresiones,
       }));
 
       res.json({
@@ -1994,14 +2731,20 @@ export class CampanasController {
         listado_inventario,
         catorcena_entrega,
         creador,
+        impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
+        num_impresiones, // Total de impresiones (enviado desde frontend)
+        evidencia, // Evidencia para tareas de Recepción Faltantes
       } = req.body;
-      const userId = req.user?.userId || 0;
-      const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
+      // Obtener el ID y nombre del responsable desde el token JWT del usuario logueado
+      const responsableId = req.user?.userId || 0;
+      const responsableNombre = req.user?.nombre || '';
+
       // Debug: Ver qué recibimos
-      console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo });
-      console.log('createTarea - User auth:', { userId, userName, userNombre: req.user?.nombre });
+      console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo, id_responsable });
+      console.log('createTarea - Token user:', { userId: req.user?.userId, nombre: req.user?.nombre });
+      console.log('createTarea - Responsable final:', { responsableId, responsableNombre });
 
       // Obtener info de la campaña para el id_propuesta
       const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
@@ -2024,22 +2767,64 @@ export class CampanasController {
       let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
       let estatusFinal = 'Pendiente';
 
-      // Para Revisión de artes, estatus siempre es Activo
-      if (tipo === 'Revisión de artes') {
+      // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
-        // Si hay catorcena, obtener fecha_fin de la catorcena seleccionada
-        if (catorcena_entrega) {
-          const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
-          if (match) {
-            const numCatorcena = parseInt(match[1]);
-            const yearCatorcena = parseInt(match[2]);
-            const catorcena = await prisma.catorcenas.findFirst({
-              where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
-            });
-            if (catorcena?.fecha_fin) {
-              fechaFinFinal = new Date(catorcena.fecha_fin);
-            }
+      }
+
+      // Si hay catorcena_entrega, obtener fecha_fin de la catorcena seleccionada
+      // Aplica para: Revisión de artes, Impresión, Instalación, Testigo, Programación
+      if (catorcena_entrega && (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Instalación' || tipo === 'Testigo' || tipo === 'Programación')) {
+        const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
+        if (match) {
+          const numCatorcena = parseInt(match[1]);
+          const yearCatorcena = parseInt(match[2]);
+          const catorcena = await prisma.catorcenas.findFirst({
+            where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
+          });
+          if (catorcena?.fecha_fin) {
+            fechaFinFinal = new Date(catorcena.fecha_fin);
           }
+        }
+      }
+
+      // Preparar datos de impresiones como JSON para almacenar en evidencia
+      let evidenciaData: string | null = null;
+      let numImpresionesTotal: number | null = null;
+
+      // DEBUG: Log de todo el body para ver qué llega
+      console.log('createTarea - tipo:', tipo, 'num_impresiones:', num_impresiones, 'impresiones:', JSON.stringify(impresiones));
+
+      if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
+        evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
+        // Usar num_impresiones enviado desde el frontend directamente
+        if (num_impresiones !== undefined && num_impresiones !== null) {
+          numImpresionesTotal = Number(num_impresiones);
+          console.log('createTarea - numImpresionesTotal asignado:', numImpresionesTotal);
+        } else {
+          console.log('createTarea - num_impresiones NO llegó del frontend');
+        }
+      } else if (evidencia) {
+        // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes, Programación)
+        // IMPORTANTE: Limpiar archivoData de la evidencia para evitar problemas de memoria y truncamiento
+        // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
+        try {
+          const evidenciaObj = JSON.parse(evidencia);
+          if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
+            // Eliminar archivoData de cada archivo para reducir el tamaño
+            evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
+              archivo: a.archivo,
+              spot: a.spot,
+              tipo: a.tipo,
+              // NO incluir archivoData
+            }));
+            evidenciaData = JSON.stringify(evidenciaObj);
+          } else {
+            evidenciaData = evidencia;
+          }
+        } catch (parseError) {
+          // Si no es JSON válido, usar como está
+          evidenciaData = evidencia;
         }
       }
 
@@ -2051,10 +2836,10 @@ export class CampanasController {
           estatus: estatusFinal,
           fecha_inicio: new Date(),
           fecha_fin: fechaFinFinal,
-          id_responsable: id_responsable || userId,
-          responsable: responsable || userName,
-          asignado: asignado || userName,
-          id_asignado: id_asignado || String(userId),
+          id_responsable: responsableId,
+          responsable: responsableNombre || null,
+          asignado: asignado || responsableNombre || null,
+          id_asignado: id_asignado || String(responsableId),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -2063,6 +2848,8 @@ export class CampanasController {
           nombre_proveedores: nombre_proveedores || null,
           contenido: contenido || null,
           listado_inventario: listado_inventario || null,
+          evidencia: evidenciaData, // Datos de impresiones para tipo Impresión
+          num_impresiones: numImpresionesTotal,
         },
       });
 
@@ -2071,8 +2858,15 @@ export class CampanasController {
         const reservaIdArray = ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
         if (reservaIdArray.length > 0) {
           const placeholders = reservaIdArray.map(() => '?').join(',');
-          // Para Revisión de artes, actualizar tarea = 'En revisión'
-          const tareaValue = tipo === 'Revisión de artes' ? 'En revisión' : (tipo || 'Producción');
+          // Determinar valor de tarea según tipo
+          let tareaValue = tipo || 'Producción';
+          if (tipo === 'Revisión de artes') {
+            tareaValue = 'En revisión';
+          } else if (tipo === 'Impresión') {
+            tareaValue = 'Pedido Solicitado';
+          } else if (tipo === 'Recepción') {
+            tareaValue = 'Por Recibir';
+          }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
             tareaValue,
@@ -2081,64 +2875,7 @@ export class CampanasController {
         }
       }
 
-      // Enviar correo al asignado para tareas de Revisión o Instalación
-      if ((tipo === 'Revisión de artes' || tipo === 'Instalación') && id_asignado) {
-        const asignadoIdNum = parseInt(id_asignado);
-        if (!isNaN(asignadoIdNum)) {
-          const usuarioAsignado = await prisma.usuario.findUnique({
-            where: { id: asignadoIdNum },
-            select: { correo_electronico: true, nombre: true },
-          });
-
-          if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
-            try {
-              const htmlBody = `
-              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
-                  <h1 style="color: #ffffff; margin: 0; font-size: 28px;">QEB</h1>
-                  <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 12px;">OOH Management</p>
-                </div>
-                <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
-                  <h2 style="color: #1f2937; margin: 0 0 20px 0; font-size: 20px;">Nueva Tarea Asignada</h2>
-                  <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 15px 0;">
-                    Se te ha asignado la tarea <strong>${titulo || 'Nueva tarea'}</strong> para <strong>${tipo}</strong>: ${contenido || descripcion || ''}
-                  </p>
-                  <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${creador || userName}</p>
-                  </div>
-                </div>
-                <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
-                  <p style="color: #9ca3af; font-size: 11px; margin: 0;">Mensaje automático del sistema QEB.</p>
-                </div>
-              </div>
-              `;
-
-              await transporter.sendMail({
-                from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
-                to: usuarioAsignado.correo_electronico,
-                subject: `Tarea campaña ${campanaNombre}`,
-                html: htmlBody,
-              });
-              console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
-
-              // Guardar en correos_enviados
-              await prisma.correos_enviados.create({
-                data: {
-                  remitente: 'no-reply@qeb.mx',
-                  destinatario: usuarioAsignado.correo_electronico,
-                  asunto: `Tarea campaña ${campanaNombre}`,
-                  cuerpo: htmlBody,
-                },
-              });
-            } catch (emailError) {
-              console.error('Error enviando correo de tarea:', emailError);
-              // No falla la creación de la tarea si el correo falla
-            }
-          }
-        }
-      }
-
+      // Enviar respuesta inmediatamente
       res.status(201).json({
         success: true,
         data: {
@@ -2152,6 +2889,69 @@ export class CampanasController {
           campania_id: tarea.campania_id,
         },
       });
+
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tarea.id,
+        campanaId,
+        tipo: tarea.tipo,
+        titulo: tarea.titulo,
+      });
+
+      // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
+      if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
+        const asignadoIdNum = parseInt(id_asignado);
+        if (!isNaN(asignadoIdNum)) {
+          prisma.usuario.findUnique({
+            where: { id: asignadoIdNum },
+            select: { correo_electronico: true, nombre: true },
+          }).then(usuarioAsignado => {
+            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
+              const htmlBody = `
+              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
+                  <h1 style="color: #ffffff; margin: 0; font-size: 28px;">QEB</h1>
+                  <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 12px;">OOH Management</p>
+                </div>
+                <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
+                  <h2 style="color: #1f2937; margin: 0 0 20px 0; font-size: 20px;">Nueva Tarea Asignada</h2>
+                  <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 15px 0;">
+                    Se te ha asignado la tarea <strong>${titulo || 'Nueva tarea'}</strong> para <strong>${tipo}</strong>: ${contenido || descripcion || ''}
+                  </p>
+                  <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
+                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${responsableNombre}</p>
+                  </div>
+                </div>
+                <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
+                  <p style="color: #9ca3af; font-size: 11px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                </div>
+              </div>
+              `;
+
+              transporter.sendMail({
+                from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                to: usuarioAsignado.correo_electronico,
+                subject: `Tarea campaña ${campanaNombre}`,
+                html: htmlBody,
+              }).then(() => {
+                console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
+                // Guardar en correos_enviados
+                prisma.correos_enviados.create({
+                  data: {
+                    remitente: 'no-reply@qeb.mx',
+                    destinatario: usuarioAsignado.correo_electronico,
+                    asunto: `Tarea campaña ${campanaNombre}`,
+                    cuerpo: htmlBody,
+                  },
+                }).catch(err => console.error('Error guardando correo enviado:', err));
+              }).catch(emailError => {
+                console.error('Error enviando correo de tarea:', emailError);
+              });
+            }
+          }).catch(err => console.error('Error buscando usuario para correo:', err));
+        }
+      }
     } catch (error) {
       console.error('Error en createTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al crear tarea';
@@ -2178,6 +2978,7 @@ export class CampanasController {
         id_asignado,
         archivo,
         evidencia,
+        archivo_testigo,
       } = req.body;
 
       const updateData: Record<string, unknown> = {};
@@ -2190,19 +2991,101 @@ export class CampanasController {
       if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
       if (archivo !== undefined) updateData.archivo = archivo;
       if (evidencia !== undefined) updateData.evidencia = evidencia;
+      if (archivo_testigo !== undefined) updateData.archivo_testigo = archivo_testigo;
 
       const tarea = await prisma.tareas.update({
         where: { id: parseInt(tareaId) },
         data: updateData,
       });
 
+      // Si es una tarea de tipo Testigo y se está completando, actualizar el estado de instalación a validado
+      if (tipo === 'Testigo' && estatus === 'Completado' && tarea.ids_reservas) {
+        const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        if (reservaIds.length > 0) {
+          // Actualizar las reservas a instalado = true (validado)
+          await prisma.reservas.updateMany({
+            where: { id: { in: reservaIds } },
+            data: { instalado: true },
+          });
+          console.log(`Testigo completado: ${reservaIds.length} reservas marcadas como validadas`);
+        }
+      }
+
       res.json({
         success: true,
         data: tarea,
       });
+
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      if (tarea.campania_id) {
+        emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+          tareaId: tarea.id,
+          campanaId: tarea.campania_id,
+          estatus: tarea.estatus,
+        });
+      }
     } catch (error) {
       console.error('Error en updateTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  // Eliminar una tarea
+  async deleteTarea(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { tareaId } = req.params;
+      const tareaIdNum = parseInt(tareaId);
+
+      // Verificar que la tarea existe
+      const tarea = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!tarea) {
+        res.status(404).json({
+          success: false,
+          error: 'Tarea no encontrada',
+        });
+        return;
+      }
+
+      // Si la tarea tiene ids_reservas, limpiar el campo tarea de esas reservas
+      if (tarea.ids_reservas) {
+        const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        if (reservaIds.length > 0) {
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = NULL WHERE id IN (${reservaIds.join(',')})`
+          );
+        }
+      }
+
+      // Guardar campanaId antes de eliminar
+      const campanaId = tarea.campania_id;
+
+      // Eliminar la tarea
+      await prisma.tareas.delete({
+        where: { id: tareaIdNum },
+      });
+
+      res.json({
+        success: true,
+        message: 'Tarea eliminada correctamente',
+      });
+
+      // Emitir evento de WebSocket para notificar a otros usuarios
+      if (campanaId) {
+        emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ELIMINADA, {
+          tareaId: tareaIdNum,
+          campanaId,
+        });
+      }
+    } catch (error) {
+      console.error('Error en deleteTarea:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar tarea';
       res.status(500).json({
         success: false,
         error: message,
@@ -2590,8 +3473,11 @@ export class CampanasController {
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
           sc.inicio_periodo AS fecha_inicio_periodo,
           sc.fin_periodo AS fecha_fin_periodo,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
           'BONIFICACION' AS negociacion,
@@ -2605,6 +3491,7 @@ export class CampanasController {
           INNER JOIN cliente ON cliente.id = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
@@ -2615,7 +3502,7 @@ export class CampanasController {
           AND sc.bonificacion > 0
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  pr.asignado
 
@@ -2629,8 +3516,11 @@ export class CampanasController {
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
           sc.inicio_periodo AS fecha_inicio_periodo,
           sc.fin_periodo AS fecha_fin_periodo,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
           'RENTA' AS negociacion,
@@ -2644,6 +3534,7 @@ export class CampanasController {
           INNER JOIN cliente ON cliente.id = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
@@ -2654,7 +3545,7 @@ export class CampanasController {
           AND (sc.caras - sc.bonificacion) > 0
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  pr.asignado, ct.descuento
 
@@ -2744,7 +3635,9 @@ export class CampanasController {
           NULL AS Reproducciones,
           sc.inicio_periodo AS fecha_inicio,
           sc.fin_periodo AS fecha_fin,
-          cm.status AS status_campania
+          cm.status AS status_campania,
+          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year
         FROM reservas rsv
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -2780,17 +3673,81 @@ export class CampanasController {
     }
   }
 
-  // Obtener comentarios de revisión de artes por tarea
+  // Obtener comentarios de revisión de artes por tarea (incluye comentarios de tareas relacionadas)
   async getComentariosRevisionArte(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { tareaId } = req.params;
+      const tareaIdInt = parseInt(tareaId);
 
-      const comentarios = await prisma.$queryRaw`
+      // Obtener la tarea actual para saber sus ids_reservas
+      const [tareaActual] = await prisma.$queryRaw<{ ids_reservas: string | null; campania_id: number }[]>`
+        SELECT ids_reservas, campania_id FROM tareas WHERE id = ${tareaIdInt}
+      `;
+
+      if (!tareaActual || !tareaActual.ids_reservas) {
+        // Si no tiene ids_reservas, solo buscar comentarios de esta tarea
+        const comentarios = await prisma.$queryRaw`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tareaIdInt}
+          ORDER BY fecha ASC
+        `;
+        res.json({ success: true, data: comentarios });
+        return;
+      }
+
+      // Parsear los ids de reservas (pueden estar separados por coma o asterisco)
+      const reservaIds = tareaActual.ids_reservas
+        .replace(/\*/g, ',')
+        .split(',')
+        .map(id => parseInt(id.trim()))
+        .filter(id => !isNaN(id));
+
+      if (reservaIds.length === 0) {
+        const comentarios = await prisma.$queryRaw`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tareaIdInt}
+          ORDER BY fecha ASC
+        `;
+        res.json({ success: true, data: comentarios });
+        return;
+      }
+
+      // Buscar todas las tareas de la misma campaña con ids_reservas coincidentes
+      const tareasRelacionadas = await prisma.$queryRaw<{ id: number; ids_reservas: string }[]>`
+        SELECT id, ids_reservas FROM tareas
+        WHERE campania_id = ${tareaActual.campania_id}
+        AND ids_reservas IS NOT NULL
+        AND ids_reservas != ''
+      `;
+
+      // Filtrar tareas que compartan al menos una reserva
+      const tareasIds = tareasRelacionadas
+        .filter(t => {
+          const tReservaIds = t.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+          // Verificar si hay intersección
+          return tReservaIds.some(id => reservaIds.includes(id));
+        })
+        .map(t => t.id);
+
+      // Si no hay tareas relacionadas, incluir al menos la actual
+      if (!tareasIds.includes(tareaIdInt)) {
+        tareasIds.push(tareaIdInt);
+      }
+
+      // Obtener comentarios de todas las tareas relacionadas
+      const placeholders = tareasIds.map(() => '?').join(',');
+      const comentarios = await prisma.$queryRawUnsafe<any[]>(`
         SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
         FROM comentarios_revision_artes
-        WHERE tarea_id = ${parseInt(tareaId)}
+        WHERE tarea_id IN (${placeholders})
         ORDER BY fecha ASC
-      `;
+      `, ...tareasIds);
 
       res.json({
         success: true,
@@ -2899,6 +3856,527 @@ export class CampanasController {
       });
     }
   }
+
+  // ============================================================================
+  // MÉTODOS PARA GESTIÓN DE RESERVAS (copiados de propuestas y adaptados)
+  // ============================================================================
+
+  async getReservasForModal(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      // Obtener la campaña para conseguir el cotizacion_id
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana || !campana.cotizacion_id) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Obtener la propuesta asociada a la cotización
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true }
+      });
+
+      if (!cotizacion || !cotizacion.id_propuesta) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.latitud,
+          i.longitud,
+          i.plaza,
+          i.tipo_de_mueble as formato,
+          i.ubicacion,
+          rsv.estatus,
+          rsv.grupo_completo_id,
+          sc.id as solicitud_cara_id,
+          rsv.APS as aps
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NULL
+        ORDER BY rsv.id DESC
+      `;
+
+      const reservas = await prisma.$queryRawUnsafe(query, String(cotizacion.id_propuesta));
+
+      res.json({
+        success: true,
+        data: reservas,
+      });
+    } catch (error) {
+      console.error('Error en getReservasForModal:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async createReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+
+      if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
+        return;
+      }
+
+      // Verificar que la campaña existe
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Check for pending authorizations - block AP assignment if there are pending caras
+      if (campana.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true }
+        });
+        if (cotizacion?.id_propuesta) {
+          const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+          if (autorizacion.tienePendientes) {
+            const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+            res.status(400).json({
+              success: false,
+              error: `No se pueden asignar APs. ${totalPendientes} cara(s) están pendientes de autorización.`,
+              autorizacion: {
+                pendientesDg: autorizacion.pendientesDg.length,
+                pendientesDcm: autorizacion.pendientesDcm.length
+              }
+            });
+            return;
+          }
+        }
+      }
+
+      // Crear calendario entry
+      const calendario = await prisma.calendario.create({
+        data: {
+          fecha_inicio: new Date(fechaInicio),
+          fecha_fin: new Date(fechaFin),
+        },
+      });
+
+      // Obtener calendarios que se solapan con el período para validar disponibilidad
+      const fechaIni = new Date(fechaInicio);
+      const fechaFinDate = new Date(fechaFin);
+      const calendariosOverlap = await prisma.calendario.findMany({
+        where: {
+          deleted_at: null,
+          fecha_inicio: { lte: fechaFinDate },
+          fecha_fin: { gte: fechaIni },
+        },
+        select: { id: true },
+      });
+      const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
+
+      // Obtener espacios ya reservados en el período
+      let espaciosReservadosEnPeriodo: Set<number> = new Set();
+      if (calendarioIdsOverlap.length > 0) {
+        const reservasExistentes = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIdsOverlap },
+            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+          },
+          select: { inventario_id: true },
+        });
+        espaciosReservadosEnPeriodo = new Set(reservasExistentes.map(r => r.inventario_id));
+      }
+
+      let reservasCreadas = 0;
+      let reservasOmitidas = 0;
+      let currentGroupId: number | null = null;
+
+      // Procesar reservas
+      for (const reserva of reservas) {
+        let espacioId: number;
+
+        // Si viene espacio_id del frontend, usarlo directamente
+        if (reserva.espacio_id) {
+          espacioId = reserva.espacio_id;
+        } else {
+          // Buscar todos los espacios del inventario
+          const espaciosInventario = await prisma.espacio_inventario.findMany({
+            where: { inventario_id: reserva.inventario_id },
+            orderBy: { numero_espacio: 'asc' },
+          });
+
+          if (espaciosInventario.length === 0) {
+            console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+            continue;
+          }
+
+          // Buscar el primer espacio disponible (no reservado en el período)
+          let espacioEncontrado: number | null = null;
+          for (const espacio of espaciosInventario) {
+            if (!espaciosReservadosEnPeriodo.has(espacio.id)) {
+              espacioEncontrado = espacio.id;
+              break;
+            }
+          }
+
+          if (!espacioEncontrado) {
+            console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
+            reservasOmitidas++;
+            continue;
+          }
+
+          espacioId = espacioEncontrado;
+        }
+
+        // Validar que el espacio no esté ya reservado en el período
+        if (espaciosReservadosEnPeriodo.has(espacioId)) {
+          console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          reservasOmitidas++;
+          continue;
+        }
+
+        // Determinar si necesita grupo completo
+        let grupoCompletoId: number | null = null;
+        if (agruparComoCompleto && reserva.tipo !== 'Bonificacion') {
+          if (!currentGroupId) {
+            // Crear nuevo grupo
+            const maxGroup = await prisma.reservas.aggregate({
+              _max: { grupo_completo_id: true }
+            });
+            currentGroupId = (maxGroup._max.grupo_completo_id || 0) + 1;
+          }
+          grupoCompletoId = currentGroupId;
+        }
+
+        // Crear la reserva
+        await prisma.reservas.create({
+          data: {
+            solicitudCaras_id: solicitudCaraId,
+            inventario_id: espacioId,
+            calendario_id: calendario.id,
+            cliente_id: clienteId || 0,
+            estatus: reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Apartado',
+            arte_aprobado: '',
+            comentario_rechazo: '',
+            estatus_original: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            grupo_completo_id: grupoCompletoId,
+          },
+        });
+
+        // Marcar espacio como usado para evitar duplicados en este mismo request
+        espaciosReservadosEnPeriodo.add(espacioId);
+        reservasCreadas++;
+      }
+
+      res.json({
+        success: true,
+        data: {
+          calendarioId: calendario.id,
+          reservasCreadas,
+          reservasOmitidas,
+        },
+      });
+    } catch (error) {
+      console.error('Error en createReservas:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async deleteReservas(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { reservaIds } = req.body;
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Soft delete reservas
+      await prisma.reservas.updateMany({
+        where: { id: { in: reservaIds } },
+        data: { deleted_at: new Date() },
+      });
+
+      res.json({
+        success: true,
+        message: `${reservaIds.length} reserva(s) eliminada(s)`,
+      });
+    } catch (error) {
+      console.error('Error en deleteReservas:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // ============================================================================
+  // MÉTODOS PARA GESTIÓN DE CARAS
+  // ============================================================================
+
+  async updateCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+      const data = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      // Get current cara to get idquote
+      const currentCara = await prisma.solicitudCaras.findUnique({
+        where: { id: parseInt(caraId) },
+        select: { idquote: true }
+      });
+
+      if (!currentCara) {
+        res.status(404).json({ success: false, error: 'Cara no encontrada' });
+        return;
+      }
+
+      // Calculate authorization state for updated values
+      const estadoResult = await calcularEstadoAutorizacion({
+        ciudad: data.ciudad || undefined,
+        formato: data.formato || '',
+        tipo: data.tipo || undefined,
+        caras: data.caras ? parseInt(data.caras) : 0,
+        bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+        costo: data.costo ? parseInt(data.costo) : 0,
+        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0
+      });
+
+      const updateData: any = {
+        ciudad: data.ciudad,
+        estados: data.estados,
+        tipo: data.tipo,
+        flujo: data.flujo,
+        bonificacion: data.bonificacion,
+        caras: data.caras,
+        nivel_socioeconomico: data.nivel_socioeconomico,
+        formato: data.formato,
+        costo: data.costo,
+        tarifa_publica: data.tarifa_publica,
+        caras_flujo: data.caras_flujo,
+        caras_contraflujo: data.caras_contraflujo,
+        articulo: data.articulo,
+        descuento: data.descuento,
+        estado_autorizacion: estadoResult.estado,
+      };
+      if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
+      if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+
+      const cara = await prisma.solicitudCaras.update({
+        where: { id: parseInt(caraId) },
+        data: updateData,
+      });
+
+      // Check for pending authorizations and create tasks if needed
+      const idquote = currentCara.idquote || '';
+      const autorizacion = await verificarCarasPendientes(idquote);
+      if (autorizacion.tienePendientes && userId) {
+        // Get solicitud_id from propuesta
+        const propuesta = await prisma.propuesta.findUnique({
+          where: { id: parseInt(idquote) },
+          select: { solicitud_id: true }
+        });
+
+        if (propuesta?.solicitud_id) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            parseInt(idquote),
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm
+          );
+        }
+      }
+
+      // Build response message
+      let mensaje = 'Cara actualizada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Cara actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
+      res.json({
+        success: true,
+        data: cara,
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
+      });
+    } catch (error) {
+      console.error('Error en updateCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async createCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+      const data = req.body;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true }
+      });
+
+      if (!campana || !campana.cotizacion_id) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+        return;
+      }
+
+      // Obtener la propuesta asociada
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true }
+      });
+
+      if (!cotizacion || !cotizacion.id_propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada para esta campaña' });
+        return;
+      }
+
+      // Get solicitud_id for task creation
+      const propuesta = await prisma.propuesta.findUnique({
+        where: { id: cotizacion.id_propuesta },
+        select: { solicitud_id: true }
+      });
+
+      // Calculate authorization state
+      const estadoResult = await calcularEstadoAutorizacion({
+        ciudad: data.ciudad,
+        formato: data.formato || '',
+        tipo: data.tipo,
+        caras: data.caras ? parseInt(data.caras) : 0,
+        bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+        costo: data.costo ? parseInt(data.costo) : 0,
+        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0
+      });
+
+      const createData: any = {
+        idquote: String(cotizacion.id_propuesta),
+        ciudad: data.ciudad,
+        estados: data.estados,
+        tipo: data.tipo,
+        flujo: data.flujo,
+        bonificacion: data.bonificacion,
+        caras: data.caras,
+        nivel_socioeconomico: data.nivel_socioeconomico,
+        formato: data.formato,
+        costo: data.costo,
+        tarifa_publica: data.tarifa_publica,
+        caras_flujo: data.caras_flujo,
+        caras_contraflujo: data.caras_contraflujo,
+        articulo: data.articulo,
+        descuento: data.descuento,
+        estado_autorizacion: estadoResult.estado,
+      };
+      if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
+      if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+
+      const cara = await prisma.solicitudCaras.create({
+        data: createData,
+      });
+
+      // Check for pending authorizations and create tasks if needed
+      const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+      if (autorizacion.tienePendientes && userId && propuesta?.solicitud_id) {
+        await crearTareasAutorizacion(
+          propuesta.solicitud_id,
+          cotizacion.id_propuesta,
+          userId,
+          userName,
+          autorizacion.pendientesDg,
+          autorizacion.pendientesDcm
+        );
+      }
+
+      // Build response message
+      let mensaje = 'Cara creada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Cara creada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
+      res.json({
+        success: true,
+        data: cara,
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
+      });
+    } catch (error) {
+      console.error('Error en createCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async deleteCara(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { caraId } = req.params;
+
+      // Verificar que no tenga reservas
+      const reservas = await prisma.reservas.count({
+        where: {
+          solicitudCaras_id: parseInt(caraId),
+          deleted_at: null,
+        },
+      });
+
+      if (reservas > 0) {
+        res.status(400).json({
+          success: false,
+          error: 'No se puede eliminar una cara que tiene reservas asociadas',
+        });
+        return;
+      }
+
+      await prisma.solicitudCaras.delete({
+        where: { id: parseInt(caraId) },
+      });
+
+      res.json({ success: true, message: 'Cara eliminada' });
+    } catch (error) {
+      console.error('Error en deleteCara:', error);
+      const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const campanasController = new CampanasController();
+// force restart

@@ -22,7 +22,15 @@ router.get('/:id/inventario-testigos', campanasController.getInventarioTestigos.
 
 // Caras e historial
 router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
+router.patch('/:id/caras/:caraId', campanasController.updateCara.bind(campanasController));
+router.post('/:id/caras', campanasController.createCara.bind(campanasController));
+router.delete('/:id/caras/:caraId', campanasController.deleteCara.bind(campanasController));
 router.get('/:id/historial', campanasController.getHistorial.bind(campanasController));
+
+// Reservas (para modal de asignación)
+router.get('/:id/reservas-modal', campanasController.getReservasForModal.bind(campanasController));
+router.post('/:id/reservas', campanasController.createReservas.bind(campanasController));
+router.delete('/:id/reservas', campanasController.deleteReservas.bind(campanasController));
 
 // Comentarios
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
@@ -35,8 +43,14 @@ router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasControl
 router.get('/:id/artes-existentes', campanasController.getArtesExistentes.bind(campanasController));
 router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bind(campanasController));
 router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
+router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));
+router.post('/:id/add-arte-digital', campanasController.addArteDigital.bind(campanasController));
+router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesDigitales.bind(campanasController));
+router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
+router.delete('/:id/imagenes-digitales', campanasController.deleteImagenesDigitales.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
+router.post('/:id/check-reservas-tareas', campanasController.checkReservasTareas.bind(campanasController));
 router.delete('/:id/limpiar-artes-prueba', campanasController.limpiarArtesPrueba.bind(campanasController));
 
 // Comentarios de Revisión de Artes (por tarea)
@@ -48,6 +62,7 @@ router.delete('/:id/comentarios-arte/:comentarioId', campanasController.deleteCo
 router.get('/:id/tareas', campanasController.getTareas.bind(campanasController));
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
 router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
+router.delete('/:id/tareas/:tareaId', campanasController.deleteTarea.bind(campanasController));
 
 // Usuarios para asignación
 router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));

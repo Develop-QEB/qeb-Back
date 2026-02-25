@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
 
 export class DashboardController {
   // Obtener estadisticas del dashboard con filtros
@@ -98,21 +99,29 @@ export class DashboardController {
         },
       });
 
-      // Mapear estatus de reserva por inventario
+      // Mapear estatus de reserva por inventario (guardar estatus original)
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Reservado > Bloqueado
+        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
-        if (r.estatus === 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if (r.estatus === 'Reservado' && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado';
-        } else if (r.estatus === 'Bloqueado' && !current) {
-          inventarioEstatus[r.inventario_id] = 'Bloqueado';
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
+
+        if (newPrioridad > currentPrioridad) {
+          inventarioEstatus[r.inventario_id] = r.estatus;
         }
       });
 
       // Calcular KPIs
+      // Reservado = Vendido + Vendido bonificado + Con Arte (todo lo ocupado)
+      // Vendido = solo estatus "Vendido"
       const total = inventariosBase.length;
       let disponibles = 0;
       let reservados = 0;
@@ -123,7 +132,8 @@ export class DashboardController {
         const estatus = inventarioEstatus[inv.id];
         if (estatus === 'Vendido') {
           vendidos++;
-        } else if (estatus === 'Reservado') {
+          reservados++; // Vendido también cuenta como reservado
+        } else if (estatus === 'Vendido bonificado' || estatus === 'Con Arte' || estatus === 'Reservado') {
           reservados++;
         } else if (estatus === 'Bloqueado') {
           bloqueados++;
@@ -303,19 +313,35 @@ export class DashboardController {
 
       const inventarioEstatus: Record<number, string> = {};
       reservas.forEach((r) => {
+        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const current = inventarioEstatus[r.inventario_id];
-        if (r.estatus === 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Vendido';
-        } else if (r.estatus === 'Reservado' && current !== 'Vendido') {
-          inventarioEstatus[r.inventario_id] = 'Reservado';
-        } else if (r.estatus === 'Bloqueado' && !current) {
-          inventarioEstatus[r.inventario_id] = 'Bloqueado';
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
+
+        if (newPrioridad > currentPrioridad) {
+          inventarioEstatus[r.inventario_id] = r.estatus;
         }
       });
 
       // Filtrar inventarios por estatus seleccionado
+      // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
       const inventariosFiltrados = inventariosBase.filter((inv) => {
         const est = inventarioEstatus[inv.id] || 'Disponible';
+
+        if (estatus_filtro === 'Reservado') {
+          // Reservado muestra todo lo ocupado
+          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte' || est === 'Reservado';
+        } else if (estatus_filtro === 'Vendido') {
+          // Vendido solo muestra Vendido
+          return est === 'Vendido';
+        }
         return est === estatus_filtro;
       });
 
@@ -361,75 +387,83 @@ export class DashboardController {
     }
   }
 
-  // Obtener opciones para los filtros
+  // Obtener opciones para los filtros (con cache de 30 minutos)
   async getFilterOptions(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [estados, ciudades, formatos, nses, catorcenas] = await Promise.all([
-        // Estados
-        prisma.inventarios.findMany({
-          select: { estado: true },
-          distinct: ['estado'],
-          where: { estado: { not: null } },
-        }),
-        // Ciudades/Plazas
-        prisma.inventarios.findMany({
-          select: { plaza: true },
-          distinct: ['plaza'],
-          where: { plaza: { not: null } },
-        }),
-        // Formatos (tipo de mueble)
-        prisma.inventarios.findMany({
-          select: { tipo_de_mueble: true },
-          distinct: ['tipo_de_mueble'],
-          where: { tipo_de_mueble: { not: null } },
-        }),
-        // Nivel Socioeconomico
-        prisma.inventarios.findMany({
-          select: { nivel_socioeconomico: true },
-          distinct: ['nivel_socioeconomico'],
-          where: { nivel_socioeconomico: { not: null } },
-        }),
-        // Catorcenas (ultimos 2 anos)
-        prisma.catorcenas.findMany({
-          where: {
-            a_o: { gte: new Date().getFullYear() - 1 },
-          },
-          orderBy: [{ a_o: 'desc' }, { numero_catorcena: 'desc' }],
-        }),
-      ]);
+      const data = await cache.getOrSet(
+        CACHE_KEYS.FILTER_OPTIONS,
+        async () => {
+          const [estados, ciudades, formatos, nses, catorcenas] = await Promise.all([
+            // Estados
+            prisma.inventarios.findMany({
+              select: { estado: true },
+              distinct: ['estado'],
+              where: { estado: { not: null } },
+            }),
+            // Ciudades/Plazas
+            prisma.inventarios.findMany({
+              select: { plaza: true },
+              distinct: ['plaza'],
+              where: { plaza: { not: null } },
+            }),
+            // Formatos (tipo de mueble)
+            prisma.inventarios.findMany({
+              select: { tipo_de_mueble: true },
+              distinct: ['tipo_de_mueble'],
+              where: { tipo_de_mueble: { not: null } },
+            }),
+            // Nivel Socioeconomico
+            prisma.inventarios.findMany({
+              select: { nivel_socioeconomico: true },
+              distinct: ['nivel_socioeconomico'],
+              where: { nivel_socioeconomico: { not: null } },
+            }),
+            // Catorcenas (ultimos 2 anos)
+            prisma.catorcenas.findMany({
+              where: {
+                a_o: { gte: new Date().getFullYear() - 1 },
+              },
+              orderBy: [{ a_o: 'desc' }, { numero_catorcena: 'desc' }],
+            }),
+          ]);
 
-      // Buscar catorcena actual por separado
-      const catorcenaActual = await prisma.catorcenas.findFirst({
-        where: {
-          fecha_inicio: { lte: new Date() },
-          fecha_fin: { gte: new Date() },
+          // Buscar catorcena actual por separado
+          const catorcenaActual = await prisma.catorcenas.findFirst({
+            where: {
+              fecha_inicio: { lte: new Date() },
+              fecha_fin: { gte: new Date() },
+            },
+          });
+
+          return {
+            estados: estados.map((e) => e.estado).filter(Boolean).sort(),
+            ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
+            formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
+            nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
+            catorcenaActual: catorcenaActual ? {
+              id: catorcenaActual.id,
+              label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,
+              numero: catorcenaActual.numero_catorcena,
+              ano: catorcenaActual.a_o,
+              fecha_inicio: catorcenaActual.fecha_inicio,
+              fecha_fin: catorcenaActual.fecha_fin,
+            } : null,
+            catorcenas: catorcenas.map((c) => ({
+              id: c.id,
+              label: `Cat ${c.numero_catorcena} - ${c.a_o}`,
+              numero: c.numero_catorcena,
+              ano: c.a_o,
+              fecha_inicio: c.fecha_inicio,
+              fecha_fin: c.fecha_fin,
+            })),
+          };
         },
-      });
+        CACHE_TTL.FILTER_OPTIONS
+      );
 
       res.json({
         success: true,
-        data: {
-          estados: estados.map((e) => e.estado).filter(Boolean).sort(),
-          ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
-          formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
-          nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
-          catorcenaActual: catorcenaActual ? {
-            id: catorcenaActual.id,
-            label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,
-            numero: catorcenaActual.numero_catorcena,
-            ano: catorcenaActual.a_o,
-            fecha_inicio: catorcenaActual.fecha_inicio,
-            fecha_fin: catorcenaActual.fecha_fin,
-          } : null,
-          catorcenas: catorcenas.map((c) => ({
-            id: c.id,
-            label: `Cat ${c.numero_catorcena} - ${c.a_o}`,
-            numero: c.numero_catorcena,
-            ano: c.a_o,
-            fecha_inicio: c.fecha_inicio,
-            fecha_fin: c.fecha_fin,
-          })),
-        },
+        data,
       });
     } catch (error) {
       const message =
@@ -500,27 +534,35 @@ export class DashboardController {
     }
   }
 
-  // Widget: Proximas catorcenas
+  // Widget: Proximas catorcenas (con cache de 1 hora)
   async getUpcomingCatorcenas(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const hoy = new Date();
-      const catorcenas = await prisma.catorcenas.findMany({
-        where: {
-          fecha_inicio: { gte: hoy },
+      const data = await cache.getOrSet(
+        CACHE_KEYS.CATORCENAS,
+        async () => {
+          const hoy = new Date();
+          const catorcenas = await prisma.catorcenas.findMany({
+            where: {
+              fecha_inicio: { gte: hoy },
+            },
+            orderBy: { fecha_inicio: 'asc' },
+            take: 6,
+          });
+
+          return catorcenas.map((c) => ({
+            id: c.id,
+            numero: c.numero_catorcena,
+            ano: c.a_o,
+            fecha_inicio: c.fecha_inicio,
+            fecha_fin: c.fecha_fin,
+          }));
         },
-        orderBy: { fecha_inicio: 'asc' },
-        take: 6,
-      });
+        CACHE_TTL.CATORCENAS
+      );
 
       res.json({
         success: true,
-        data: catorcenas.map((c) => ({
-          id: c.id,
-          numero: c.numero_catorcena,
-          ano: c.a_o,
-          fecha_inicio: c.fecha_inicio,
-          fecha_fin: c.fecha_fin,
-        })),
+        data,
       });
     } catch (error) {
       const message =
@@ -698,13 +740,20 @@ export class DashboardController {
 
       reservas.forEach((r) => {
         const current = inventarioInfo[r.inventario_id];
-        const prioridad = { Vendido: 3, Reservado: 2, Bloqueado: 1 };
-        const currentPrioridad = current ? (prioridad[current.estatus as keyof typeof prioridad] || 0) : 0;
-        const newPrioridad = prioridad[r.estatus as keyof typeof prioridad] || 0;
+        // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
+        const prioridad: Record<string, number> = {
+          'Vendido': 5,
+          'Vendido bonificado': 4,
+          'Con Arte': 3,
+          'Reservado': 2,
+          'Bloqueado': 1,
+        };
+        const currentPrioridad = current ? (prioridad[current.estatus] || 0) : 0;
+        const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
           inventarioInfo[r.inventario_id] = {
-            estatus: r.estatus,
+            estatus: r.estatus, // Guardar estatus original
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
           };
         }
@@ -733,6 +782,14 @@ export class DashboardController {
         })
         .filter((inv) => {
           if (!estatusFiltro) return true;
+
+          // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
+          if (estatusFiltro === 'Reservado') {
+            return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' ||
+                   inv.estatus === 'Con Arte' || inv.estatus === 'Reservado';
+          } else if (estatusFiltro === 'Vendido') {
+            return inv.estatus === 'Vendido';
+          }
           return inv.estatus === estatusFiltro;
         });
 

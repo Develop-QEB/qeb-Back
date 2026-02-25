@@ -1,6 +1,13 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { getMexicoDate } from '../utils/dateHelper';
+import {
+  calcularEstadoAutorizacion,
+  verificarCarasPendientes,
+  crearTareasAutorizacion,
+  obtenerResumenAutorizacion
+} from '../services/autorizacion.service';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -219,7 +226,13 @@ export class SolicitudesController {
       const { id } = req.params;
       const { status } = req.body;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Obtener solicitud antes de actualizar
       const solicitudAnterior = await prisma.solicitud.findUnique({
@@ -324,7 +337,13 @@ export class SolicitudesController {
     try {
       const { id } = req.params;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Obtener la solicitud antes de eliminar
       const solicitud = await prisma.solicitud.findFirst({
@@ -746,6 +765,7 @@ export class SolicitudesController {
         categoria_id,
         categoria_nombre,
         card_code, // SAP CardCode (ACA_U_SAPCode)
+        salesperson_code, // SAP SalesPersonCode (ASESOR_U_SAPCode_Original)
         // Campaign data
         nombre_campania,
         descripcion,
@@ -768,7 +788,13 @@ export class SolicitudesController {
       } = req.body;
 
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       // Calculate totals from caras
       const totalCaras = caras.reduce((acc: number, c: { caras: number; bonificacion: number }) => acc + c.caras + (c.bonificacion || 0), 0);
@@ -779,12 +805,14 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
+      // Use salesperson_code from request (ASESOR_U_SAPCode_Original from frontend)
+
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
         // 1. Create solicitud
         const solicitud = await tx.solicitud.create({
           data: {
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
@@ -809,6 +837,7 @@ export class SolicitudesController {
             archivo,
             tipo_archivo,
             card_code: card_code || null,
+            salesperson_code,
           },
         });
 
@@ -818,7 +847,7 @@ export class SolicitudesController {
             tipo: 'Solicitud',
             ref_id: solicitud.id,
             accion: 'Creacion',
-            fecha_hora: new Date(),
+            fecha_hora: getMexicoDate(),
             detalles: `Solicitud creada por ${userName}`,
           },
         });
@@ -827,7 +856,7 @@ export class SolicitudesController {
         const propuesta = await tx.propuesta.create({
           data: {
             cliente_id,
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             status: 'Pendiente',
             descripcion,
             notas,
@@ -882,7 +911,7 @@ export class SolicitudesController {
         // 6. Create solicitud_original
         await tx.solicitud_original.create({
           data: {
-            fecha: new Date(),
+            fecha: getMexicoDate(),
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
@@ -908,7 +937,7 @@ export class SolicitudesController {
         for (const asignado of asignados) {
           await tx.tareas.create({
             data: {
-              fecha_inicio: new Date(),
+              fecha_inicio: getMexicoDate(),
               fecha_fin: new Date(fecha_fin),
               tipo: 'Solicitud',
               responsable: asignado.nombre,
@@ -925,9 +954,20 @@ export class SolicitudesController {
           });
         }
 
-        // 8. Create solicitudCaras for each cara entry
+        // 8. Create solicitudCaras for each cara entry with authorization status
         const createdCaras = [];
         for (const cara of caras) {
+          // Calcular estado de autorización
+          const estadoResult = await calcularEstadoAutorizacion({
+            ciudad: cara.ciudad,
+            formato: cara.formato,
+            tipo: cara.tipo,
+            caras: cara.caras,
+            bonificacion: cara.bonificacion || 0,
+            costo: cara.costo,
+            tarifa_publica: cara.tarifa_publica || 0
+          });
+
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
               idquote: propuesta.id.toString(),
@@ -945,8 +985,9 @@ export class SolicitudesController {
               fin_periodo: new Date(cara.fin_periodo),
               caras_flujo: cara.caras_flujo || 0,
               caras_contraflujo: cara.caras_contraflujo || 0,
-              articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
+              articulo: cara.articulo || articulo,
               descuento: cara.descuento || 0,
+              estado_autorizacion: estadoResult.estado,
             },
           });
           createdCaras.push(solicitudCara);
@@ -964,10 +1005,34 @@ export class SolicitudesController {
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
+      // DESPUÉS de la transacción: verificar caras pendientes y crear tareas
+      // (igual que en update - fuera de la transacción para que pueda ver los datos)
+      const autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
+      console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
+
+      if (autorizacionInfo.tienePendientes && userId) {
+        await crearTareasAutorizacion(
+          result.solicitud.id,
+          result.propuesta.id,
+          userId,
+          userName,
+          autorizacionInfo.pendientesDg,
+          autorizacionInfo.pendientesDcm
+        );
+      }
+
+      // Build message with authorization info
+      let mensaje = 'Solicitud creada exitosamente';
+      if (autorizacionInfo.tienePendientes) {
+        const totalPendientes = autorizacionInfo.pendientesDg.length + autorizacionInfo.pendientesDcm.length;
+        mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
       res.status(201).json({
         success: true,
         data: result,
-        message: 'Solicitud creada exitosamente',
+        message: mensaje,
+        autorizacion: autorizacionInfo,
       });
     } catch (error) {
       console.error('Error creating solicitud:', error);
@@ -985,7 +1050,13 @@ export class SolicitudesController {
       const { id } = req.params;
       const { comentario } = req.body;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });
@@ -1123,7 +1194,13 @@ export class SolicitudesController {
     try {
       const { id } = req.params;
       const userId = req.user?.userId;
-      const userName = req.user?.nombre || 'Usuario';
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });
@@ -1273,6 +1350,15 @@ export class SolicitudesController {
   async update(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.userId;
+      // Get user name from database if not in token
+      let userName = req.user?.nombre;
+      if (!userName && userId) {
+        const user = await prisma.usuario.findUnique({ where: { id: userId }, select: { nombre: true } });
+        userName = user?.nombre || 'Usuario';
+      }
+      userName = userName || 'Usuario';
+
       const {
         cliente_id,
         cuic,
@@ -1416,14 +1502,25 @@ export class SolicitudesController {
           });
         }
 
-        // Delete existing caras and recreate
+        // Delete existing caras and recreate with authorization status
         if (propuesta) {
           await tx.solicitudCaras.deleteMany({
             where: { idquote: propuesta.id.toString() },
           });
 
-          // Create new caras
+          // Create new caras with authorization calculation
           for (const cara of caras) {
+            // Calcular estado de autorización
+            const estadoResult = await calcularEstadoAutorizacion({
+              ciudad: cara.ciudad,
+              formato: cara.formato,
+              tipo: cara.tipo,
+              caras: cara.caras,
+              bonificacion: cara.bonificacion || 0,
+              costo: cara.costo,
+              tarifa_publica: cara.tarifa_publica || 0
+            });
+
             await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
@@ -1441,12 +1538,41 @@ export class SolicitudesController {
                 fin_periodo: new Date(cara.fin_periodo),
                 caras_flujo: cara.caras_flujo || 0,
                 caras_contraflujo: cara.caras_contraflujo || 0,
-                articulo: cara.articulo || articulo, // Use per-cara articulo, fallback to top-level
+                articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
+                estado_autorizacion: estadoResult.estado,
               },
             });
           }
+
+          // Verificar si hay caras pendientes de autorización y crear tareas
+          const autorizacionInfo = await verificarCarasPendientes(propuesta.id.toString());
+          if (autorizacionInfo.tienePendientes && userId) {
+            await crearTareasAutorizacion(
+              solicitud.id,
+              propuesta.id,
+              userId,
+              userName,
+              autorizacionInfo.pendientesDg,
+              autorizacionInfo.pendientesDcm
+            );
+          }
         }
+
+        // Detectar qué campos cambiaron
+        const cambios: string[] = [];
+        if (descripcion !== solicitud.descripcion) cambios.push('descripción');
+        if (razon_social !== solicitud.razon_social) cambios.push('razón social');
+        if (marca_nombre !== solicitud.marca_nombre) cambios.push('marca');
+        if (presupuesto !== solicitud.presupuesto) cambios.push('presupuesto');
+        if (asignadosStr !== solicitud.asignado) cambios.push('asignados');
+        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) cambios.push('nombre de campaña');
+        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) cambios.push('fecha inicio');
+        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) cambios.push('fecha fin');
+        if (notas !== solicitud.notas) cambios.push('notas');
+        if (archivo !== solicitud.archivo) cambios.push('archivo');
+
+        const cambiosStr = cambios.length > 0 ? cambios.join(', ') : 'datos generales';
 
         // Create historial entry
         await tx.historial.create({
@@ -1455,21 +1581,157 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Edición',
             fecha_hora: new Date(),
-            detalles: `Solicitud editada por ${req.user?.nombre || 'usuario'}`,
+            detalles: `${userName} editó: ${cambiosStr}`,
           },
         });
+
+        // Crear notificaciones para usuarios involucrados
+        const nombreSolicitud = razon_social || marca_nombre || solicitud.razon_social || 'Sin nombre';
+        const tituloNotificacion = `Solicitud #${solicitud.id} editada - ${nombreSolicitud}`;
+        const descripcionNotificacion = `${userName} modificó: ${cambiosStr}`;
+
+        // Recopilar involucrados (sin duplicados, excluyendo al autor)
+        const involucrados = new Set<number>();
+
+        // Agregar creador de la solicitud
+        if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+          involucrados.add(solicitud.usuario_id);
+        }
+
+        // Agregar usuarios asignados anteriores
+        if (solicitud.id_asignado) {
+          solicitud.id_asignado.split(',').forEach((idStr: string) => {
+            const parsed = parseInt(idStr.trim());
+            if (!isNaN(parsed) && parsed !== userId) {
+              involucrados.add(parsed);
+            }
+          });
+        }
+
+        // Agregar nuevos asignados
+        if (asignados && Array.isArray(asignados)) {
+          asignados.forEach((a: { id: number }) => {
+            if (a.id && a.id !== userId) {
+              involucrados.add(a.id);
+            }
+          });
+        }
+
+        // Crear notificación para cada involucrado
+        const now = new Date();
+        const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+        for (const responsableId of involucrados) {
+          await tx.tareas.create({
+            data: {
+              titulo: tituloNotificacion,
+              descripcion: descripcionNotificacion,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              responsable: '',
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campania?.id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              asignado: userName,
+              id_asignado: userId?.toString() || '',
+            },
+          });
+        }
       }, {
         maxWait: 60000,
         timeout: 120000,
       });
 
+      // Check for pending authorizations after transaction
+      let autorizacion = { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] };
+      if (propuesta) {
+        autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+      }
+
+      // Build message with authorization info
+      let mensaje = 'Solicitud actualizada exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Solicitud actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+      }
+
       res.json({
         success: true,
-        message: 'Solicitud actualizada exitosamente',
+        message: mensaje,
+        autorizacion,
       });
     } catch (error) {
       console.error('Error updating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar solicitud';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async uploadArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      if (!req.file) {
+        res.status(400).json({ success: false, error: 'No se proporcionó archivo' });
+        return;
+      }
+
+      const fileUrl = `/uploads/${req.file.filename}`;
+
+      await prisma.solicitud.update({
+        where: { id: parseInt(id) },
+        data: {
+          archivo: fileUrl,
+        },
+      });
+
+      res.json({ success: true, data: { url: fileUrl } });
+    } catch (error) {
+      console.error('Error uploading archivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al subir archivo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Evalúa el estado de autorización de una cara sin guardarla
+   * Útil para mostrar preview en el frontend antes de crear la solicitud
+   */
+  async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      console.log('[evaluarAutorizacion] Body recibido:', req.body);
+      const { ciudad, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
+
+      // Validar datos requeridos
+      if (!formato || caras === undefined || costo === undefined) {
+        res.status(400).json({
+          success: false,
+          error: 'Faltan datos requeridos: formato, caras y costo son obligatorios'
+        });
+        return;
+      }
+
+      // Calcular estado de autorización
+      const resultado = await calcularEstadoAutorizacion({
+        ciudad: ciudad || null,
+        formato,
+        tipo: tipo || null,
+        caras: Number(caras) || 0,
+        bonificacion: Number(bonificacion) || 0,
+        costo: Number(costo) || 0,
+        tarifa_publica: Number(tarifa_publica) || 0
+      });
+
+      res.json({
+        success: true,
+        data: resultado
+      });
+    } catch (error) {
+      console.error('Error evaluando autorización:', error);
+      const message = error instanceof Error ? error.message : 'Error al evaluar autorización';
       res.status(500).json({ success: false, error: message });
     }
   }
