@@ -114,4 +114,15 @@ async function gracefulShutdown(signal: string) {
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Promise Rejection:', reason);
+  console.error('[FATAL] Promise:', promise);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught Exception:', error);
+  // Dar tiempo para loguear y luego salir con código de error
+  setTimeout(() => process.exit(1), 1000);
+});
+
 main();
