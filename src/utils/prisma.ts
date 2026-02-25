@@ -1,12 +1,26 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
+// Hostinger hostname -> IP mapping (DNS resolution fails from some cloud providers)
+const HOSTINGER_HOST_MAP: Record<string, string> = {
+  'srv1978.hstgr.io': '82.197.82.225',
+};
+
 // Build datasource URL with forced pool settings (tuned for Hostinger shared hosting)
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  const [base, queryString] = url.split('?');
+  // Replace Hostinger hostnames with direct IPs to avoid DNS issues from cloud providers
+  let resolvedUrl = url;
+  for (const [hostname, ip] of Object.entries(HOSTINGER_HOST_MAP)) {
+    if (resolvedUrl.includes(hostname)) {
+      resolvedUrl = resolvedUrl.replace(hostname, ip);
+      console.log(`[Prisma] Resolved ${hostname} -> ${ip}`);
+    }
+  }
+
+  const [base, queryString] = resolvedUrl.split('?');
   const existing = new URLSearchParams(queryString || '');
 
   // FORCE these values — Hostinger shared hosting needs generous timeouts
