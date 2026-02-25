@@ -23,11 +23,12 @@ function getDatasourceUrl(): string {
   const [base, queryString] = resolvedUrl.split('?');
   const existing = new URLSearchParams(queryString || '');
 
-  // FORCE these values — Hostinger shared hosting needs generous timeouts
-  existing.set('connection_limit', '15');
-  existing.set('pool_timeout', '30');
-  existing.set('connect_timeout', '30');
-  existing.set('socket_timeout', '30');
+  // Hostinger shared hosting: wait_timeout=20s, max_user_connections=50
+  // Keep pool small and timeouts generous to handle aggressive idle killing
+  existing.set('connection_limit', '5');
+  existing.set('pool_timeout', '60');
+  existing.set('connect_timeout', '60');
+  existing.set('socket_timeout', '60');
 
   const finalUrl = `${base}?${existing.toString()}`;
   const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
@@ -85,7 +86,7 @@ const createPrismaClient = () => {
     return next(params);
   });
 
-  // Keepalive: ping DB every 4 minutes to prevent Hostinger from dropping idle connections
+  // Keepalive: ping DB every 10 seconds — Hostinger wait_timeout is only 20s!
   setInterval(async () => {
     try {
       await client.$queryRaw`SELECT 1`;
@@ -93,7 +94,7 @@ const createPrismaClient = () => {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn('[Prisma] Keepalive ping failed:', msg);
     }
-  }, 4 * 60 * 1000);
+  }, 10 * 1000);
 
   return client;
 };
