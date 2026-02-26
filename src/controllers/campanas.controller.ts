@@ -132,7 +132,14 @@ export class CampanasController {
                 AND rsv2.APS > 0
             )
             THEN 1 ELSE 0
-          END AS has_aps
+          END AS has_aps,
+          (
+            SELECT COUNT(*)
+            FROM reservas rsv3
+            INNER JOIN solicitudCaras sc3 ON sc3.id = rsv3.solicitudCaras_id
+            WHERE sc3.idquote = pr.solicitud_id
+              AND rsv3.deleted_at IS NULL
+          ) AS reservas_count
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -285,6 +292,18 @@ export class CampanasController {
         solicitud_id: c.solicitud_id,
       }));
 
+      // Contar reservas para detectar campañas incompletas
+      let reservasCount = 0;
+      if (propuesta?.solicitud_id) {
+        const countResult = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
+          `SELECT COUNT(*) as cnt FROM reservas r
+           INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+           WHERE sc.idquote = ? AND r.deleted_at IS NULL`,
+          propuesta.solicitud_id
+        );
+        reservasCount = Number(countResult[0]?.cnt || 0);
+      }
+
       // Combinar toda la info
       const campanaCompleta = {
         ...campana,
@@ -350,6 +369,8 @@ export class CampanasController {
         // Info de SAP desde solicitud
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
+        // Reservas count para detectar campañas incompletas
+        reservas_count: reservasCount,
         // Comentarios
         comentarios,
       };
