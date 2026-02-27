@@ -4798,7 +4798,8 @@ export class CampanasController {
           cm.status AS status_campania,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
-          sc.cortesia
+          sc.cortesia,
+          sc.articulo AS numero_articulo
         FROM reservas rsv
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id

@@ -2929,6 +2929,26 @@ export class PropuestasController {
         },
       });
 
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+      const todasCaras = await prisma.solicitudCaras.findMany({
+        where: { idquote: id },
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
+      });
+      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      if (totalCarasGlobal % 2 !== 0) {
+        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
+        if (carasNoP.length > 0) {
+          await prisma.solicitudCaras.updateMany({
+            where: {
+              idquote: id,
+              autorizacion_dg: { not: 'pendiente' }
+            },
+            data: { autorizacion_dg: 'pendiente' }
+          });
+          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+        }
+      }
+
       // Check for pending authorizations and create tasks if needed
       const autorizacion = await verificarCarasPendientes(id);
       if (autorizacion.tienePendientes && userId) {
