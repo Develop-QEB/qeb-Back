@@ -1079,6 +1079,8 @@ export class CampanasController {
           i.tipo_de_cara,
           i.latitud,
           i.longitud,
+          i.ancho,
+          i.alto,
           i.plaza,
           i.tradicional_digital,
           i.tarifa_publica,
