@@ -423,6 +423,32 @@ export class NotificacionesController {
         data: updateData,
       });
 
+      // Si es tarea de ajuste y se finaliza, verificar si todas las hermanas ya están finalizadas
+      if (
+        ['Atendido', 'Completado'].includes(tarea.estatus || '') &&
+        ['Ajuste Cto Cliente', 'Ajuste de Caras'].includes(tarea.tipo || '') &&
+        tarea.id_propuesta
+      ) {
+        const tareasHermanas = await prisma.tareas.findMany({
+          where: {
+            id_propuesta: tarea.id_propuesta,
+            tipo: tarea.tipo,
+          },
+          select: { estatus: true },
+        });
+
+        const todasFinalizadas = tareasHermanas.every(t =>
+          ['Atendido', 'Completado', 'Cancelado'].includes(t.estatus || '')
+        );
+
+        if (todasFinalizadas) {
+          await prisma.propuesta.update({
+            where: { id: parseInt(tarea.id_propuesta) },
+            data: { status: 'Atendida', updated_at: new Date() },
+          });
+        }
+      }
+
       // Emitir evento WebSocket para actualizar tareas en tiempo real
       emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
 
