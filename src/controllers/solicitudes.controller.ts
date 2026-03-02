@@ -1287,6 +1287,64 @@ export class SolicitudesController {
     }
   }
 
+  async getInventarioOptions(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const estado = req.query.estado as string | undefined;
+      const ciudadesParam = req.query.ciudades as string | undefined;
+      const ciudadesArray = ciudadesParam ? ciudadesParam.split(',').map(c => c.trim()).filter(Boolean) : [];
+
+      // Build WHERE condition: filter by estado and/or municipios
+      const whereCondition: any = {};
+      if (estado && ciudadesArray.length > 0) {
+        whereCondition.OR = [
+          { estado },
+          { municipio: { in: ciudadesArray } },
+        ];
+      } else if (estado) {
+        whereCondition.estado = estado;
+      } else if (ciudadesArray.length > 0) {
+        whereCondition.municipio = { in: ciudadesArray };
+      }
+      // If no filters, return everything (fallback)
+
+      const [formatos, tipos, nse] = await Promise.all([
+        prisma.inventarios.findMany({
+          select: { tipo_de_mueble: true },
+          distinct: ['tipo_de_mueble'],
+          where: { ...whereCondition, tipo_de_mueble: { not: null } },
+          orderBy: { tipo_de_mueble: 'asc' },
+        }),
+        prisma.inventarios.findMany({
+          select: { tradicional_digital: true },
+          distinct: ['tradicional_digital'],
+          where: { ...whereCondition, tradicional_digital: { not: null } },
+          orderBy: { tradicional_digital: 'asc' },
+        }),
+        prisma.inventarios.findMany({
+          select: { nivel_socioeconomico: true },
+          distinct: ['nivel_socioeconomico'],
+          where: { ...whereCondition, nivel_socioeconomico: { not: null } },
+          orderBy: { nivel_socioeconomico: 'asc' },
+        }),
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          formatos: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+          tipos: tipos.map(t => t.tradicional_digital).filter(Boolean),
+          nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener opciones de inventario';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async getNextId(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Get max ID from solicitud, propuesta, cotizacion, campania tables
