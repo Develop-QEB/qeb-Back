@@ -1152,6 +1152,137 @@ export class InventariosController {
     }
   }
 
+  // Bulk create inventarios from CSV
+  async bulkCreate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { inventarios } = req.body;
+      if (!Array.isArray(inventarios) || inventarios.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de inventarios' });
+        return;
+      }
+
+      const REQUIRED_FIELDS = ['codigo_unico', 'tipo_de_mueble', 'tipo_de_cara', 'tradicional_digital', 'plaza', 'estado', 'municipio'];
+      const errores: { fila: number; campo: string; mensaje: string }[] = [];
+      const validRows: any[] = [];
+      const codigosInBatch = new Set<string>();
+
+      // Validate each row
+      for (let i = 0; i < inventarios.length; i++) {
+        const row = inventarios[i];
+        const filaNum = i + 1;
+        let hasError = false;
+
+        // Check required fields
+        for (const field of REQUIRED_FIELDS) {
+          if (!row[field] || String(row[field]).trim() === '') {
+            errores.push({ fila: filaNum, campo: field, mensaje: `Campo requerido vacío` });
+            hasError = true;
+          }
+        }
+
+        // Check duplicate within batch
+        const codigo = String(row.codigo_unico || '').trim();
+        if (codigo && codigosInBatch.has(codigo)) {
+          errores.push({ fila: filaNum, campo: 'codigo_unico', mensaje: `Duplicado dentro del CSV` });
+          hasError = true;
+        }
+        if (codigo) codigosInBatch.add(codigo);
+
+        // Validate enum values
+        if (row.tipo_de_cara && !['Flujo', 'Contraflujo'].includes(row.tipo_de_cara)) {
+          errores.push({ fila: filaNum, campo: 'tipo_de_cara', mensaje: `Debe ser Flujo o Contraflujo` });
+          hasError = true;
+        }
+        if (row.tradicional_digital && !['Tradicional', 'Digital'].includes(row.tradicional_digital)) {
+          errores.push({ fila: filaNum, campo: 'tradicional_digital', mensaje: `Debe ser Tradicional o Digital` });
+          hasError = true;
+        }
+
+        if (!hasError) {
+          validRows.push({
+            codigo_unico: codigo || null,
+            ubicacion: row.ubicacion || null,
+            tipo_de_cara: row.tipo_de_cara || null,
+            cara: row.cara || null,
+            mueble: row.mueble || null,
+            latitud: parseFloat(row.latitud) || 0,
+            longitud: parseFloat(row.longitud) || 0,
+            plaza: row.plaza || null,
+            estado: row.estado || null,
+            municipio: row.municipio || null,
+            cp: row.cp ? parseInt(row.cp) : null,
+            tradicional_digital: row.tradicional_digital || null,
+            sentido: row.sentido || null,
+            tipo_de_mueble: row.tipo_de_mueble || null,
+            ancho: parseFloat(row.ancho) || 0,
+            alto: parseFloat(row.alto) || 0,
+            nivel_socioeconomico: row.nivel_socioeconomico || null,
+            total_espacios: row.total_espacios ? parseInt(row.total_espacios) : null,
+            estatus: row.estatus || 'Disponible',
+            codigo: row.codigo || null,
+            isla: row.isla || null,
+            mueble_isla: row.mueble_isla || null,
+            entre_calle_1: row.entre_calle_1 || null,
+            entre_calle_2: row.entre_calle_2 || null,
+            orientacion: row.orientacion || null,
+            tarifa_piso: row.tarifa_piso ? parseFloat(row.tarifa_piso) : null,
+            tarifa_publica: row.tarifa_publica ? parseFloat(row.tarifa_publica) : null,
+          });
+        }
+      }
+
+      // Check which codigos already exist in DB
+      let duplicados = 0;
+      if (validRows.length > 0) {
+        const codigos = validRows.map(r => r.codigo_unico).filter(Boolean);
+        const existing = await prisma.inventarios.findMany({
+          where: { codigo_unico: { in: codigos } },
+          select: { codigo_unico: true },
+        });
+        const existingSet = new Set(existing.map(e => e.codigo_unico));
+
+        const toInsert = validRows.filter(r => {
+          if (r.codigo_unico && existingSet.has(r.codigo_unico)) {
+            duplicados++;
+            return false;
+          }
+          return true;
+        });
+
+        if (toInsert.length > 0) {
+          await prisma.inventarios.createMany({
+            data: toInsert,
+            skipDuplicates: true,
+          });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            insertados: toInsert.length,
+            duplicados,
+            errores,
+            total: inventarios.length,
+          },
+        });
+      } else {
+        res.json({
+          success: true,
+          data: {
+            insertados: 0,
+            duplicados: 0,
+            errores,
+            total: inventarios.length,
+          },
+        });
+      }
+    } catch (error) {
+      console.error('Error in bulk create:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear inventarios masivamente';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Update an existing inventario
   async update(req: AuthRequest, res: Response): Promise<void> {
     try {

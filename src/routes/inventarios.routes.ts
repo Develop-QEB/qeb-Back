@@ -26,6 +26,7 @@ router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.b
 router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
 
 // CRUD
+router.post('/bulk', inventariosController.bulkCreate.bind(inventariosController));
 router.post('/', inventariosController.create.bind(inventariosController));
 router.put('/:id', inventariosController.update.bind(inventariosController));
 router.patch('/:id/toggle-block', inventariosController.toggleBlock.bind(inventariosController));
