@@ -1071,37 +1071,44 @@ export class CampanasController {
 
       const query = `
         SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.mueble,
-          i.estado,
-          i.tipo_de_cara,
-          i.latitud,
-          i.longitud,
-          i.ancho,
-          i.alto,
-          i.plaza,
-          i.tradicional_digital,
-          i.tarifa_publica,
-          rsv.estatus as estatus_reserva,
-          rsv.archivo,
-          rsv.calendario_id,
-          rsv.arte_aprobado,
-          rsv.instalado,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.plaza) as plaza,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          sc.formato,
-          sc.tarifa_publica as tarifa_publica_sc,
-          sc.bonificacion as bonificacion_sc,
-          sc.costo as renta,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
-          1 AS caras_totales
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -1112,7 +1119,8 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
+        ORDER BY MIN(rsv.id) DESC
       `;
 
       const tareasQuery = `
@@ -1154,9 +1162,10 @@ export class CampanasController {
       }
 
       const inventarioConEstatus = inventarioArr.map((row: any) => {
-        const rsvId = Number(row.rsv_ids);
-        const tImpresion = impresionByReserva.get(rsvId);
-        const tRecepcion = recepcionByReserva.get(rsvId);
+        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
+        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
+        const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (Number(row.instalado) === 1) {
@@ -1174,7 +1183,7 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = programacionByReserva.get(rsvId);
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -1186,7 +1195,7 @@ export class CampanasController {
         }
 
         // Indicaciones de instalación
-        const tInstalacion = instalacionByReserva.get(rsvId);
+        const tInstalacion = rsvIds.map(id => instalacionByReserva.get(id)).find(Boolean);
         let indicaciones_instalacion: string | null = null;
         if (tInstalacion && tInstalacion.evidencia) {
           try {
@@ -1197,7 +1206,7 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion };
+        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
@@ -1227,42 +1236,49 @@ export class CampanasController {
       // Query principal con subquery para id_propuesta (elimina 1 round trip a DB)
       const query = `
         SELECT /*+ MAX_EXECUTION_TIME(30000) */
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.ubicacion,
-          i.tipo_de_cara,
-          i.cara,
-          i.mueble,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.estado,
-          i.municipio,
-          i.tipo_de_mueble,
-          i.ancho,
-          i.alto,
-          i.nivel_socioeconomico,
-          i.tarifa_publica,
-          i.tradicional_digital,
-          rsv.archivo,
-          rsv.estatus as estatus_reserva,
-          rsv.calendario_id,
-          rsv.APS as aps,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.cara) as cara,
+          MIN(i.mueble) as mueble,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.APS) as aps,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          epIn.numero_espacio as espacios,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          1 AS caras_totales,
-          rsv.arte_aprobado,
-          rsv.instalado,
-          sc.formato,
-          sc.tarifa_publica as tarifa_publica_sc,
-          sc.bonificacion as bonificacion_sc,
-          sc.costo as renta
+          MIN(epIn.numero_espacio) as espacios,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -1277,7 +1293,8 @@ export class CampanasController {
           )
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
       `;
 
       const tareasQuery = `
@@ -1364,9 +1381,10 @@ export class CampanasController {
 
       // Calcular estatus_arte y catorcena en código
       const inventarioConEstatus = inventarioArr.map((row: any) => {
-        const rsvId = Number(row.rsv_ids);
-        const tImpresion = impresionByReserva.get(rsvId);
-        const tRecepcion = recepcionByReserva.get(rsvId);
+        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
+        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
+        const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
 
         // estatus_arte
         let estatus_arte: string;
@@ -1396,7 +1414,7 @@ export class CampanasController {
         }
 
         // Indicaciones de programación desde la tarea
-        const tProgramacion = programacionByReserva.get(rsvId);
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -1408,7 +1426,7 @@ export class CampanasController {
         }
 
         // Indicaciones de instalación desde la tarea
-        const tInstalacion = instalacionByReserva.get(rsvId);
+        const tInstalacion = rsvIds.map(id => instalacionByReserva.get(id)).find(Boolean);
         let indicaciones_instalacion: string | null = null;
         if (tInstalacion && tInstalacion.evidencia) {
           try {
@@ -1419,7 +1437,7 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion };
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
