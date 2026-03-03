@@ -170,9 +170,37 @@ export class CampanasController {
       `;
 
       const offset = (page - 1) * limit;
-      const campanas = await prisma.$queryRawUnsafe(query, ...params, limit, offset);
+      const campanas = await prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset);
       const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
       const total = Number(countResult[0]?.total || 0);
+
+      // Recalcular circuitos por campaña en bloque para evitar inconsistencias por subqueries correlacionadas.
+      const campanaIds = (campanas || []).map((c: any) => Number(c.id)).filter((id: number) => Number.isFinite(id));
+      if (campanaIds.length > 0) {
+        const placeholders = campanaIds.map(() => '?').join(', ');
+        const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
+          `
+            SELECT
+              cm.id AS campania_id,
+              COUNT(DISTINCT CONCAT(COALESCE(rsv.APS, 0), '-', rsv.solicitudCaras_id)) AS circuitos
+            FROM campania cm
+            LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            LEFT JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+            LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+            WHERE cm.id IN (${placeholders})
+            GROUP BY cm.id
+          `,
+          ...campanaIds
+        );
+
+        const circuitosMap = new Map<number, number>(
+          (circuitosPorCampana || []).map(row => [Number(row.campania_id), Number(row.circuitos || 0)])
+        );
+
+        campanas.forEach((campana: any) => {
+          campana.circuitos = circuitosMap.get(Number(campana.id)) ?? 0;
+        });
+      }
 
       // Convert BigInt to Number for JSON serialization
       const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
