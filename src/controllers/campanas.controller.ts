@@ -4813,7 +4813,7 @@ export class CampanasController {
           )) AS FinSegmento,
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
-          CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'HAS_ARTE' ELSE NULL END AS ArteUrl,
           NULL AS OrigenArte,
           rsv.id AS rsv_id,
           inv.tradicional_digital AS tradicional_digital,
@@ -5677,6 +5677,39 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Obtener el archivo (arte) de una reserva por su ID
+   * Devuelve el contenido de rsv.archivo (base64 o URL)
+   */
+  async getReservaArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const reservaId = parseInt(req.params.reservaId);
+      if (isNaN(reservaId)) {
+        res.status(400).json({ success: false, error: 'ID de reserva inválido' });
+        return;
+      }
+
+      const result = await prisma.$queryRawUnsafe<{ archivo: string | null }[]>(
+        `SELECT archivo FROM reservas WHERE id = ? LIMIT 1`,
+        reservaId
+      );
+
+      if (!result || result.length === 0) {
+        res.status(404).json({ success: false, error: 'Reserva no encontrada' });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: { archivo: result[0].archivo },
+      });
+    } catch (error) {
+      console.error('Error en getReservaArchivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener archivo de reserva';
       res.status(500).json({ success: false, error: message });
     }
   }
