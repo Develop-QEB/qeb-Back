@@ -140,6 +140,14 @@ export class CampanasController {
             WHERE sc3.idquote = pr.solicitud_id
               AND rsv3.deleted_at IS NULL
           ) AS reservas_count
+          ,
+          (
+            SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
+            FROM reservas rsv4
+            INNER JOIN solicitudCaras sc4 ON sc4.id = rsv4.solicitudCaras_id
+            WHERE sc4.idquote = pr.solicitud_id
+              AND rsv4.deleted_at IS NULL
+          ) AS circuitos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
