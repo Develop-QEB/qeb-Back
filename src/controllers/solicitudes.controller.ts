@@ -11,13 +11,7 @@ import {
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
 import nodemailer from 'nodemailer';
-
-// Helper function to serialize BigInt values to numbers
-function serializeBigInt<T>(obj: T): T {
-  return JSON.parse(JSON.stringify(obj, (_, value) =>
-    typeof value === 'bigint' ? Number(value) : value
-  ));
-}
+import { serializeBigInt } from '../utils/serialization';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
