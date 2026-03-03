@@ -181,14 +181,12 @@ export class CampanasController {
         const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
           `
             SELECT
-              cm.id AS campania_id,
-              COUNT(DISTINCT CONCAT(COALESCE(rsv.APS, 0), '-', rsv.solicitudCaras_id)) AS circuitos
-            FROM campania cm
-            LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-            LEFT JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
-            LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
-            WHERE cm.id IN (${placeholders})
-            GROUP BY cm.id
+              rsv.campania_id AS campania_id,
+              COUNT(DISTINCT rsv.solicitudCaras_id) AS circuitos
+            FROM reservas rsv
+            WHERE rsv.deleted_at IS NULL
+              AND rsv.campania_id IN (${placeholders})
+            GROUP BY rsv.campania_id
           `,
           ...campanaIds
         );
