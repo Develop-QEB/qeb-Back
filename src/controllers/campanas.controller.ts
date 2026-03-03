@@ -4673,7 +4673,8 @@ export class CampanasController {
           0 AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'bonificacion' AS tipo_fila
+          'bonificacion' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -4715,7 +4716,8 @@ export class CampanasController {
           ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'renta' AS tipo_fila
+          'renta' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
