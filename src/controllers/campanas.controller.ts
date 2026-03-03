@@ -4869,12 +4869,14 @@ export class CampanasController {
         tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
       }
 
-      // Query imagenes_digitales count per reserva
+      // Query imagenes_digitales count and filenames per reserva
       let artesCountMap = new Map<number, number>();
+      let artesNamesMap = new Map<number, string>();
       if (rsvIds.length > 0) {
         const placeholdersRsv = rsvIds.map(() => '?').join(',');
         const artesCountQuery = `
-          SELECT id_reserva, COUNT(*) as total_artes
+          SELECT id_reserva, COUNT(*) as total_artes,
+                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes
           FROM imagenes_digitales
           WHERE id_reserva IN (${placeholdersRsv})
           GROUP BY id_reserva
@@ -4882,6 +4884,7 @@ export class CampanasController {
         const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
         for (const row of artesCountArr) {
           artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
+          if (row.nombres_artes) artesNamesMap.set(Number(row.id_reserva), String(row.nombres_artes));
         }
       }
 
@@ -4946,6 +4949,7 @@ export class CampanasController {
           ...row,
           indicaciones,
           num_artes_digitales: artesCountMap.get(rsvId) || 0,
+          nombres_artes_digitales: artesNamesMap.get(rsvId) || null,
         };
       });
 
