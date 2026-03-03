@@ -5,24 +5,36 @@ function getDatasourceUrl(): string {
   let url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  // Force connection_limit to 2 (minimal - prevents exhausting Hostinger MySQL
-  // during Render rolling deploys where old+new instances overlap)
+  // Force calibrated pool settings
   if (url.includes('connection_limit')) {
-    url = url.replace(/connection_limit=\d+/, 'connection_limit=2');
+    url = url.replace(/connection_limit=\d+/, 'connection_limit=15');
   } else {
-    url += (url.includes('?') ? '&' : '?') + 'connection_limit=2';
+    url += (url.includes('?') ? '&' : '?') + 'connection_limit=15';
   }
 
-  // Force pool_timeout to 15s (fail fast instead of hanging)
+  // Pool timeout calibrated for this workload
   if (url.includes('pool_timeout')) {
-    url = url.replace(/pool_timeout=\d+/, 'pool_timeout=15');
+    url = url.replace(/pool_timeout=\d+/, 'pool_timeout=30');
   } else {
-    url += '&pool_timeout=15';
+    url += '&pool_timeout=30';
   }
 
   // TCP-level timeouts
-  if (!url.includes('connect_timeout')) url += '&connect_timeout=15';
-  if (!url.includes('socket_timeout')) url += '&socket_timeout=15';
+  if (url.includes('connect_timeout')) {
+    url = url.replace(/connect_timeout=\d+/, 'connect_timeout=30');
+  } else {
+    url += '&connect_timeout=30';
+  }
+  if (url.includes('socket_timeout')) {
+    url = url.replace(/socket_timeout=\d+/, 'socket_timeout=30');
+  } else {
+    url += '&socket_timeout=30';
+  }
+  if (url.includes('keepalive')) {
+    url = url.replace(/keepalive=\d+/, 'keepalive=240');
+  } else {
+    url += '&keepalive=240';
+  }
 
   return url;
 }
