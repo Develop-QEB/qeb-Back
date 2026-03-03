@@ -1818,6 +1818,8 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
           AND (
@@ -1988,6 +1990,8 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.archivo IS NULL
           AND imDig.id_reserva IS NULL
           AND rsv.APS IS NOT NULL
@@ -2091,6 +2095,8 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
         GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
