@@ -3467,6 +3467,32 @@ export class CampanasController {
         // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
         try {
           const evidenciaObj = JSON.parse(evidencia);
+          // Backend guard: si Recepción Faltantes llega sin guia_pdf, heredarla de la última Recepción de la campaña.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            !evidenciaObj?.guia_pdf
+          ) {
+            try {
+              const ultimaRecepcionConGuia = await prisma.tareas.findFirst({
+                where: {
+                  campania_id: campanaId,
+                  tipo: 'Recepción',
+                  evidencia: { contains: 'guia_pdf' },
+                },
+                orderBy: { id: 'desc' },
+                select: { evidencia: true },
+              });
+              if (ultimaRecepcionConGuia?.evidencia) {
+                const evidenciaPrev = JSON.parse(ultimaRecepcionConGuia.evidencia);
+                if (evidenciaPrev?.guia_pdf) {
+                  evidenciaObj.guia_pdf = evidenciaPrev.guia_pdf;
+                }
+              }
+            } catch (inheritErr) {
+              console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
+            }
+          }
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
