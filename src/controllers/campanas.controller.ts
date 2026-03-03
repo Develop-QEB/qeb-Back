@@ -1356,10 +1356,17 @@ export class CampanasController {
 
       console.log('Inventario con arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      // Convertir BigInt a Number para JSON serialization
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      // Evitar stringify/parse en payloads grandes (puede agotar heap en producción).
+      // Solo convertimos BigInt en columnas del resultado.
+      const inventarioSerializable = Array.isArray(inventario)
+        ? inventario.map((row) => {
+            const normalized: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+              normalized[key] = typeof value === 'bigint' ? Number(value) : value;
+            }
+            return normalized;
+          })
+        : inventario;
 
       res.json({
         success: true,
