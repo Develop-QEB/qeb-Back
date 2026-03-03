@@ -137,7 +137,8 @@ export class CampanasController {
             SELECT COUNT(*)
             FROM reservas rsv3
             INNER JOIN solicitudCaras sc3 ON sc3.id = rsv3.solicitudCaras_id
-            WHERE sc3.idquote = ct.id_propuesta
+            INNER JOIN cotizacion ct3 ON ct3.id_propuesta = sc3.idquote
+            WHERE ct3.id = cm.cotizacion_id
               AND rsv3.deleted_at IS NULL
           ) AS reservas_count
           ,
@@ -145,7 +146,8 @@ export class CampanasController {
             SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
             FROM reservas rsv4
             INNER JOIN solicitudCaras sc4 ON sc4.id = rsv4.solicitudCaras_id
-            WHERE sc4.idquote = ct.id_propuesta
+            INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
+            WHERE ct4.id = cm.cotizacion_id
               AND rsv4.deleted_at IS NULL
           ) AS circuitos
         FROM campania cm
