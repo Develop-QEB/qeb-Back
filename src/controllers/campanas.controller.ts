@@ -821,29 +821,37 @@ export class CampanasController {
 
       const query = `
         SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.mueble,
-          i.estado,
-          i.tipo_de_cara,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.tradicional_digital,
-          i.tarifa_publica,
-          rsv.estatus as estatus_reserva,
-          rsv.archivo,
-          rsv.calendario_id,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          1 AS caras_totales
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN COUNT(DISTINCT rsv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          CASE
+            WHEN COUNT(DISTINCT rsv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.calendario_id) as calendario_id,
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(rsv.id)) as grupo_completo_id,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MAX(cat.numero_catorcena) as numero_catorcena,
+          MAX(cat.año) as anio_catorcena,
+          COUNT(DISTINCT rsv.id) AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -854,7 +862,8 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
       `;
 
       const inventario = await prisma.$queryRawUnsafe(query, campanaId);
@@ -884,51 +893,52 @@ export class CampanasController {
 
       console.log('Fetching inventario con APS for campana:', campanaId);
 
+      // Query principal con GROUP BY grupo_completo_id para agrupar muebles completos
       const query = `
         SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.ubicacion,
-          i.tipo_de_cara,
-          i.cara,
-          i.mueble,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.estado,
-          i.municipio,
-          i.tipo_de_mueble,
-          i.ancho,
-          i.alto,
-          i.nivel_socioeconomico,
-          i.tarifa_publica,
-          i.tradicional_digital,
-          rsv.archivo,
-          rsv.estatus as estatus_reserva,
-          rsv.calendario_id,
-          rsv.APS as aps,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          epIn.numero_espacio as espacios,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          1 AS caras_totales,
-          rsv.arte_aprobado,
-          rsv.instalado,
-          -- Calcular estatus de arte basado en el flujo
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
           CASE
-            WHEN rsv.instalado = 1 THEN 'Instalado'
-            WHEN t_recepcion.id IS NOT NULL AND t_recepcion.estatus = 'Completado' THEN 'Artes Recibidos'
-            WHEN t_impresion.id IS NOT NULL AND t_impresion.estatus IN ('Activo', 'Atendido') THEN 'En Impresion'
-            WHEN rsv.arte_aprobado = 'aprobado' THEN 'Artes Aprobados'
-            WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'Revision Artes'
-            ELSE 'Carga Artes'
-          END as estatus_arte
+            WHEN COUNT(DISTINCT rsv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN COUNT(DISTINCT rsv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.cara) as cara,
+          MIN(i.mueble) as mueble,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.APS) as aps,
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(rsv.id)) as grupo_completo_id,
+          GROUP_CONCAT(DISTINCT epIn.numero_espacio ORDER BY epIn.numero_espacio SEPARATOR ',') as espacios,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MAX(cat.numero_catorcena) as numero_catorcena,
+          MAX(cat.año) as anio_catorcena,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MAX(rsv.instalado) as instalado,
+          CASE WHEN MAX(rsv.archivo) IS NOT NULL AND MAX(rsv.archivo) != '' THEN 1 ELSE 0 END as tiene_archivo
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -936,24 +946,68 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
-            AND t_impresion.tipo = 'Impresión'
-            AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
-          LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
-            AND t_recepcion.tipo = 'Recepción'
-            AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      // Tareas en query separada (evita FIND_IN_SET en JOINs)
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Impresión', 'Recepción')
       `;
 
       const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      const tareas = await prisma.$queryRawUnsafe(tareasQuery, campanaId);
 
-      console.log('Inventario con APS result count:', Array.isArray(inventario) ? inventario.length : 0);
+      const inventarioArr = inventario as any[];
+      const tareasArr = tareas as any[];
 
-      const inventarioSerializable = serializeBigInt(inventario);
+      console.log('Inventario con APS result count:', inventarioArr.length);
+
+      // Indexar tareas por reserva_id para lookup O(1)
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva : recepcionByReserva;
+        for (const rsvId of ids) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      // Calcular estatus_arte en JS usando los rsv_ids del grupo
+      const result = inventarioArr.map((row: any) => {
+        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+
+        // Para el grupo, usar el "mejor" estatus (más avanzado en el pipeline)
+        let estatus_arte = 'Carga Artes';
+        const hasInstalado = Number(row.instalado) === 1;
+        const hasRecepcion = rsvIds.some(id => recepcionByReserva.get(id)?.estatus === 'Completado');
+        const hasImpresion = rsvIds.some(id => {
+          const t = impresionByReserva.get(id);
+          return t && (t.estatus === 'Activo' || t.estatus === 'Atendido');
+        });
+        const hasArteAprobado = row.arte_aprobado === 'aprobado';
+        const hasArchivo = Number(row.tiene_archivo) === 1;
+
+        if (hasInstalado) estatus_arte = 'Instalado';
+        else if (hasRecepcion) estatus_arte = 'Artes Recibidos';
+        else if (hasImpresion) estatus_arte = 'En Impresion';
+        else if (hasArteAprobado) estatus_arte = 'Artes Aprobados';
+        else if (hasArchivo) estatus_arte = 'Revision Artes';
+
+        return { ...row, estatus_arte };
+      });
+
+      const inventarioSerializable = serializeBigInt(result);
 
       res.json({
         success: true,

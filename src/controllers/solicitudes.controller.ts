@@ -1507,6 +1507,17 @@ export class SolicitudesController {
           createdCaras.push(solicitudCara);
         }
 
+        // Regla: si el total global de caras (renta + bonificación) es impar, todas requieren DG
+        const totalCarasGlobal = caras.reduce((sum: number, c: any) => sum + (Number(c.caras) || 0) + (Number(c.bonificacion) || 0), 0);
+        if (totalCarasGlobal > 0 && totalCarasGlobal % 2 !== 0) {
+          const caraIds = createdCaras.map(c => c.id);
+          await tx.solicitudCaras.updateMany({
+            where: { id: { in: caraIds } },
+            data: { autorizacion_dg: 'pendiente' }
+          });
+          console.log(`[create] Total caras impar (${totalCarasGlobal}), marcando ${caraIds.length} caras como pendiente DG`);
+        }
+
         return {
           solicitud,
           propuesta,
@@ -2387,6 +2398,16 @@ export class SolicitudesController {
                 autorizacion_dcm: estadoResult.autorizacion_dcm,
               },
             });
+          }
+
+          // Regla: si el total global de caras (renta + bonificación) es impar, todas requieren DG
+          const totalCarasGlobal = caras.reduce((sum: number, c: any) => sum + (Number(c.caras) || 0) + (Number(c.bonificacion) || 0), 0);
+          if (totalCarasGlobal > 0 && totalCarasGlobal % 2 !== 0) {
+            await tx.solicitudCaras.updateMany({
+              where: { idquote: propuesta.id.toString() },
+              data: { autorizacion_dg: 'pendiente' }
+            });
+            console.log(`[update] Total caras impar (${totalCarasGlobal}), marcando todas las caras como pendiente DG`);
           }
           // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
