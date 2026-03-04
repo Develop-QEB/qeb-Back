@@ -28,6 +28,29 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+const isPublicFileUrl = (value: string): boolean =>
+  value.startsWith('http://') || value.startsWith('https://') || value.startsWith('/uploads/');
+
+const ensureStoredFileUrl = async (
+  rawValue: string,
+  folder: string,
+  resourceType: 'image' | 'video' | 'auto' = 'auto'
+): Promise<string> => {
+  const value = rawValue.trim();
+  if (!value) {
+    throw new Error('Archivo vacio');
+  }
+  if (isPublicFileUrl(value)) {
+    return value;
+  }
+
+  const uploaded = await uploadToCloudinary(value, folder, resourceType);
+  if (!uploaded?.secure_url) {
+    throw new Error('No se pudo subir el archivo a Spaces');
+  }
+  return uploaded.secure_url;
+};
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -2323,32 +2346,11 @@ export class CampanasController {
         return;
       }
 
-      let archivoFinal = archivo.trim();
-      if (!archivoFinal) {
-        res.status(400).json({
-          success: false,
-          error: 'Se requiere la URL del archivo',
-        });
-        return;
-      }
-
-      const isRemoteUrl =
-        archivoFinal.startsWith('http://') ||
-        archivoFinal.startsWith('https://') ||
-        archivoFinal.startsWith('/uploads/');
-
-      // Blindaje backend: si llega base64, subirlo a Spaces y guardar solo URL.
-      if (!isRemoteUrl) {
-        const uploaded = await uploadToCloudinary(
-          archivoFinal,
-          `qeb/campana-${campanaId}/artes`,
-          'image'
-        );
-        if (!uploaded?.secure_url) {
-          throw new Error('No se pudo subir el archivo a Spaces');
-        }
-        archivoFinal = uploaded.secure_url;
-      }
+      const archivoFinal = await ensureStoredFileUrl(
+        archivo,
+        `qeb/campana-${campanaId}/artes`,
+        'image'
+      );
 
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
@@ -2483,14 +2485,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -2617,14 +2616,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -3090,9 +3086,14 @@ export class CampanasController {
       const updateFields: string[] = ['instalado = ?'];
       const updateParams: (boolean | string | number)[] = [instalado ? 1 : 0];
 
-      if (imagenTestigo) {
+      if (imagenTestigo && typeof imagenTestigo === 'string' && imagenTestigo.trim()) {
+        const imagenTestigoUrl = await ensureStoredFileUrl(
+          imagenTestigo,
+          `qeb/campana-${campanaId}/testigos`,
+          'image'
+        );
         updateFields.push('imagen_testigo = ?');
-        updateParams.push(imagenTestigo);
+        updateParams.push(imagenTestigoUrl);
       }
 
       if (fechaTestigo) {
@@ -3819,9 +3820,29 @@ export class CampanasController {
       if (fecha_fin !== undefined) updateData.fecha_fin = new Date(fecha_fin);
       if (asignado !== undefined) updateData.asignado = asignado;
       if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
-      if (archivo !== undefined) updateData.archivo = archivo;
+      if (archivo !== undefined) {
+        if (typeof archivo === 'string' && archivo.trim()) {
+          updateData.archivo = await ensureStoredFileUrl(
+            archivo,
+            `qeb/campana-${id}/artes`,
+            'image'
+          );
+        } else {
+          updateData.archivo = archivo;
+        }
+      }
       if (evidencia !== undefined) updateData.evidencia = evidencia;
-      if (archivo_testigo !== undefined) updateData.archivo_testigo = archivo_testigo;
+      if (archivo_testigo !== undefined) {
+        if (typeof archivo_testigo === 'string' && archivo_testigo.trim()) {
+          updateData.archivo_testigo = await ensureStoredFileUrl(
+            archivo_testigo,
+            `qeb/campana-${id}/testigos`,
+            'image'
+          );
+        } else {
+          updateData.archivo_testigo = archivo_testigo;
+        }
+      }
 
       const tarea = await prisma.tareas.update({
         where: { id: parseInt(tareaId) },
@@ -5814,3 +5835,4 @@ export class CampanasController {
 
 export const campanasController = new CampanasController();
 // force restart
+
