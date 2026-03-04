@@ -2315,12 +2315,39 @@ export class CampanasController {
       }
 
       // Validar archivo si no es limpieza
-      if (!archivo) {
+      if (!archivo || typeof archivo !== 'string') {
         res.status(400).json({
           success: false,
           error: 'Se requiere la URL del archivo',
         });
         return;
+      }
+
+      let archivoFinal = archivo.trim();
+      if (!archivoFinal) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere la URL del archivo',
+        });
+        return;
+      }
+
+      const isRemoteUrl =
+        archivoFinal.startsWith('http://') ||
+        archivoFinal.startsWith('https://') ||
+        archivoFinal.startsWith('/uploads/');
+
+      // Blindaje backend: si llega base64, subirlo a Spaces y guardar solo URL.
+      if (!isRemoteUrl) {
+        const uploaded = await uploadToCloudinary(
+          archivoFinal,
+          `qeb/campana-${campanaId}/artes`,
+          'image'
+        );
+        if (!uploaded?.secure_url) {
+          throw new Error('No se pudo subir el archivo a Spaces');
+        }
+        archivoFinal = uploaded.secure_url;
       }
 
       // Actualizar reservas directamente seleccionadas
@@ -2330,7 +2357,7 @@ export class CampanasController {
         WHERE id IN (${placeholders})
       `;
 
-      await prisma.$executeRawUnsafe(updateDirectQuery, archivo, ...reservaIds);
+      await prisma.$executeRawUnsafe(updateDirectQuery, archivoFinal, ...reservaIds);
 
       // Actualizar reservas del mismo grupo_completo
       if (grupoIds.length > 0) {
@@ -2341,7 +2368,7 @@ export class CampanasController {
           WHERE grupo_completo_id IN (${grupoPlaceholders})
         `;
 
-        await prisma.$executeRawUnsafe(updateGruposQuery, archivo, ...grupoIds);
+        await prisma.$executeRawUnsafe(updateGruposQuery, archivoFinal, ...grupoIds);
       }
 
       // Registrar en historial
