@@ -137,9 +137,19 @@ export class CampanasController {
             SELECT COUNT(*)
             FROM reservas rsv3
             INNER JOIN solicitudCaras sc3 ON sc3.id = rsv3.solicitudCaras_id
-            WHERE sc3.idquote = pr.solicitud_id
+            INNER JOIN cotizacion ct3 ON ct3.id_propuesta = sc3.idquote
+            WHERE ct3.id = cm.cotizacion_id
               AND rsv3.deleted_at IS NULL
           ) AS reservas_count
+          ,
+          (
+            SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
+            FROM reservas rsv4
+            INNER JOIN solicitudCaras sc4 ON sc4.id = rsv4.solicitudCaras_id
+            INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
+            WHERE ct4.id = cm.cotizacion_id
+              AND rsv4.deleted_at IS NULL
+          ) AS circuitos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -160,9 +170,35 @@ export class CampanasController {
       `;
 
       const offset = (page - 1) * limit;
-      const campanas = await prisma.$queryRawUnsafe(query, ...params, limit, offset);
+      const campanas = await prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset);
       const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
       const total = Number(countResult[0]?.total || 0);
+
+      // Recalcular circuitos por campaña en bloque para evitar inconsistencias por subqueries correlacionadas.
+      const campanaIds = (campanas || []).map((c: any) => Number(c.id)).filter((id: number) => Number.isFinite(id));
+      if (campanaIds.length > 0) {
+        const placeholders = campanaIds.map(() => '?').join(', ');
+        const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
+          `
+            SELECT
+              rsv.campania_id AS campania_id,
+              COUNT(DISTINCT rsv.solicitudCaras_id) AS circuitos
+            FROM reservas rsv
+            WHERE rsv.deleted_at IS NULL
+              AND rsv.campania_id IN (${placeholders})
+            GROUP BY rsv.campania_id
+          `,
+          ...campanaIds
+        );
+
+        const circuitosMap = new Map<number, number>(
+          (circuitosPorCampana || []).map(row => [Number(row.campania_id), Number(row.circuitos || 0)])
+        );
+
+        campanas.forEach((campana: any) => {
+          campana.circuitos = circuitosMap.get(Number(campana.id)) ?? 0;
+        });
+      }
 
       // Convert BigInt to Number for JSON serialization
       const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
@@ -3438,6 +3474,32 @@ export class CampanasController {
         // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
         try {
           const evidenciaObj = JSON.parse(evidencia);
+          // Backend guard: si Recepción Faltantes llega sin guia_pdf, heredarla de la última Recepción de la campaña.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            !evidenciaObj?.guia_pdf
+          ) {
+            try {
+              const ultimaRecepcionConGuia = await prisma.tareas.findFirst({
+                where: {
+                  campania_id: campanaId,
+                  tipo: 'Recepción',
+                  evidencia: { contains: 'guia_pdf' },
+                },
+                orderBy: { id: 'desc' },
+                select: { evidencia: true },
+              });
+              if (ultimaRecepcionConGuia?.evidencia) {
+                const evidenciaPrev = JSON.parse(ultimaRecepcionConGuia.evidencia);
+                if (evidenciaPrev?.guia_pdf) {
+                  evidenciaObj.guia_pdf = evidenciaPrev.guia_pdf;
+                }
+              }
+            } catch (inheritErr) {
+              console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
+            }
+          }
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
