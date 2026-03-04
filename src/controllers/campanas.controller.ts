@@ -181,12 +181,15 @@ export class CampanasController {
         const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
           `
             SELECT
-              rsv.campania_id AS campania_id,
+              cm.id AS campania_id,
               COUNT(DISTINCT rsv.solicitudCaras_id) AS circuitos
             FROM reservas rsv
+            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+            INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+            INNER JOIN campania cm ON cm.cotizacion_id = ct.id
             WHERE rsv.deleted_at IS NULL
-              AND rsv.campania_id IN (${placeholders})
-            GROUP BY rsv.campania_id
+              AND cm.id IN (${placeholders})
+            GROUP BY cm.id
           `,
           ...campanaIds
         );
@@ -1960,7 +1963,6 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-
       console.log('Fetching inventario sin arte for campana:', campanaId);
 
       const query = `
