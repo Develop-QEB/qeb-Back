@@ -1,25 +1,14 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
 
-// Build datasource URL with forced pool settings (tuned for Hostinger shared hosting)
+// Use DATABASE_URL exactly as provided by environment
 function getDatasourceUrl(): string {
   const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  const [base, queryString] = url.split('?');
-  const existing = new URLSearchParams(queryString || '');
-
-  // FORCE these values — Hostinger shared hosting needs generous timeouts
-  existing.set('connection_limit', '15');
-  existing.set('pool_timeout', '30');
-  existing.set('connect_timeout', '30');
-  existing.set('socket_timeout', '30');
-  existing.set('keepalive', '240');
-
-  const finalUrl = `${base}?${existing.toString()}`;
-  const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');
+  const safeUrl = url.replace(/\/\/[^@]+@/, '//***@');
   console.log('[Prisma] Using datasource URL:', safeUrl);
-  return finalUrl;
+  return url;
 }
 
 const globalForPrisma = globalThis as unknown as {
@@ -91,3 +80,5 @@ export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
 
 export default prisma;
+
+
