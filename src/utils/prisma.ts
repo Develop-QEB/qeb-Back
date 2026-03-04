@@ -14,6 +14,7 @@ function getDatasourceUrl(): string {
   existing.set('pool_timeout', '30');
   existing.set('connect_timeout', '30');
   existing.set('socket_timeout', '30');
+  existing.set('keepalive', '240');
 
   const finalUrl = `${base}?${existing.toString()}`;
   const safeUrl = finalUrl.replace(/\/\/[^@]+@/, '//***@');

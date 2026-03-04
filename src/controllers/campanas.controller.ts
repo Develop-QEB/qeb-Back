@@ -1780,38 +1780,38 @@ export class CampanasController {
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
 
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.tipo_de_mueble,
-          inv.ancho,
-          inv.alto,
-          inv.nivel_socioeconomico,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
 
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(
-              SUBSTRING_INDEX(inv.codigo_unico, '_', 1),
+              SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1),
               '_completo_',
-              SUBSTRING_INDEX(inv.codigo_unico, '_', -1)
+              SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1)
             )
-            ELSE inv.codigo_unico
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
 
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
 
           MAX(rsv.archivo) AS archivo,
@@ -1837,13 +1837,13 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = sc.idquote LIMIT 1) AS IMU,
+          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = MAX(sc.idquote) LIMIT 1) AS IMU,
 
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id
 
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
@@ -1865,7 +1865,7 @@ export class CampanasController {
             (rsv.archivo IS NOT NULL AND rsv.archivo != '')
             OR imDig.id_reserva IS NOT NULL
           )
-        GROUP BY inv.id
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1873,10 +1873,17 @@ export class CampanasController {
 
       console.log('Inventario con arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      // Convertir BigInt a Number para JSON serialization
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      // Evitar stringify/parse en payloads grandes (puede agotar heap en producción).
+      // Solo convertimos BigInt en columnas del resultado.
+      const inventarioSerializable = Array.isArray(inventario)
+        ? inventario.map((row) => {
+            const normalized: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+              normalized[key] = typeof value === 'bigint' ? Number(value) : value;
+            }
+            return normalized;
+          })
+        : inventario;
 
       res.json({
         success: true,
@@ -1968,31 +1975,31 @@ export class CampanasController {
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_id,
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.tipo_de_mueble,
-          inv.ancho,
-          inv.alto,
-          inv.nivel_socioeconomico,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
-            ELSE inv.codigo_unico
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1))
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
@@ -2008,7 +2015,7 @@ export class CampanasController {
           MAX(sc.tipo) AS tipo_medio,
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
@@ -2027,7 +2034,7 @@ export class CampanasController {
           AND imDig.id_reserva IS NULL
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY inv.id
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -2067,29 +2074,29 @@ export class CampanasController {
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.ancho,
-          inv.alto,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
-            ELSE inv.codigo_unico
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1))
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           MAX(rsv.estatus) AS estatus,
@@ -2109,7 +2116,7 @@ export class CampanasController {
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
           COUNT(DISTINCT rsv.id) AS caras_totales,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id,
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id,
           MAX(tr.id) AS tarea_instalacion_id,
           MAX(tr.titulo) AS tarea_instalacion_titulo,
           MAX(tr.estatus) AS tarea_instalacion_estatus
@@ -2128,7 +2135,7 @@ export class CampanasController {
           AND rsv.deleted_at IS NULL
           AND sc.inicio_periodo <= cm.fecha_fin
           AND sc.fin_periodo >= cm.fecha_inicio
-        GROUP BY inv.id
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -4730,7 +4737,8 @@ export class CampanasController {
           0 AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'bonificacion' AS tipo_fila
+          'bonificacion' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -4772,7 +4780,8 @@ export class CampanasController {
           ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'renta' AS tipo_fila
+          'renta' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -4868,7 +4877,8 @@ export class CampanasController {
           )) AS FinSegmento,
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
-          CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'HAS_ARTE' ELSE NULL END AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN SUBSTRING_INDEX(rsv.archivo, '/', -1) ELSE NULL END AS ArteFileName,
           NULL AS OrigenArte,
           rsv.id AS rsv_id,
           inv.tradicional_digital AS tradicional_digital,
@@ -4924,12 +4934,14 @@ export class CampanasController {
         tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
       }
 
-      // Query imagenes_digitales count per reserva
+      // Query imagenes_digitales count and filenames per reserva
       let artesCountMap = new Map<number, number>();
+      let artesNamesMap = new Map<number, string>();
       if (rsvIds.length > 0) {
         const placeholdersRsv = rsvIds.map(() => '?').join(',');
         const artesCountQuery = `
-          SELECT id_reserva, COUNT(*) as total_artes
+          SELECT id_reserva, COUNT(*) as total_artes,
+                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes
           FROM imagenes_digitales
           WHERE id_reserva IN (${placeholdersRsv})
           GROUP BY id_reserva
@@ -4937,6 +4949,7 @@ export class CampanasController {
         const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
         for (const row of artesCountArr) {
           artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
+          if (row.nombres_artes) artesNamesMap.set(Number(row.id_reserva), String(row.nombres_artes));
         }
       }
 
@@ -5001,6 +5014,7 @@ export class CampanasController {
           ...row,
           indicaciones,
           num_artes_digitales: artesCountMap.get(rsvId) || 0,
+          nombres_artes_digitales: artesNamesMap.get(rsvId) || null,
         };
       });
 
@@ -5728,6 +5742,39 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Obtener el archivo (arte) de una reserva por su ID
+   * Devuelve el contenido de rsv.archivo (base64 o URL)
+   */
+  async getReservaArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const reservaId = parseInt(req.params.reservaId);
+      if (isNaN(reservaId)) {
+        res.status(400).json({ success: false, error: 'ID de reserva inválido' });
+        return;
+      }
+
+      const result = await prisma.$queryRawUnsafe<{ archivo: string | null }[]>(
+        `SELECT archivo FROM reservas WHERE id = ? LIMIT 1`,
+        reservaId
+      );
+
+      if (!result || result.length === 0) {
+        res.status(404).json({ success: false, error: 'Reserva no encontrada' });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: { archivo: result[0].archivo },
+      });
+    } catch (error) {
+      console.error('Error en getReservaArchivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener archivo de reserva';
       res.status(500).json({ success: false, error: message });
     }
   }

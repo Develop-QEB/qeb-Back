@@ -51,6 +51,7 @@ router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasContr
 router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));
 router.post('/:id/add-arte-digital', campanasController.addArteDigital.bind(campanasController));
 router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesDigitales.bind(campanasController));
+router.get('/:id/reserva-archivo/:reservaId', campanasController.getReservaArchivo.bind(campanasController));
 router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
 router.delete('/:id/imagenes-digitales', campanasController.deleteImagenesDigitales.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));

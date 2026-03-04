@@ -34,30 +34,27 @@ const getAllowedOrigins = () => {
   return [...new Set([...defaultOrigins, envUrl])];
 };
 
-const corsOptions = {
-  origin: getAllowedOrigins(),
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Permitir requests sin Origin (health checks, curl, server-to-server)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = getAllowedOrigins();
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  // Permitir headers dinámicos del preflight para evitar bloqueos por headers extras.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  optionsSuccessStatus: 204,
 };
 
-// Responder preflights CORS inmediatamente
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    const origin = req.headers.origin;
-    const allowedOrigins = getAllowedOrigins();
-    if (origin && allowedOrigins.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.status(204).end();
-      return;
-    }
-  }
-  next();
-});
 app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
