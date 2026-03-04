@@ -1837,7 +1837,7 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = MAX(sc.idquote) LIMIT 1) AS IMU,
+          MAX(sol.IMU) AS IMU,
 
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
@@ -1851,9 +1851,9 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN archivos arc ON inv.archivos_id = arc.id
+          LEFT JOIN propuesta pr ON pr.id = sc.idquote
+          LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
@@ -1863,7 +1863,12 @@ export class CampanasController {
           AND rsv.APS > 0
           AND (
             (rsv.archivo IS NOT NULL AND rsv.archivo != '')
-            OR imDig.id_reserva IS NOT NULL
+            OR EXISTS (
+              SELECT 1
+              FROM imagenes_digitales imDig
+              WHERE imDig.id_reserva = rsv.id
+              LIMIT 1
+            )
           )
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
