@@ -4814,6 +4814,7 @@ export class CampanasController {
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
           CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'HAS_ARTE' ELSE NULL END AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN SUBSTRING_INDEX(rsv.archivo, '/', -1) ELSE NULL END AS ArteFileName,
           NULL AS OrigenArte,
           rsv.id AS rsv_id,
           inv.tradicional_digital AS tradicional_digital,
