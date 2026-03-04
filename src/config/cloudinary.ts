@@ -1,11 +1,4 @@
-import { v2 as cloudinary } from 'cloudinary';
-
-// Configure Cloudinary with environment variables
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+import { isSpacesConfigured, uploadBufferToSpaces } from './spaces';
 
 export interface CloudinaryUploadResult {
   secure_url: string;
@@ -16,81 +9,87 @@ export interface CloudinaryUploadResult {
   height?: number;
 }
 
-/**
- * Verifica si Cloudinary está configurado correctamente
- */
+const DEFAULT_IMAGE_MIME = 'image/jpeg';
+const DEFAULT_VIDEO_MIME = 'video/mp4';
+
+const extensionFromMime = (mimeType: string): string => {
+  const lower = mimeType.toLowerCase();
+  if (lower === 'image/jpeg') return 'jpg';
+  if (lower === 'image/png') return 'png';
+  if (lower === 'image/webp') return 'webp';
+  if (lower === 'image/gif') return 'gif';
+  if (lower === 'video/mp4') return 'mp4';
+  if (lower === 'video/quicktime') return 'mov';
+  if (lower === 'video/webm') return 'webm';
+  return 'bin';
+};
+
+const parseBase64 = (
+  value: string,
+  resourceType: 'image' | 'video' | 'auto'
+): { buffer: Buffer; mimeType: string } => {
+  const trimmed = value.trim();
+  const dataUriMatch = trimmed.match(/^data:([^;]+);base64,(.+)$/s);
+
+  if (dataUriMatch) {
+    const mimeType = dataUriMatch[1];
+    const payload = dataUriMatch[2].replace(/\s+/g, '');
+    return { buffer: Buffer.from(payload, 'base64'), mimeType };
+  }
+
+  const fallbackMime = resourceType === 'video' ? DEFAULT_VIDEO_MIME : DEFAULT_IMAGE_MIME;
+  const payload = trimmed.replace(/\s+/g, '');
+  return { buffer: Buffer.from(payload, 'base64'), mimeType: fallbackMime };
+};
+
+// Compat wrapper: legacy name, now backed by Spaces.
 export function isCloudinaryConfigured(): boolean {
-  return !!(
-    process.env.CLOUDINARY_CLOUD_NAME &&
-    process.env.CLOUDINARY_API_KEY &&
-    process.env.CLOUDINARY_API_SECRET
-  );
+  return isSpacesConfigured();
 }
 
-/**
- * Sube un archivo base64 a Cloudinary
- * @param base64Data - Datos en formato base64 (con o sin prefijo data:)
- * @param folder - Carpeta en Cloudinary donde guardar el archivo
- * @param resourceType - Tipo de recurso: 'image' | 'video' | 'auto'
- * @returns URL de Cloudinary o null si no está configurado
- */
 export async function uploadToCloudinary(
   base64Data: string,
   folder: string,
   resourceType: 'image' | 'video' | 'auto' = 'auto'
 ): Promise<CloudinaryUploadResult | null> {
-  // Si Cloudinary no está configurado, retornar null para usar fallback
-  if (!isCloudinaryConfigured()) {
-    console.log('Cloudinary no configurado, usando almacenamiento base64 en BD');
-    return null;
-  }
-
-  // Asegurar que el base64 tenga el prefijo correcto
-  let uploadData = base64Data;
-  if (!base64Data.startsWith('data:')) {
-    // Si no tiene prefijo, intentar detectar el tipo
-    uploadData = `data:application/octet-stream;base64,${base64Data}`;
-  }
-
-  try {
-    const result = await cloudinary.uploader.upload(uploadData, {
-      folder,
-      resource_type: resourceType,
-      // Para videos, permitir archivos grandes
-      chunk_size: 6000000, // 6MB chunks para videos grandes
-    });
-
+  if (
+    base64Data.startsWith('http://') ||
+    base64Data.startsWith('https://') ||
+    base64Data.startsWith('/uploads/')
+  ) {
     return {
-      secure_url: result.secure_url,
-      public_id: result.public_id,
-      resource_type: result.resource_type,
-      format: result.format,
-      width: result.width,
-      height: result.height,
+      secure_url: base64Data,
+      public_id: '',
+      resource_type: resourceType,
+      format: '',
     };
-  } catch (error) {
-    console.error('Error subiendo a Cloudinary:', error);
-    // Retornar null para usar fallback de base64
-    return null;
   }
+
+  if (!isCloudinaryConfigured()) {
+    throw new Error('Spaces no esta configurado. No se permite guardar base64 en BD.');
+  }
+
+  const parsed = parseBase64(base64Data, resourceType);
+  const extension = extensionFromMime(parsed.mimeType);
+  const uploaded = await uploadBufferToSpaces(parsed.buffer, {
+    folder,
+    originalName: `archivo-${Date.now()}.${extension}`,
+    mimeType: parsed.mimeType,
+  });
+
+  return {
+    secure_url: uploaded.url,
+    public_id: uploaded.key,
+    resource_type: resourceType,
+    format: extension,
+  };
 }
 
-/**
- * Elimina un archivo de Cloudinary por su public_id
- */
 export async function deleteFromCloudinary(
   publicId: string,
   resourceType: 'image' | 'video' = 'image'
 ): Promise<boolean> {
-  try {
-    const result = await cloudinary.uploader.destroy(publicId, {
-      resource_type: resourceType,
-    });
-    return result.result === 'ok';
-  } catch (error) {
-    console.error('Error deleting from Cloudinary:', error);
-    return false;
-  }
+  void publicId;
+  void resourceType;
+  return false;
 }
-
-export default cloudinary;

@@ -1,62 +1,54 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { uploadToCloudinary, isCloudinaryConfigured } from '../config/cloudinary';
+import { isSpacesConfigured, uploadBufferToSpaces } from '../config/spaces';
 
 const router = Router();
 
-// Asegurar que existe la carpeta de uploads para artes (fallback local)
-const uploadDir = path.join(__dirname, '../../uploads/artes');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Asegurar que existe la carpeta de uploads para testigos
-const uploadDirTestigos = path.join(__dirname, '../../uploads/testigos');
-if (!fs.existsSync(uploadDirTestigos)) {
-  fs.mkdirSync(uploadDirTestigos, { recursive: true });
-}
-
 // Sanitizar nombre de archivo (quitar caracteres especiales pero mantener legible)
 const sanitizeFilename = (filename: string): string => {
-  // Reemplazar espacios con guiones bajos y quitar caracteres no permitidos
   return filename
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
-    .replace(/[^a-zA-Z0-9._-]/g, '_') // Solo alfanuméricos, puntos, guiones
-    .replace(/_+/g, '_') // Evitar múltiples guiones bajos
-    .replace(/^_|_$/g, ''); // Quitar guiones bajos al inicio/fin
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
 };
 
-// Configurar multer en memoria para arte (se sube a Cloudinary)
-const storageArte = multer.memoryStorage();
-
-// Configurar multer en disco como fallback local para arte
-const storageDiskArte = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (_req, file, cb) => {
-    const sanitizedName = sanitizeFilename(file.originalname);
-    cb(null, sanitizedName);
-  },
-});
+// Configurar multer en memoria para subir directo a Spaces.
+const storageMemory = multer.memoryStorage();
 
 // Filtro de tipos de archivo permitidos
 const fileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf'];
+  const allowedTypes = [
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'application/pdf',
+    'video/mp4',
+    'video/quicktime',
+    'video/webm',
+    'video/x-msvideo',
+  ];
+
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Tipo de archivo no permitido. Solo se permiten: JPG, PNG, GIF, WEBP, PDF'));
+    cb(new Error('Tipo de archivo no permitido. Solo se permiten: JPG, PNG, GIF, WEBP, PDF, MP4, MOV, WEBM, AVI'));
   }
 };
 
-// Usar memoryStorage si Cloudinary está configurado, diskStorage si no
-const upload = multer({
-  storage: isCloudinaryConfigured() ? storageArte : storageDiskArte,
+const uploadArte = multer({
+  storage: storageMemory,
+  fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+});
+
+const uploadTestigo = multer({
+  storage: storageMemory,
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max
@@ -64,7 +56,7 @@ const upload = multer({
 });
 
 // Endpoint para subir archivo de arte
-router.post('/arte', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/arte', authMiddleware, uploadArte.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       res.status(400).json({
@@ -74,43 +66,33 @@ router.post('/arte', authMiddleware, upload.single('file'), async (req: Request,
       return;
     }
 
-    // Si Cloudinary está configurado, subir ahí
-    if (isCloudinaryConfigured() && req.file.buffer) {
-      const base64Data = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-      const cloudResult = await uploadToCloudinary(base64Data, 'qeb/artes', 'image');
-
-      if (cloudResult) {
-        console.log('Archivo subido a Cloudinary:', req.file.originalname, '->', cloudResult.secure_url);
-        res.json({
-          success: true,
-          data: {
-            url: cloudResult.secure_url,
-            filename: req.file.originalname,
-            originalName: req.file.originalname,
-            size: req.file.size,
-            mimetype: req.file.mimetype,
-          },
-        });
-        return;
-      }
-      // Si falla Cloudinary, continuar con fallback local
-      console.warn('Cloudinary fallo, no hay fallback en memoria. Archivo no guardado.');
+    if (!isSpacesConfigured()) {
       res.status(500).json({
         success: false,
-        error: 'Error al subir archivo a Cloudinary',
+        error: 'Spaces no esta configurado',
       });
       return;
     }
 
-    // Fallback: archivo guardado en disco local
-    const fileUrl = `/uploads/artes/${req.file.filename}`;
-    console.log('Archivo subido localmente:', req.file.filename, '-> Path:', fileUrl);
+    if (!req.file.buffer) {
+      res.status(400).json({
+        success: false,
+        error: 'Archivo invalido: no se recibio buffer para subir',
+      });
+      return;
+    }
+
+    const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+      folder: 'artes',
+      originalName: sanitizeFilename(req.file.originalname),
+      mimeType: req.file.mimetype,
+    });
 
     res.json({
       success: true,
       data: {
-        url: fileUrl,
-        filename: req.file.filename!,
+        url: uploaded.url,
+        filename: uploaded.key,
         originalName: req.file.originalname,
         size: req.file.size,
         mimetype: req.file.mimetype,
@@ -126,28 +108,6 @@ router.post('/arte', authMiddleware, upload.single('file'), async (req: Request,
   }
 });
 
-// Configurar multer en disco como fallback local para testigos
-const storageDiskTestigos = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadDirTestigos);
-  },
-  filename: (_req, file, cb) => {
-    const timestamp = Date.now();
-    const sanitizedName = sanitizeFilename(file.originalname);
-    const ext = path.extname(sanitizedName);
-    const name = path.basename(sanitizedName, ext);
-    cb(null, `testigo-${timestamp}-${name}${ext}`);
-  },
-});
-
-const uploadTestigo = multer({
-  storage: isCloudinaryConfigured() ? multer.memoryStorage() : storageDiskTestigos,
-  fileFilter,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max
-  },
-});
-
 // Endpoint para subir archivo de testigo
 router.post('/testigo', authMiddleware, uploadTestigo.single('file'), async (req: Request, res: Response) => {
   try {
@@ -159,42 +119,33 @@ router.post('/testigo', authMiddleware, uploadTestigo.single('file'), async (req
       return;
     }
 
-    // Si Cloudinary está configurado, subir ahí
-    if (isCloudinaryConfigured() && req.file.buffer) {
-      const base64Data = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-      const cloudResult = await uploadToCloudinary(base64Data, 'qeb/testigos', 'image');
-
-      if (cloudResult) {
-        console.log('Archivo testigo subido a Cloudinary:', req.file.originalname, '->', cloudResult.secure_url);
-        res.json({
-          success: true,
-          data: {
-            url: cloudResult.secure_url,
-            filename: req.file.originalname,
-            originalName: req.file.originalname,
-            size: req.file.size,
-            mimetype: req.file.mimetype,
-          },
-        });
-        return;
-      }
-      console.warn('Cloudinary fallo para testigo. Archivo no guardado.');
+    if (!isSpacesConfigured()) {
       res.status(500).json({
         success: false,
-        error: 'Error al subir archivo de testigo a Cloudinary',
+        error: 'Spaces no esta configurado',
       });
       return;
     }
 
-    // Fallback: archivo guardado en disco local
-    const fileUrl = `/uploads/testigos/${req.file.filename}`;
-    console.log('Archivo testigo subido localmente:', req.file.filename, '-> Path:', fileUrl);
+    if (!req.file.buffer) {
+      res.status(400).json({
+        success: false,
+        error: 'Archivo invalido: no se recibio buffer para subir',
+      });
+      return;
+    }
+
+    const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+      folder: 'testigos',
+      originalName: sanitizeFilename(req.file.originalname),
+      mimeType: req.file.mimetype,
+    });
 
     res.json({
       success: true,
       data: {
-        url: fileUrl,
-        filename: req.file.filename!,
+        url: uploaded.url,
+        filename: uploaded.key,
         originalName: req.file.originalname,
         size: req.file.size,
         mimetype: req.file.mimetype,
@@ -237,3 +188,4 @@ router.use((err: Error, _req: Request, res: Response, next: Function) => {
 });
 
 export default router;
+
