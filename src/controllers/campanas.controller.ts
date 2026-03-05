@@ -28,6 +28,29 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+const isPublicFileUrl = (value: string): boolean =>
+  value.startsWith('http://') || value.startsWith('https://') || value.startsWith('/uploads/');
+
+const ensureStoredFileUrl = async (
+  rawValue: string,
+  folder: string,
+  resourceType: 'image' | 'video' | 'auto' = 'auto'
+): Promise<string> => {
+  const value = rawValue.trim();
+  if (!value) {
+    throw new Error('Archivo vacio');
+  }
+  if (isPublicFileUrl(value)) {
+    return value;
+  }
+
+  const uploaded = await uploadToCloudinary(value, folder, resourceType);
+  if (!uploaded?.secure_url) {
+    throw new Error('No se pudo subir el archivo a Spaces');
+  }
+  return uploaded.secure_url;
+};
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -1883,7 +1906,7 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = MAX(sc.idquote) LIMIT 1) AS IMU,
+          MAX(sol.IMU) AS IMU,
 
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
@@ -1897,9 +1920,9 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN archivos arc ON inv.archivos_id = arc.id
+          LEFT JOIN propuesta pr ON pr.id = sc.idquote
+          LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
@@ -1909,7 +1932,12 @@ export class CampanasController {
           AND rsv.APS > 0
           AND (
             (rsv.archivo IS NOT NULL AND rsv.archivo != '')
-            OR imDig.id_reserva IS NOT NULL
+            OR EXISTS (
+              SELECT 1
+              FROM imagenes_digitales imDig
+              WHERE imDig.id_reserva = rsv.id
+              LIMIT 1
+            )
           )
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
         ORDER BY MIN(rsv.id) DESC
@@ -2356,13 +2384,19 @@ export class CampanasController {
       }
 
       // Validar archivo si no es limpieza
-      if (!archivo) {
+      if (!archivo || typeof archivo !== 'string') {
         res.status(400).json({
           success: false,
           error: 'Se requiere la URL del archivo',
         });
         return;
       }
+
+      const archivoFinal = await ensureStoredFileUrl(
+        archivo,
+        `qeb/campana-${campanaId}/artes`,
+        'image'
+      );
 
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
@@ -2371,7 +2405,7 @@ export class CampanasController {
         WHERE id IN (${placeholders})
       `;
 
-      await prisma.$executeRawUnsafe(updateDirectQuery, archivo, ...reservaIds);
+      await prisma.$executeRawUnsafe(updateDirectQuery, archivoFinal, ...reservaIds);
 
       // Actualizar reservas del mismo grupo_completo
       if (grupoIds.length > 0) {
@@ -2382,7 +2416,7 @@ export class CampanasController {
           WHERE grupo_completo_id IN (${grupoPlaceholders})
         `;
 
-        await prisma.$executeRawUnsafe(updateGruposQuery, archivo, ...grupoIds);
+        await prisma.$executeRawUnsafe(updateGruposQuery, archivoFinal, ...grupoIds);
       }
 
       // Registrar en historial
@@ -2497,14 +2531,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -2631,14 +2662,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -3104,9 +3132,14 @@ export class CampanasController {
       const updateFields: string[] = ['instalado = ?'];
       const updateParams: (boolean | string | number)[] = [instalado ? 1 : 0];
 
-      if (imagenTestigo) {
+      if (imagenTestigo && typeof imagenTestigo === 'string' && imagenTestigo.trim()) {
+        const imagenTestigoUrl = await ensureStoredFileUrl(
+          imagenTestigo,
+          `qeb/campana-${campanaId}/testigos`,
+          'image'
+        );
         updateFields.push('imagen_testigo = ?');
-        updateParams.push(imagenTestigo);
+        updateParams.push(imagenTestigoUrl);
       }
 
       if (fechaTestigo) {
@@ -3833,9 +3866,29 @@ export class CampanasController {
       if (fecha_fin !== undefined) updateData.fecha_fin = new Date(fecha_fin);
       if (asignado !== undefined) updateData.asignado = asignado;
       if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
-      if (archivo !== undefined) updateData.archivo = archivo;
+      if (archivo !== undefined) {
+        if (typeof archivo === 'string' && archivo.trim()) {
+          updateData.archivo = await ensureStoredFileUrl(
+            archivo,
+            `qeb/campana-${id}/artes`,
+            'image'
+          );
+        } else {
+          updateData.archivo = archivo;
+        }
+      }
       if (evidencia !== undefined) updateData.evidencia = evidencia;
-      if (archivo_testigo !== undefined) updateData.archivo_testigo = archivo_testigo;
+      if (archivo_testigo !== undefined) {
+        if (typeof archivo_testigo === 'string' && archivo_testigo.trim()) {
+          updateData.archivo_testigo = await ensureStoredFileUrl(
+            archivo_testigo,
+            `qeb/campana-${id}/testigos`,
+            'image'
+          );
+        } else {
+          updateData.archivo_testigo = archivo_testigo;
+        }
+      }
 
       const tarea = await prisma.tareas.update({
         where: { id: parseInt(tareaId) },
@@ -5828,3 +5881,4 @@ export class CampanasController {
 
 export const campanasController = new CampanasController();
 // force restart
+
