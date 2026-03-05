@@ -3980,7 +3980,7 @@ export class CampanasController {
             data: { status: 'Atendida', updated_at: new Date() },
           });
 
-          // Si count === 0 ya estaba en "Atendida" (cambio manual previo), no duplicar notificación
+          // Si count === 0 ya estaba en "Atendida" (cambio manual previo), no duplicar notificaciónn
           if (count === 0) return;
 
           const propuestaAtendida = await prisma.propuesta.findUnique({
@@ -3994,7 +3994,7 @@ export class CampanasController {
           });
           const nombreCampaniaAjuste = cotizacionAjuste?.nombre_campania || 'Propuesta';
 
-          // Notificar al creador UNA sola vez al cambiar el status
+          // Notificar al creador al cambiar el status
           if (propuestaAtendida?.solicitud_id) {
             const solicitudCreador = await prisma.solicitud.findUnique({
               where: { id: propuestaAtendida.solicitud_id },
