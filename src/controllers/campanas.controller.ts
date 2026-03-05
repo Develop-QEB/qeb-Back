@@ -3904,7 +3904,7 @@ export class CampanasController {
             });
             console.log(`Orden de Programación ${ev.orden_programacion_id} auto-finalizada`);
 
-            // Emitir evento WebSocket para la orden actualizada
+            // Emitir evento WebSocket para la orden actualizadaa
             if (tarea.campania_id) {
               emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
                 tareaId: ev.orden_programacion_id,
