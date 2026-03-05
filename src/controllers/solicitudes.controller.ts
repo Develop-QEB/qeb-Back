@@ -497,6 +497,7 @@ export class SolicitudesController {
           SELECT
             s.id as solicitud_id,
             ct.tipo_periodo,
+            ct.nombre_campania,
             ct.fecha_inicio as periodo_fecha_inicio,
             ct.fecha_fin as periodo_fecha_fin,
             cat_ini.numero_catorcena as catorcena_inicio,
@@ -519,6 +520,7 @@ export class SolicitudesController {
           return {
             ...s,
             tipo_periodo: extra?.tipo_periodo || null,
+            nombre_campania: extra?.nombre_campania || null,
             periodo_fecha_inicio: extra?.periodo_fecha_inicio || null,
             periodo_fecha_fin: extra?.periodo_fecha_fin || null,
             catorcena_inicio: extra?.catorcena_inicio ? Number(extra.catorcena_inicio) : null,

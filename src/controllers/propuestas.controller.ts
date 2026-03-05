@@ -688,22 +688,20 @@ export class PropuestasController {
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-      // Si el cambio es a "Ajuste Cto Cliente", crear tareas específicas para Tráfico
+      // Si el cambio es a "Ajuste Cto Cliente", crear tareas para los asignados de la propuesta
       if (status === 'Ajuste Cto-Cliente') {
-        const usuariosTrafico = await prisma.usuario.findMany({
-          where: {
-            OR: [
-              { puesto: { contains: 'Tráfico' } },
-              { puesto: { contains: 'Trafico' } },
-              { area: { contains: 'Tráfico' } },
-              { area: { contains: 'Trafico' } }
-            ],
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
-        
-        // Crear tarea para cada usuario de Tráfico
+        const idsAsignados = propuesta.id_asignado
+          ? propuesta.id_asignado.split(',').map(i => parseInt(i.trim())).filter(i => !isNaN(i) && i !== userId)
+          : [];
+
+        const usuariosTrafico = idsAsignados.length > 0
+          ? await prisma.usuario.findMany({
+              where: { id: { in: idsAsignados }, deleted_at: null },
+              select: { id: true, nombre: true, correo_electronico: true },
+            })
+          : [];
+
+        // Crear tarea para cada usuario de Tráfico seleccionado
         for (const usuarioTrafico of usuariosTrafico) {
           if (usuarioTrafico.id !== userId) {
             // Crear tarea
@@ -772,8 +770,31 @@ export class PropuestasController {
         }
       }
 
+      // Si el cambio es manual a "Atendida", notificar al creador con correo específico
+      if (status === 'Atendida' && solicitud?.usuario_id) {
+        const creadorAtendida = await prisma.usuario.findUnique({
+          where: { id: solicitud.usuario_id },
+          select: { nombre: true, correo_electronico: true },
+        });
+        if (creadorAtendida?.correo_electronico) {
+          const cotizacionAtendida = await prisma.cotizacion.findFirst({
+            where: { id_propuesta: propuestaId },
+            select: { nombre_campania: true },
+          });
+          const nombreCampAtendida = cotizacionAtendida?.nombre_campania || nombrePropuesta;
+          enviarCorreoNotificacion(
+            propuesta.solicitud_id || 0,
+            `Ajuste completado: ${nombreCampAtendida}`,
+            `${userName} cambió el estado de la propuesta "${nombreCampAtendida}" a "Atendida"`,
+            creadorAtendida.correo_electronico,
+            creadorAtendida.nombre,
+            { accion: 'Cambio de estado', usuario: userName, cliente: solicitud?.razon_social || undefined }
+          ).catch(err => console.error('Error enviando correo Atendida:', err));
+        }
+      }
+
       // Si el cambio es de "Ajuste Cto-Cliente" a otro status, notificar al creador de la solicitud
-      if (statusAnterior === 'Ajuste Cto-Cliente' && solicitud?.usuario_id) {
+      if (statusAnterior === 'Ajuste Cto-Cliente' && status !== 'Atendida' && solicitud?.usuario_id) {
         const creador = await prisma.usuario.findUnique({
           where: { id: solicitud.usuario_id },
           select: { nombre: true, correo_electronico: true }
