@@ -140,7 +140,26 @@ export class CampanasController {
             INNER JOIN cotizacion ct3 ON ct3.id_propuesta = sc3.idquote
             WHERE ct3.id = cm.cotizacion_id
               AND rsv3.deleted_at IS NULL
-          ) AS reservas_count
+          ) AS reservas_count,
+          (
+            SELECT COUNT(*)
+            FROM reservas rsv5
+            INNER JOIN solicitudCaras sc5 ON sc5.id = rsv5.solicitudCaras_id
+            INNER JOIN cotizacion ct5 ON ct5.id_propuesta = sc5.idquote
+            INNER JOIN calendario cal5 ON cal5.id = rsv5.calendario_id
+            INNER JOIN catorcenas cat5 ON cal5.fecha_inicio >= cat5.fecha_inicio AND cal5.fecha_fin <= cat5.fecha_fin
+            WHERE ct5.id = cm.cotizacion_id
+              AND rsv5.deleted_at IS NULL
+              AND cm.fecha_fin BETWEEN cat5.fecha_inicio AND cat5.fecha_fin
+          ) AS reservas_count_ultima_cat,
+          (
+            SELECT COALESCE(SUM(sc6.caras + sc6.bonificacion), 0)
+            FROM solicitudCaras sc6
+            INNER JOIN cotizacion ct6 ON ct6.id_propuesta = sc6.idquote
+            INNER JOIN catorcenas cat6 ON sc6.inicio_periodo >= cat6.fecha_inicio AND sc6.fin_periodo <= cat6.fecha_fin
+            WHERE ct6.id = cm.cotizacion_id
+              AND cm.fecha_fin BETWEEN cat6.fecha_inicio AND cat6.fecha_fin
+          ) AS caras_ultima_cat
           ,
           (
             SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
@@ -333,6 +352,8 @@ export class CampanasController {
 
       // Contar reservas para detectar campañas incompletas
       let reservasCount = 0;
+      let reservasCountUltimaCat = 0;
+      let carasUltimaCat = 0;
       if (propuesta?.solicitud_id) {
         const countResult = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
           `SELECT COUNT(*) as cnt FROM reservas r
@@ -341,6 +362,29 @@ export class CampanasController {
           propuesta.solicitud_id
         );
         reservasCount = Number(countResult[0]?.cnt || 0);
+
+        // Contar solo reservas de la última catorcena
+        if (campana.fecha_fin) {
+          const ultCatResult = await prisma.$queryRawUnsafe<{ cnt: bigint, caras_esperadas: any }[]>(
+            `SELECT
+              (SELECT COUNT(*) FROM reservas r2
+               INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+               INNER JOIN calendario cal2 ON cal2.id = r2.calendario_id
+               INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
+               WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
+                 AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
+              ) as cnt,
+              (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
+               FROM solicitudCaras sc3
+               INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
+               WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
+              ) as caras_esperadas`,
+            propuesta.solicitud_id, campana.fecha_fin,
+            propuesta.solicitud_id, campana.fecha_fin
+          );
+          reservasCountUltimaCat = Number(ultCatResult[0]?.cnt || 0);
+          carasUltimaCat = Number(ultCatResult[0]?.caras_esperadas || 0);
+        }
       }
 
       // Combinar toda la info
@@ -410,6 +454,8 @@ export class CampanasController {
         salesperson_code: solicitud?.salesperson_code || null,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
+        reservas_count_ultima_cat: reservasCountUltimaCat,
+        caras_ultima_cat: carasUltimaCat,
         // Comentarios
         comentarios,
       };
