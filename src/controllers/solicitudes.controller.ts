@@ -11,6 +11,7 @@ import {
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
 import nodemailer from 'nodemailer';
+import { uploadBufferToSpaces } from '../config/spaces';
 
 // Helper function to serialize BigInt values to numbers
 function serializeBigInt<T>(obj: T): T {
@@ -2767,16 +2768,20 @@ export class SolicitudesController {
         return;
       }
 
-      const fileUrl = `/uploads/${req.file.filename}`;
+      const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+        folder: 'solicitudes',
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
 
       await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: {
-          archivo: fileUrl,
+          archivo: uploaded.url,
         },
       });
 
-      res.json({ success: true, data: { url: fileUrl } });
+      res.json({ success: true, data: { url: uploaded.url } });
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';

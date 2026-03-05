@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { validationResult } from 'express-validator';
 import { authService } from '../services/auth.service';
 import { AuthRequest } from '../types';
+import { uploadBufferToSpaces } from '../config/spaces';
 
 export class AuthController {
   async register(req: Request, res: Response): Promise<void> {
@@ -192,10 +193,14 @@ export class AuthController {
         return;
       }
 
-      // Generar la URL relativa para acceder a la imagen
-      const fotoPath = `/uploads/profiles/${req.file.filename}`;
+      // Subir a Spaces
+      const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+        folder: 'profiles',
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
 
-      const user = await authService.updateFotoPerfil(req.user.userId, fotoPath);
+      const user = await authService.updateFotoPerfil(req.user.userId, uploaded.url);
 
       res.json({
         success: true,

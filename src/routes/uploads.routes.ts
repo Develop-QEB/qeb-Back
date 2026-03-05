@@ -161,6 +161,50 @@ router.post('/testigo', authMiddleware, uploadTestigo.single('file'), async (req
   }
 });
 
+// Endpoint genérico para subir archivos (solicitudes, tickets, perfil, etc.)
+// El query param ?folder= define la carpeta destino en Spaces
+router.post('/general', authMiddleware, uploadArte.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ success: false, error: 'No se recibio ningun archivo' });
+      return;
+    }
+
+    if (!isSpacesConfigured()) {
+      res.status(500).json({ success: false, error: 'Spaces no esta configurado' });
+      return;
+    }
+
+    if (!req.file.buffer) {
+      res.status(400).json({ success: false, error: 'Archivo invalido: no se recibio buffer' });
+      return;
+    }
+
+    const folder = (req.query.folder as string) || 'general';
+
+    const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+      folder,
+      originalName: sanitizeFilename(req.file.originalname),
+      mimeType: req.file.mimetype,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        url: uploaded.url,
+        filename: uploaded.key,
+        originalName: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      },
+    });
+  } catch (error) {
+    console.error('Error al subir archivo general:', error);
+    const message = error instanceof Error ? error.message : 'Error al subir archivo';
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
 // Middleware para manejar errores de multer
 router.use((err: Error, _req: Request, res: Response, next: Function) => {
   if (err instanceof multer.MulterError) {

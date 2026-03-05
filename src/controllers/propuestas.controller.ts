@@ -8,6 +8,7 @@ import {
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
+import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 
 // transporter
@@ -2750,18 +2751,22 @@ export class PropuestasController {
         return;
       }
 
-      const fileUrl = `/uploads/${req.file.filename}`;
+      const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+        folder: 'propuestas',
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
 
       // Update propuesta with file URL in database
       await prisma.propuesta.update({
         where: { id: parseInt(id) },
         data: {
-          archivo: fileUrl,
+          archivo: uploaded.url,
           updated_at: new Date(),
         },
       });
 
-      res.json({ success: true, data: { url: fileUrl } });
+      res.json({ success: true, data: { url: uploaded.url } });
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';
