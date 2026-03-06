@@ -83,9 +83,9 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(cm.nombre LIKE ? OR cm.articulo LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
@@ -410,6 +410,66 @@ export class CampanasController {
         }
       }
 
+      // Desglose de completitud por catorcena - detalle por grupo (solicitudCaras)
+      let incompletenessDetail: any[] = [];
+      if (propuesta?.solicitud_id) {
+        const detailResult = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT
+            cat.numero_catorcena as catorcena,
+            cat.año as anio,
+            sc.id as sc_id,
+            sc.articulo,
+            sc.ciudad,
+            sc.caras as caras_renta,
+            sc.caras_flujo,
+            sc.caras_contraflujo,
+            sc.bonificacion as caras_bonif,
+            (sc.caras + sc.bonificacion) as caras_esperadas,
+            (SELECT COUNT(*) FROM reservas r2
+             WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+            ) as reservas_count
+          FROM solicitudCaras sc
+          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+          WHERE sc.idquote = ?
+          ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+          propuesta.solicitud_id
+        );
+
+        // Agrupar por catorcena
+        const byCat: Record<string, any> = {};
+        for (const r of detailResult) {
+          const key = `${r.anio}-${r.catorcena}`;
+          if (!byCat[key]) {
+            byCat[key] = {
+              catorcena: Number(r.catorcena),
+              anio: Number(r.anio),
+              caras_esperadas: 0,
+              reservas_count: 0,
+              grupos: [],
+            };
+          }
+          const esperadas = Number(r.caras_esperadas);
+          const reservadas = Number(r.reservas_count);
+          byCat[key].caras_esperadas += esperadas;
+          byCat[key].reservas_count += reservadas;
+          if (reservadas < esperadas) {
+            byCat[key].grupos.push({
+              articulo: r.articulo || 'SIN-ART',
+              ciudad: r.ciudad || '',
+              caras_esperadas: esperadas,
+              reservas_count: reservadas,
+              faltantes: esperadas - reservadas,
+            });
+          }
+        }
+        incompletenessDetail = Object.values(byCat)
+          .map((c: any) => ({
+            ...c,
+            completa: c.reservas_count >= c.caras_esperadas,
+          }))
+          .filter((c: any) => c.caras_esperadas > 0);
+      }
+
       // Combinar toda la info
       const campanaCompleta = {
         ...campana,
@@ -475,10 +535,13 @@ export class CampanasController {
         // Info de SAP desde solicitud
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
+        sap_database: solicitud?.sap_database || null,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
         caras_ultima_cat: carasUltimaCat,
+        // Desglose de completitud por catorcena
+        incompleteness_detail: incompletenessDetail,
         // Comentarios
         comentarios,
       };
@@ -1015,9 +1078,9 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(cm.nombre LIKE ? OR cm.articulo LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       if (yearInicio && yearFin) {
