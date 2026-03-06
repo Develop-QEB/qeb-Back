@@ -56,6 +56,7 @@ const uploadTestigo = multer({
 });
 
 // Endpoint para subir archivo de arte
+// Acepta ?campanaId=123 para organizar en subcarpetas: artes/campana-123/
 router.post('/arte', authMiddleware, uploadArte.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
@@ -82,8 +83,13 @@ router.post('/arte', authMiddleware, uploadArte.single('file'), async (req: Requ
       return;
     }
 
+    // Organizar por tipo de contenido según mimetype
+    const isPdf = req.file.mimetype === 'application/pdf';
+    const isVideo = req.file.mimetype.startsWith('video/');
+    const folder = isPdf ? 'documentos' : isVideo ? 'digitales' : 'artes';
+
     const uploaded = await uploadBufferToSpaces(req.file.buffer, {
-      folder: 'artes',
+      folder,
       originalName: sanitizeFilename(req.file.originalname),
       mimeType: req.file.mimetype,
     });
