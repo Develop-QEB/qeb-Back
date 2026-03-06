@@ -112,11 +112,11 @@ export class AuthController {
       }
 
       const { nombre, area, puesto } = req.body;
+      const isAdmin = req.user.rol === 'Administrador';
 
       const user = await authService.updateProfile(req.user.userId, {
         nombre,
-        area,
-        puesto,
+        ...(isAdmin && { area, puesto }),
       });
 
       res.json({
@@ -195,7 +195,7 @@ export class AuthController {
 
       // Subir a Spaces
       const uploaded = await uploadBufferToSpaces(req.file.buffer, {
-        folder: 'profiles',
+        folder: 'perfiles',
         originalName: req.file.originalname,
         mimeType: req.file.mimetype,
       });

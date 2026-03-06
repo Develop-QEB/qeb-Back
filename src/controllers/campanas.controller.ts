@@ -1463,7 +1463,7 @@ export class CampanasController {
           )
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -2001,7 +2001,7 @@ export class CampanasController {
               LIMIT 1
             )
           )
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -2170,7 +2170,7 @@ export class CampanasController {
           AND imDig.id_reserva IS NULL
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -2271,7 +2271,7 @@ export class CampanasController {
           AND rsv.deleted_at IS NULL
           AND sc.inicio_periodo <= cm.fecha_fin
           AND sc.fin_periodo >= cm.fecha_inicio
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
