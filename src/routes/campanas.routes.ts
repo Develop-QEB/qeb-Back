@@ -40,6 +40,9 @@ router.delete('/:id/reservas', campanasController.deleteReservas.bind(campanasCo
 // Comentarios
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
 
+// SAP
+router.post('/:id/mark-posted-sap', campanasController.markPostedToSAP.bind(campanasController));
+
 // APS
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
 router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));

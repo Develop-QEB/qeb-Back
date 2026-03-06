@@ -536,6 +536,7 @@ export class CampanasController {
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
+        posted_to_sap: (campana as any).posted_to_sap ? true : false,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
@@ -4543,6 +4544,17 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  async markPostedToSAP(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      await prisma.$queryRawUnsafe('UPDATE campania SET posted_to_sap = 1 WHERE id = ?', campanaId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error en markPostedToSAP:', error);
+      res.status(500).json({ success: false, error: 'Error al marcar como enviado a SAP' });
     }
   }
 
