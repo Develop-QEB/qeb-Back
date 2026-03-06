@@ -227,6 +227,40 @@ export class UsuariosController {
     }
   }
 
+  async adminResetPassword(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (req.user?.rol !== 'Administrador') {
+        res.status(403).json({ success: false, error: 'No tienes permisos para realizar esta acción' });
+        return;
+      }
+
+      const { id } = req.params;
+      const { nuevaPassword } = req.body;
+
+      if (!nuevaPassword || nuevaPassword.length < 6) {
+        res.status(400).json({ success: false, error: 'La contraseña debe tener al menos 6 caracteres' });
+        return;
+      }
+
+      const usuario = await prisma.usuario.findFirst({ where: { id: parseInt(id), deleted_at: null } });
+      if (!usuario) {
+        res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+        return;
+      }
+
+      const hash = await bcrypt.hash(nuevaPassword, 10);
+      await prisma.usuario.update({
+        where: { id: parseInt(id) },
+        data: { user_password: hash, updated_at: new Date() },
+      });
+
+      res.json({ success: true, message: 'Contraseña restablecida correctamente' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al restablecer contraseña';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async deleteMany(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Verificar que el usuario sea Administrador

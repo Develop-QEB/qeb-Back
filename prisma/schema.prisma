@@ -69,6 +69,7 @@ model catorcenas {
   fecha_inicio     DateTime @db.Date
   fecha_fin        DateTime @db.Date
 
+  @@index([fecha_inicio, fecha_fin], map: "idx_fechas")
   @@map("catorcenas")
 }
 
@@ -102,6 +103,8 @@ model campania {
   cotizacion_id    Int?
   articulo         String    @db.VarChar(20)
   fecha_aprobacion DateTime? @db.DateTime(0)
+
+  @@index([cotizacion_id], map: "idx_cotizacion_id")
 }
 
 model cliente {
@@ -165,12 +168,16 @@ model cotizacion {
   fecha_expiracion     DateTime? @db.Date
   articulo             String    @db.VarChar(20)
   tipo_periodo         String?   @default("catorcena") @db.VarChar(20)
+
+  @@index([id_propuesta], map: "idx_id_propuesta")
 }
 
 model espacio_inventario {
   id             Int @id @default(autoincrement())
   inventario_id  Int
   numero_espacio Int
+
+  @@index([inventario_id], map: "idx_inventario_id")
 }
 
 model historial {
@@ -202,6 +209,8 @@ model imagenes_digitales {
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
   archivo_data       String?  @db.LongText
+
+  @@index([id_reserva], map: "idx_id_reserva")
 }
 
 model propuesta {
@@ -246,6 +255,8 @@ model reservas {
 
   @@index([solicitudCaras_id])
   @@index([APS])
+  @@index([deleted_at], map: "idx_deleted_at")
+  @@index([inventario_id], map: "idx_inventario_id")
 }
 
 model session_locks {
@@ -288,7 +299,8 @@ model solicitud {
   sap_database     String?   @db.VarChar(10)
 }
 
-model solicitudCaras {
+model 
+ {
   id                   Int      @id @default(autoincrement())
   idquote              String?  @db.VarChar(50)
   ciudad               String?  @db.VarChar(1000)
@@ -312,6 +324,7 @@ model solicitudCaras {
   cortesia             Int?     @default(0)
 
   @@index([idquote])
+  @@index([inicio_periodo, fin_periodo], map: "idx_periodos")
 }
 
 model tareas {
@@ -355,6 +368,8 @@ model usuario {
   deleted_at         DateTime?        @db.Timestamp(0)
   user_role          String           @default("Normal") @db.VarChar(50)
   foto_perfil        String?          @db.VarChar(500)
+  reset_token        String?          @db.VarChar(6)
+  reset_token_expiry DateTime?        @db.DateTime(0)
   equipos            usuario_equipo[]
 }
 
