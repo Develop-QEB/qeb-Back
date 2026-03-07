@@ -4,6 +4,11 @@ import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 
+if (process.env.NODE_ENV !== 'production') {
+  console.warn(`[Config] NODE_ENV=${process.env.NODE_ENV || 'undefined'}; forcing production mode`);
+  process.env.NODE_ENV = 'production';
+}
+
 const PORT = process.env.PORT || 3000;
 
 // Crear servidor HTTP para Socket.io
@@ -76,9 +81,9 @@ async function main() {
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   });
 
-  // Conectar a la base de datos con reintentos
+  // Verify DB connectivity (lazy - only opens 1 connection, not the whole pool)
   try {
-    await connectWithRetry();
+    await verifyDbConnection();
 
     // Ejecutar limpieza inicial al arrancar
     await limpiarReservasExpiradas();
@@ -92,23 +97,22 @@ async function main() {
   }
 }
 
-// Graceful shutdown: close HTTP server first (stop accepting requests), then disconnect DB
+// Graceful shutdown: disconnect DB immediately, then close HTTP
 async function gracefulShutdown(signal: string) {
   console.log(`[Shutdown] ${signal} received, closing gracefully...`);
-  // 1. Stop accepting new connections
-  httpServer.close(() => {
-    console.log('[Shutdown] HTTP server closed');
-  });
-  // 2. Give pending requests a moment to finish
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  // 3. Disconnect Prisma to release all DB connections
+  // 1. Disconnect Prisma FIRST to release DB connections immediately
   try {
     await prisma.$disconnect();
     console.log('[Shutdown] Prisma disconnected');
   } catch (err) {
     console.error('[Shutdown] Error disconnecting Prisma:', err);
   }
-  process.exit(0);
+  // 2. Close HTTP server
+  httpServer.close(() => {
+    console.log('[Shutdown] HTTP server closed');
+  });
+  // 3. Force exit after 3s if still hanging
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));

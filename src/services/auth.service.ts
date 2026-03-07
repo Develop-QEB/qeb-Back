@@ -4,7 +4,9 @@ import prisma from '../utils/prisma';
 import { AuthResponse, JwtPayload, UserResponse } from '../types';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
-const ACCESS_TOKEN_EXPIRY = '30d'; // Token de larga duración (30 días)
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'default-refresh-secret';
+const ACCESS_TOKEN_EXPIRY = '15m';
+const REFRESH_TOKEN_EXPIRY = '7d';
 
 export interface RegisterData {
   nombre: string;
@@ -107,6 +109,10 @@ export class AuthService {
       expiresIn: ACCESS_TOKEN_EXPIRY,
     });
 
+    const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, {
+      expiresIn: REFRESH_TOKEN_EXPIRY,
+    });
+
     const userResponse: UserResponse = {
       id: user.id,
       nombre: user.nombre,
@@ -120,8 +126,48 @@ export class AuthService {
 
     return {
       accessToken,
+      refreshToken,
       user: userResponse,
     };
+  }
+
+  async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
+    try {
+      const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as JwtPayload;
+
+      const user = await prisma.usuario.findFirst({
+        where: {
+          id: decoded.userId,
+          deleted_at: null
+        },
+      });
+
+      if (!user) {
+        throw new Error('Usuario no valido');
+      }
+
+      const payload: JwtPayload = {
+        userId: user.id,
+        email: user.correo_electronico,
+        rol: user.user_role,
+        nombre: user.nombre,
+      };
+
+      const newAccessToken = jwt.sign(payload, JWT_SECRET, {
+        expiresIn: ACCESS_TOKEN_EXPIRY,
+      });
+
+      const newRefreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, {
+        expiresIn: REFRESH_TOKEN_EXPIRY,
+      });
+
+      return {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      };
+    } catch {
+      throw new Error('Refresh token invalido');
+    }
   }
 
   async getProfile(userId: number): Promise<UserResponse> {

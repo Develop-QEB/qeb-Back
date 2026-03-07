@@ -187,7 +187,7 @@ async function enviarCorreoTarea(
                 <table width="100%" cellpadding="0" cellspacing="0">
                   <tr>
                     <td align="center">
-                      <a href="${linkUrl || `https://app.qeb.mx/solicitudes?viewId=${tareaId}`}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">${linkUrl ? 'Ver Propuesta' : 'Ver Solicitud'}</a>
+                      <a href="${linkUrl || `https://app.qeb.mx/solicitudes?viewId=${tareaId}`}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">${datosAdicionales.idCampania ? 'Ver Campaña' : linkUrl ? 'Ver Propuesta' : 'Ver Solicitud'}</a>
                     </td>
                   </tr>
                 </table>
@@ -2189,7 +2189,7 @@ export class SolicitudesController {
           const excludeCreator = solicitud.usuario_id ? { not: solicitud.usuario_id } : {};
 
           if (nuevosAsignadosIds.length === 0) {
-            usuariosTrafico = await prisma.usuario.findMany({
+            usuariosTrafico = await tx.usuario.findMany({
               where: {
                 OR: [
                   { puesto: { contains: 'Tráfico' } },
@@ -2204,10 +2204,10 @@ export class SolicitudesController {
             });
           } else {
             // Si hay asignados específicos, filtrar al creador manualmente después del query
-            const usuariosTraficoRaw = await prisma.usuario.findMany({
-              where: { 
+            const usuariosTraficoRaw = await tx.usuario.findMany({
+              where: {
                 id: { in: nuevosAsignadosIds },
-                deleted_at: null 
+                deleted_at: null
               },
               select: { id: true, nombre: true, correo_electronico: true }
             });
@@ -2283,7 +2283,7 @@ export class SolicitudesController {
             },
           });
         }
-      });
+      }, { timeout: 30000 });
 
       // Obtener catorcenas para el correo
       const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({

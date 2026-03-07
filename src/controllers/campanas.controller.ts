@@ -13,6 +13,7 @@ import {
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
+import { serializeBigInt } from '../utils/serialization';
 
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
@@ -547,10 +548,7 @@ export class CampanasController {
         comentarios,
       };
 
-      // Convertir BigInt a Number para JSON serialization
-      const campanaSerializable = JSON.parse(JSON.stringify(campanaCompleta, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const campanaSerializable = serializeBigInt(campanaCompleta);
 
       res.json({
         success: true,
@@ -1213,10 +1211,7 @@ export class CampanasController {
 
       console.log('[getCaras Campaña] Encontradas', caras.length, 'caras para idquote:', String(cotizacion.id_propuesta));
 
-      // Convertir BigInt a Number
-      const carasSerializable = JSON.parse(JSON.stringify(caras, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const carasSerializable = serializeBigInt(caras);
 
       res.json({
         success: true,
@@ -2075,10 +2070,7 @@ export class CampanasController {
         orderBy: { fecha_hora: 'asc' },
       });
 
-      // Convertir BigInt a Number para JSON serialization
-      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const historialSerializable = serializeBigInt(historial);
 
       res.json({
         success: true,
@@ -2178,9 +2170,7 @@ export class CampanasController {
 
       console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -2279,9 +2269,7 @@ export class CampanasController {
 
       console.log('Inventario instalaciones result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -5079,9 +5067,7 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params, ...params);
 
-      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const dataSerializable = serializeBigInt(data);
 
       res.json({
         success: true,

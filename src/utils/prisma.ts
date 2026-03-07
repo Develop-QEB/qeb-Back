@@ -76,8 +76,8 @@ const createPrismaClient = () => {
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 
-// Guardar en global para reutilizar en hot-reloads (nodemon)
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+// Cache in global to prevent multiple PrismaClient instances
+globalForPrisma.prisma = prisma;
 
 export default prisma;
 
