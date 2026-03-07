@@ -8,13 +8,378 @@ import {
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
+import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { hasFullVisibility } from '../utils/permissions';
+import nodemailer from 'nodemailer';
+import { serializeBigInt } from '../utils/serialization';
 
-// Helper function to serialize BigInt values to numbers
-function serializeBigInt<T>(obj: T): T {
-  return JSON.parse(JSON.stringify(obj, (_, value) =>
-    typeof value === 'bigint' ? Number(value) : value
-  ));
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: { rejectUnauthorized: false },
+});
+
+async function enviarCorreoTarea(
+  tareaId: number,
+  titulo: string,
+  descripcion: string,
+  fechaFin: Date,
+  destinatarioEmail: string,
+  destinatarioNombre: string,
+  datosAdicionales: {
+    cliente?: string;
+    producto?: string;
+    creador?: string;
+    periodoInicio?: string;
+    periodoFin?: string;
+    idSolicitud?: number;
+    idPropuesta?: number;
+    idCampania?: number;
+  } = {},
+  linkUrl?: string
+): Promise<void> {
+  const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+
+  const htmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+      <tr>
+        <td align="center">
+          <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
+            <tr>
+              <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+              </td>
+            </tr>
+
+            <!-- Main Content -->
+            <tr>
+              <td style="padding: 40px;">
+                
+                <!-- Title -->
+                <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Nueva Tarea Asignada</h2>
+                <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se te ha asignado una nueva tarea.
+                </p>
+                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
+                  <p style="color: #6b7280; margin: 0 0 4px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Tarea</p>
+                  <p style="color: #1f2937; margin: 0; font-size: 16px; font-weight: 600;">${descripcion}</p>
+                </div>
+
+                <!-- Info Grid -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                  ${datosAdicionales.cliente ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">🏢</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Cliente</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.cliente}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+                  
+                  ${datosAdicionales.producto ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📦</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Producto</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.producto}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.creador ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">✨</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Creado por</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.creador}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📅</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Período</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">
+                              ${datosAdicionales.periodoInicio && datosAdicionales.periodoFin 
+                                ? `${datosAdicionales.periodoInicio} → ${datosAdicionales.periodoFin}` 
+                                : 'Sin período definido'}
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+
+                ${(datosAdicionales.idSolicitud || datosAdicionales.idPropuesta || datosAdicionales.idCampania) ? `
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 20px;">
+                  <tr>
+                    <td style="padding: 10px 14px; background-color: #f9fafb; border-radius: 8px;">
+                      <p style="color: #9ca3af; margin: 0 0 4px 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Referencia</p>
+                      <p style="color: #374151; margin: 0; font-size: 13px; font-weight: 500;">${[
+                        datosAdicionales.idSolicitud ? `Solicitud #${datosAdicionales.idSolicitud}` : '',
+                        datosAdicionales.idPropuesta ? `Propuesta #${datosAdicionales.idPropuesta}` : '',
+                        datosAdicionales.idCampania ? `Campaña #${datosAdicionales.idCampania}` : '',
+                      ].filter(Boolean).join('  ·  ')}</p>
+                    </td>
+                  </tr>
+                </table>
+                ` : ''}
+
+                <!-- CTA Button -->
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="${linkUrl || `https://app.qeb.mx/solicitudes?viewId=${tareaId}`}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">${datosAdicionales.idCampania ? 'Ver Campaña' : linkUrl ? 'Ver Propuesta' : 'Ver Solicitud'}</a>
+                    </td>
+                  </tr>
+                </table>
+
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+      to: destinatarioEmail,
+      subject: `Nueva tarea: ${titulo}`,
+      html: htmlBody,
+    });
+
+    await prisma.correos_enviados.create({
+      data: {
+        remitente: 'no-reply@qeb.mx',
+        destinatario: destinatarioEmail,
+        asunto: `Nueva tarea: ${titulo}`,
+        cuerpo: htmlBody,
+      },
+    });
+  }
 }
+
+async function enviarCorreoNotificacion(
+  solicitudId: number,
+  titulo: string,
+  descripcion: string,
+  destinatarioEmail: string,
+  destinatarioNombre: string,
+  datosAdicionales: {
+    accion?: string;
+    usuario?: string;
+    cliente?: string;
+  } = {}
+): Promise<void> {
+  const htmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+      <tr>
+        <td align="center">
+          <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
+            <tr>
+              <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+              </td>
+            </tr>
+
+            <!-- Main Content -->
+            <tr>
+              <td style="padding: 40px;">
+                
+                <!-- Title -->
+                <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                  <span style="display: inline-block; background-color: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">🔔 Notificación</span>
+                </div>
+                <h2 style="color: #1f2937; margin: 12px 0 8px 0; font-size: 20px; font-weight: 600;">${titulo}</h2>
+                <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, tienes una nueva notificación.
+                </p>
+
+                <!-- Notification Card -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #fffbeb; border-radius: 12px; border: 1px solid #fde68a; margin-bottom: 24px;">
+                  <tr>
+                    <td style="padding: 20px;">
+                      <p style="color: #92400e; margin: 0; font-size: 14px; line-height: 1.6;">${descripcion}</p>
+                    </td>
+                  </tr>
+                </table>
+
+                <!-- Info Grid -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                  ${datosAdicionales.usuario ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">👤</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Realizado por</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.usuario}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.cliente ? `
+                  <tr>
+                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">🏢</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Cliente</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.cliente}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+
+                  ${datosAdicionales.accion ? `
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td width="24" valign="top">
+                            <div style="width: 20px; height: 20px; background-color: #fef3c7; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">⚡</div>
+                          </td>
+                          <td style="padding-left: 12px;">
+                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Acción</p>
+                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${datosAdicionales.accion}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  ` : ''}
+                </table>
+
+                <!-- CTA Button -->
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="https://app.qeb.mx/solicitudes?viewId=${solicitudId}" style="display: inline-block; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(245, 158, 11, 0.4);">Ver en QEB</a>
+                    </td>
+                  </tr>
+                </table>
+
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+      to: destinatarioEmail,
+      subject: `🔔 ${titulo}`,
+      html: htmlBody,
+    });
+
+    await prisma.correos_enviados.create({
+      data: {
+        remitente: 'no-reply@qeb.mx',
+        destinatario: destinatarioEmail,
+        asunto: `🔔 ${titulo}`,
+        cuerpo: htmlBody,
+      },
+    });
+  }
+}
+
 
 export class SolicitudesController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -85,6 +450,19 @@ export class SolicitudesController {
           gte: new Date(`${yearInicio}-01-01`),
           lte: new Date(`${yearInicio}-12-31`),
         };
+      }
+
+      // Visibility filter: non-leadership roles only see their own records
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
       }
 
       // Build orderBy
@@ -320,10 +698,48 @@ export class SolicitudesController {
         },
       });
 
+      // Enviar correo
+      const usuariosNotificar = await prisma.usuario.findMany({
+        where: { id: { in: Array.from(involucrados) } },
+        select: { id: true, correo_electronico: true, nombre: true },
+      });
+
+      for (const usuario of usuariosNotificar) {
+        if (usuario.correo_electronico) {
+          enviarCorreoNotificacion(
+            solicitud.id,
+            tituloNotificacion,
+            descripcionNotificacion,
+            usuario.correo_electronico,
+            usuario.nombre,
+            {
+              accion: 'Cambio de estado',
+              usuario: userName,
+              cliente: nombreSolicitud,
+            }
+          ).catch(err => console.error('Error enviando correo notificación:', err));
+        }
+      }
+
       res.json({
         success: true,
         data: solicitud,
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_STATUS_CHANGED, {
+        solicitudId: solicitud.id,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      if (campania) {
+        emitToCampanas(SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+          campaniaId: campania.id,
+          usuario: userName,
+        });
+      }
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'status_changed' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
       res.status(500).json({
@@ -409,6 +825,35 @@ export class SolicitudesController {
         success: true,
         message: 'Solicitud eliminada correctamente',
       });
+
+      // Enviar correo
+      const usuariosNotificar = await prisma.usuario.findMany({
+        where: { id: { in: Array.from(involucrados) } },
+        select: { id: true, correo_electronico: true, nombre: true },
+      });
+
+      for (const usuario of usuariosNotificar) {
+        if (usuario.correo_electronico) {
+          enviarCorreoNotificacion(
+            solicitud.id,
+            'Solicitud eliminada',
+            `La solicitud "${solicitud.descripcion || solicitud.id}" ha sido eliminada por ${userName}`,
+            usuario.correo_electronico,
+            usuario.nombre,
+            {
+              accion: 'Eliminación',
+              usuario: userName,
+            }
+          ).catch(err => console.error('Error enviando correo notificación:', err));
+        }
+      }
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ELIMINADA, {
+        solicitudId: solicitud.id,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'eliminada' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar solicitud';
       res.status(500).json({
@@ -426,6 +871,19 @@ export class SolicitudesController {
       const catorcenaFin = req.query.catorcenaFin as string;
 
       const where: Record<string, unknown> = { deleted_at: null };
+
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
+      }
 
       // Apply date filters
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -532,6 +990,19 @@ export class SolicitudesController {
         deleted_at: null,
       };
 
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM solicitud
+           WHERE deleted_at IS NULL
+             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+          userId, String(userId)
+        );
+        where.id = { in: visibleIds.map(r => r.id) };
+      }
+
       if (status) {
         where.status = status;
       }
@@ -599,6 +1070,43 @@ export class SolicitudesController {
   async getUsers(req: AuthRequest, res: Response): Promise<void> {
     try {
       const area = req.query.area as string;
+      const filterByTeam = req.query.filterByTeam === 'true';
+      const userId = req.user?.userId;
+
+      let teamMemberIds: number[] = [];
+
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      if (filterByTeam && userId) {
+        // Obtener los equipos del usuario actual
+        const userTeams = await prisma.usuario_equipo.findMany({
+          where: {
+            usuario_id: userId,
+            equipo: {
+              deleted_at: null,
+            },
+          },
+          select: {
+            equipo_id: true,
+          },
+        });
+
+        // Si el usuario tiene equipos, obtener todos los miembros de esos equipos
+        if (userTeams.length > 0) {
+          const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
+          const teamMembers = await prisma.usuario_equipo.findMany({
+            where: {
+              equipo_id: { in: teamIds },
+              equipo: {
+                deleted_at: null,
+              },
+            },
+            select: {
+              usuario_id: true,
+            },
+          });
+          teamMemberIds = [...new Set(teamMembers.map((m: { usuario_id: number }) => m.usuario_id))];
+        }
+      }
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -606,6 +1114,11 @@ export class SolicitudesController {
 
       if (area) {
         where.area = area;
+      }
+
+      // Si hay filtro por equipo y el usuario tiene equipos, filtrar por miembros
+      if (filterByTeam && teamMemberIds.length > 0) {
+        where.id = { in: teamMemberIds };
       }
 
       const users = await prisma.usuario.findMany({
@@ -766,6 +1279,7 @@ export class SolicitudesController {
         categoria_nombre,
         card_code, // SAP CardCode (ACA_U_SAPCode)
         salesperson_code, // SAP SalesPersonCode (ASESOR_U_SAPCode_Original)
+        sap_database, // CIMU, TEST, or TRADE
         // Campaign data
         nombre_campania,
         descripcion,
@@ -838,6 +1352,7 @@ export class SolicitudesController {
             tipo_archivo,
             card_code: card_code || null,
             salesperson_code,
+            sap_database: sap_database || null,
           },
         });
 
@@ -857,7 +1372,7 @@ export class SolicitudesController {
           data: {
             cliente_id,
             fecha: getMexicoDate(),
-            status: 'Pendiente',
+            status: 'Abierto',
             descripcion,
             notas,
             solicitud_id: solicitud.id,
@@ -927,32 +1442,29 @@ export class SolicitudesController {
             contraflujo: caras.reduce((acc: number, c: { caras_contraflujo: number }) => acc + (c.caras_contraflujo || 0), 0),
             total_flujo: totalCaras,
             bonificacion: totalBonificacion,
-            nombre_cliente: razon_social || nombre_campania || 'Sin nombre',
-            descuento: 0,
+            nombre_cliente: razon_social,
             articulo,
           },
         });
 
-        // 7. Create tareas for each asignado
-        for (const asignado of asignados) {
-          await tx.tareas.create({
-            data: {
-              fecha_inicio: getMexicoDate(),
-              fecha_fin: new Date(fecha_fin),
-              tipo: 'Solicitud',
-              responsable: asignado.nombre,
-              id_responsable: asignado.id,
-              estatus: 'Pendiente',
-              descripcion: `Atender solicitud: ${nombre_campania}`,
-              titulo: nombre_campania,
-              campania_id: campania.id,
-              id_solicitud: solicitud.id.toString(),
-              id_propuesta: propuesta.id.toString(),
-              asignado: asignado.nombre,
-              id_asignado: asignado.id.toString(),
-            },
-          });
-        }
+        // 7. Crear tareas para cada asignado
+        await tx.tareas.create({
+          data: {
+            tipo: 'Seguimiento Solicitud',
+            titulo: 'Seguimiento Solicitud',
+            descripcion: nombre_campania, 
+            contenido: razon_social, 
+            estatus: 'Pendiente',
+            id_responsable: userId || 0,
+            responsable: userName,
+            asignado: userName,
+            id_asignado: userId?.toString() || '0',
+            id_solicitud: solicitud.id.toString(),
+            campania_id: campania.id,
+            fecha_inicio: getMexicoDate(), 
+            fecha_fin: new Date(fecha_fin), 
+          },
+        });
 
         // 8. Create solicitudCaras for each cara entry with authorization status
         const createdCaras = [];
@@ -960,6 +1472,7 @@ export class SolicitudesController {
           // Calcular estado de autorización
           const estadoResult = await calcularEstadoAutorizacion({
             ciudad: cara.ciudad,
+            estado: cara.estado,
             formato: cara.formato,
             tipo: cara.tipo,
             caras: cara.caras,
@@ -987,7 +1500,8 @@ export class SolicitudesController {
               caras_contraflujo: cara.caras_contraflujo || 0,
               articulo: cara.articulo || articulo,
               descuento: cara.descuento || 0,
-              estado_autorizacion: estadoResult.estado,
+              autorizacion_dg: estadoResult.autorizacion_dg,
+              autorizacion_dcm: estadoResult.autorizacion_dcm,
             },
           });
           createdCaras.push(solicitudCara);
@@ -1005,20 +1519,13 @@ export class SolicitudesController {
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
-      // DESPUÉS de la transacción: verificar caras pendientes y crear tareas
-      // (igual que en update - fuera de la transacción para que pueda ver los datos)
-      const autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
-      console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
-
-      if (autorizacionInfo.tienePendientes && userId) {
-        await crearTareasAutorizacion(
-          result.solicitud.id,
-          result.propuesta.id,
-          userId,
-          userName,
-          autorizacionInfo.pendientesDg,
-          autorizacionInfo.pendientesDcm
-        );
+      // Verificar caras pendientes de autorización (no debe bloquear la respuesta)
+      let autorizacionInfo: { tienePendientes: boolean; pendientesDg: any[]; pendientesDcm: any[] } = { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
+      try {
+        autorizacionInfo = await verificarCarasPendientes(result.propuesta.id.toString());
+        console.log('[create] Verificando pendientes después de transacción:', autorizacionInfo);
+      } catch (err) {
+        console.error('[create] Error verificando pendientes (no-blocking):', err);
       }
 
       // Build message with authorization info
@@ -1028,12 +1535,98 @@ export class SolicitudesController {
         mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
       }
 
+      // SIEMPRE enviar respuesta exitosa si la transacción commiteó
       res.status(201).json({
         success: true,
         data: result,
         message: mensaje,
         autorizacion: autorizacionInfo,
       });
+
+      // Emitir eventos WebSocket (siempre, independiente de lógica post-transacción)
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_CREADA, {
+        solicitud: result.solicitud,
+        propuesta: result.propuesta,
+        campania: result.campania,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_CREADA, {
+        campania: result.campania,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'creada' });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+        solicitudId: result.solicitud.id,
+        campanaId: result.campania.id,
+        usuario: userName,
+      });
+
+      // Lógica post-respuesta: tareas de autorización (no bloquea al usuario)
+      try {
+        if (autorizacionInfo.tienePendientes && userId) {
+          await crearTareasAutorizacion(
+            result.solicitud.id,
+            result.propuesta.id,
+            userId,
+            userName,
+            autorizacionInfo.pendientesDg,
+            autorizacionInfo.pendientesDcm
+          );
+        }
+      } catch (err) {
+        console.error('[create] Error creando tareas autorización (no-blocking):', err);
+      }
+
+      // Lógica post-respuesta: correo electrónico (no bloquea al usuario)
+      try {
+        const catorcenaInicio = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date(fecha_inicio) },
+            fecha_fin: { gte: new Date(fecha_inicio) },
+          },
+        });
+        const catorcenaFin = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date(fecha_fin) },
+            fecha_fin: { gte: new Date(fecha_fin) },
+          },
+        });
+
+        const periodoInicioStr = catorcenaInicio
+          ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}`
+          : null;
+        const periodoFinStr = catorcenaFin
+          ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}`
+          : null;
+
+        if (userId) {
+          const creadorConEmail = await prisma.usuario.findUnique({
+            where: { id: userId },
+            select: { correo_electronico: true },
+          });
+
+          if (creadorConEmail?.correo_electronico) {
+            enviarCorreoTarea(
+              result.solicitud.id,
+              nombre_campania,
+              `Dar seguimiento a solicitud: ${nombre_campania}`,
+              new Date(fecha_fin),
+              creadorConEmail.correo_electronico,
+              userName,
+              {
+                cliente: razon_social,
+                producto: producto_nombre,
+                creador: userName,
+                periodoInicio: periodoInicioStr || undefined,
+                periodoFin: periodoFinStr || undefined,
+                idSolicitud: result.solicitud.id,
+              }
+            ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
+      } catch (err) {
+        console.error('[create] Error obteniendo catorcenas/enviando correo (no-blocking):', err);
+      }
     } catch (error) {
       console.error('Error creating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al crear solicitud';
@@ -1149,6 +1742,28 @@ export class SolicitudesController {
           autor_nombre: userName,
         },
       });
+      // Enviar correo
+      const usuariosNotificar = await prisma.usuario.findMany({
+        where: { id: { in: Array.from(involucrados) } },
+        select: { id: true, correo_electronico: true, nombre: true },
+      });
+
+      for (const usuario of usuariosNotificar) {
+        if (usuario.correo_electronico) {
+          enviarCorreoNotificacion(
+            solicitud.id,
+            tituloNotificacion,
+            descripcionNotificacion,
+            usuario.correo_electronico,
+            usuario.nombre,
+            {
+              accion: 'Nuevo comentario',
+              usuario: userName,
+              cliente: nombreSolicitud,
+            }
+          ).catch(err => console.error('Error enviando correo notificación:', err));
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
       res.status(500).json({ success: false, error: message });
@@ -1193,6 +1808,7 @@ export class SolicitudesController {
   async atender(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const { asignados } = req.body as { asignados?: { id: number; nombre: string }[] };
       const userId = req.user?.userId;
       // Get user name from database if not in token
       let userName = req.user?.nombre;
@@ -1201,6 +1817,10 @@ export class SolicitudesController {
         userName = user?.nombre || 'Usuario';
       }
       userName = userName || 'Usuario';
+
+      // Process asignados - convert to strings for storage
+      const asignadoNombres = asignados?.map(a => a.nombre).join(', ') || '';
+      const asignadoIds = asignados?.map(a => a.id.toString()).join(', ') || '';
 
       if (!userId) {
         res.status(401).json({ success: false, error: 'No autorizado' });
@@ -1231,6 +1851,24 @@ export class SolicitudesController {
         where: { id_propuesta: propuesta.id },
       }) : null;
 
+      // Declarar involucrados ANTES de la transacción para usarlos después
+      const involucrados = new Set<number>();
+
+      // Agregar creador de la solicitud
+      if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+        involucrados.add(solicitud.usuario_id);
+      }
+
+      // Agregar usuarios asignados
+      if (solicitud.id_asignado) {
+        solicitud.id_asignado.split(',').forEach(idStr => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucrados.add(parsed);
+          }
+        });
+      }
+
       await prisma.$transaction(async (tx) => {
         // Update solicitud status
         await tx.solicitud.update({
@@ -1238,11 +1876,18 @@ export class SolicitudesController {
           data: { status: 'Atendida' },
         });
 
-        // Update propuesta status
+        // Update propuesta status and asignados
         if (propuesta) {
           await tx.propuesta.update({
             where: { id: propuesta.id },
-            data: { status: 'Abierto' },
+            data: {
+              status: 'Abierto',
+              // Update asignados if provided, otherwise keep existing
+              ...(asignados && asignados.length > 0 ? {
+                asignado: asignadoNombres,
+                id_asignado: asignadoIds,
+              } : {}),
+            },
           });
         }
 
@@ -1252,24 +1897,100 @@ export class SolicitudesController {
           data: { estatus: 'Atendido' },
         });
 
-        // Create new tarea for seguimiento propuesta
+        // Create new tareas after attending and seguimiento de propuesta
         if (propuesta) {
+          const cotizacionData = await tx.cotizacion.findFirst({
+            where: { id_propuesta: propuesta.id },
+          });
+          const campaniaData = await tx.campania.findFirst({
+            where: { cotizacion_id: cotizacionData?.id },
+          });
+          const ahoraMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+          const fechaFinMx = new Date(ahoraMx);
+          fechaFinMx.setDate(fechaFinMx.getDate() + 7);
+
+          // Seguimiento Propuesta (asignado ORIGINAL )
+          const asignadoOriginal = solicitud.usuario_id || userId;
+          const nombreAsignadoOriginal = solicitud.nombre_usuario || userName || '';
+
           await tx.tareas.create({
             data: {
-              fecha_inicio: new Date(),
-              fecha_fin: solicitud.fecha || new Date(),
-              tipo: 'Seguimiento de propuesta',
-              responsable: solicitud.nombre_usuario || userName || '',
-              id_responsable: solicitud.usuario_id || userId,
-              asignado: solicitud.asignado || '',
-              id_asignado: solicitud.id_asignado || '',
-              estatus: 'Activo',
-              descripcion: `Seguimiento de propuesta: ${cotizacion?.nombre_campania || ''}`,
-              titulo: `Atender propuesta ${cotizacion?.nombre_campania || ''}`,
+              fecha_inicio: ahoraMx,
+              fecha_fin: fechaFinMx,
+              tipo: 'Seguimiento Propuesta',
+              responsable: nombreAsignadoOriginal,
+              id_responsable: asignadoOriginal,
+              asignado: nombreAsignadoOriginal,
+              id_asignado: asignadoOriginal.toString(),
+              estatus: 'Pendiente',
+              descripcion: `Dar seguimiento a la propuesta: ${cotizacionData?.nombre_campania || ''}`,
+              titulo: `Seguimiento Propuesta`,
               id_propuesta: propuesta.id.toString(),
               id_solicitud: solicitud.id.toString(),
+              campania_id: campaniaData?.id || null,
             },
           });
+
+          // Atender Propuesta 
+          const nuevosAsignadosIds = asignados && asignados.length > 0 
+            ? asignados.map((a: { id: number }) => a.id)
+            : [];
+
+          let usuariosTrafico: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+
+          // Construir condición de exclusión solo si hay creador
+          const excludeCreator = solicitud.usuario_id ? { not: solicitud.usuario_id } : {};
+
+          if (nuevosAsignadosIds.length === 0) {
+            usuariosTrafico = await tx.usuario.findMany({
+              where: {
+                OR: [
+                  { puesto: { contains: 'Tráfico' } },
+                  { puesto: { contains: 'Trafico' } },
+                  { area: { contains: 'Tráfico' } },
+                  { area: { contains: 'Trafico' } }
+                ],
+                ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
+                deleted_at: null
+              },
+              select: { id: true, nombre: true, correo_electronico: true }
+            });
+          } else {
+            // Si hay asignados específicos, filtrar al creador manualmente después del query
+            const usuariosTraficoRaw = await tx.usuario.findMany({
+              where: {
+                id: { in: nuevosAsignadosIds },
+                deleted_at: null
+              },
+              select: { id: true, nombre: true, correo_electronico: true }
+            });
+            
+            // Filtrar al creador si existe
+            usuariosTrafico = solicitud.usuario_id 
+              ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
+              : usuariosTraficoRaw;
+          }
+
+          //  tarea para usuario de Tráfico
+          for (const usuarioTrafico of usuariosTrafico) {
+            await tx.tareas.create({
+              data: {
+                fecha_inicio: ahoraMx,
+                fecha_fin: fechaFinMx,
+                tipo: 'Atender Propuesta',
+                responsable: usuarioTrafico.nombre,
+                id_responsable: usuarioTrafico.id,
+                asignado: usuarioTrafico.nombre,
+                id_asignado: usuarioTrafico.id.toString(),
+                estatus: 'Pendiente',
+                descripcion: `Atender propuesta: ${cotizacionData?.nombre_campania || ''}`,
+                titulo: `Atender Propuesta`,
+                id_propuesta: propuesta.id.toString(),
+                id_solicitud: solicitud.id.toString(),
+                campania_id: campaniaData?.id || null,
+              },
+            });
+          }
         }
 
         // Create historial for solicitud
@@ -1296,24 +2017,6 @@ export class SolicitudesController {
           });
         }
 
-        // Crear notificaciones para usuarios involucrados
-        const involucrados = new Set<number>();
-
-        // Agregar creador de la solicitud
-        if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
-          involucrados.add(solicitud.usuario_id);
-        }
-
-        // Agregar usuarios asignados
-        if (solicitud.id_asignado) {
-          solicitud.id_asignado.split(',').forEach(idStr => {
-            const parsed = parseInt(idStr.trim());
-            if (!isNaN(parsed) && parsed !== userId) {
-              involucrados.add(parsed);
-            }
-          });
-        }
-
         // Crear notificación para cada involucrado
         const now = new Date();
         for (const responsableId of involucrados) {
@@ -1333,12 +2036,151 @@ export class SolicitudesController {
             },
           });
         }
+      }, { timeout: 30000 });
+
+      // Obtener catorcenas para el correo
+      const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuesta?.id },
       });
+      const fechaFin = cotizacionData?.fecha_fin || solicitud.fecha || new Date();
+
+      const catorcenaInicio = cotizacionData?.fecha_inicio ? await prisma.catorcenas.findFirst({
+        where: {
+          fecha_inicio: { lte: cotizacionData.fecha_inicio },
+          fecha_fin: { gte: cotizacionData.fecha_inicio },
+        },
+      }) : null;
+
+      const catorcenaFin = await prisma.catorcenas.findFirst({
+        where: {
+          fecha_inicio: { lte: fechaFin },
+          fecha_fin: { gte: fechaFin },
+        },
+      });
+
+      const periodoInicioStr = catorcenaInicio 
+        ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}` 
+        : undefined;
+      const periodoFinStr = catorcenaFin 
+        ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}` 
+        : undefined;
+
+      // Enviar correo al creador (Seguimiento Propuesta)
+      const asignadoOriginal = solicitud.usuario_id || userId;
+      const nombreAsignadoOriginal = solicitud.nombre_usuario || userName || '';
+
+      if (asignadoOriginal) {
+        const creador = await prisma.usuario.findUnique({
+          where: { id: asignadoOriginal },
+          select: { correo_electronico: true, nombre: true },
+        });
+
+        if (creador?.correo_electronico) {
+          enviarCorreoTarea(
+            solicitud.id,
+            cotizacionData?.nombre_campania || '',
+            `Dar seguimiento a la propuesta: ${cotizacionData?.nombre_campania || ''}`,
+            fechaFin,
+            creador.correo_electronico,
+            nombreAsignadoOriginal,
+            {
+              cliente: solicitud?.razon_social || undefined,
+              producto: solicitud?.producto_nombre || undefined,
+              creador: userName,
+              periodoInicio: periodoInicioStr,
+              periodoFin: periodoFinStr,
+              idPropuesta: propuesta?.id || undefined,
+            },
+            `https://app.qeb.mx/propuestas?viewId=${propuesta?.id || ''}`
+          ).catch(err => console.error('Error enviando correo:', err));
+        }
+      }
+
+      // Enviar correo a usuarios de Tráfico (Atender Propuesta)
+      const nuevosAsignadosIds = asignados && asignados.length > 0 
+        ? asignados.map((a: { id: number }) => a.id)
+        : [];
+
+      let usuariosTrafico: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+
+      if (nuevosAsignadosIds.length === 0) {
+        usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } }
+            ],
+            ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
+            deleted_at: null
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+      } else {
+        const usuariosTraficoRaw = await prisma.usuario.findMany({
+          where: { 
+            id: { in: nuevosAsignadosIds },
+            deleted_at: null 
+          },
+          select: { id: true, nombre: true, correo_electronico: true }
+        });
+        
+        // Filtrar al creador si existe
+        usuariosTrafico = solicitud.usuario_id 
+          ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
+          : usuariosTraficoRaw;
+      }
+
+      for (const usuarioTrafico of usuariosTrafico) {
+        if (usuarioTrafico.correo_electronico) {
+          enviarCorreoTarea(
+            solicitud.id,
+            cotizacionData?.nombre_campania || '',
+            `Atender propuesta: ${cotizacionData?.nombre_campania || ''}`,
+            fechaFin,
+            usuarioTrafico.correo_electronico,
+            usuarioTrafico.nombre,
+            {
+              cliente: solicitud?.razon_social || undefined,
+              producto: solicitud?.producto_nombre || undefined,
+              creador: userName,
+              periodoInicio: periodoInicioStr,
+              periodoFin: periodoFinStr,
+              idPropuesta: propuesta?.id || undefined,
+            },
+            `https://app.qeb.mx/propuestas?viewId=${propuesta?.id || ''}`
+          ).catch(err => console.error('Error enviando correo:', err));
+        }
+      }
+
+
 
       res.json({
         success: true,
         message: 'Solicitud atendida exitosamente',
       });
+      // Enviar correo
+      const usuariosNotificar = await prisma.usuario.findMany({
+        where: { id: { in: Array.from(involucrados) } },
+        select: { id: true, correo_electronico: true, nombre: true },
+      });
+
+      for (const usuario of usuariosNotificar) {
+        if (usuario.correo_electronico) {
+          enviarCorreoNotificacion(
+            solicitud.id,
+            'Solicitud atendida',
+            `La solicitud "${solicitud.descripcion || solicitud.id}" ha sido atendida por ${userName}`,
+            usuario.correo_electronico,
+            usuario.nombre,
+            {
+              accion: 'Atendida',
+              usuario: userName,
+            }
+          ).catch(err => console.error('Error enviando correo notificación:', err));
+        }
+      }
     } catch (error) {
       console.error('Error atendiendo solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al atender solicitud';
@@ -1513,6 +2355,7 @@ export class SolicitudesController {
             // Calcular estado de autorización
             const estadoResult = await calcularEstadoAutorizacion({
               ciudad: cara.ciudad,
+              estado: cara.estado,
               formato: cara.formato,
               tipo: cara.tipo,
               caras: cara.caras,
@@ -1540,23 +2383,12 @@ export class SolicitudesController {
                 caras_contraflujo: cara.caras_contraflujo || 0,
                 articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
-                estado_autorizacion: estadoResult.estado,
+                autorizacion_dg: estadoResult.autorizacion_dg,
+                autorizacion_dcm: estadoResult.autorizacion_dcm,
               },
             });
           }
-
-          // Verificar si hay caras pendientes de autorización y crear tareas
-          const autorizacionInfo = await verificarCarasPendientes(propuesta.id.toString());
-          if (autorizacionInfo.tienePendientes && userId) {
-            await crearTareasAutorizacion(
-              solicitud.id,
-              propuesta.id,
-              userId,
-              userName,
-              autorizacionInfo.pendientesDg,
-              autorizacionInfo.pendientesDcm
-            );
-          }
+          // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
 
         // Detectar qué campos cambiaron
@@ -1645,10 +2477,70 @@ export class SolicitudesController {
         timeout: 120000,
       });
 
-      // Check for pending authorizations after transaction
+      // Enviar correo
+      const involucradosCorreo = new Set<number>();
+      
+      if (solicitud.usuario_id && solicitud.usuario_id !== userId) {
+        involucradosCorreo.add(solicitud.usuario_id);
+      }
+      
+      if (solicitud.id_asignado) {
+        solicitud.id_asignado.split(',').forEach((idStr: string) => {
+          const parsed = parseInt(idStr.trim());
+          if (!isNaN(parsed) && parsed !== userId) {
+            involucradosCorreo.add(parsed);
+          }
+        });
+      }
+      
+      if (asignados && Array.isArray(asignados)) {
+        asignados.forEach((a: { id: number }) => {
+          if (a.id && a.id !== userId) {
+            involucradosCorreo.add(a.id);
+          }
+        });
+      }
+
+      const usuariosNotificarUpdate = await prisma.usuario.findMany({
+        where: { id: { in: Array.from(involucradosCorreo) } },
+        select: { id: true, correo_electronico: true, nombre: true },
+      });
+
+      const nombreSolicitudCorreo = razon_social || marca_nombre || solicitud.razon_social || 'Sin nombre';
+
+      for (const usuario of usuariosNotificarUpdate) {
+        if (usuario.correo_electronico) {
+          enviarCorreoNotificacion(
+            solicitud.id,
+            `Solicitud #${solicitud.id} editada`,
+            `${userName} realizó cambios en la solicitud`,
+            usuario.correo_electronico,
+            usuario.nombre,
+            {
+              accion: 'Edición',
+              usuario: userName,
+              cliente: nombreSolicitudCorreo,
+            }
+          ).catch(err => console.error('Error enviando correo notificación:', err));
+        }
+      }
+
+      // Check for pending authorizations after transaction and create tasks
       let autorizacion = { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] };
       if (propuesta) {
         autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+
+        // Crear tareas de autorización si hay pendientes
+        if (autorizacion.tienePendientes && userId) {
+          await crearTareasAutorizacion(
+            solicitud.id,
+            propuesta.id,
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm
+          );
+        }
       }
 
       // Build message with authorization info
@@ -1658,11 +2550,71 @@ export class SolicitudesController {
         mensaje = `Solicitud actualizada. ${totalPendientes} cara(s) requieren autorización.`;
       }
 
+      // Notificar a Tráfico sobre el ajuste de caras si hay propuesta
+      if (propuesta && caras && caras.length > 0) {
+        const usuariosTrafico = await prisma.usuario.findMany({
+          where: {
+            OR: [
+              { puesto: { contains: 'Tráfico' } },
+              { puesto: { contains: 'Trafico' } },
+              { area: { contains: 'Tráfico' } },
+              { area: { contains: 'Trafico' } }
+            ],
+            deleted_at: null
+          },
+          select: { id: true, nombre: true }
+        });
+
+        if (usuariosTrafico.length > 0) {
+          const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+          fechaFin.setDate(fechaFin.getDate() + 7);
+
+          for (const usuarioTrafico of usuariosTrafico) {
+            if (usuarioTrafico.id !== userId) {
+              await prisma.tareas.create({
+                data: {
+                  tipo: 'Ajuste de Caras',
+                  titulo: `Solicitud #${solicitud.id} - Ajuste de caras`,
+                  descripcion: `${userName} modificó las caras de la solicitud. Total de caras: ${caras.length}`,
+                  estatus: 'Pendiente',
+                  id_responsable: usuarioTrafico.id,
+                  responsable: usuarioTrafico.nombre,
+                  id_solicitud: solicitud.id.toString(),
+                  id_propuesta: propuesta.id.toString(),
+                  id_asignado: usuarioTrafico.id.toString(),
+                  asignado: usuarioTrafico.nombre,
+                  fecha_fin: fechaFin
+                }
+              });
+            }
+          }
+
+          // Emitir notificación via WebSocket
+          emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+            tipo: 'Ajuste de Caras',
+            solicitudId: solicitud.id
+          });
+        }
+      }
+
       res.json({
         success: true,
         message: mensaje,
         autorizacion,
       });
+
+      // Emitir eventos WebSocket
+      emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, {
+        solicitudId: solicitud.id,
+        usuario: userName,
+      });
+      if (campania) {
+        emitToCampanas(SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+          campaniaId: campania.id,
+          usuario: userName,
+        });
+      }
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'solicitud', accion: 'actualizada' });
     } catch (error) {
       console.error('Error updating solicitud:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar solicitud';
@@ -1703,7 +2655,7 @@ export class SolicitudesController {
   async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
     try {
       console.log('[evaluarAutorizacion] Body recibido:', req.body);
-      const { ciudad, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
+      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
 
       // Validar datos requeridos
       if (!formato || caras === undefined || costo === undefined) {
@@ -1717,6 +2669,7 @@ export class SolicitudesController {
       // Calcular estado de autorización
       const resultado = await calcularEstadoAutorizacion({
         ciudad: ciudad || null,
+        estado: estado || null,
         formato,
         tipo: tipo || null,
         caras: Number(caras) || 0,
@@ -1738,4 +2691,3 @@ export class SolicitudesController {
 }
 
 export const solicitudesController = new SolicitudesController();
-

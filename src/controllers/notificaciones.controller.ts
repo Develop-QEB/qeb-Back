@@ -21,36 +21,66 @@ export class NotificacionesController {
       const orderBy = req.query.orderBy as string || 'fecha_inicio';
       const orderDir = req.query.orderDir as string || 'desc';
       const userId = req.user?.userId;
+      const quick = req.query.quick as string;
 
       const where: Record<string, unknown> = {};
+      const userRole = req.user?.rol;
 
       // Filtrar por usuario responsable o asignado
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve tareas de todos los Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        // Gerente Digital (Operaciones) también ve tareas de todos los Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       if (tipo) {
         where.tipo = tipo;
       }
 
-      if (estatus) {
-        where.estatus = estatus;
-      }
+      if (!quick) {
+        if (estatus) {
+          where.estatus = estatus;
+        }
 
       if (leida !== undefined && leida !== '') {
         // 'leida' = estatus 'Atendido'
-        if (leida === 'true') {
-          where.estatus = 'Atendido';
-        } else {
-          where.estatus = { not: 'Atendido' };
-        }
-      }
+        where.estatus =
+      leida === 'true'
+        ? 'Atendido'
+        : { not: 'Atendido' };
+  }
+}
 
       if (search) {
         where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
           {
             OR: [
               { titulo: { contains: search } },
@@ -63,18 +93,62 @@ export class NotificacionesController {
         ];
       }
 
+      // filtros rapidos
+      if (quick) {
+        switch (quick) {
+          case 'no_leidas':
+            where.estatus = { not: 'Atendido' };
+            break;
+
+          case 'leidas':
+            where.estatus = 'Atendido';
+            break;
+
+          case 'hoy': {
+            const start = new Date();
+            start.setHours(0, 0, 0, 0);
+
+            const end = new Date();
+            end.setHours(23, 59, 59, 999);
+
+            where.fecha_inicio = {
+              gte: start,
+              lte: end,
+            };
+            break;
+          }
+
+          case 'vencidas':
+            where.fecha_fin = { lt: new Date() };
+            where.estatus = { not: 'Atendido' };
+            break;
+
+          case 'asignadas_a_mi':
+            where.OR = [{ id_asignado: { contains: String(userId) } }];
+            break;
+
+          case 'creadas_por_mi':
+            where.OR = [{ id_responsable: userId }];
+            break;
+        }
+      }
+
+
       // Determinar ordenamiento
       const orderByClause: Record<string, string> = {};
       if (orderBy === 'fecha_fin') {
         orderByClause.fecha_fin = orderDir;
       } else if (orderBy === 'fecha_inicio') {
         orderByClause.fecha_inicio = orderDir;
+      } else if (orderBy === 'created_at') {
+        orderByClause.created_at = orderDir;
       } else if (orderBy === 'titulo') {
         orderByClause.titulo = orderDir;
       } else if (orderBy === 'estatus') {
         orderByClause.estatus = orderDir;
       } else {
-        orderByClause.fecha_inicio = 'desc';
+        // Por defecto ordenar por created_at (más nuevo primero)
+        orderByClause.created_at = 'desc';
       }
 
       const [tareas, total] = await Promise.all([
@@ -87,6 +161,7 @@ export class NotificacionesController {
         prisma.tareas.count({ where }),
       ]);
 
+
       // Mapear tareas al formato de notificaciones con todos los campos
       const notificaciones = tareas.map(tarea => ({
         id: tarea.id,
@@ -97,7 +172,8 @@ export class NotificacionesController {
         leida: tarea.estatus === 'Atendido',
         referencia_tipo: tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
         referencia_id: tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
-        fecha_creacion: tarea.fecha_inicio,
+        fecha_creacion: tarea.created_at || tarea.fecha_inicio,
+        created_at: tarea.created_at,
         fecha_inicio: tarea.fecha_inicio,
         fecha_fin: tarea.fecha_fin,
         responsable: tarea.responsable,
@@ -152,9 +228,39 @@ export class NotificacionesController {
         return;
       }
 
-      // Obtener comentarios de la tabla comentarios usando solicitud_id
-      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id: number }[] = [];
-      if (tarea.id_solicitud) {
+      // Obtener comentarios según el tipo de tarea
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
+      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id?: number; tarea_id?: number }[] = [];
+
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: usar tabla comentarios_revision_artes con tarea_id
+        const rawComentarios = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY fecha DESC
+        `;
+
+        // Obtener fotos de los autores
+        const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
+        const usuarios = autorIds.length > 0 ? await prisma.usuario.findMany({
+          where: { id: { in: autorIds } },
+          select: { id: true, nombre: true, foto_perfil: true },
+        }) : [];
+        const usuarioMap = new Map(usuarios.map(u => [u.id, { nombre: u.nombre, foto_perfil: u.foto_perfil }]));
+
+        comentarios = rawComentarios.map(c => ({
+          id: c.id,
+          autor_id: c.autor_id,
+          autor_nombre: c.autor_nombre || usuarioMap.get(c.autor_id)?.nombre || 'Usuario',
+          autor_foto: usuarioMap.get(c.autor_id)?.foto_perfil || null,
+          contenido: c.contenido,
+          fecha: c.fecha,
+          tarea_id: c.tarea_id,
+        }));
+      } else if (tarea.id_solicitud) {
+        // Para otras tareas: usar tabla comentarios con solicitud_id
         const solicitudId = parseInt(tarea.id_solicitud);
         const rawComentarios = await prisma.comentarios.findMany({
           where: { solicitud_id: solicitudId },
@@ -245,8 +351,8 @@ export class NotificacionesController {
           descripcion,
           tipo: tipo || 'Tarea',
           estatus: 'Activo',
-          fecha_inicio: new Date(),
-          fecha_fin: fecha_fin ? new Date(fecha_fin) : new Date(),
+          fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
+          fecha_fin: fecha_fin ? new Date(fecha_fin) : (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
           id_responsable: userId || 0,
           responsable: userName,
           asignado: asignado || userName,
@@ -316,6 +422,9 @@ export class NotificacionesController {
         where: { id: parseInt(id) },
         data: updateData,
       });
+
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
 
       res.json({
         success: true,
@@ -423,6 +532,9 @@ export class NotificacionesController {
         where: { id: parseInt(id) },
       });
 
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ELIMINADA, { tareaId: parseInt(id) });
+
       res.json({
         success: true,
         message: 'Notificación eliminada',
@@ -439,13 +551,40 @@ export class NotificacionesController {
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
+      const userRole = req.user?.rol;
 
       const where: Record<string, unknown> = {};
       if (userId) {
-        where.OR = [
+        const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
           { id_asignado: { contains: String(userId) } },
         ];
+
+        // Coordinador de Diseño también ve stats de Diseñadores
+        if (userRole === 'Coordinador de Diseño') {
+          const disenadores = await prisma.usuario.findMany({
+            where: { user_role: 'Diseñadores', deleted_at: null },
+            select: { id: true },
+          });
+          for (const d of disenadores) {
+            orConditions.push({ id_responsable: d.id });
+            orConditions.push({ id_asignado: { contains: String(d.id) } });
+          }
+        }
+
+        // Gerente Digital (Operaciones) también ve stats de Jefe de Operaciones Digital
+        if (userRole === 'Gerente Digital (Operaciones)') {
+          const jefesDigital = await prisma.usuario.findMany({
+            where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
+            select: { id: true },
+          });
+          for (const j of jefesDigital) {
+            orConditions.push({ id_responsable: j.id });
+            orConditions.push({ id_asignado: { contains: String(j.id) } });
+          }
+        }
+
+        where.OR = orConditions;
       }
 
       const [total, activas, porTipo, porEstatus] = await Promise.all([
@@ -501,7 +640,7 @@ export class NotificacionesController {
       const { contenido } = req.body;
       const userId = req.user?.userId || 0;
 
-      // Obtener la tarea para conseguir su solicitud_id
+      // Obtener la tarea para determinar qué tabla de comentarios usar
       const tarea = await prisma.tareas.findUnique({
         where: { id: parseInt(id) },
       });
@@ -514,24 +653,75 @@ export class NotificacionesController {
         return;
       }
 
-      const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
+      const userName = req.user?.nombre || 'Usuario';
 
-      const comentario = await prisma.comentarios.create({
-        data: {
-          autor_id: userId,
-          comentario: contenido,
-          creado_en: new Date(),
-          solicitud_id: solicitudId,
-          campania_id: tarea.campania_id || 0,
-          origen: 'tarea',
-        },
-      });
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: insertar en comentarios_revision_artes
+        // Obtener nombre del usuario desde la BD
+        const [userData] = await prisma.$queryRaw<{ nombre: string }[]>`
+          SELECT nombre FROM usuario WHERE id = ${userId}
+        `;
+        const autorNombre = userData?.nombre || userName;
+
+        await prisma.$executeRaw`
+          INSERT INTO comentarios_revision_artes (tarea_id, autor_id, autor_nombre, contenido, fecha)
+          VALUES (${tarea.id}, ${userId}, ${autorNombre}, ${contenido.trim()}, NOW())
+        `;
+
+        // Obtener el comentario recién insertado
+        const [comentario] = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY id DESC
+          LIMIT 1
+        `;
+
+        res.status(201).json({
+          success: true,
+          data: {
+            id: comentario.id,
+            autor_id: comentario.autor_id,
+            autor_nombre: comentario.autor_nombre,
+            contenido: comentario.contenido,
+            fecha: comentario.fecha,
+            tarea_id: comentario.tarea_id,
+          },
+        });
+      } else {
+        // Para otras tareas: insertar en tabla comentarios con solicitud_id
+        const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
+
+        const comentario = await prisma.comentarios.create({
+          data: {
+            autor_id: userId,
+            comentario: contenido,
+            creado_en: new Date(),
+            solicitud_id: solicitudId,
+            campania_id: tarea.campania_id || 0,
+            origen: 'tarea',
+          },
+        });
+
+        res.status(201).json({
+          success: true,
+          data: {
+            id: comentario.id,
+            autor_id: comentario.autor_id,
+            contenido: comentario.comentario,
+            fecha: comentario.creado_en,
+            solicitud_id: comentario.solicitud_id,
+          },
+        });
+      }
 
       // Crear notificaciones para todos los involucrados (excepto el autor)
-      const userName = req.user?.nombre || 'Usuario';
       const tituloTarea = tarea.titulo || 'Tarea';
       const tituloNotificacion = `Nuevo comentario en tarea: ${tituloTarea}`;
       const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+      const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
 
       // Obtener solicitud relacionada para el creador
       const solicitudData = solicitudId > 0
@@ -585,16 +775,8 @@ export class NotificacionesController {
         });
       }
 
-      res.status(201).json({
-        success: true,
-        data: {
-          id: comentario.id,
-          autor_id: comentario.autor_id,
-          contenido: comentario.comentario,
-          fecha: comentario.creado_en,
-          solicitud_id: comentario.solicitud_id,
-        },
-      });
+      // Emitir evento WebSocket para actualizar tareas en tiempo real
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
       res.status(500).json({
@@ -608,16 +790,52 @@ export class NotificacionesController {
     try {
       const { id } = req.params;
 
-      // Obtener la tarea para conseguir su solicitud_id
+      // Obtener la tarea para determinar qué tabla de comentarios usar
       const tarea = await prisma.tareas.findUnique({
         where: { id: parseInt(id) },
       });
 
-      if (!tarea || !tarea.id_solicitud) {
-        res.json({
-          success: true,
-          data: [],
-        });
+      if (!tarea) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const GESTION_ARTES_TIPOS = ['Revisión de artes', 'Revision de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión', 'Testigo', 'Programación', 'Recepción', 'Producción'];
+      const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
+
+      if (isArtReviewTask) {
+        // Para tareas de Revisión de artes / Corrección: usar tabla comentarios_revision_artes
+        const rawComentarios = await prisma.$queryRaw<{ id: number; tarea_id: number; autor_id: number; autor_nombre: string; contenido: string; fecha: Date }[]>`
+          SELECT id, tarea_id, autor_id, autor_nombre, contenido, fecha
+          FROM comentarios_revision_artes
+          WHERE tarea_id = ${tarea.id}
+          ORDER BY fecha DESC
+        `;
+
+        const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
+        const usuarios = autorIds.length > 0 ? await prisma.usuario.findMany({
+          where: { id: { in: autorIds } },
+          select: { id: true, foto_perfil: true },
+        }) : [];
+        const fotoMap = new Map(usuarios.map(u => [u.id, u.foto_perfil]));
+
+        const mappedComentarios = rawComentarios.map(c => ({
+          id: c.id,
+          autor_id: c.autor_id,
+          autor_nombre: c.autor_nombre || 'Usuario',
+          autor_foto: fotoMap.get(c.autor_id) || null,
+          contenido: c.contenido,
+          fecha: c.fecha,
+          tarea_id: c.tarea_id,
+        }));
+
+        res.json({ success: true, data: mappedComentarios });
+        return;
+      }
+
+      // Para otras tareas: usar tabla comentarios con solicitud_id
+      if (!tarea.id_solicitud) {
+        res.json({ success: true, data: [] });
         return;
       }
 
@@ -805,7 +1023,14 @@ export class NotificacionesController {
       }
 
       const puestoUpper = (usuario.puesto || '').toUpperCase();
-      if (!puestoUpper.includes('DG') && !puestoUpper.includes('DCM')) {
+
+      // Determinar el tipo de autorización según el puesto del usuario
+      let tipoAutorizacion: 'dg' | 'dcm';
+      if (puestoUpper.includes('DG')) {
+        tipoAutorizacion = 'dg';
+      } else if (puestoUpper.includes('DCM')) {
+        tipoAutorizacion = 'dcm';
+      } else {
         res.status(403).json({
           success: false,
           error: 'No tienes permiso para rechazar solicitudes',
@@ -837,7 +1062,7 @@ export class NotificacionesController {
         return;
       }
 
-      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario);
+      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
 
       // Emit socket event for real-time updates
       emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });
@@ -870,6 +1095,24 @@ export class NotificacionesController {
         return;
       }
 
+      // Obtener información de la solicitud (cliente, campaña)
+      // idquote puede ser el cuic o el id de la solicitud
+      const solicitudId = parseInt(idquote);
+      const solicitud = await prisma.solicitud.findFirst({
+        where: {
+          OR: [
+            { cuic: idquote },
+            ...(isNaN(solicitudId) ? [] : [{ id: solicitudId }])
+          ],
+          deleted_at: null
+        },
+        select: {
+          razon_social: true,
+          descripcion: true,
+          producto_nombre: true,
+        },
+      });
+
       const caras = await prisma.solicitudCaras.findMany({
         where: { idquote },
         select: {
@@ -882,7 +1125,8 @@ export class NotificacionesController {
           bonificacion: true,
           costo: true,
           tarifa_publica: true,
-          estado_autorizacion: true,
+          autorizacion_dg: true,
+          autorizacion_dcm: true,
           articulo: true,
           inicio_periodo: true,
         },
@@ -912,6 +1156,8 @@ export class NotificacionesController {
           total_caras: totalCaras,
           tarifa_efectiva: tarifaEfectiva,
           catorcena: catorcenaInfo,
+          cliente: solicitud?.razon_social || null,
+          campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
         };
       });
 

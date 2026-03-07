@@ -7,6 +7,18 @@ import { uploadProfilePhoto } from '../middleware/upload.middleware';
 const router = Router();
 
 router.post(
+  '/register',
+  [
+    body('nombre').notEmpty().withMessage('Nombre requerido'),
+    body('correo').isEmail().withMessage('Email inválido'),
+    body('password').isLength({ min: 6 }).withMessage('La contraseña debe tener al menos 6 caracteres'),
+    body('area').notEmpty().withMessage('Área requerida'),
+    body('puesto').notEmpty().withMessage('Puesto requerido'),
+  ],
+  authController.register.bind(authController)
+);
+
+router.post(
   '/login',
   [
     body('email').isEmail().withMessage('Email inválido'),

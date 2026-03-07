@@ -46,6 +46,7 @@ router.get('/:id/full', propuestasController.getFullDetails.bind(propuestasContr
 router.get('/:id/inventario', propuestasController.getInventarioReservado.bind(propuestasController));
 router.get('/:id/comments', propuestasController.getComments.bind(propuestasController));
 router.get('/:id/reservas-modal', propuestasController.getReservasForModal.bind(propuestasController));
+router.get('/:id/caras', propuestasController.getCaras.bind(propuestasController));
 router.get('/:id', propuestasController.getById.bind(propuestasController));
 
 // POST routes

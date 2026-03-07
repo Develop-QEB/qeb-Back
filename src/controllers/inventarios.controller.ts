@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { serializeBigInt } from '../utils/serialization';
 
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -362,6 +363,7 @@ export class InventariosController {
           entre_calle_2: true,
           orientacion: true,
           sentido: true,
+          isla: true,
         },
       });
 
@@ -744,10 +746,7 @@ export class InventariosController {
 
       const historial = await prisma.$queryRawUnsafe(query, inventarioId);
 
-      // Convertir BigInt a Number
-      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const historialSerializable = serializeBigInt(historial);
 
       res.json({
         success: true,

@@ -6,9 +6,14 @@ const router = Router();
 
 router.use(authMiddleware);
 
-// Rutas base
-router.get('/', campanasController.getAll.bind(campanasController));
+// Rutas estáticas (ANTES de /:id para que no las capture el parámetro dinámico)
 router.get('/stats', campanasController.getStats.bind(campanasController));
+router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));
+router.get('/ordenes-montaje/cat', campanasController.getOrdenMontajeCAT.bind(campanasController));
+router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.bind(campanasController));
+
+// Rutas dinámicas con :id
+router.get('/', campanasController.getAll.bind(campanasController));
 router.get('/:id', campanasController.getById.bind(campanasController));
 router.patch('/:id', campanasController.update.bind(campanasController));
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
@@ -63,12 +68,5 @@ router.get('/:id/tareas', campanasController.getTareas.bind(campanasController))
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
 router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
 router.delete('/:id/tareas/:tareaId', campanasController.deleteTarea.bind(campanasController));
-
-// Usuarios para asignación
-router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));
-
-// Órdenes de Montaje
-router.get('/ordenes-montaje/cat', campanasController.getOrdenMontajeCAT.bind(campanasController));
-router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.bind(campanasController));
 
 export default router;

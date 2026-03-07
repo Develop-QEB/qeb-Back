@@ -15,8 +15,11 @@ const getAllowedOrigins = () => {
     'http://localhost:5174',
     'http://localhost:5175',
     'http://localhost:5176',
+    'https://front-qeb-pi.vercel.app',
+    'https://front-16yzokren-qeb.vercel.app',
     'http://localhost:5177',
-    'https://front-qeb.vercel.app'
+    'https://front-qeb.vercel.app',
+    'https://app.qeb.mx'
   ];
 
   const envUrl = process.env.FRONTEND_URL;
@@ -31,14 +34,27 @@ const getAllowedOrigins = () => {
   return [...new Set([...defaultOrigins, envUrl])];
 };
 
-const corsOptions = {
-  origin: getAllowedOrigins(),
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Permitir requests sin Origin (health checks, curl, server-to-server)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = getAllowedOrigins();
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  // Permitir headers dinámicos del preflight para evitar bloqueos por headers extras.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
@@ -74,6 +90,12 @@ app.use('/uploads', (req, res, next) => {
 import { propuestasController } from './controllers/propuestas.controller';
 app.get('/public/propuestas/:id', propuestasController.getPublicDetails.bind(propuestasController));
 
+// Evitar que el navegador cachee respuestas de la API
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 app.use('/api', routes);
 
 app.use(notFoundMiddleware);

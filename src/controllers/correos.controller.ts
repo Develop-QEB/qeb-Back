@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import nodemailer from 'nodemailer';
 import prisma from '../utils/prisma';
+import nodemailer from 'nodemailer';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({

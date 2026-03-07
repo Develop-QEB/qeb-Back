@@ -4,6 +4,11 @@ import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 
+if (process.env.NODE_ENV !== 'production') {
+  console.warn(`[Config] NODE_ENV=${process.env.NODE_ENV || 'undefined'}; forcing production mode`);
+  process.env.NODE_ENV = 'production';
+}
+
 const PORT = process.env.PORT || 3000;
 
 // Crear servidor HTTP para Socket.io
@@ -42,10 +47,39 @@ async function limpiarReservasExpiradas(): Promise<void> {
 // Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
 const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
 
+// Verify DB connectivity with a single lightweight query (does NOT pre-allocate the entire pool)
+async function verifyDbConnection(): Promise<void> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 3000;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      console.log('[DB] Database connected successfully');
+      return;
+    } catch (error) {
+      console.error(`[DB] Connection attempt ${attempt}/${MAX_RETRIES} failed:`, (error as Error).message);
+      if (attempt === MAX_RETRIES) {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+}
+
 async function main() {
+  // Inicializar Socket.io
+  initializeSocket(httpServer);
+  console.log('[Socket] WebSocket server inicializado');
+
+  // Arrancar servidor HTTP primero para responder health checks y CORS
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+
+  // Verify DB connectivity (lazy - only opens 1 connection, not the whole pool)
   try {
-    await prisma.$connect();
-    console.log('Database connected successfully');
+    await verifyDbConnection();
 
     // Ejecutar limpieza inicial al arrancar
     await limpiarReservasExpiradas();
@@ -53,30 +87,31 @@ async function main() {
     // Programar limpieza periódica
     setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
-
-    // Inicializar Socket.io
-    initializeSocket(httpServer);
-    console.log('[Socket] WebSocket server inicializado');
-
-    httpServer.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    });
   } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+    console.error('[DB] Could not connect to database after all retries:', error);
+    console.log('[DB] Server is running but database is unavailable. API requests will fail.');
   }
 }
 
-process.on('SIGINT', async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
+// Graceful shutdown: disconnect DB immediately, then close HTTP
+async function gracefulShutdown(signal: string) {
+  console.log(`[Shutdown] ${signal} received, closing gracefully...`);
+  // 1. Disconnect Prisma FIRST to release DB connections immediately
+  try {
+    await prisma.$disconnect();
+    console.log('[Shutdown] Prisma disconnected');
+  } catch (err) {
+    console.error('[Shutdown] Error disconnecting Prisma:', err);
+  }
+  // 2. Close HTTP server
+  httpServer.close(() => {
+    console.log('[Shutdown] HTTP server closed');
+  });
+  // 3. Force exit after 3s if still hanging
+  setTimeout(() => process.exit(0), 3000).unref();
+}
 
-process.on('SIGTERM', async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 main();
-

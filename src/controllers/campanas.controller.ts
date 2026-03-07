@@ -10,8 +10,10 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
-import { emitToCampana, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { hasFullVisibility } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
+import { serializeBigInt } from '../utils/serialization';
 
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
@@ -77,6 +79,18 @@ export class CampanasController {
         }
       }
 
+      // Visibility filter: non-leadership roles only see campañas where they have tareas
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tareas t
+          WHERE t.campania_id = cm.id
+            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+        )`);
+        params.push(userId, String(userId));
+      }
+
       const whereClause = conditions.join(' AND ');
 
       // Query with JOINs to get additional data
@@ -92,6 +106,9 @@ export class CampanasController {
           COALESCE(s.producto_nombre, cl.T2_U_Producto) as T2_U_Producto,
           COALESCE(s.categoria_nombre, cl.T2_U_Categoria) as T2_U_Categoria,
           s.nombre_usuario as creador_nombre,
+          s.sap_database as sap_database,
+          s.card_code as card_code,
+          s.salesperson_code as salesperson_code,
           cat_ini.numero_catorcena as catorcena_inicio_num,
           cat_ini.año as catorcena_inicio_anio,
           cat_fin.numero_catorcena as catorcena_fin_num,
@@ -117,7 +134,7 @@ export class CampanasController {
         LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         WHERE ${whereClause}
-        ORDER BY cm.id DESC
+        ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
         LIMIT ? OFFSET ?
       `;
 
@@ -133,10 +150,7 @@ export class CampanasController {
       const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
       const total = Number(countResult[0]?.total || 0);
 
-      // Convert BigInt to Number for JSON serialization
-      const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const campanasSerializable = serializeBigInt(campanas);
 
       res.json({
         success: true,
@@ -174,10 +188,18 @@ export class CampanasController {
         return;
       }
 
-      // Obtener info del cliente
-      const cliente = await prisma.cliente.findUnique({
+      // Obtener info del cliente - buscar por id, si no tiene datos buscar por CUIC
+      let cliente = await prisma.cliente.findUnique({
         where: { id: campana.cliente_id },
       });
+      // Si el cliente no tiene datos (campos NULL), intentar buscar por CUIC desde la solicitud
+      if (cliente && !cliente.T0_U_RazonSocial && !cliente.T0_U_Cliente) {
+        const cuic = cliente.CUIC || campana.cliente_id;
+        const clientePorCuic = await prisma.cliente.findFirst({
+          where: { CUIC: cuic, T0_U_RazonSocial: { not: null } },
+        });
+        if (clientePorCuic) cliente = clientePorCuic;
+      }
 
       // Obtener info de cotizacion si existe
       let cotizacion = null;
@@ -262,7 +284,7 @@ export class CampanasController {
         T0_U_IDAgencia: cliente?.T0_U_IDAgencia || null,
         T0_U_Agencia: solicitud?.agencia || cliente?.T0_U_Agencia || null,
         T0_U_Cliente: cliente?.T0_U_Cliente || null,
-        T0_U_RazonSocial: solicitud?.razon_social || cliente?.T0_U_RazonSocial || null,
+        T0_U_RazonSocial: cliente?.T0_U_RazonSocial || solicitud?.razon_social || null,
         T0_U_IDACA: cliente?.T0_U_IDACA || null,
         cuic: solicitud?.cuic ? parseInt(solicitud.cuic) : cliente?.CUIC || null,
         T1_U_Cliente: cliente?.T1_U_Cliente || null,
@@ -321,10 +343,7 @@ export class CampanasController {
         comentarios,
       };
 
-      // Convertir BigInt a Number para JSON serialization
-      const campanaSerializable = JSON.parse(JSON.stringify(campanaCompleta, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const campanaSerializable = serializeBigInt(campanaCompleta);
 
       res.json({
         success: true,
@@ -357,8 +376,8 @@ export class CampanasController {
         return;
       }
 
-      // Si intenta cambiar a "Activa" o similar status de aprobación, verificar autorizaciones
-      if (status === 'Activa' || status === 'En pauta') {
+      // Si intenta cambiar a "Aprobada" o similar status de aprobación, verificar autorizaciones
+      if (status === 'Aprobada' || status === 'En pauta') {
         // Get the propuesta linked to this campana
         if (campanaAnterior.cotizacion_id) {
           const cotizacion = await prisma.cotizacion.findUnique({
@@ -463,6 +482,21 @@ export class CampanasController {
         success: true,
         data: campana,
       });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+        campanaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_STATUS_CHANGED, {
+        campanaId,
+        statusAnterior,
+        statusNuevo: status,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'campana', accion: 'status_changed' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar status';
       res.status(500).json({
@@ -650,6 +684,17 @@ export class CampanasController {
         success: true,
         data: campana,
       });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+        campanaId,
+        usuario: userName,
+      });
+      emitToCampanas(SOCKET_EVENTS.CAMPANA_ACTUALIZADA, {
+        campanaId,
+        usuario: userName,
+      });
+      emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'campana', accion: 'actualizada' });
     } catch (error) {
       console.error('Error updating campana:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar campaña';
@@ -660,20 +705,39 @@ export class CampanasController {
     }
   }
 
-  async getStats(_req: AuthRequest, res: Response): Promise<void> {
+  async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [total, activas, inactivas] = await Promise.all([
-        prisma.campania.count(),
-        prisma.campania.count({ where: { status: 'activa' } }),
-        prisma.campania.count({ where: { status: 'inactiva' } }),
-      ]);
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      let visibilityClause = '';
+      const statsParams: (string | number)[] = [];
+      if (userId && !hasFullVisibility(userRol)) {
+        visibilityClause = `
+          AND EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`;
+        statsParams.push(userId, String(userId));
+      }
+
+      const rows = await prisma.$queryRawUnsafe<Array<{ total: bigint; activas: bigint; inactivas: bigint }>>(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN cm.status = 'Aprobada' THEN 1 ELSE 0 END) as activas,
+          SUM(CASE WHEN cm.status = 'inactiva' THEN 1 ELSE 0 END) as inactivas
+        FROM campania cm
+        WHERE 1=1 ${visibilityClause}
+      `, ...statsParams);
+
+      const row = rows[0];
 
       res.json({
         success: true,
         data: {
-          total,
-          activas,
-          inactivas,
+          total: Number(row?.total || 0),
+          activas: Number(row?.activas || 0),
+          inactivas: Number(row?.inactivas || 0),
         },
       });
     } catch (error) {
@@ -690,17 +754,23 @@ export class CampanasController {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
+      console.log('[getCaras Campaña] Buscando caras para campaña:', campanaId);
+
       // Obtener campaña para conseguir cotizacion_id
       const campana = await prisma.campania.findUnique({
         where: { id: campanaId },
       });
 
       if (!campana) {
+        console.log('[getCaras Campaña] Campaña no encontrada');
         res.status(404).json({ success: false, error: 'Campaña no encontrada' });
         return;
       }
 
+      console.log('[getCaras Campaña] cotizacion_id:', campana.cotizacion_id);
+
       if (!campana.cotizacion_id) {
+        console.log('[getCaras Campaña] No tiene cotizacion_id, retornando []');
         res.json({ success: true, data: [] });
         return;
       }
@@ -710,7 +780,10 @@ export class CampanasController {
         where: { id: campana.cotizacion_id },
       });
 
+      console.log('[getCaras Campaña] cotizacion:', cotizacion?.id, 'id_propuesta:', cotizacion?.id_propuesta);
+
       if (!cotizacion?.id_propuesta) {
+        console.log('[getCaras Campaña] Cotización sin id_propuesta, retornando []');
         res.json({ success: true, data: [] });
         return;
       }
@@ -721,10 +794,9 @@ export class CampanasController {
         orderBy: { id: 'asc' },
       });
 
-      // Convertir BigInt a Number
-      const carasSerializable = JSON.parse(JSON.stringify(caras, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      console.log('[getCaras Campaña] Encontradas', caras.length, 'caras para idquote:', String(cotizacion.id_propuesta));
+
+      const carasSerializable = serializeBigInt(caras);
 
       res.json({
         success: true,
@@ -789,10 +861,7 @@ export class CampanasController {
 
       console.log('Inventario result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -848,7 +917,18 @@ export class CampanasController {
           sc.fin_periodo,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
-          1 AS caras_totales
+          1 AS caras_totales,
+          rsv.arte_aprobado,
+          rsv.instalado,
+          -- Calcular estatus de arte basado en el flujo
+          CASE
+            WHEN rsv.instalado = 1 THEN 'Instalado'
+            WHEN t_recepcion.id IS NOT NULL AND t_recepcion.estatus = 'Completado' THEN 'Artes Recibidos'
+            WHEN t_impresion.id IS NOT NULL AND t_impresion.estatus IN ('Activo', 'Atendido') THEN 'En Impresion'
+            WHEN rsv.arte_aprobado = 'aprobado' THEN 'Artes Aprobados'
+            WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'Revision Artes'
+            ELSE 'Carga Artes'
+          END as estatus_arte
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -856,6 +936,12 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
+            AND t_impresion.tipo = 'Impresión'
+            AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
+          LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
+            AND t_recepcion.tipo = 'Recepción'
+            AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
@@ -867,9 +953,11 @@ export class CampanasController {
 
       console.log('Inventario con APS result count:', Array.isArray(inventario) ? inventario.length : 0);
 
+      const inventarioSerializable = serializeBigInt(inventario);
+
       res.json({
         success: true,
-        data: inventario,
+        data: inventarioSerializable,
       });
     } catch (error) {
       console.error('Error en getInventarioConAPS:', error);
@@ -886,37 +974,41 @@ export class CampanasController {
       const { id } = req.params;
       const { contenido } = req.body;
       const userId = req.user?.userId || 0;
+      const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
-      // Obtener la campaña para conseguir el solicitud_id via propuesta
-      const campana = await prisma.campania.findUnique({
-        where: { id: campanaId },
-      });
+      // UNA SOLA consulta para obtener toda la info necesaria
+      const [campanaInfo] = await prisma.$queryRaw<{
+        campana_id: number;
+        campana_nombre: string | null;
+        solicitud_id: number | null;
+        propuesta_id: number | null;
+        propuesta_id_asignado: string | null;
+        solicitud_usuario_id: number | null;
+      }[]>`
+        SELECT
+          cm.id as campana_id,
+          cm.nombre as campana_nombre,
+          s.id as solicitud_id,
+          p.id as propuesta_id,
+          p.id_asignado as propuesta_id_asignado,
+          s.usuario_id as solicitud_usuario_id
+        FROM campania cm
+        LEFT JOIN cotizacion c ON cm.cotizacion_id = c.id
+        LEFT JOIN propuesta p ON c.id_propuesta = p.id
+        LEFT JOIN solicitud s ON p.solicitud_id = s.id
+        WHERE cm.id = ${campanaId}
+        LIMIT 1
+      `;
 
-      if (!campana) {
-        res.status(404).json({
-          success: false,
-          error: 'Campaña no encontrada',
-        });
+      if (!campanaInfo) {
+        res.status(404).json({ success: false, error: 'Campaña no encontrada' });
         return;
       }
 
-      // Intentar obtener solicitud_id de la propuesta relacionada
-      let solicitudId = 0;
-      if (campana.cotizacion_id) {
-        const cotizacion = await prisma.cotizacion.findUnique({
-          where: { id: campana.cotizacion_id },
-        });
-        if (cotizacion?.id_propuesta) {
-          const propuesta = await prisma.propuesta.findUnique({
-            where: { id: cotizacion.id_propuesta },
-          });
-          if (propuesta?.solicitud_id) {
-            solicitudId = propuesta.solicitud_id;
-          }
-        }
-      }
+      const solicitudId = campanaInfo.solicitud_id || 0;
 
+      // Crear el comentario
       const comentario = await prisma.comentarios.create({
         data: {
           autor_id: userId,
@@ -928,73 +1020,20 @@ export class CampanasController {
         },
       });
 
-      // Crear notificaciones para todos los involucrados (excepto el autor)
-      const userName = req.user?.nombre || 'Usuario';
-      const nombreCampana = campana.nombre || 'Sin nombre';
-      const tituloNotificacion = `Nuevo comentario en campaña #${campanaId} - ${nombreCampana}`;
-      const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+      // Emitir evento de socket para actualizar en tiempo real
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_COMENTARIO_CREADO, {
+        campanaId,
+        comentario: {
+          id: comentario.id,
+          autor_id: comentario.autor_id,
+          autor_nombre: userName,
+          autor_foto: null, // Se obtiene del cache del frontend
+          contenido: comentario.comentario,
+          fecha: comentario.creado_en,
+        },
+      });
 
-      // Obtener propuesta y solicitud para los involucrados
-      let propuestaData = null;
-      let solicitudData = null;
-      if (campana.cotizacion_id) {
-        const cotizacion = await prisma.cotizacion.findUnique({
-          where: { id: campana.cotizacion_id },
-        });
-        if (cotizacion?.id_propuesta) {
-          propuestaData = await prisma.propuesta.findUnique({
-            where: { id: cotizacion.id_propuesta },
-          });
-          if (propuestaData?.solicitud_id) {
-            solicitudData = await prisma.solicitud.findUnique({
-              where: { id: propuestaData.solicitud_id },
-            });
-          }
-        }
-      }
-
-      // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
-      const involucrados = new Set<number>();
-
-      // Agregar usuarios asignados de la propuesta
-      if (propuestaData?.id_asignado) {
-        propuestaData.id_asignado.split(',').forEach(id => {
-          const parsed = parseInt(id.trim());
-          if (!isNaN(parsed) && parsed !== userId) {
-            involucrados.add(parsed);
-          }
-        });
-      }
-
-      // Agregar creador de la solicitud
-      if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
-        involucrados.add(solicitudData.usuario_id);
-      }
-
-      // Crear una notificación para cada involucrado
-      const now = new Date();
-      const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
-
-      for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            id_solicitud: solicitudId.toString(),
-            id_propuesta: propuestaData?.id?.toString() || '',
-            campania_id: campanaId,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            responsable: '',
-            asignado: userName,
-            id_asignado: userId.toString(),
-          },
-        });
-      }
-
+      // Responder inmediatamente al cliente
       res.status(201).json({
         success: true,
         data: {
@@ -1004,6 +1043,61 @@ export class CampanasController {
           fecha: comentario.creado_en,
           solicitud_id: comentario.solicitud_id,
         },
+      });
+
+      // Crear notificaciones en background (no bloquea la respuesta)
+      setImmediate(async () => {
+        try {
+          const involucrados = new Set<number>();
+
+          // Agregar usuarios asignados de la propuesta
+          if (campanaInfo.propuesta_id_asignado) {
+            campanaInfo.propuesta_id_asignado.split(',').forEach(id => {
+              const parsed = parseInt(id.trim());
+              if (!isNaN(parsed) && parsed !== userId) {
+                involucrados.add(parsed);
+              }
+            });
+          }
+
+          // Agregar creador de la solicitud
+          if (campanaInfo.solicitud_usuario_id && campanaInfo.solicitud_usuario_id !== userId) {
+            involucrados.add(campanaInfo.solicitud_usuario_id);
+          }
+
+          if (involucrados.size === 0) return;
+
+          const nombreCampana = campanaInfo.campana_nombre || 'Sin nombre';
+          const tituloNotificacion = `Nuevo comentario en campaña #${campanaId} - ${nombreCampana}`;
+          const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
+          const now = new Date();
+          const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+          // Crear todas las notificaciones en paralelo
+          await Promise.all(
+            Array.from(involucrados).map(responsableId =>
+              prisma.tareas.create({
+                data: {
+                  titulo: tituloNotificacion,
+                  descripcion: descripcionNotificacion,
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: responsableId,
+                  id_solicitud: solicitudId.toString(),
+                  id_propuesta: campanaInfo.propuesta_id?.toString() || '',
+                  campania_id: campanaId,
+                  fecha_inicio: now,
+                  fecha_fin: fechaFin,
+                  responsable: '',
+                  asignado: userName,
+                  id_asignado: userId.toString(),
+                },
+              })
+            )
+          );
+        } catch (err) {
+          console.error('Error creando notificaciones de comentario:', err);
+        }
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
@@ -1230,11 +1324,16 @@ export class CampanasController {
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-          AND rsv.archivo IS NOT NULL
-          AND rsv.archivo != ''
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+          AND (
+            (rsv.archivo IS NOT NULL AND rsv.archivo != '')
+            OR imDig.id_reserva IS NOT NULL
+          )
         GROUP BY inv.id
         ORDER BY MIN(rsv.id) DESC
       `;
@@ -1243,10 +1342,7 @@ export class CampanasController {
 
       console.log('Inventario con arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      // Convertir BigInt a Number para JSON serialization
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -1302,10 +1398,7 @@ export class CampanasController {
         orderBy: { fecha_hora: 'asc' },
       });
 
-      // Convertir BigInt a Number para JSON serialization
-      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const historialSerializable = serializeBigInt(historial);
 
       res.json({
         success: true,
@@ -1404,9 +1497,7 @@ export class CampanasController {
 
       console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -1503,9 +1594,7 @@ export class CampanasController {
 
       console.log('Inventario instalaciones result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventario, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventario);
 
       res.json({
         success: true,
@@ -2305,11 +2394,11 @@ export class CampanasController {
         }
       }
 
-      // Si es rechazo, intercambiar creador y asignado en la tarea de Revisión de artes
+      // Si es rechazo, intercambiar creador y asignado en la tarea de Revision de artes
       console.log('updateArteStatus - Status:', status, '- CampanaId:', campanaId);
       if (status === 'Rechazado') {
-        console.log('updateArteStatus - Buscando tareas de Revisión de artes para rotar roles...');
-        // Buscar la tarea de Revisión de artes que contiene estas reservas
+        console.log('updateArteStatus - Buscando tareas de Revision de artes para rotar roles...');
+        // Buscar la tarea de Revision de artes que contiene estas reservas
         const tareasRevision = await prisma.$queryRawUnsafe<{
           id: number;
           ids_reservas: string;
@@ -2321,7 +2410,7 @@ export class CampanasController {
           SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
           FROM tareas
           WHERE campania_id = ?
-          AND tipo = 'Revisión de artes'
+          AND tipo = 'Revision de artes'
           AND ids_reservas IS NOT NULL
           AND ids_reservas != ''
           AND estatus = 'Activo'
@@ -2379,6 +2468,8 @@ export class CampanasController {
       });
       // También emitir INVENTARIO_ACTUALIZADO para refrescar todas las tablas
       emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
+      // Emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice (roles rotados en rechazo)
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { campanaId, status });
     } catch (error) {
       console.error('Error en updateArteStatus:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar estado de arte';
@@ -2602,7 +2693,7 @@ export class CampanasController {
           LEFT JOIN solicitudCaras sc2 ON sc2.id = rsv2.solicitudCaras_id
           WHERE tr.campania_id = ${campanaId}
             AND tr.estatus != 'Atendido'
-            AND tr.estatus != 'Pendientes'
+            AND tr.estatus != 'Pendiente'
             AND tr.estatus != 'Notificación nueva'
             AND (rsv.tarea IS NULL OR rsv.tarea != 'Aprobado')
             AND (rsv2.tarea IS NULL OR rsv2.tarea != 'Aprobado')
@@ -2693,6 +2784,7 @@ export class CampanasController {
         proveedores_id: t.proveedores_id,
         nombre_proveedores: t.nombre_proveedores,
         num_impresiones: t.num_impresiones,
+        archivo_testigo: t.archivo_testigo,
       }));
 
       res.json({
@@ -2729,7 +2821,6 @@ export class CampanasController {
         nombre_proveedores,
         contenido,
         listado_inventario,
-        catorcena_entrega,
         creador,
         impresiones, // Número de impresiones por inventario { inventario_id: cantidad }
         num_impresiones, // Total de impresiones (enviado desde frontend)
@@ -2745,6 +2836,44 @@ export class CampanasController {
       console.log('createTarea - Body recibido:', { asignado, id_asignado, tipo, titulo, id_responsable });
       console.log('createTarea - Token user:', { userId: req.user?.userId, nombre: req.user?.nombre });
       console.log('createTarea - Responsable final:', { responsableId, responsableNombre });
+
+      // Validación de campos requeridos según tipo de tarea
+      if (tipo === 'Impresión') {
+        if (num_impresiones === undefined || num_impresiones === null || Number(num_impresiones) <= 0) {
+          res.status(400).json({
+            success: false,
+            error: 'El número de impresiones es requerido para tareas de tipo Impresión',
+          });
+          return;
+        }
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de tipo Impresión',
+          });
+          return;
+        }
+      }
+
+      if (tipo === 'Revision de artes' || tipo === 'Correccion') {
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de Revision de artes',
+          });
+          return;
+        }
+      }
+
+      if (tipo === 'Testigo' || tipo === 'Instalación') {
+        if (!ids_reservas) {
+          res.status(400).json({
+            success: false,
+            error: 'Se requieren IDs de reservas para tareas de Testigo/Instalación',
+          });
+          return;
+        }
+      }
 
       // Obtener info de la campaña para el id_propuesta
       const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
@@ -2764,28 +2893,14 @@ export class CampanasController {
       }
 
       // Determinar fecha_fin y estatus según el tipo de tarea
-      let fechaFinFinal = fecha_fin ? new Date(fecha_fin) : new Date();
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const fechaFinFinal = new Date(ahora);
+      fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
-      // Para Revisión de artes, Impresión y Programación, estatus siempre es Activo
-      if (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Programación') {
+      // Para Revision de artes, Impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
-      }
-
-      // Si hay catorcena_entrega, obtener fecha_fin de la catorcena seleccionada
-      // Aplica para: Revisión de artes, Impresión, Instalación, Testigo, Programación
-      if (catorcena_entrega && (tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Instalación' || tipo === 'Testigo' || tipo === 'Programación')) {
-        const match = catorcena_entrega.match(/Catorcena (\d+), (\d+)/);
-        if (match) {
-          const numCatorcena = parseInt(match[1]);
-          const yearCatorcena = parseInt(match[2]);
-          const catorcena = await prisma.catorcenas.findFirst({
-            where: { numero_catorcena: numCatorcena, a_o: yearCatorcena },
-          });
-          if (catorcena?.fecha_fin) {
-            fechaFinFinal = new Date(catorcena.fecha_fin);
-          }
-        }
       }
 
       // Preparar datos de impresiones como JSON para almacenar en evidencia
@@ -2795,8 +2910,8 @@ export class CampanasController {
       // DEBUG: Log de todo el body para ver qué llega
       console.log('createTarea - tipo:', tipo, 'num_impresiones:', num_impresiones, 'impresiones:', JSON.stringify(impresiones));
 
-      if (tipo === 'Impresión' && (impresiones || catorcena_entrega)) {
-        evidenciaData = JSON.stringify({ impresiones: impresiones || {}, catorcena_entrega });
+      if (tipo === 'Impresión' && impresiones) {
+        evidenciaData = JSON.stringify({ impresiones: impresiones || {} });
         // Usar num_impresiones enviado desde el frontend directamente
         if (num_impresiones !== undefined && num_impresiones !== null) {
           numImpresionesTotal = Number(num_impresiones);
@@ -2834,7 +2949,7 @@ export class CampanasController {
           descripcion,
           tipo: tipo || 'Producción',
           estatus: estatusFinal,
-          fecha_inicio: new Date(),
+          fecha_inicio: ahora,
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
@@ -2860,12 +2975,20 @@ export class CampanasController {
           const placeholders = reservaIdArray.map(() => '?').join(',');
           // Determinar valor de tarea según tipo
           let tareaValue = tipo || 'Producción';
-          if (tipo === 'Revisión de artes') {
+          if (tipo === 'Revision de artes') {
             tareaValue = 'En revisión';
           } else if (tipo === 'Impresión') {
             tareaValue = 'Pedido Solicitado';
           } else if (tipo === 'Recepción') {
             tareaValue = 'Por Recibir';
+          } else if (tipo === 'Correccion') {
+            tareaValue = 'En corrección';
+          } else if (tipo === 'Testigo') {
+            tareaValue = 'Pendiente testigo';
+          } else if (tipo === 'Programación') {
+            tareaValue = 'En programación';
+          } else if (tipo === 'Instalación') {
+            tareaValue = 'Pendiente instalación';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
@@ -2897,9 +3020,11 @@ export class CampanasController {
         tipo: tarea.tipo,
         titulo: tarea.titulo,
       });
+      // También emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tarea.id, tipo: tarea.tipo });
 
       // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
-      if ((tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
+      if ((tipo === 'Revision de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
           prisma.usuario.findUnique({
@@ -2908,31 +3033,123 @@ export class CampanasController {
           }).then(usuarioAsignado => {
             if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
               const htmlBody = `
-              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                <div style="text-align: center; background: #8b5cf6; padding: 25px; border-radius: 12px 12px 0 0;">
-                  <h1 style="color: #ffffff; margin: 0; font-size: 28px;">QEB</h1>
-                  <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 12px;">OOH Management</p>
-                </div>
-                <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
-                  <h2 style="color: #1f2937; margin: 0 0 20px 0; font-size: 20px;">Nueva Tarea Asignada</h2>
-                  <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 15px 0;">
-                    Se te ha asignado la tarea <strong>${titulo || 'Nueva tarea'}</strong> para <strong>${tipo}</strong>: ${contenido || descripcion || ''}
-                  </p>
-                  <div style="background: #f3f4f6; border-radius: 8px; padding: 15px; margin: 20px 0;">
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Campaña:</strong> ${campanaNombre}</p>
-                    <p style="margin: 5px 0; font-size: 13px; color: #374151;"><strong>Creador:</strong> ${responsableNombre}</p>
-                  </div>
-                </div>
-                <div style="background: #374151; padding: 15px; border-radius: 0 0 12px 12px; text-align: center;">
-                  <p style="color: #9ca3af; font-size: 11px; margin: 0;">Mensaje automático del sistema QEB.</p>
-                </div>
-              </div>
-              `;
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              </head>
+              <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                  <tr>
+                    <td align="center">
+                      <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                        
+                        <!-- Header -->
+                        <tr>
+                          <td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.5px;">QEB</h1>
+                            <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                          </td>
+                        </tr>
+
+                        <!--Main Content-->
+                        <tr>
+                          <td style="padding: 40px;">
+                            
+                            <!-- Title -->
+                            <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Nueva Tarea Asignada</h2>
+                            <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                              Hola <strong style="color: #374151;">${usuarioAsignado.nombre}</strong>, se te ha asignado una nueva tarea.
+                            </p>
+
+                            <!-- Task Card -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                              <tr>
+                                <td style="padding: 20px;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td style="padding-bottom: 12px;">
+                                        <span style="display: inline-block; background-color: #8b5cf6; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">${tipo}</span>
+                                      </td>
+                                    </tr>
+                                    <tr>
+                                      <td>
+                                        <h3 style="color: #1f2937; margin: 0 0 8px 0; font-size: 18px; font-weight: 600;">${titulo || 'Nueva tarea'}</h3>
+                                        <p style="color: #6b7280; margin: 0; font-size: 14px; line-height: 1.5;">${contenido || descripcion || ''}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- Info Grid -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
+                              <tr>
+                                <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td width="24" valign="top">
+                                        <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">📊</div>
+                                      </td>
+                                      <td style="padding-left: 12px;">
+                                        <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Campaña</p>
+                                        <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${campanaNombre}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                              
+                              <tr>
+                                <td style="padding: 12px 0;">
+                                  <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                      <td width="24" valign="top">
+                                        <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">✨</div>
+                                      </td>
+                                      <td style="padding-left: 12px;">
+                                        <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Creado por</p>
+                                        <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${responsableNombre}</p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- CTA Button -->
+                            <table width="100%" cellpadding="0" cellspacing="0">
+                              <tr>
+                                <td align="center">
+                                  <a href="https://app.qeb.mx/campanas/${campanaId}/tareas" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                                </td>
+                              </tr>
+                            </table>
+
+                          </td>
+                        </tr>
+
+                        <!-- Footer -->
+                        <tr>
+                          <td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                            <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                            <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                          </td>
+                        </tr>
+
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </body>
+              </html>`;
 
               transporter.sendMail({
                 from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
                 to: usuarioAsignado.correo_electronico,
-                subject: `Tarea campaña ${campanaNombre}`,
+                subject: `Nueva tarea: ${titulo || tipo}`,
                 html: htmlBody,
               }).then(() => {
                 console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
@@ -2941,7 +3158,7 @@ export class CampanasController {
                   data: {
                     remitente: 'no-reply@qeb.mx',
                     destinatario: usuarioAsignado.correo_electronico,
-                    asunto: `Tarea campaña ${campanaNombre}`,
+                    asunto: `Nueva tarea: ${titulo || tipo}`,
                     cuerpo: htmlBody,
                   },
                 }).catch(err => console.error('Error guardando correo enviado:', err));
@@ -3024,6 +3241,73 @@ export class CampanasController {
           estatus: tarea.estatus,
         });
       }
+      // También emitir globalmente para que la página de Notificaciones/Mis Tareas se actualice
+      emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
+
+      // Notificar al asignado por correo cuando la tarea pasa a "Atendido"
+      if (estatus === 'Atendido' && tarea.id_asignado) {
+        const userName = req.user?.nombre || 'Usuario';
+        const asignadoId = parseInt(tarea.id_asignado);
+        if (!isNaN(asignadoId)) prisma.usuario.findUnique({ where: { id: asignadoId } })
+          .then((responsable: any) => {
+            if (responsable?.correo_electronico) {
+              const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+              <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                  <tr><td align="center">
+                    <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                      <tr><td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                        <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700;">QEB</h1>
+                        <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                      </td></tr>
+                      <tr><td style="padding: 40px;">
+                        <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Tarea Atendida</h2>
+                        <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                          Hola <strong style="color: #374151;">${responsable.nombre}</strong>, la siguiente tarea ha sido marcada como <strong>Atendida</strong> por <strong>${userName}</strong>.
+                        </p>
+                        <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                          <tr><td style="padding: 20px;">
+                            <span style="display: inline-block; background-color: #10b981; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">Atendido</span>
+                            <h3 style="color: #1f2937; margin: 8px 0; font-size: 18px; font-weight: 600;">${tarea.titulo}</h3>
+                            <p style="color: #6b7280; margin: 0; font-size: 14px;">${tarea.tipo || ''}</p>
+                          </td></tr>
+                        </table>
+                        <table width="100%" cellpadding="0" cellspacing="0">
+                          <tr><td align="center">
+                            <a href="https://app.qeb.mx/campanas/${tarea.campania_id}/tareas" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                          </td></tr>
+                        </table>
+                      </td></tr>
+                      <tr><td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                        <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                        <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                      </td></tr>
+                    </table>
+                  </td></tr>
+                </table>
+              </body></html>`;
+
+              transporter.sendMail({
+                from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                to: responsable.correo_electronico,
+                subject: `Tarea atendida: ${tarea.titulo || tarea.tipo}`,
+                html: htmlBody,
+              }).then(() => {
+                console.log('Correo de tarea atendida enviado a:', responsable.correo_electronico);
+                prisma.correos_enviados.create({
+                  data: {
+                    remitente: 'no-reply@qeb.mx',
+                    destinatario: responsable.correo_electronico,
+                    asunto: `Tarea atendida: ${tarea.titulo || tarea.tipo}`,
+                    cuerpo: htmlBody,
+                  },
+                }).catch((err: any) => console.error('Error guardando correo enviado:', err));
+              }).catch((emailError: any) => {
+                console.error('Error enviando correo de tarea atendida:', emailError);
+              });
+            }
+          }).catch((err: any) => console.error('Error buscando responsable para correo:', err));
+      }
     } catch (error) {
       console.error('Error en updateTarea:', error);
       const message = error instanceof Error ? error.message : 'Error al actualizar tarea';
@@ -3057,8 +3341,11 @@ export class CampanasController {
       if (tarea.ids_reservas) {
         const reservaIds = tarea.ids_reservas.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
         if (reservaIds.length > 0) {
+          // Usar query parametrizada para evitar SQL injection
+          const placeholders = reservaIds.map(() => '?').join(',');
           await prisma.$executeRawUnsafe(
-            `UPDATE reservas SET tarea = NULL WHERE id IN (${reservaIds.join(',')})`
+            `UPDATE reservas SET tarea = NULL WHERE id IN (${placeholders})`,
+            ...reservaIds
           );
         }
       }
@@ -3408,15 +3695,71 @@ export class CampanasController {
     }
   }
 
-// Obtener lista de usuarios para asignación
+// Obtener lista de usuarios para asignación (filtrado por equipo)
   async getUsuarios(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const usuarios = await prisma.$queryRaw<{ id: number; nombre: string }[]>`
-        SELECT id, nombre
-        FROM usuario
-        WHERE deleted_at IS NULL
-        ORDER BY nombre ASC
-      `;
+      const filterByTeam = req.query.filterByTeam !== 'false'; // true por defecto
+      const userId = req.user?.userId;
+
+      let teamMemberIds: number[] = [];
+
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      if (filterByTeam && userId) {
+        const userTeams = await prisma.usuario_equipo.findMany({
+          where: {
+            usuario_id: userId,
+            equipo: {
+              deleted_at: null,
+            },
+          },
+          select: {
+            equipo_id: true,
+          },
+        });
+
+        if (userTeams.length > 0) {
+          const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
+          const teamMembers = await prisma.usuario_equipo.findMany({
+            where: {
+              equipo_id: { in: teamIds },
+              equipo: {
+                deleted_at: null,
+              },
+            },
+            select: {
+              usuario_id: true,
+            },
+          });
+          teamMemberIds = [...new Set(teamMembers.map((m: { usuario_id: number }) => m.usuario_id))];
+        }
+      }
+
+      // Si hay filtro por equipo y el usuario tiene equipos, filtrar por miembros
+      let usuarios: { id: number; nombre: string }[];
+      if (filterByTeam && teamMemberIds.length > 0) {
+        usuarios = await prisma.usuario.findMany({
+          where: {
+            deleted_at: null,
+            id: { in: teamMemberIds },
+          },
+          select: {
+            id: true,
+            nombre: true,
+          },
+          orderBy: { nombre: 'asc' },
+        });
+      } else {
+        usuarios = await prisma.usuario.findMany({
+          where: {
+            deleted_at: null,
+          },
+          select: {
+            id: true,
+            nombre: true,
+          },
+          orderBy: { nombre: 'asc' },
+        });
+      }
 
       res.json({
         success: true,
@@ -3488,7 +3831,7 @@ export class CampanasController {
           sc.id AS grupo_id,
           'bonificacion' AS tipo_fila
         FROM campania cm
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
@@ -3497,8 +3840,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
-          AND rsv.estatus <> 'vendido'
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           AND sc.bonificacion > 0
           ${statusFilter}
           ${dateFilter}
@@ -3531,7 +3873,7 @@ export class CampanasController {
           sc.id AS grupo_id,
           'renta' AS tipo_fila
         FROM campania cm
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
@@ -3540,8 +3882,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
-          AND rsv.estatus <> 'vendido'
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           AND (sc.caras - sc.bonificacion) > 0
           ${statusFilter}
           ${dateFilter}
@@ -3554,9 +3895,7 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params, ...params);
 
-      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const dataSerializable = serializeBigInt(data);
 
       res.json({
         success: true,
@@ -3623,11 +3962,11 @@ export class CampanasController {
           )) AS FinSegmento,
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
-          rsv.archivo AS ArteUrl,
+          CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
           NULL AS OrigenArte,
-          inv.codigo_unico AS Unidad,
-          inv.tipo_de_cara AS Cara,
-          inv.municipio AS Ciudad,
+          CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
+          CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
+          CAST(inv.municipio AS CHAR(255)) AS Ciudad,
           CASE
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
             ELSE 'RENTA'
@@ -3645,9 +3984,9 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = sc.idquote
           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          INNER JOIN cliente ON cliente.id = cm.cliente_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
         WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus NOT IN ('eliminada')
+          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           ${statusFilter}
           ${dateFilter}
         ORDER BY cm.id, sc.id, inv.id
@@ -3655,9 +3994,7 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params);
 
-      const dataSerializable = JSON.parse(JSON.stringify(data, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const dataSerializable = serializeBigInt(data);
 
       res.json({
         success: true,
@@ -3888,6 +4225,7 @@ export class CampanasController {
         return;
       }
 
+      // Return all reservas for the propuesta (not just those with APS)
       const query = `
         SELECT
           rsv.id as reserva_id,
@@ -3900,6 +4238,7 @@ export class CampanasController {
           i.plaza,
           i.tipo_de_mueble as formato,
           i.ubicacion,
+          i.isla,
           rsv.estatus,
           rsv.grupo_completo_id,
           sc.id as solicitud_cara_id,
@@ -4157,6 +4496,7 @@ export class CampanasController {
       // Calculate authorization state for updated values
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: data.ciudad || undefined,
+        estado: data.estados || undefined,
         formato: data.formato || '',
         tipo: data.tipo || undefined,
         caras: data.caras ? parseInt(data.caras) : 0,
@@ -4180,7 +4520,8 @@ export class CampanasController {
         caras_contraflujo: data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
-        estado_autorizacion: estadoResult.estado,
+        autorizacion_dg: estadoResult.autorizacion_dg,
+        autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
       if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
@@ -4275,6 +4616,7 @@ export class CampanasController {
       // Calculate authorization state
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: data.ciudad,
+        estado: data.estados,
         formato: data.formato || '',
         tipo: data.tipo,
         caras: data.caras ? parseInt(data.caras) : 0,
@@ -4299,7 +4641,8 @@ export class CampanasController {
         caras_contraflujo: data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
-        estado_autorizacion: estadoResult.estado,
+        autorizacion_dg: estadoResult.autorizacion_dg,
+        autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
       if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
