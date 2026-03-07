@@ -40,6 +40,9 @@ router.delete('/:id/reservas', campanasController.deleteReservas.bind(campanasCo
 // Comentarios
 router.post('/:id/comentarios', campanasController.addComment.bind(campanasController));
 
+// SAP
+router.post('/:id/mark-posted-sap', campanasController.markPostedToSAP.bind(campanasController));
+
 // APS
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
 router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));
@@ -51,6 +54,7 @@ router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasContr
 router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));
 router.post('/:id/add-arte-digital', campanasController.addArteDigital.bind(campanasController));
 router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesDigitales.bind(campanasController));
+router.get('/:id/reserva-archivo/:reservaId', campanasController.getReservaArchivo.bind(campanasController));
 router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
 router.delete('/:id/imagenes-digitales', campanasController.deleteImagenesDigitales.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
@@ -67,6 +71,8 @@ router.delete('/:id/comentarios-arte/:comentarioId', campanasController.deleteCo
 router.get('/:id/tareas', campanasController.getTareas.bind(campanasController));
 router.post('/:id/tareas', campanasController.createTarea.bind(campanasController));
 router.patch('/:id/tareas/:tareaId', campanasController.updateTarea.bind(campanasController));
+router.post('/:id/tareas/:tareaId/enviar-orden-programacion', campanasController.enviarOrdenProgramacion.bind(campanasController));
+router.post('/:id/tareas/:tareaId/activar-orden-instalacion', campanasController.activarOrdenInstalacion.bind(campanasController));
 router.delete('/:id/tareas/:tareaId', campanasController.deleteTarea.bind(campanasController));
 
 export default router;

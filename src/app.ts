@@ -19,7 +19,8 @@ const getAllowedOrigins = () => {
     'https://front-16yzokren-qeb.vercel.app',
     'http://localhost:5177',
     'https://front-qeb.vercel.app',
-    'https://app.qeb.mx'
+    'https://app.qeb.mx',
+    'https://develop-qeb.vercel.app'
   ];
 
   const envUrl = process.env.FRONTEND_URL;

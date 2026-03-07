@@ -16,6 +16,9 @@ router.get('/', usuariosController.getAll.bind(usuariosController));
 // PUT /api/usuarios/:id - Actualizar usuario (solo admin)
 router.put('/:id', usuariosController.update.bind(usuariosController));
 
+// PATCH /api/usuarios/:id/reset-password - Restablecer contraseña (solo admin)
+router.patch('/:id/reset-password', usuariosController.adminResetPassword.bind(usuariosController));
+
 // DELETE /api/usuarios - Eliminar múltiples usuarios (solo admin)
 router.delete('/', usuariosController.deleteMany.bind(usuariosController));
 

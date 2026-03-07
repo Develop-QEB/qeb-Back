@@ -16,9 +16,6 @@ const transporter = nodemailer.createTransport({
 // Plazas principales - todo lo demás es "OTRAS"
 const PLAZAS_PRINCIPALES = ['CIUDAD DE MEXICO', 'GUADALAJARA', 'MONTERREY'];
 
-// Formatos que requieren autorización
-const FORMATOS_CON_CRITERIOS = ['PARABUS', 'COLUMNA'];
-
 export interface CaraData {
   ciudad?: string | null;
   estado?: string | null;  // Estado para determinar la plaza
@@ -89,20 +86,51 @@ function normalizarPlaza(ciudad: string | null | undefined, estado: string | nul
 }
 
 /**
- * Normaliza el formato para buscar en criterios
+ * Normaliza el formato para buscar en criterios_autorizacion.
+ * Los formatos compuestos (Bajo Puente X, MI MACRO X) se pasan tal cual
+ * para buscar el criterio específico primero.
  */
 function normalizarFormato(formato: string | null | undefined): string | null {
   if (!formato) return null;
-  const formatoUpper = formato.toUpperCase().trim();
+  const f = formato.trim();
+  const fUpper = f.toUpperCase();
 
-  // Buscar el formato que coincida
-  for (const f of FORMATOS_CON_CRITERIOS) {
-    if (formatoUpper.includes(f)) {
-      return f;
-    }
-  }
+  // Bajo Puente - pasar tal cual (puede ser "Bajo Puente Gran Terraza", "Bajo Puente Colorines Bloque 1", etc.)
+  if (fUpper.startsWith('BAJO PUENTE')) return f;
 
-  return null; // No tiene criterios definidos
+  // MI MACRO - pasar tal cual (puede ser "MI MACRO Vidrio Int", "MI MACRO Parabus", etc.)
+  if (fUpper.startsWith('MI MACRO')) return f;
+
+  // Puente Peatonal
+  if (fUpper.includes('PUENTE PEATONAL')) return 'Puente Peatonal';
+
+  // TOTEM
+  if (fUpper === 'TOTEM' || fUpper.includes('TOTEM')) return 'TOTEM';
+
+  // Kiosco (sub-tipos como DANUBIO, Sena resuelven a Kiosco via mueble lookup)
+  if (fUpper === 'KIOSCO' || fUpper.includes('KIOSCO')) return 'Kiosco';
+
+  // Carteleras Digitales
+  if (fUpper.includes('CARTELERA')) return 'CARTELERAS DIGITALES';
+
+  // Formatos estándar PB y Columna
+  if (fUpper.includes('PARABUS')) return 'PARABUS';
+  if (fUpper.includes('COLUMNA')) return 'COLUMNA';
+  if (fUpper.includes('BOLERO')) return 'Bolero';
+
+  return null; // Se intentará lookup por mueble en calcularEstadoAutorizacion
+}
+
+/**
+ * Para formatos compuestos, retorna la versión genérica para fallback.
+ * Ej: "Bajo Puente Gran Terraza" → "Bajo Puente"
+ *     "MI MACRO Vidrio Int" → "MI MACRO"
+ */
+function getFormatoGenerico(formato: string): string | null {
+  const fUpper = formato.toUpperCase();
+  if (fUpper.startsWith('BAJO PUENTE') && formato !== 'Bajo Puente') return 'Bajo Puente';
+  if (fUpper.startsWith('MI MACRO') && formato !== 'MI MACRO') return 'MI MACRO';
+  return null;
 }
 
 /**
@@ -145,9 +173,45 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
   });
 
   // Normalizar datos para búsqueda
-  const formatoNormalizado = normalizarFormato(cara.formato);
+  let formatoNormalizado = normalizarFormato(cara.formato);
 
-  // Si el formato no tiene criterios definidos, aprobar automáticamente ambos
+  // Si no hay match directo por tipo_de_mueble, buscar la categoría (mueble) en inventarios
+  if (!formatoNormalizado && cara.formato) {
+    try {
+      const inv = await prisma.inventarios.findFirst({
+        where: { tipo_de_mueble: cara.formato },
+        select: { mueble: true }
+      });
+      if (inv?.mueble) {
+        formatoNormalizado = inv.mueble;
+        console.log('[calcularEstadoAutorizacion] Formato resuelto via mueble:', formatoNormalizado);
+      }
+    } catch (err) {
+      console.error('[calcularEstadoAutorizacion] Error lookup mueble:', err);
+    }
+  }
+
+  // Para "Bolero", verificar si en esa ciudad es realmente un Bajo Puente o Puente Peatonal
+  if (formatoNormalizado === 'Bolero' && cara.ciudad) {
+    try {
+      const invEspecifico = await prisma.inventarios.findFirst({
+        where: {
+          tipo_de_mueble: cara.formato,
+          municipio: cara.ciudad,
+          mueble: { notIn: ['Bolero'] }
+        },
+        select: { mueble: true }
+      });
+      if (invEspecifico?.mueble) {
+        console.log('[calcularEstadoAutorizacion] Bolero reclasificado a:', invEspecifico.mueble);
+        formatoNormalizado = invEspecifico.mueble;
+      }
+    } catch (err) {
+      console.error('[calcularEstadoAutorizacion] Error reclasificacion Bolero:', err);
+    }
+  }
+
+  // Si no se pudo resolver el formato, aprobar automáticamente
   if (!formatoNormalizado) {
     return {
       autorizacion_dg: 'aprobado',
@@ -166,8 +230,8 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     plazaNormalizada
   });
 
-  // Buscar criterio en la base de datos
-  const criterio = await prisma.criterios_autorizacion.findFirst({
+  // Buscar criterio: primero plaza específica, luego fallback a "TODAS"
+  let criterio = await prisma.criterios_autorizacion.findFirst({
     where: {
       formato: formatoNormalizado,
       tipo: tipoNormalizado,
@@ -175,6 +239,44 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
       activo: true
     }
   });
+
+  if (!criterio) {
+    criterio = await prisma.criterios_autorizacion.findFirst({
+      where: {
+        formato: formatoNormalizado,
+        tipo: tipoNormalizado,
+        plaza: 'TODAS',
+        activo: true
+      }
+    });
+  }
+
+  // Fallback: si no encontró criterio específico, intentar con formato genérico
+  // Ej: "Bajo Puente Gran Terraza" no encontrado → buscar "Bajo Puente"
+  if (!criterio && formatoNormalizado) {
+    const formatoGenerico = getFormatoGenerico(formatoNormalizado);
+    if (formatoGenerico) {
+      console.log('[calcularEstadoAutorizacion] Fallback a formato genérico:', formatoGenerico);
+      criterio = await prisma.criterios_autorizacion.findFirst({
+        where: {
+          formato: formatoGenerico,
+          tipo: tipoNormalizado,
+          plaza: plazaNormalizada,
+          activo: true
+        }
+      });
+      if (!criterio) {
+        criterio = await prisma.criterios_autorizacion.findFirst({
+          where: {
+            formato: formatoGenerico,
+            tipo: tipoNormalizado,
+            plaza: 'TODAS',
+            activo: true
+          }
+        });
+      }
+    }
+  }
 
   console.log('[calcularEstadoAutorizacion] Criterio encontrado:', criterio);
 
@@ -247,6 +349,13 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     requiereDcm = true;
     if (motivoDcm) motivoDcm += '; ';
     motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
+  }
+
+  // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
+  if (requiereDg && requiereDcm) {
+    console.log('[calcularEstadoAutorizacion] Mixta DG+DCM detectada → preferencia DG, DCM auto-aprobado');
+    requiereDcm = false;
+    motivoDcm = '';
   }
 
   const resultado = {

@@ -29,6 +29,29 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+const isPublicFileUrl = (value: string): boolean =>
+  value.startsWith('http://') || value.startsWith('https://') || value.startsWith('/uploads/');
+
+const ensureStoredFileUrl = async (
+  rawValue: string,
+  folder: string,
+  resourceType: 'image' | 'video' | 'auto' = 'auto'
+): Promise<string> => {
+  const value = rawValue.trim();
+  if (!value) {
+    throw new Error('Archivo vacio');
+  }
+  if (isPublicFileUrl(value)) {
+    return value;
+  }
+
+  const uploaded = await uploadToCloudinary(value, folder, resourceType);
+  if (!uploaded?.secure_url) {
+    throw new Error('No se pudo subir el archivo a Spaces');
+  }
+  return uploaded.secure_url;
+};
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -40,6 +63,7 @@ export class CampanasController {
       const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
 
       // Build WHERE conditions
       // Excluir campañas 'inactiva' (propuestas no aprobadas) a menos que se filtre explícitamente por ese status
@@ -54,28 +78,32 @@ export class CampanasController {
         conditions.push("cm.status != 'inactiva'");
       }
 
-      if (search) {
-        conditions.push('(cm.nombre LIKE ? OR cm.articulo LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
-        const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        conditions.push("COALESCE(ct.tipo_periodo, 'catorcena') = ?");
+        params.push(tipoPeriodo);
       }
 
-      // Year/catorcena filters using fecha_inicio
+      if (search) {
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Year/catorcena filters - overlap logic (campaign active during selected period)
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
-          // Get date range from catorcenas
           conditions.push(`
-            cm.fecha_inicio >= (
-              SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-            )
-            AND cm.fecha_fin <= (
+            cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
+            AND cm.fecha_fin >= (
+              SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+            )
           `);
-          params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
         } else {
-          conditions.push('YEAR(cm.fecha_inicio) >= ? AND YEAR(cm.fecha_fin) <= ?');
-          params.push(yearInicio, yearFin);
+          conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
+          params.push(yearFin, yearInicio);
         }
       }
 
@@ -113,6 +141,9 @@ export class CampanasController {
           cat_ini.año as catorcena_inicio_anio,
           cat_fin.numero_catorcena as catorcena_fin_num,
           cat_fin.año as catorcena_fin_anio,
+          ct.id_propuesta as propuesta_id,
+          ct.tipo_periodo as tipo_periodo,
+          pr.inversion as inversion,
           CASE
             WHEN EXISTS (
               SELECT 1
@@ -125,7 +156,43 @@ export class CampanasController {
                 AND rsv2.APS > 0
             )
             THEN 1 ELSE 0
-          END AS has_aps
+          END AS has_aps,
+          (
+            SELECT COUNT(*)
+            FROM reservas rsv3
+            INNER JOIN solicitudCaras sc3 ON sc3.id = rsv3.solicitudCaras_id
+            INNER JOIN cotizacion ct3 ON ct3.id_propuesta = sc3.idquote
+            WHERE ct3.id = cm.cotizacion_id
+              AND rsv3.deleted_at IS NULL
+          ) AS reservas_count,
+          (
+            SELECT COUNT(*)
+            FROM reservas rsv5
+            INNER JOIN solicitudCaras sc5 ON sc5.id = rsv5.solicitudCaras_id
+            INNER JOIN cotizacion ct5 ON ct5.id_propuesta = sc5.idquote
+            INNER JOIN calendario cal5 ON cal5.id = rsv5.calendario_id
+            INNER JOIN catorcenas cat5 ON cal5.fecha_inicio >= cat5.fecha_inicio AND cal5.fecha_fin <= cat5.fecha_fin
+            WHERE ct5.id = cm.cotizacion_id
+              AND rsv5.deleted_at IS NULL
+              AND cm.fecha_fin BETWEEN cat5.fecha_inicio AND cat5.fecha_fin
+          ) AS reservas_count_ultima_cat,
+          (
+            SELECT COALESCE(SUM(sc6.caras + sc6.bonificacion), 0)
+            FROM solicitudCaras sc6
+            INNER JOIN cotizacion ct6 ON ct6.id_propuesta = sc6.idquote
+            INNER JOIN catorcenas cat6 ON sc6.inicio_periodo >= cat6.fecha_inicio AND sc6.fin_periodo <= cat6.fecha_fin
+            WHERE ct6.id = cm.cotizacion_id
+              AND cm.fecha_fin BETWEEN cat6.fecha_inicio AND cat6.fecha_fin
+          ) AS caras_ultima_cat
+          ,
+          (
+            SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
+            FROM reservas rsv4
+            INNER JOIN solicitudCaras sc4 ON sc4.id = rsv4.solicitudCaras_id
+            INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
+            WHERE ct4.id = cm.cotizacion_id
+              AND rsv4.deleted_at IS NULL
+          ) AS circuitos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -146,11 +213,43 @@ export class CampanasController {
       `;
 
       const offset = (page - 1) * limit;
-      const campanas = await prisma.$queryRawUnsafe(query, ...params, limit, offset);
+      const campanas = await prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset);
       const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
       const total = Number(countResult[0]?.total || 0);
 
-      const campanasSerializable = serializeBigInt(campanas);
+      // Recalcular circuitos por campaña en bloque para evitar inconsistencias por subqueries correlacionadas.
+      const campanaIds = (campanas || []).map((c: any) => Number(c.id)).filter((id: number) => Number.isFinite(id));
+      if (campanaIds.length > 0) {
+        const placeholders = campanaIds.map(() => '?').join(', ');
+        const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
+          `
+            SELECT
+              cm.id AS campania_id,
+              COUNT(DISTINCT rsv.solicitudCaras_id) AS circuitos
+            FROM reservas rsv
+            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+            INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+            INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+            WHERE rsv.deleted_at IS NULL
+              AND cm.id IN (${placeholders})
+            GROUP BY cm.id
+          `,
+          ...campanaIds
+        );
+
+        const circuitosMap = new Map<number, number>(
+          (circuitosPorCampana || []).map(row => [Number(row.campania_id), Number(row.circuitos || 0)])
+        );
+
+        campanas.forEach((campana: any) => {
+          campana.circuitos = circuitosMap.get(Number(campana.id)) ?? 0;
+        });
+      }
+
+      // Convert BigInt to Number for JSON serialization
+      const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
 
       res.json({
         success: true,
@@ -275,6 +374,103 @@ export class CampanasController {
         solicitud_id: c.solicitud_id,
       }));
 
+      // Contar reservas para detectar campañas incompletas
+      let reservasCount = 0;
+      let reservasCountUltimaCat = 0;
+      let carasUltimaCat = 0;
+      if (propuesta?.solicitud_id) {
+        const countResult = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
+          `SELECT COUNT(*) as cnt FROM reservas r
+           INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+           WHERE sc.idquote = ? AND r.deleted_at IS NULL`,
+          propuesta.solicitud_id
+        );
+        reservasCount = Number(countResult[0]?.cnt || 0);
+
+        // Contar solo reservas de la última catorcena
+        if (campana.fecha_fin) {
+          const ultCatResult = await prisma.$queryRawUnsafe<{ cnt: bigint, caras_esperadas: any }[]>(
+            `SELECT
+              (SELECT COUNT(*) FROM reservas r2
+               INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+               INNER JOIN calendario cal2 ON cal2.id = r2.calendario_id
+               INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
+               WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
+                 AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
+              ) as cnt,
+              (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
+               FROM solicitudCaras sc3
+               INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
+               WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
+              ) as caras_esperadas`,
+            propuesta.solicitud_id, campana.fecha_fin,
+            propuesta.solicitud_id, campana.fecha_fin
+          );
+          reservasCountUltimaCat = Number(ultCatResult[0]?.cnt || 0);
+          carasUltimaCat = Number(ultCatResult[0]?.caras_esperadas || 0);
+        }
+      }
+
+      // Desglose de completitud por catorcena - detalle por grupo (solicitudCaras)
+      let incompletenessDetail: any[] = [];
+      if (propuesta?.solicitud_id) {
+        const detailResult = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT
+            cat.numero_catorcena as catorcena,
+            cat.año as anio,
+            sc.id as sc_id,
+            sc.articulo,
+            sc.ciudad,
+            sc.caras as caras_renta,
+            sc.caras_flujo,
+            sc.caras_contraflujo,
+            sc.bonificacion as caras_bonif,
+            (sc.caras + sc.bonificacion) as caras_esperadas,
+            (SELECT COUNT(*) FROM reservas r2
+             WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+            ) as reservas_count
+          FROM solicitudCaras sc
+          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+          WHERE sc.idquote = ?
+          ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+          propuesta.solicitud_id
+        );
+
+        // Agrupar por catorcena
+        const byCat: Record<string, any> = {};
+        for (const r of detailResult) {
+          const key = `${r.anio}-${r.catorcena}`;
+          if (!byCat[key]) {
+            byCat[key] = {
+              catorcena: Number(r.catorcena),
+              anio: Number(r.anio),
+              caras_esperadas: 0,
+              reservas_count: 0,
+              grupos: [],
+            };
+          }
+          const esperadas = Number(r.caras_esperadas);
+          const reservadas = Number(r.reservas_count);
+          byCat[key].caras_esperadas += esperadas;
+          byCat[key].reservas_count += reservadas;
+          if (reservadas < esperadas) {
+            byCat[key].grupos.push({
+              articulo: r.articulo || 'SIN-ART',
+              ciudad: r.ciudad || '',
+              caras_esperadas: esperadas,
+              reservas_count: reservadas,
+              faltantes: esperadas - reservadas,
+            });
+          }
+        }
+        incompletenessDetail = Object.values(byCat)
+          .map((c: any) => ({
+            ...c,
+            completa: c.reservas_count >= c.caras_esperadas,
+          }))
+          .filter((c: any) => c.caras_esperadas > 0);
+      }
+
       // Combinar toda la info
       const campanaCompleta = {
         ...campana,
@@ -312,6 +508,7 @@ export class CampanasController {
         catorcena_fin_num: catorcenas.catorcena_fin_num || null,
         catorcena_fin_anio: catorcenas.catorcena_fin_anio || null,
         // Info de cotizacion
+        tipo_periodo: cotizacion?.tipo_periodo || 'catorcena',
         user_id: cotizacion?.user_id || null,
         clientes_id: cotizacion?.clientes_id || null,
         nombre_campania: cotizacion?.nombre_campania || null,
@@ -339,6 +536,14 @@ export class CampanasController {
         // Info de SAP desde solicitud
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
+        sap_database: solicitud?.sap_database || null,
+        posted_to_sap: (campana as any).posted_to_sap ? true : false,
+        // Reservas count para detectar campañas incompletas
+        reservas_count: reservasCount,
+        reservas_count_ultima_cat: reservasCountUltimaCat,
+        caras_ultima_cat: carasUltimaCat,
+        // Desglose de completitud por catorcena
+        incompleteness_detail: incompletenessDetail,
         // Comentarios
         comentarios,
       };
@@ -477,6 +682,146 @@ export class CampanasController {
           detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
         },
       });
+
+      // --- Estatus manuales de bitácora ---
+      const nombreCampanaStatus = campana.nombre || `Campaña #${campanaId}`;
+
+      if (status === 'Ajuste CTO Cliente') {
+        const idsAsignados = propuesta?.id_asignado
+          ? propuesta.id_asignado.split(',').map(i => parseInt(i.trim())).filter(i => !isNaN(i) && i !== userId)
+          : [];
+
+        const usuariosAsignados = idsAsignados.length > 0
+          ? await prisma.usuario.findMany({
+              where: { id: { in: idsAsignados }, deleted_at: null },
+              select: { id: true, nombre: true, correo_electronico: true },
+            })
+          : [];
+
+        for (const u of usuariosAsignados) {
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Ajuste de campaña',
+              descripcion: `Ajuste CTO Cliente - ${nombreCampanaStatus}`,
+              tipo: 'Ajuste Cto Cliente',
+              estatus: 'Pendiente',
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              id_responsable: u.id,
+              responsable: u.nombre,
+              asignado: u.nombre,
+              id_asignado: u.id.toString(),
+              id_solicitud: solicitud?.id?.toString() || '',
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campanaId,
+            },
+          });
+        }
+
+        // Tarea de seguimiento para Analista (asignados de la propuesta)
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            const analista = await prisma.usuario.findUnique({ where: { id: analistaId }, select: { nombre: true } });
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Seguimiento ajuste de campaña',
+                descripcion: `Seguimiento Ajuste CTO Cliente - ${nombreCampanaStatus}`,
+                tipo: 'Seguimiento',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: analista?.nombre || '',
+                asignado: analista?.nombre || '',
+                id_asignado: analistaId.toString(),
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+              },
+            });
+          }
+        }
+      }
+
+      if (status === 'Ajuste Comercial') {
+        // Tarea de ajuste para el asesor (creador de la solicitud)
+        if (solicitud?.usuario_id) {
+          const asesor = await prisma.usuario.findUnique({ where: { id: solicitud.usuario_id }, select: { nombre: true } });
+          await prisma.tareas.create({
+            data: {
+              titulo: 'Ajuste de campaña',
+              descripcion: `Ajuste Comercial - ${nombreCampanaStatus}`,
+              tipo: 'Ajuste Comercial',
+              estatus: 'Pendiente',
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              id_responsable: solicitud.usuario_id,
+              responsable: asesor?.nombre || '',
+              asignado: asesor?.nombre || '',
+              id_asignado: solicitud.usuario_id.toString(),
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campanaId,
+            },
+          });
+        }
+
+        // Tarea de seguimiento para Analista
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            const analista = await prisma.usuario.findUnique({ where: { id: analistaId }, select: { nombre: true } });
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Seguimiento ajuste de campaña',
+                descripcion: `Seguimiento Ajuste Comercial - ${nombreCampanaStatus}`,
+                tipo: 'Seguimiento',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: analista?.nombre || '',
+                asignado: analista?.nombre || '',
+                id_asignado: analistaId.toString(),
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+              },
+            });
+          }
+        }
+      }
+
+      if (status === 'Atendido') {
+        // Notificación al Analista asignado
+        if (propuesta?.id_asignado) {
+          for (const idStr of propuesta.id_asignado.split(',')) {
+            const analistaId = parseInt(idStr.trim());
+            if (isNaN(analistaId)) continue;
+            await prisma.tareas.create({
+              data: {
+                titulo: `Campaña atendida: ${nombreCampanaStatus}`,
+                descripcion: `${userName} marcó la campaña como Atendido`,
+                tipo: 'Notificación',
+                estatus: 'Pendiente',
+                fecha_inicio: now,
+                fecha_fin: fechaFin,
+                id_responsable: analistaId,
+                responsable: '',
+                id_solicitud: solicitud?.id?.toString() || '',
+                id_propuesta: propuesta?.id?.toString() || '',
+                campania_id: campanaId,
+                asignado: userName,
+                id_asignado: userId.toString(),
+              },
+            });
+          }
+        }
+
+      }
 
       res.json({
         success: true,
@@ -707,37 +1052,107 @@ export class CampanasController {
 
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
-      let visibilityClause = '';
-      const statsParams: (string | number)[] = [];
-      if (userId && !hasFullVisibility(userRol)) {
-        visibilityClause = `
-          AND EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-          )`;
-        statsParams.push(userId, String(userId));
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+
+      // Build WHERE — same logic as getAll
+      const conditions: string[] = ['cm.id IS NOT NULL'];
+      const params: (string | number)[] = [];
+
+      if (status) {
+        conditions.push('cm.status = ?');
+        params.push(status);
+      } else {
+        conditions.push("cm.status != 'inactiva'");
       }
 
-      const rows = await prisma.$queryRawUnsafe<Array<{ total: bigint; activas: bigint; inactivas: bigint }>>(`
-        SELECT
-          COUNT(*) as total,
-          SUM(CASE WHEN cm.status = 'Aprobada' THEN 1 ELSE 0 END) as activas,
-          SUM(CASE WHEN cm.status = 'inactiva' THEN 1 ELSE 0 END) as inactivas
-        FROM campania cm
-        WHERE 1=1 ${visibilityClause}
-      `, ...statsParams);
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        conditions.push("COALESCE(ct.tipo_periodo, 'catorcena') = ?");
+        params.push(tipoPeriodo);
+      }
 
-      const row = rows[0];
+      if (search) {
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ?)');
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      if (yearInicio && yearFin) {
+        if (catorcenaInicio && catorcenaFin) {
+          conditions.push(`
+            cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+            AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          `);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+        } else {
+          conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
+          params.push(yearFin, yearInicio);
+        }
+      }
+
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tareas t
+          WHERE t.campania_id = cm.id
+            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+        )`);
+        params.push(userId, String(userId));
+      }
+
+      const whereClause = conditions.join(' AND ');
+
+      // Total + status breakdown + APS count in a single query
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        status: string | null;
+        cnt: bigint;
+        con_aps: bigint;
+      }>>(`
+        SELECT
+          cm.status,
+          COUNT(*) as cnt,
+          SUM(CASE
+            WHEN EXISTS (
+              SELECT 1 FROM cotizacion ct2
+              INNER JOIN solicitudCaras sc2 ON sc2.idquote = ct2.id_propuesta
+              INNER JOIN reservas rsv2 ON rsv2.solicitudCaras_id = sc2.id AND rsv2.deleted_at IS NULL
+              WHERE ct2.id = cm.cotizacion_id AND rsv2.APS IS NOT NULL AND rsv2.APS > 0
+            ) THEN 1 ELSE 0
+          END) as con_aps
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        WHERE ${whereClause}
+        GROUP BY cm.status
+      `, ...params);
+
+      const byStatus: Record<string, number> = {};
+      let total = 0;
+      let conAps = 0;
+      for (const row of rows) {
+        const s = row.status || 'Sin status';
+        const cnt = Number(row.cnt);
+        byStatus[s] = cnt;
+        total += cnt;
+        conAps += Number(row.con_aps);
+      }
 
       res.json({
         success: true,
         data: {
-          total: Number(row?.total || 0),
-          activas: Number(row?.activas || 0),
-          inactivas: Number(row?.inactivas || 0),
+          total,
+          activas: byStatus['Aprobada'] || 0,
+          inactivas: byStatus['inactiva'] || 0,
+          byStatus,
+          conAps,
+          sinAps: total - conAps,
         },
       });
     } catch (error) {
@@ -821,29 +1236,44 @@ export class CampanasController {
 
       const query = `
         SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.mueble,
-          i.estado,
-          i.tipo_de_cara,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.tradicional_digital,
-          i.tarifa_publica,
-          rsv.estatus as estatus_reserva,
-          rsv.archivo,
-          rsv.calendario_id,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.plaza) as plaza,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
-          1 AS caras_totales
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -854,14 +1284,100 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
+        ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+      `;
 
-      console.log('Inventario result count:', Array.isArray(inventario) ? inventario.length : 0);
+      const [inventario, tareas] = await Promise.all([
+        prisma.$queryRawUnsafe(query, campanaId),
+        prisma.$queryRawUnsafe(tareasQuery, campanaId),
+      ]);
 
-      const inventarioSerializable = serializeBigInt(inventario);
+      const inventarioArr = inventario as any[];
+      const tareasArr = tareas as any[];
+
+      if (!inventarioArr.length) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Indexar tareas por reserva_id
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
+        for (const rsvId of ids) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      const inventarioConEstatus = inventarioArr.map((row: any) => {
+        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
+        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
+        const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+
+        let estatus_arte: string;
+        if (Number(row.instalado) === 1) {
+          estatus_arte = 'Instalado';
+        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+          estatus_arte = 'Artes Recibidos';
+        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+          estatus_arte = 'En Impresion';
+        } else if (row.arte_aprobado === 'aprobado') {
+          estatus_arte = 'Artes Aprobados';
+        } else if (row.archivo != null && row.archivo !== '') {
+          estatus_arte = 'Revision Artes';
+        } else {
+          estatus_arte = 'Carga Artes';
+        }
+
+        // Indicaciones de programación
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia)
+              : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        // Indicaciones de instalación
+        const tInstalacion = rsvIds.map(id => instalacionByReserva.get(id)).find(Boolean);
+        let indicaciones_instalacion: string | null = null;
+        if (tInstalacion && tInstalacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tInstalacion.evidencia === 'string'
+              ? JSON.parse(tInstalacion.evidencia)
+              : tInstalacion.evidencia;
+            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+      });
+
+      // Convertir BigInt a Number para que JSON.stringify funcione
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
 
       res.json({
         success: true,
@@ -882,78 +1398,217 @@ export class CampanasController {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
-      console.log('Fetching inventario con APS for campana:', campanaId);
-
+      // Query principal con subquery para id_propuesta (elimina 1 round trip a DB)
       const query = `
-        SELECT
-          rsv.id as rsv_ids,
-          i.id,
-          i.codigo_unico,
-          i.ubicacion,
-          i.tipo_de_cara,
-          i.cara,
-          i.mueble,
-          i.latitud,
-          i.longitud,
-          i.plaza,
-          i.estado,
-          i.municipio,
-          i.tipo_de_mueble,
-          i.ancho,
-          i.alto,
-          i.nivel_socioeconomico,
-          i.tarifa_publica,
-          i.tradicional_digital,
-          rsv.archivo,
-          rsv.estatus as estatus_reserva,
-          rsv.calendario_id,
-          rsv.APS as aps,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          epIn.numero_espacio as espacios,
-          sc.id AS solicitud_caras_id,
-          sc.articulo,
-          sc.tipo as tipo_medio,
-          sc.inicio_periodo,
-          sc.fin_periodo,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          1 AS caras_totales,
-          rsv.arte_aprobado,
-          rsv.instalado,
-          -- Calcular estatus de arte basado en el flujo
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
           CASE
-            WHEN rsv.instalado = 1 THEN 'Instalado'
-            WHEN t_recepcion.id IS NOT NULL AND t_recepcion.estatus = 'Completado' THEN 'Artes Recibidos'
-            WHEN t_impresion.id IS NOT NULL AND t_impresion.estatus IN ('Activo', 'Atendido') THEN 'En Impresion'
-            WHEN rsv.arte_aprobado = 'aprobado' THEN 'Artes Aprobados'
-            WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'Revision Artes'
-            ELSE 'Carga Artes'
-          END as estatus_arte
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN tareas t_impresion ON t_impresion.campania_id = cm.id
-            AND t_impresion.tipo = 'Impresión'
-            AND FIND_IN_SET(rsv.id, t_impresion.ids_reservas) > 0
-          LEFT JOIN tareas t_recepcion ON t_recepcion.campania_id = cm.id
-            AND t_recepcion.tipo = 'Recepción'
-            AND FIND_IN_SET(rsv.id, t_recepcion.ids_reservas) > 0
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.cara) as cara,
+          MIN(i.mueble) as mueble,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.APS) as aps,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          MIN(epIn.numero_espacio) as espacios,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
         WHERE
-          cm.id = ?
+          sc.idquote = (
+            SELECT ct.id_propuesta
+            FROM campania cm
+              INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            WHERE cm.id = ?
+            LIMIT 1
+          )
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        ORDER BY rsv.id DESC
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+        ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+      `;
 
-      console.log('Inventario con APS result count:', Array.isArray(inventario) ? inventario.length : 0);
+      const catorcenasQuery = `
+        SELECT numero_catorcena, año as anio_catorcena, fecha_inicio, fecha_fin
+        FROM catorcenas
+        ORDER BY fecha_inicio
+      `;
 
-      const inventarioSerializable = serializeBigInt(inventario);
+      // Las 3 queries en paralelo con timeout de 45s para no colgar el servidor
+      const QUERY_TIMEOUT = 45000;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Query timeout: las consultas tardaron más de 45s')), QUERY_TIMEOUT)
+      );
+
+      const [inventario, tareas, catorcenas] = await Promise.race([
+        Promise.all([
+          prisma.$queryRawUnsafe(query, campanaId),
+          prisma.$queryRawUnsafe(tareasQuery, campanaId),
+          prisma.$queryRawUnsafe(catorcenasQuery),
+        ]),
+        timeoutPromise as never,
+      ]);
+
+      const inventarioArr = inventario as any[];
+      const tareasArr = tareas as any[];
+      const catorcenasArr = catorcenas as any[];
+
+      if (!inventarioArr.length) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      // Indexar tareas por reserva_id para lookup O(1)
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
+        for (const rsvId of ids) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      // Pre-computar timestamps de catorcenas ordenadas para búsqueda binaria O(log n)
+      const catorcenaRanges = catorcenasArr.map((cat: any) => ({
+        inicio: new Date(cat.fecha_inicio).getTime(),
+        fin: new Date(cat.fecha_fin).getTime(),
+        numero_catorcena: cat.numero_catorcena,
+        anio_catorcena: cat.anio_catorcena,
+      }));
+
+      function findCatorcena(fecha: Date) {
+        const ts = fecha.getTime();
+        let lo = 0, hi = catorcenaRanges.length - 1;
+        let result = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (catorcenaRanges[mid].inicio <= ts) {
+            result = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (result >= 0 && ts <= catorcenaRanges[result].fin) {
+          return catorcenaRanges[result];
+        }
+        return null;
+      }
+
+      // Calcular estatus_arte y catorcena en código
+      const inventarioConEstatus = inventarioArr.map((row: any) => {
+        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
+        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
+        const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+
+        // estatus_arte
+        let estatus_arte: string;
+        if (Number(row.instalado) === 1) {
+          estatus_arte = 'Instalado';
+        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+          estatus_arte = 'Artes Recibidos';
+        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+          estatus_arte = 'En Impresion';
+        } else if (row.arte_aprobado === 'aprobado') {
+          estatus_arte = 'Artes Aprobados';
+        } else if (row.archivo != null && row.archivo !== '') {
+          estatus_arte = 'Revision Artes';
+        } else {
+          estatus_arte = 'Carga Artes';
+        }
+
+        // catorcena matching con búsqueda binaria
+        let numero_catorcena = null;
+        let anio_catorcena = null;
+        if (row.inicio_periodo) {
+          const cat = findCatorcena(new Date(row.inicio_periodo));
+          if (cat) {
+            numero_catorcena = cat.numero_catorcena;
+            anio_catorcena = cat.anio_catorcena;
+          }
+        }
+
+        // Indicaciones de programación desde la tarea
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia)
+              : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        // Indicaciones de instalación desde la tarea
+        const tInstalacion = rsvIds.map(id => instalacionByReserva.get(id)).find(Boolean);
+        let indicaciones_instalacion: string | null = null;
+        if (tInstalacion && tInstalacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tInstalacion.evidencia === 'string'
+              ? JSON.parse(tInstalacion.evidencia)
+              : tInstalacion.evidencia;
+            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+          } catch { /* ignore parse errors */ }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+      });
+
+      // Convertir BigInt a Number para que JSON.stringify funcione
+      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
 
       res.json({
         success: true,
@@ -1251,38 +1906,38 @@ export class CampanasController {
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
 
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.tipo_de_mueble,
-          inv.ancho,
-          inv.alto,
-          inv.nivel_socioeconomico,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
 
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN CONCAT(
-              SUBSTRING_INDEX(inv.codigo_unico, '_', 1),
+              SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1),
               '_completo_',
-              SUBSTRING_INDEX(inv.codigo_unico, '_', -1)
+              SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1)
             )
-            ELSE inv.codigo_unico
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
 
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
             THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
 
           MAX(rsv.archivo) AS archivo,
@@ -1308,13 +1963,13 @@ export class CampanasController {
 
           COUNT(DISTINCT rsv.id) AS caras_totales,
 
-          (SELECT sol2.IMU FROM propuesta pr2 INNER JOIN solicitud sol2 ON sol2.id = pr2.solicitud_id WHERE pr2.id = sc.idquote LIMIT 1) AS IMU,
+          MAX(sol.IMU) AS IMU,
 
           MAX(sc.articulo) AS articulo,
           MAX(sc.tipo) AS tipo_medio,
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id
 
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
@@ -1322,19 +1977,26 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN archivos arc ON inv.archivos_id = arc.id
+          LEFT JOIN propuesta pr ON pr.id = sc.idquote
+          LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
           AND (
             (rsv.archivo IS NOT NULL AND rsv.archivo != '')
-            OR imDig.id_reserva IS NOT NULL
+            OR EXISTS (
+              SELECT 1
+              FROM imagenes_digitales imDig
+              WHERE imDig.id_reserva = rsv.id
+              LIMIT 1
+            )
           )
-        GROUP BY inv.id
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1342,7 +2004,17 @@ export class CampanasController {
 
       console.log('Inventario con arte result count:', Array.isArray(inventario) ? inventario.length : 0);
 
-      const inventarioSerializable = serializeBigInt(inventario);
+      // Evitar stringify/parse en payloads grandes (puede agotar heap en producción).
+      // Solo convertimos BigInt en columnas del resultado.
+      const inventarioSerializable = Array.isArray(inventario)
+        ? inventario.map((row) => {
+            const normalized: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+              normalized[key] = typeof value === 'bigint' ? Number(value) : value;
+            }
+            return normalized;
+          })
+        : inventario;
 
       res.json({
         success: true,
@@ -1426,37 +2098,36 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-
       console.log('Fetching inventario sin arte for campana:', campanaId);
 
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_id,
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.tipo_de_mueble,
-          inv.ancho,
-          inv.alto,
-          inv.nivel_socioeconomico,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
-            ELSE inv.codigo_unico
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1))
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
@@ -1472,7 +2143,7 @@ export class CampanasController {
           MAX(sc.tipo) AS tipo_medio,
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id
         FROM inventarios inv
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
@@ -1485,11 +2156,13 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.archivo IS NULL
           AND imDig.id_reserva IS NULL
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
-        GROUP BY inv.id
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1527,29 +2200,29 @@ export class CampanasController {
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          inv.id,
-          inv.codigo_unico,
-          inv.ubicacion,
-          inv.tipo_de_cara,
-          inv.cara,
-          inv.mueble,
-          inv.latitud,
-          inv.longitud,
-          inv.plaza,
-          inv.estado,
-          inv.municipio,
-          inv.ancho,
-          inv.alto,
-          inv.tarifa_publica,
-          inv.tradicional_digital,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(inv.codigo_unico, '_', 1), '_completo_', SUBSTRING_INDEX(inv.codigo_unico, '_', -1))
-            ELSE inv.codigo_unico
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1))
+            ELSE MIN(inv.codigo_unico)
           END as codigo_unico_display,
           CASE
-            WHEN MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
-            ELSE inv.tipo_de_cara
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE MIN(inv.tipo_de_cara)
           END as tipo_de_cara_display,
           MAX(rsv.archivo) AS archivo,
           MAX(rsv.estatus) AS estatus,
@@ -1569,7 +2242,7 @@ export class CampanasController {
           MAX(cat.numero_catorcena) AS numero_catorcena,
           MAX(cat.año) AS anio_catorcena,
           COUNT(DISTINCT rsv.id) AS caras_totales,
-          COALESCE(MAX(rsv.grupo_completo_id), inv.id) as grupo_completo_id,
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id,
           MAX(tr.id) AS tarea_instalacion_id,
           MAX(tr.titulo) AS tarea_instalacion_titulo,
           MAX(tr.estatus) AS tarea_instalacion_estatus
@@ -1586,7 +2259,9 @@ export class CampanasController {
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
-        GROUP BY inv.id
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
 
@@ -1759,13 +2434,19 @@ export class CampanasController {
       }
 
       // Validar archivo si no es limpieza
-      if (!archivo) {
+      if (!archivo || typeof archivo !== 'string') {
         res.status(400).json({
           success: false,
           error: 'Se requiere la URL del archivo',
         });
         return;
       }
+
+      const archivoFinal = await ensureStoredFileUrl(
+        archivo,
+        `qeb/campana-${campanaId}/artes`,
+        'image'
+      );
 
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
@@ -1774,7 +2455,7 @@ export class CampanasController {
         WHERE id IN (${placeholders})
       `;
 
-      await prisma.$executeRawUnsafe(updateDirectQuery, archivo, ...reservaIds);
+      await prisma.$executeRawUnsafe(updateDirectQuery, archivoFinal, ...reservaIds);
 
       // Actualizar reservas del mismo grupo_completo
       if (grupoIds.length > 0) {
@@ -1785,7 +2466,7 @@ export class CampanasController {
           WHERE grupo_completo_id IN (${grupoPlaceholders})
         `;
 
-        await prisma.$executeRawUnsafe(updateGruposQuery, archivo, ...grupoIds);
+        await prisma.$executeRawUnsafe(updateGruposQuery, archivoFinal, ...grupoIds);
       }
 
       // Registrar en historial
@@ -1900,14 +2581,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -2034,14 +2712,11 @@ export class CampanasController {
 
         // Intentar subir a Cloudinary, si falla usar base64 directamente
         const resourceType = tipo === 'video' ? 'video' : 'image';
-        const cloudinaryResult = await uploadToCloudinary(
+        const archivoData = await ensureStoredFileUrl(
           base64Data,
           `qeb/campana-${campanaId}/digitales`,
           resourceType
         );
-
-        // Usar URL de Cloudinary si está disponible, sino usar base64
-        const archivoData = cloudinaryResult?.secure_url || base64Data;
 
         // Guardar la referencia
         savedFiles.push(archivoData);
@@ -2507,9 +3182,14 @@ export class CampanasController {
       const updateFields: string[] = ['instalado = ?'];
       const updateParams: (boolean | string | number)[] = [instalado ? 1 : 0];
 
-      if (imagenTestigo) {
+      if (imagenTestigo && typeof imagenTestigo === 'string' && imagenTestigo.trim()) {
+        const imagenTestigoUrl = await ensureStoredFileUrl(
+          imagenTestigo,
+          `qeb/campana-${campanaId}/testigos`,
+          'image'
+        );
         updateFields.push('imagen_testigo = ?');
-        updateParams.push(imagenTestigo);
+        updateParams.push(imagenTestigoUrl);
       }
 
       if (fechaTestigo) {
@@ -2925,6 +3605,32 @@ export class CampanasController {
         // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
         try {
           const evidenciaObj = JSON.parse(evidencia);
+          // Backend guard: si Recepción Faltantes llega sin guia_pdf, heredarla de la última Recepción de la campaña.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            !evidenciaObj?.guia_pdf
+          ) {
+            try {
+              const ultimaRecepcionConGuia = await prisma.tareas.findFirst({
+                where: {
+                  campania_id: campanaId,
+                  tipo: 'Recepción',
+                  evidencia: { contains: 'guia_pdf' },
+                },
+                orderBy: { id: 'desc' },
+                select: { evidencia: true },
+              });
+              if (ultimaRecepcionConGuia?.evidencia) {
+                const evidenciaPrev = JSON.parse(ultimaRecepcionConGuia.evidencia);
+                if (evidenciaPrev?.guia_pdf) {
+                  evidenciaObj.guia_pdf = evidenciaPrev.guia_pdf;
+                }
+              }
+            } catch (inheritErr) {
+              console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
+            }
+          }
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
@@ -2953,8 +3659,8 @@ export class CampanasController {
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
-          asignado: asignado || responsableNombre || null,
-          id_asignado: id_asignado || String(responsableId),
+          asignado: tipo === 'Impresión' ? (responsableNombre || null) : (asignado || responsableNombre || null),
+          id_asignado: tipo === 'Impresión' ? String(responsableId) : (id_asignado || String(responsableId)),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -2987,8 +3693,12 @@ export class CampanasController {
             tareaValue = 'Pendiente testigo';
           } else if (tipo === 'Programación') {
             tareaValue = 'En programación';
+          } else if (tipo === 'Orden de Programación') {
+            tareaValue = 'Orden de programación';
           } else if (tipo === 'Instalación') {
             tareaValue = 'Pendiente instalación';
+          } else if (tipo === 'Orden de Instalación') {
+            tareaValue = 'Orden de instalación';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
@@ -3206,14 +3916,84 @@ export class CampanasController {
       if (fecha_fin !== undefined) updateData.fecha_fin = new Date(fecha_fin);
       if (asignado !== undefined) updateData.asignado = asignado;
       if (id_asignado !== undefined) updateData.id_asignado = id_asignado;
-      if (archivo !== undefined) updateData.archivo = archivo;
+      if (archivo !== undefined) {
+        if (typeof archivo === 'string' && archivo.trim()) {
+          updateData.archivo = await ensureStoredFileUrl(
+            archivo,
+            `qeb/campana-${id}/artes`,
+            'image'
+          );
+        } else {
+          updateData.archivo = archivo;
+        }
+      }
       if (evidencia !== undefined) updateData.evidencia = evidencia;
-      if (archivo_testigo !== undefined) updateData.archivo_testigo = archivo_testigo;
+      if (archivo_testigo !== undefined) {
+        if (typeof archivo_testigo === 'string' && archivo_testigo.trim()) {
+          updateData.archivo_testigo = await ensureStoredFileUrl(
+            archivo_testigo,
+            `qeb/campana-${id}/testigos`,
+            'image'
+          );
+        } else {
+          updateData.archivo_testigo = archivo_testigo;
+        }
+      }
 
       const tarea = await prisma.tareas.update({
         where: { id: parseInt(tareaId) },
         data: updateData,
       });
+
+      // Si es una tarea de Programación que se completa y tiene orden padre, auto-finalizar la orden
+      if (tarea.tipo === 'Programación' && estatus === 'Completado' && tarea.evidencia) {
+        try {
+          const ev = JSON.parse(tarea.evidencia);
+          if (ev.orden_programacion_id) {
+            await prisma.tareas.update({
+              where: { id: ev.orden_programacion_id },
+              data: { estatus: 'Finalizada' },
+            });
+            console.log(`Orden de Programación ${ev.orden_programacion_id} auto-finalizada`);
+
+            // Emitir evento WebSocket para la orden actualizadaa
+            if (tarea.campania_id) {
+              emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+                tareaId: ev.orden_programacion_id,
+                campanaId: tarea.campania_id,
+                estatus: 'Finalizada',
+              });
+            }
+          }
+        } catch (e) {
+          console.error('Error auto-finalizando orden de programación:', e);
+        }
+      }
+
+      // Si es una tarea de Instalación que se completa y tiene orden padre, auto-finalizar la orden
+      if (tarea.tipo === 'Instalación' && estatus === 'Completado' && tarea.evidencia) {
+        try {
+          const ev = JSON.parse(tarea.evidencia);
+          if (ev.orden_instalacion_id) {
+            await prisma.tareas.update({
+              where: { id: ev.orden_instalacion_id },
+              data: { estatus: 'Finalizada' },
+            });
+            console.log(`Orden de Instalación ${ev.orden_instalacion_id} auto-finalizada`);
+
+            // Emitir evento WebSocket para la orden actualizada
+            if (tarea.campania_id) {
+              emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+                tareaId: ev.orden_instalacion_id,
+                campanaId: tarea.campania_id,
+                estatus: 'Finalizada',
+              });
+            }
+          }
+        } catch (e) {
+          console.error('Error auto-finalizando orden de instalación:', e);
+        }
+      }
 
       // Si es una tarea de tipo Testigo y se está completando, actualizar el estado de instalación a validado
       if (tipo === 'Testigo' && estatus === 'Completado' && tarea.ids_reservas) {
@@ -3225,6 +4005,133 @@ export class CampanasController {
             data: { instalado: true },
           });
           console.log(`Testigo completado: ${reservaIds.length} reservas marcadas como validadas`);
+        }
+      }
+
+      // Si es tarea de ajuste y se finaliza, verificar si todas las hermanas ya están finalizadas
+      if (
+        ['Atendido', 'Completado', 'Finalizada'].includes(tarea.estatus || '') &&
+        ['Ajuste Cto Cliente', 'Ajuste de Caras'].includes(tarea.tipo || '') &&
+        tarea.id_propuesta
+      ) {
+        const tareasHermanas = await prisma.tareas.findMany({
+          where: {
+            id_propuesta: tarea.id_propuesta,
+            tipo: tarea.tipo,
+          },
+          select: { id: true, estatus: true },
+        });
+
+        const todasFinalizadas = tareasHermanas.every(t =>
+          ['Atendido', 'Completado', 'Cancelado', 'Finalizada'].includes(t.estatus || '')
+        );
+
+        if (todasFinalizadas) {
+          const { count } = await prisma.propuesta.updateMany({
+            where: { id: parseInt(tarea.id_propuesta), status: { not: 'Atendida' } },
+            data: { status: 'Atendida', updated_at: new Date() },
+          });
+
+          // Si count === 0 ya estaba en "Atendida" (cambio manual previo), no duplicar notificaciónn
+          if (count === 0) return;
+
+          const propuestaAtendida = await prisma.propuesta.findUnique({
+            where: { id: parseInt(tarea.id_propuesta) },
+            select: { solicitud_id: true },
+          });
+
+          const cotizacionAjuste = await prisma.cotizacion.findFirst({
+            where: { id_propuesta: parseInt(tarea.id_propuesta) },
+            select: { nombre_campania: true },
+          });
+          const nombreCampaniaAjuste = cotizacionAjuste?.nombre_campania || 'Propuesta';
+
+          // Notificar al creador al cambiar el status
+          if (propuestaAtendida?.solicitud_id) {
+            const solicitudCreador = await prisma.solicitud.findUnique({
+              where: { id: propuestaAtendida.solicitud_id },
+              select: { usuario_id: true },
+            });
+            if (solicitudCreador?.usuario_id) {
+              const nowNotif = new Date();
+              await prisma.tareas.create({
+                data: {
+                  titulo: `Ajuste completado: ${nombreCampaniaAjuste}`,
+                  descripcion: 'Todos los ajustes han sido atendidos. El estado de la propuesta cambió a Atendida.',
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: solicitudCreador.usuario_id,
+                  responsable: '',
+                  id_solicitud: tarea.id_solicitud || '',
+                  id_propuesta: tarea.id_propuesta,
+                  campania_id: tarea.campania_id,
+                  fecha_inicio: nowNotif,
+                  fecha_fin: new Date(nowNotif.getTime() + 24 * 60 * 60 * 1000),
+                  asignado: req.user?.nombre || 'Usuario',
+                  id_asignado: (req.user?.userId || 0).toString(),
+                },
+              });
+
+              // Enviar correo al creador
+              const creador = await prisma.usuario.findUnique({
+                where: { id: solicitudCreador.usuario_id },
+                select: { nombre: true, correo_electronico: true },
+              });
+              if (creador?.correo_electronico) {
+                const nombrePropuesta = nombreCampaniaAjuste;
+                const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+                <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                  <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                    <tr><td align="center">
+                      <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                        <tr><td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                          <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700;">QEB</h1>
+                          <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                        </td></tr>
+                        <tr><td style="padding: 40px;">
+                          <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Ajuste Completado</h2>
+                          <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                            Hola <strong style="color: #374151;">${creador.nombre}</strong>, todos los ajustes de la siguiente propuesta han sido atendidos.
+                          </p>
+                          <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                            <tr><td style="padding: 20px;">
+                              <span style="display: inline-block; background-color: #10b981; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">Atendida</span>
+                              <h3 style="color: #1f2937; margin: 8px 0; font-size: 18px; font-weight: 600;">${nombrePropuesta}</h3>
+                            </td></tr>
+                          </table>
+                          <table width="100%" cellpadding="0" cellspacing="0">
+                            <tr><td align="center">
+                              <a href="https://app.qeb.mx/propuestas?viewId=${tarea.id_propuesta}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Propuesta</a>
+                            </td></tr>
+                          </table>
+                        </td></tr>
+                        <tr><td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                          <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                          <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                        </td></tr>
+                      </table>
+                    </td></tr>
+                  </table>
+                </body></html>`;
+
+                transporter.sendMail({
+                  from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                  to: creador.correo_electronico,
+                  subject: `Ajuste completado: ${nombrePropuesta}`,
+                  html: htmlBody,
+                }).then(() => {
+                  prisma.correos_enviados.create({
+                    data: {
+                      remitente: 'no-reply@qeb.mx',
+                      destinatario: creador.correo_electronico!,
+                      asunto: `Ajuste completado: ${nombrePropuesta}`,
+                      cuerpo: htmlBody,
+                    },
+                  }).catch((err: any) => console.error('Error guardando correo ajuste completado:', err));
+                }).catch((err: any) => console.error('Error enviando correo ajuste completado:', err));
+              }
+            }
+          }
         }
       }
 
@@ -3245,7 +4152,8 @@ export class CampanasController {
       emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
 
       // Notificar al asignado por correo cuando la tarea pasa a "Atendido"
-      if (estatus === 'Atendido' && tarea.id_asignado) {
+      // (excluir tipos de ajuste: su notificación se envía una sola vez al cambiar el status)
+      if (['Atendido', 'Finalizada'].includes(estatus || '') && tarea.id_asignado && !['Ajuste Cto Cliente', 'Ajuste de Caras'].includes(tarea.tipo || '')) {
         const userName = req.user?.nombre || 'Usuario';
         const asignadoId = parseInt(tarea.id_asignado);
         if (!isNaN(asignadoId)) prisma.usuario.findUnique({ where: { id: asignadoId } })
@@ -3318,6 +4226,253 @@ export class CampanasController {
     }
   }
 
+  /**
+   * Enviar una Orden de Programación: crea tarea hija "Programación" para Operaciones
+   */
+  async enviarOrdenProgramacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, tareaId } = req.params;
+      const campanaId = parseInt(id);
+      const tareaIdNum = parseInt(tareaId);
+
+      // Buscar la orden de programación
+      const orden = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!orden) {
+        res.status(404).json({ success: false, error: 'Orden de Programación no encontrada' });
+        return;
+      }
+
+      if (orden.tipo !== 'Orden de Programación') {
+        res.status(400).json({ success: false, error: 'La tarea no es de tipo Orden de Programación' });
+        return;
+      }
+
+      if (orden.estatus !== 'Pendiente') {
+        res.status(400).json({ success: false, error: 'La orden ya fue enviada' });
+        return;
+      }
+
+      // Parsear evidencia de la orden
+      let evidenciaOrden: any = {};
+      try {
+        if (orden.evidencia) {
+          evidenciaOrden = JSON.parse(orden.evidencia);
+        }
+      } catch (e) {
+        console.error('Error parsing orden evidencia:', e);
+      }
+
+      // Crear tarea hija de tipo "Programación"
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const childEvidencia = JSON.stringify({
+        ...evidenciaOrden,
+        programados: {},
+        orden_programacion_id: tareaIdNum,
+      });
+
+      const tareaProgramacion = await prisma.tareas.create({
+        data: {
+          titulo: orden.titulo || 'Programación',
+          descripcion: orden.descripcion || null,
+          tipo: 'Programación',
+          estatus: 'Activo',
+          fecha_inicio: ahora,
+          fecha_fin: orden.fecha_fin,
+          id_responsable: req.user?.userId || 0,
+          responsable: req.user?.nombre || '',
+          asignado: orden.asignado || null,
+          id_asignado: orden.id_asignado || null,
+          id_solicitud: orden.id_solicitud || '',
+          id_propuesta: orden.id_propuesta || '',
+          campania_id: campanaId,
+          ids_reservas: orden.ids_reservas || null,
+          listado_inventario: orden.listado_inventario || null,
+          evidencia: childEvidencia,
+        },
+      });
+
+      // Actualizar reservas: tarea = 'En programación'
+      if (orden.ids_reservas) {
+        const reservaIdArray = orden.ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
+        if (reservaIdArray.length > 0) {
+          const placeholders = reservaIdArray.map(() => '?').join(',');
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
+            'En programación',
+            ...reservaIdArray
+          );
+        }
+      }
+
+      // Actualizar la orden: estatus = 'Enviada', agregar ID de la tarea hija
+      const ordenEvidenciaActualizada = JSON.stringify({
+        ...evidenciaOrden,
+        tarea_programacion_id: tareaProgramacion.id,
+      });
+
+      await prisma.tareas.update({
+        where: { id: tareaIdNum },
+        data: {
+          estatus: 'Enviada',
+          evidencia: ordenEvidenciaActualizada,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          orden: { id: tareaIdNum, estatus: 'Enviada' },
+          programacion: { id: tareaProgramacion.id, estatus: 'Activo' },
+        },
+      });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+        tareaId: tareaIdNum,
+        campanaId,
+        estatus: 'Enviada',
+      });
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tareaProgramacion.id,
+        campanaId,
+        tipo: 'Programación',
+        titulo: tareaProgramacion.titulo,
+      });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaProgramacion.id, tipo: 'Programación' });
+
+    } catch (error) {
+      console.error('Error en enviarOrdenProgramacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al enviar orden de programación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Activar una Orden de Instalación: crea tarea hija "Instalación" para Operaciones
+   */
+  async activarOrdenInstalacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, tareaId } = req.params;
+      const campanaId = parseInt(id);
+      const tareaIdNum = parseInt(tareaId);
+
+      // Buscar la orden de instalación
+      const orden = await prisma.tareas.findUnique({
+        where: { id: tareaIdNum },
+      });
+
+      if (!orden) {
+        res.status(404).json({ success: false, error: 'Orden de Instalación no encontrada' });
+        return;
+      }
+
+      if (orden.tipo !== 'Orden de Instalación') {
+        res.status(400).json({ success: false, error: 'La tarea no es de tipo Orden de Instalación' });
+        return;
+      }
+
+      if (orden.estatus !== 'Pendiente') {
+        res.status(400).json({ success: false, error: 'La orden ya fue activada' });
+        return;
+      }
+
+      // Parsear evidencia de la orden
+      let evidenciaOrden: any = {};
+      try {
+        if (orden.evidencia) {
+          evidenciaOrden = JSON.parse(orden.evidencia);
+        }
+      } catch (e) {
+        console.error('Error parsing orden evidencia:', e);
+      }
+
+      // Crear tarea hija de tipo "Instalación"
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      const childEvidencia = JSON.stringify({
+        ...evidenciaOrden,
+        orden_instalacion_id: tareaIdNum,
+      });
+
+      const tareaInstalacion = await prisma.tareas.create({
+        data: {
+          titulo: orden.titulo || 'Instalación',
+          descripcion: orden.descripcion || null,
+          tipo: 'Instalación',
+          estatus: 'Activo',
+          fecha_inicio: ahora,
+          fecha_fin: orden.fecha_fin,
+          id_responsable: req.user?.userId || 0,
+          responsable: req.user?.nombre || '',
+          asignado: orden.asignado || null,
+          id_asignado: orden.id_asignado || null,
+          id_solicitud: orden.id_solicitud || '',
+          id_propuesta: orden.id_propuesta || '',
+          campania_id: campanaId,
+          ids_reservas: orden.ids_reservas || null,
+          listado_inventario: orden.listado_inventario || null,
+          evidencia: childEvidencia,
+        },
+      });
+
+      // Actualizar reservas: tarea = 'Pendiente instalación'
+      if (orden.ids_reservas) {
+        const reservaIdArray = orden.ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
+        if (reservaIdArray.length > 0) {
+          const placeholders = reservaIdArray.map(() => '?').join(',');
+          await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
+            'Pendiente instalación',
+            ...reservaIdArray
+          );
+        }
+      }
+
+      // Actualizar la orden: estatus = 'Activada', agregar ID de la tarea hija
+      const ordenEvidenciaActualizada = JSON.stringify({
+        ...evidenciaOrden,
+        tarea_instalacion_id: tareaInstalacion.id,
+      });
+
+      await prisma.tareas.update({
+        where: { id: tareaIdNum },
+        data: {
+          estatus: 'Activada',
+          evidencia: ordenEvidenciaActualizada,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          orden: { id: tareaIdNum, estatus: 'Activada' },
+          instalacion: { id: tareaInstalacion.id, estatus: 'Activo' },
+        },
+      });
+
+      // Emitir eventos WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_ACTUALIZADA, {
+        tareaId: tareaIdNum,
+        campanaId,
+        estatus: 'Activada',
+      });
+      emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+        tareaId: tareaInstalacion.id,
+        campanaId,
+        tipo: 'Instalación',
+        titulo: tareaInstalacion.titulo,
+      });
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaInstalacion.id, tipo: 'Instalación' });
+
+    } catch (error) {
+      console.error('Error en activarOrdenInstalacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al activar orden de instalación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Eliminar una tarea
   async deleteTarea(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -3377,6 +4532,17 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  async markPostedToSAP(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      await prisma.$queryRawUnsafe('UPDATE campania SET posted_to_sap = 1 WHERE id = ?', campanaId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error en markPostedToSAP:', error);
+      res.status(500).json({ success: false, error: 'Error al marcar como enviado a SAP' });
     }
   }
 
@@ -3823,13 +4989,18 @@ export class CampanasController {
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
-          'BONIFICACION' AS negociacion,
+          CASE
+            WHEN sc.cortesia = 1 THEN 'CORTESIA'
+            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
+            ELSE 'BONIFICACION'
+          END AS negociacion,
           sc.bonificacion AS caras,
           0 AS tarifa,
           0 AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'bonificacion' AS tipo_fila
+          'bonificacion' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -3871,7 +5042,8 @@ export class CampanasController {
           ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
           cm.id AS campania_id,
           sc.id AS grupo_id,
-          'renta' AS tipo_fila
+          'renta' AS tipo_fila,
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -3945,7 +5117,10 @@ export class CampanasController {
           cm.nombre AS Campania,
           cliente.T1_U_Cliente AS Anunciante,
           CASE
-            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
+            WHEN sc.articulo LIKE 'RT%' THEN 'RENTA'
+            WHEN sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 'BONIFICACION'
+            WHEN sc.articulo LIKE 'CT%' THEN 'CORTESIA'
+            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             ELSE 'RENTA'
           END AS Operacion,
           cm.id AS CodigoContrato,
@@ -3962,12 +5137,16 @@ export class CampanasController {
           )) AS FinSegmento,
           cliente.T2_U_Marca AS Arte,
           rsv.id AS CodigoArte,
-          CAST(rsv.archivo AS CHAR(1000)) AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'HAS_ARTE' ELSE NULL END AS ArteUrl,
+          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN SUBSTRING_INDEX(rsv.archivo, '/', -1) ELSE NULL END AS ArteFileName,
           NULL AS OrigenArte,
+          rsv.id AS rsv_id,
+          inv.tradicional_digital AS tradicional_digital,
           CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
           CAST(inv.municipio AS CHAR(255)) AS Ciudad,
           CASE
+            WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
             ELSE 'RENTA'
           END AS TipoDistribucion,
@@ -3976,7 +5155,9 @@ export class CampanasController {
           sc.fin_periodo AS fecha_fin,
           cm.status AS status_campania,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
-          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year
+          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
+          sc.cortesia,
+          sc.articulo AS numero_articulo
         FROM reservas rsv
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -3994,7 +5175,112 @@ export class CampanasController {
 
       const data = await prisma.$queryRawUnsafe(query, ...params);
 
-      const dataSerializable = serializeBigInt(data);
+      const dataArr = data as any[];
+
+      // Collect unique campania_ids and rsv_ids from results
+      const campaniaIds = [...new Set(dataArr.map((r: any) => Number(r.CodigoContrato)).filter(Boolean))];
+      const rsvIds = [...new Set(dataArr.map((r: any) => Number(r.rsv_id)).filter(Boolean))];
+
+      // Query tareas (Programación e Instalación) for these campaigns
+      let tareasArr: any[] = [];
+      if (campaniaIds.length > 0) {
+        const placeholdersCamp = campaniaIds.map(() => '?').join(',');
+        const tareasQuery = `
+          SELECT id, tipo, evidencia, contenido, ids_reservas, campania_id
+          FROM tareas
+          WHERE campania_id IN (${placeholdersCamp})
+            AND tipo IN ('Programación', 'Instalación')
+        `;
+        tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
+      }
+
+      // Query imagenes_digitales count and filenames per reserva
+      let artesCountMap = new Map<number, number>();
+      let artesNamesMap = new Map<number, string>();
+      if (rsvIds.length > 0) {
+        const placeholdersRsv = rsvIds.map(() => '?').join(',');
+        const artesCountQuery = `
+          SELECT id_reserva, COUNT(*) as total_artes,
+                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes
+          FROM imagenes_digitales
+          WHERE id_reserva IN (${placeholdersRsv})
+          GROUP BY id_reserva
+        `;
+        const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
+        for (const row of artesCountArr) {
+          artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
+          if (row.nombres_artes) artesNamesMap.set(Number(row.id_reserva), String(row.nombres_artes));
+        }
+      }
+
+      // Index tareas by reserva_id
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
+
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).replace(/\*/g, ',').split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : instalacionByReserva;
+        for (const rsvId of ids) {
+          if (!map.has(rsvId)) map.set(rsvId, tarea);
+        }
+      }
+
+      // Map indicaciones and extra fields to each row
+      const enrichedData = dataArr.map((row: any) => {
+        const rsvId = Number(row.rsv_id);
+        let indicaciones: string | null = null;
+
+        const isDigital = row.tradicional_digital === 'Digital';
+
+        if (isDigital) {
+          // Digital: indicaciones from Programación task evidencia JSON
+          const tProgramacion = programacionByReserva.get(rsvId);
+          if (tProgramacion && tProgramacion.evidencia) {
+            try {
+              const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+                ? JSON.parse(tProgramacion.evidencia)
+                : tProgramacion.evidencia;
+              if (evidenciaJson.indicaciones && row.ArteUrl) {
+                // Try exact match first, then try by filename
+                indicaciones = evidenciaJson.indicaciones[row.ArteUrl] || null;
+                if (!indicaciones) {
+                  // Try matching by path variants
+                  for (const [key, val] of Object.entries(evidenciaJson.indicaciones)) {
+                    if (key && row.ArteUrl && (key.includes(row.ArteUrl) || row.ArteUrl.includes(key))) {
+                      indicaciones = val as string;
+                      break;
+                    }
+                  }
+                }
+              }
+              // Fallback to general indicaciones string
+              if (!indicaciones && typeof evidenciaJson.indicaciones === 'string') {
+                indicaciones = evidenciaJson.indicaciones;
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        } else {
+          // Tradicional: indicaciones from Instalación task contenido
+          const tInstalacion = instalacionByReserva.get(rsvId);
+          if (tInstalacion && tInstalacion.contenido) {
+            indicaciones = String(tInstalacion.contenido);
+          }
+        }
+
+        return {
+          ...row,
+          indicaciones,
+          num_artes_digitales: artesCountMap.get(rsvId) || 0,
+          nombres_artes_digitales: artesNamesMap.get(rsvId) || null,
+        };
+      });
+
+      const dataSerializable = JSON.parse(JSON.stringify(enrichedData, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
 
       res.json({
         success: true,
@@ -4508,7 +5794,7 @@ export class CampanasController {
       const updateData: any = {
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo,
+        tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
         bonificacion: data.bonificacion,
         caras: data.caras,
@@ -4629,7 +5915,7 @@ export class CampanasController {
         idquote: String(cotizacion.id_propuesta),
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo,
+        tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
         bonificacion: data.bonificacion,
         caras: data.caras,
@@ -4719,7 +6005,41 @@ export class CampanasController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  /**
+   * Obtener el archivo (arte) de una reserva por su ID
+   * Devuelve el contenido de rsv.archivo (base64 o URL)
+   */
+  async getReservaArchivo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const reservaId = parseInt(req.params.reservaId);
+      if (isNaN(reservaId)) {
+        res.status(400).json({ success: false, error: 'ID de reserva inválido' });
+        return;
+      }
+
+      const result = await prisma.$queryRawUnsafe<{ archivo: string | null }[]>(
+        `SELECT archivo FROM reservas WHERE id = ? LIMIT 1`,
+        reservaId
+      );
+
+      if (!result || result.length === 0) {
+        res.status(404).json({ success: false, error: 'Reserva no encontrada' });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: { archivo: result[0].archivo },
+      });
+    } catch (error) {
+      console.error('Error en getReservaArchivo:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener archivo de reserva';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const campanasController = new CampanasController();
 // force restart
+

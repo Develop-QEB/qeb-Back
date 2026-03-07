@@ -44,4 +44,7 @@ router.post(
 
 router.post('/logout', authMiddleware, authController.logout.bind(authController));
 
+router.post('/forgot-password', (req, res) => authController.forgotPassword(req, res));
+router.post('/reset-password',  (req, res) => authController.resetPassword(req, res));
+
 export default router;
