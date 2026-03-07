@@ -300,8 +300,7 @@ model solicitud {
   sap_database     String?   @db.VarChar(10)
 }
 
-model 
- {
+model solicitudCaras {
   id                   Int      @id @default(autoincrement())
   idquote              String?  @db.VarChar(50)
   ciudad               String?  @db.VarChar(1000)
