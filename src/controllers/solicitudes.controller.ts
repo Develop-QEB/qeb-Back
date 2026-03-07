@@ -423,16 +423,14 @@ export class SolicitudesController {
         ];
       }
 
-      // Year range and catorcena filter
+      // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        // Get catorcena dates for start
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearInicio),
             numero_catorcena: parseInt(catorcenaInicio),
           },
         });
-        // Get catorcena dates for end
         const catorcenasFinData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearFin),
@@ -441,23 +439,54 @@ export class SolicitudesController {
         });
 
         if (catorcenasInicioData && catorcenasFinData) {
-          where.fecha = {
-            gte: catorcenasInicioData.fecha_inicio,
-            lte: catorcenasFinData.fecha_fin,
-          };
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          if (periodIds.length > 0) {
+            where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        // Filter by year range only
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        if (periodIds.length > 0) {
+          where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       } else if (yearInicio) {
-        // Filter by single year
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearInicio}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearInicio}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        if (periodIds.length > 0) {
+          where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       // Visibility filter: non-leadership roles only see their own records
@@ -470,7 +499,14 @@ export class SolicitudesController {
              AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
           userId, String(userId)
         );
-        where.id = { in: visibleIds.map(r => r.id) };
+        const visibleSet = new Set(visibleIds.map(r => r.id));
+        // Intersect with period filter if both are active
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => visibleSet.has(id)) };
+        } else {
+          where.id = { in: visibleIds.map(r => r.id) };
+        }
       }
 
       // Build orderBy
@@ -944,32 +980,62 @@ export class SolicitudesController {
         where.id = { in: visibleIds.map(r => r.id) };
       }
 
-      // Apply date filters
+      // Apply date filters — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        const catorcenasInicio = await prisma.catorcenas.findFirst({
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearInicio),
             numero_catorcena: parseInt(catorcenaInicio),
           },
         });
-        const catorcenasFin = await prisma.catorcenas.findFirst({
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearFin),
             numero_catorcena: parseInt(catorcenaFin),
           },
         });
 
-        if (catorcenasInicio && catorcenasFin) {
-          where.fecha = {
-            gte: catorcenasInicio.fecha_inicio,
-            lte: catorcenasFin.fecha_fin,
-          };
+        if (catorcenasInicioData && catorcenasFinData) {
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          const periodIdSet = new Set(periodIds.map(r => r.id));
+          const existingIn = (where.id as any)?.in as number[] | undefined;
+          if (existingIn) {
+            where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+          } else if (periodIds.length > 0) {
+            where.id = { in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       // Get all distinct status values
@@ -1076,6 +1142,7 @@ export class SolicitudesController {
         ];
       }
 
+      // Period filter — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
@@ -1091,21 +1158,66 @@ export class SolicitudesController {
         });
 
         if (catorcenasInicioData && catorcenasFinData) {
-          where.fecha = {
-            gte: catorcenasInicioData.fecha_inicio,
-            lte: catorcenasFinData.fecha_fin,
-          };
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          const periodIdSet = new Set(periodIds.map(r => r.id));
+          const existingIn = (where.id as any)?.in as number[] | undefined;
+          if (existingIn) {
+            where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+          } else if (periodIds.length > 0) {
+            where.id = { in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       } else if (yearInicio) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearInicio}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearInicio}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       const solicitudes = await prisma.solicitud.findMany({

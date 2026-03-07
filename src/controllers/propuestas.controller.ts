@@ -389,6 +389,10 @@ export class PropuestasController {
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const yearInicio = req.query.yearInicio as string;
+      const yearFin = req.query.yearFin as string;
+      const catorcenaInicio = req.query.catorcenaInicio as string;
+      const catorcenaFin = req.query.catorcenaFin as string;
 
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
@@ -413,6 +417,26 @@ export class PropuestasController {
         whereConditions += ` AND (pr.articulo LIKE ? OR pr.descripcion LIKE ? OR pr.asignado LIKE ? OR cl.T1_U_Cliente LIKE ?)`;
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Period filter — filter by cotizacion/campania dates
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
+        });
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
+        });
+        if (catorcenasInicioData && catorcenasFinData) {
+          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+          params.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+        }
+      } else if (yearInicio && yearFin) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        params.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      } else if (yearInicio) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        params.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
       // Visibility filter: non-leadership roles only see records where they participate
