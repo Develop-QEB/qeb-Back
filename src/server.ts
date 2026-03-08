@@ -83,7 +83,7 @@ async function main() {
 
   // Verify DB connectivity (lazy - only opens 1 connection, not the whole pool)
   try {
-    await verifyDbConnection();
+    await connectWithRetry();
 
     // Ejecutar limpieza inicial al arrancar
     await limpiarReservasExpiradas();
