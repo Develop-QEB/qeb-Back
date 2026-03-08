@@ -143,7 +143,7 @@ export class CampanasController {
           cat_fin.año as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
-          pr.inversion as inversion,
+          pr.inversion as propuesta_inversion,
           CASE
             WHEN EXISTS (
               SELECT 1
@@ -245,6 +245,15 @@ export class CampanasController {
           campana.circuitos = circuitosMap.get(Number(campana.id)) ?? 0;
         });
       }
+
+      // Remap propuesta_inversion → inversion to avoid cm.* column name collision
+      // when campania table has its own inversion column (not in Prisma schema)
+      campanas.forEach((campana: any) => {
+        if ('propuesta_inversion' in campana) {
+          campana.inversion = campana.propuesta_inversion ?? campana.inversion ?? null;
+          delete campana.propuesta_inversion;
+        }
+      });
 
       // Convert BigInt to Number for JSON serialization
       const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
