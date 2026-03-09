@@ -192,7 +192,14 @@ export class CampanasController {
             INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
             WHERE ct4.id = cm.cotizacion_id
               AND rsv4.deleted_at IS NULL
-          ) AS circuitos
+          ) AS circuitos,
+          (
+            SELECT GROUP_CONCAT(DISTINCT CONCAT(cat7.numero_catorcena, ':', cat7.año) ORDER BY cat7.año, cat7.numero_catorcena SEPARATOR ',')
+            FROM solicitudCaras sc7
+            INNER JOIN cotizacion ct7 ON ct7.id_propuesta = sc7.idquote
+            INNER JOIN catorcenas cat7 ON sc7.inicio_periodo BETWEEN cat7.fecha_inicio AND cat7.fecha_fin
+            WHERE ct7.id = cm.cotizacion_id
+          ) AS catorcenas_con_contenido
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
