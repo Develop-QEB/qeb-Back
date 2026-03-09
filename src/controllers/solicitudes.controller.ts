@@ -11,7 +11,14 @@ import {
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
 import nodemailer from 'nodemailer';
-import { serializeBigInt } from '../utils/serialization';
+import { uploadBufferToSpaces } from '../config/spaces';
+
+// Helper function to serialize BigInt values to numbers
+function serializeBigInt<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj, (_, value) =>
+    typeof value === 'bigint' ? Number(value) : value
+  ));
+}
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -395,6 +402,7 @@ export class SolicitudesController {
       const sortBy = req.query.sortBy as string;
       const sortOrder = (req.query.sortOrder as string) || 'desc';
       const groupBy = req.query.groupBy as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -415,16 +423,14 @@ export class SolicitudesController {
         ];
       }
 
-      // Year range and catorcena filter
+      // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        // Get catorcena dates for start
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearInicio),
             numero_catorcena: parseInt(catorcenaInicio),
           },
         });
-        // Get catorcena dates for end
         const catorcenasFinData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearFin),
@@ -433,23 +439,54 @@ export class SolicitudesController {
         });
 
         if (catorcenasInicioData && catorcenasFinData) {
-          where.fecha = {
-            gte: catorcenasInicioData.fecha_inicio,
-            lte: catorcenasFinData.fecha_fin,
-          };
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          if (periodIds.length > 0) {
+            where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        // Filter by year range only
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        if (periodIds.length > 0) {
+          where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       } else if (yearInicio) {
-        // Filter by single year
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearInicio}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearInicio}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        if (periodIds.length > 0) {
+          where.id = { ...(where.id as any), in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       // Visibility filter: non-leadership roles only see their own records
@@ -462,7 +499,14 @@ export class SolicitudesController {
              AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
           userId, String(userId)
         );
-        where.id = { in: visibleIds.map(r => r.id) };
+        const visibleSet = new Set(visibleIds.map(r => r.id));
+        // Intersect with period filter if both are active
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => visibleSet.has(id)) };
+        } else {
+          where.id = { in: visibleIds.map(r => r.id) };
+        }
       }
 
       // Build orderBy
@@ -481,6 +525,57 @@ export class SolicitudesController {
         prisma.solicitud.count({ where }),
       ]);
 
+      // Enrich solicitudes with cotizacion data (tipo_periodo, dates, catorcenas)
+      let enrichedSolicitudes: unknown[] = solicitudes;
+      const solicitudIds = solicitudes.map(s => s.id);
+      if (solicitudIds.length > 0) {
+        const placeholders = solicitudIds.map(() => '?').join(',');
+        const enrichmentData = await prisma.$queryRawUnsafe<any[]>(`
+          SELECT
+            s.id as solicitud_id,
+            ct.tipo_periodo,
+            ct.nombre_campania,
+            ct.fecha_inicio as periodo_fecha_inicio,
+            ct.fecha_fin as periodo_fecha_fin,
+            cat_ini.numero_catorcena as catorcena_inicio,
+            cat_ini.año as anio_inicio,
+            cat_fin.numero_catorcena as catorcena_fin,
+            cat_fin.año as anio_fin
+          FROM solicitud s
+          LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+          LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+          WHERE s.id IN (${placeholders})
+          GROUP BY s.id
+        `, ...solicitudIds);
+
+        const enrichMap = new Map(enrichmentData.map((e: any) => [Number(e.solicitud_id), e]));
+
+        enrichedSolicitudes = solicitudes.map(s => {
+          const extra = enrichMap.get(s.id);
+          return {
+            ...s,
+            tipo_periodo: extra?.tipo_periodo || null,
+            nombre_campania: extra?.nombre_campania || null,
+            periodo_fecha_inicio: extra?.periodo_fecha_inicio || null,
+            periodo_fecha_fin: extra?.periodo_fecha_fin || null,
+            catorcena_inicio: extra?.catorcena_inicio ? Number(extra.catorcena_inicio) : null,
+            anio_inicio: extra?.anio_inicio ? Number(extra.anio_inicio) : null,
+            catorcena_fin: extra?.catorcena_fin ? Number(extra.catorcena_fin) : null,
+            anio_fin: extra?.anio_fin ? Number(extra.anio_fin) : null,
+          };
+        });
+
+        // Filter by tipoPeriodo if requested
+        if (tipoPeriodo && tipoPeriodo !== 'todas') {
+          enrichedSolicitudes = enrichedSolicitudes.filter((s: any) => {
+            const tp = s.tipo_periodo || 'catorcena';
+            return tp === tipoPeriodo;
+          });
+        }
+      }
+
       // Group data if requested
       let groupedData = null;
       if (groupBy && ['status', 'marca_nombre', 'asignado', 'razon_social'].includes(groupBy)) {
@@ -494,7 +589,7 @@ export class SolicitudesController {
 
       res.json({
         success: true,
-        data: solicitudes,
+        data: enrichedSolicitudes,
         groupedData,
         pagination: {
           page,
@@ -885,32 +980,62 @@ export class SolicitudesController {
         where.id = { in: visibleIds.map(r => r.id) };
       }
 
-      // Apply date filters
+      // Apply date filters — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        const catorcenasInicio = await prisma.catorcenas.findFirst({
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearInicio),
             numero_catorcena: parseInt(catorcenaInicio),
           },
         });
-        const catorcenasFin = await prisma.catorcenas.findFirst({
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
           where: {
             a_o: parseInt(yearFin),
             numero_catorcena: parseInt(catorcenaFin),
           },
         });
 
-        if (catorcenasInicio && catorcenasFin) {
-          where.fecha = {
-            gte: catorcenasInicio.fecha_inicio,
-            lte: catorcenasFin.fecha_fin,
-          };
+        if (catorcenasInicioData && catorcenasFinData) {
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          const periodIdSet = new Set(periodIds.map(r => r.id));
+          const existingIn = (where.id as any)?.in as number[] | undefined;
+          if (existingIn) {
+            where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+          } else if (periodIds.length > 0) {
+            where.id = { in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       // Get all distinct status values
@@ -1017,6 +1142,7 @@ export class SolicitudesController {
         ];
       }
 
+      // Period filter — filter by cotizacion period dates, not solicitud.fecha
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
@@ -1032,21 +1158,66 @@ export class SolicitudesController {
         });
 
         if (catorcenasInicioData && catorcenasFinData) {
-          where.fecha = {
-            gte: catorcenasInicioData.fecha_inicio,
-            lte: catorcenasFinData.fecha_fin,
-          };
+          const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL
+               AND ct.fecha_inicio <= ?
+               AND ct.fecha_fin >= ?`,
+            catorcenasFinData.fecha_fin,
+            catorcenasInicioData.fecha_inicio
+          );
+          const periodIdSet = new Set(periodIds.map(r => r.id));
+          const existingIn = (where.id as any)?.in as number[] | undefined;
+          if (existingIn) {
+            where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+          } else if (periodIds.length > 0) {
+            where.id = { in: periodIds.map(r => r.id) };
+          } else {
+            where.id = { in: [] };
+          }
         }
       } else if (yearInicio && yearFin) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearFin}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearFin}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       } else if (yearInicio) {
-        where.fecha = {
-          gte: new Date(`${yearInicio}-01-01`),
-          lte: new Date(`${yearInicio}-12-31`),
-        };
+        const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id
+           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL
+             AND ct.fecha_inicio <= ?
+             AND ct.fecha_fin >= ?`,
+          new Date(`${yearInicio}-12-31`),
+          new Date(`${yearInicio}-01-01`)
+        );
+        const periodIdSet = new Set(periodIds.map(r => r.id));
+        const existingIn = (where.id as any)?.in as number[] | undefined;
+        if (existingIn) {
+          where.id = { in: existingIn.filter(id => periodIdSet.has(id)) };
+        } else if (periodIds.length > 0) {
+          where.id = { in: periodIds.map(r => r.id) };
+        } else {
+          where.id = { in: [] };
+        }
       }
 
       const solicitudes = await prisma.solicitud.findMany({
@@ -1231,6 +1402,64 @@ export class SolicitudesController {
     }
   }
 
+  async getInventarioOptions(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const estado = req.query.estado as string | undefined;
+      const ciudadesParam = req.query.ciudades as string | undefined;
+      const ciudadesArray = ciudadesParam ? ciudadesParam.split(',').map(c => c.trim()).filter(Boolean) : [];
+
+      // Build WHERE condition: filter by estado and/or municipios
+      const whereCondition: any = {};
+      if (estado && ciudadesArray.length > 0) {
+        whereCondition.OR = [
+          { estado },
+          { municipio: { in: ciudadesArray } },
+        ];
+      } else if (estado) {
+        whereCondition.estado = estado;
+      } else if (ciudadesArray.length > 0) {
+        whereCondition.municipio = { in: ciudadesArray };
+      }
+      // If no filters, return everything (fallback)
+
+      const [formatos, tipos, nse] = await Promise.all([
+        prisma.inventarios.findMany({
+          select: { tipo_de_mueble: true },
+          distinct: ['tipo_de_mueble'],
+          where: { ...whereCondition, tipo_de_mueble: { not: null } },
+          orderBy: { tipo_de_mueble: 'asc' },
+        }),
+        prisma.inventarios.findMany({
+          select: { tradicional_digital: true },
+          distinct: ['tradicional_digital'],
+          where: { ...whereCondition, tradicional_digital: { not: null } },
+          orderBy: { tradicional_digital: 'asc' },
+        }),
+        prisma.inventarios.findMany({
+          select: { nivel_socioeconomico: true },
+          distinct: ['nivel_socioeconomico'],
+          where: { ...whereCondition, nivel_socioeconomico: { not: null } },
+          orderBy: { nivel_socioeconomico: 'asc' },
+        }),
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          formatos: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+          tipos: tipos.map(t => t.tradicional_digital).filter(Boolean),
+          nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener opciones de inventario';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+
   async getNextId(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Get max ID from solicitud, propuesta, cotizacion, campania tables
@@ -1297,6 +1526,8 @@ export class SolicitudesController {
         tipo_archivo,
         // IMU
         IMU,
+        // Tipo de periodo (catorcena o personalizado)
+        tipo_periodo,
         // Caras data (array)
         caras,
       } = req.body;
@@ -1405,6 +1636,7 @@ export class SolicitudesController {
             status: 'Pendiente',
             id_propuesta: propuesta.id,
             articulo,
+            tipo_periodo: tipo_periodo || 'catorcena',
           },
         });
 
@@ -1486,7 +1718,7 @@ export class SolicitudesController {
               idquote: propuesta.id.toString(),
               ciudad: cara.ciudad,
               estados: cara.estado,
-              tipo: cara.tipo,
+              tipo: cara.tipo || 'Tradicional',
               flujo: cara.flujo || 'Ambos',
               bonificacion: cara.bonificacion || 0,
               caras: cara.caras,
@@ -1502,20 +1734,24 @@ export class SolicitudesController {
               descuento: cara.descuento || 0,
               autorizacion_dg: estadoResult.autorizacion_dg,
               autorizacion_dcm: estadoResult.autorizacion_dcm,
+              cortesia: (cara.articulo || articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
             },
           });
           createdCaras.push(solicitudCara);
         }
 
-        // Regla: si el total global de caras (renta + bonificación) es impar, todas requieren DG
-        const totalCarasGlobal = caras.reduce((sum: number, c: any) => sum + (Number(c.caras) || 0) + (Number(c.bonificacion) || 0), 0);
-        if (totalCarasGlobal > 0 && totalCarasGlobal % 2 !== 0) {
-          const caraIds = createdCaras.map(c => c.id);
-          await tx.solicitudCaras.updateMany({
-            where: { id: { in: caraIds } },
-            data: { autorizacion_dg: 'pendiente' }
-          });
-          console.log(`[create] Total caras impar (${totalCarasGlobal}), marcando ${caraIds.length} caras como pendiente DG`);
+        // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+        const totalCarasGlobal = caras.reduce((acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0), 0);
+        if (totalCarasGlobal % 2 !== 0) {
+          for (const createdCara of createdCaras) {
+            if (createdCara.autorizacion_dg !== 'pendiente') {
+              await tx.solicitudCaras.update({
+                where: { id: createdCara.id },
+                data: { autorizacion_dg: 'pendiente' },
+              });
+            }
+          }
+          console.log(`[create] Total caras impar (${totalCarasGlobal}), todas las caras requieren autorización DG`);
         }
 
         return {
@@ -2236,6 +2472,7 @@ export class SolicitudesController {
         archivo,
         tipo_archivo,
         IMU,
+        tipo_periodo,
         caras,
       } = req.body;
 
@@ -2335,6 +2572,7 @@ export class SolicitudesController {
               precio: totalInversion,
               contacto: asignadosStr,
               articulo,
+              tipo_periodo: tipo_periodo || 'catorcena',
             },
           });
         }
@@ -2380,7 +2618,7 @@ export class SolicitudesController {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
                 estados: cara.estado,
-                tipo: cara.tipo,
+                tipo: cara.tipo || 'Tradicional',
                 flujo: cara.flujo || 'Ambos',
                 bonificacion: cara.bonificacion || 0,
                 caras: cara.caras,
@@ -2398,16 +2636,6 @@ export class SolicitudesController {
                 autorizacion_dcm: estadoResult.autorizacion_dcm,
               },
             });
-          }
-
-          // Regla: si el total global de caras (renta + bonificación) es impar, todas requieren DG
-          const totalCarasGlobal = caras.reduce((sum: number, c: any) => sum + (Number(c.caras) || 0) + (Number(c.bonificacion) || 0), 0);
-          if (totalCarasGlobal > 0 && totalCarasGlobal % 2 !== 0) {
-            await tx.solicitudCaras.updateMany({
-              where: { idquote: propuesta.id.toString() },
-              data: { autorizacion_dg: 'pendiente' }
-            });
-            console.log(`[update] Total caras impar (${totalCarasGlobal}), marcando todas las caras como pendiente DG`);
           }
           // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
@@ -2652,16 +2880,20 @@ export class SolicitudesController {
         return;
       }
 
-      const fileUrl = `/uploads/${req.file.filename}`;
+      const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+        folder: 'solicitudes',
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
 
       await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: {
-          archivo: fileUrl,
+          archivo: uploaded.url,
         },
       });
 
-      res.json({ success: true, data: { url: fileUrl } });
+      res.json({ success: true, data: { url: uploaded.url } });
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';
