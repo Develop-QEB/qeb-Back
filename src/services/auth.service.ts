@@ -5,7 +5,7 @@ import { AuthResponse, JwtPayload, UserResponse } from '../types';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'default-refresh-secret';
-const ACCESS_TOKEN_EXPIRY = '1h';
+const ACCESS_TOKEN_EXPIRY = '8h';
 const REFRESH_TOKEN_EXPIRY = '7d';
 
 export interface RegisterData {
