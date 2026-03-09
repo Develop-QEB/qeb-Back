@@ -73,7 +73,7 @@ export class AuthController {
   }
 
   async refresh(_req: Request, res: Response): Promise<void> {
-    // Refresh token deshabilitado - usar token de larga duración (8h)
+    // Refresh token deshabilitado - usar token de larga duración
     res.status(410).json({
       success: false,
       error: 'Refresh token deshabilitado. Por favor inicia sesión nuevamente.',
