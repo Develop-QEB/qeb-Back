@@ -192,7 +192,14 @@ export class CampanasController {
             INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
             WHERE ct4.id = cm.cotizacion_id
               AND rsv4.deleted_at IS NULL
-          ) AS circuitos
+          ) AS circuitos,
+          (
+            SELECT GROUP_CONCAT(DISTINCT CONCAT(cat7.numero_catorcena, ':', cat7.año) ORDER BY cat7.año, cat7.numero_catorcena SEPARATOR ',')
+            FROM solicitudCaras sc7
+            INNER JOIN cotizacion ct7 ON ct7.id_propuesta = sc7.idquote
+            INNER JOIN catorcenas cat7 ON sc7.inicio_periodo BETWEEN cat7.fecha_inicio AND cat7.fecha_fin
+            WHERE ct7.id = cm.cotizacion_id
+          ) AS catorcenas_con_contenido
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -547,6 +554,7 @@ export class CampanasController {
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
+        posted_aps: JSON.parse((campana as any).posted_aps || '[]'),
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
@@ -3604,7 +3612,14 @@ export class CampanasController {
         } else {
           console.log('createTarea - num_impresiones NO llegó del frontend');
         }
-      } else if (evidencia) {
+      }
+
+      // Guardar num_impresiones para cualquier tipo de tarea (Recepción, etc.)
+      if (numImpresionesTotal === null && num_impresiones !== undefined && num_impresiones !== null && Number(num_impresiones) > 0) {
+        numImpresionesTotal = Number(num_impresiones);
+      }
+
+      if (evidencia && !evidenciaData) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes, Programación)
         // IMPORTANTE: Limpiar archivoData de la evidencia para evitar problemas de memoria y truncamiento
         // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
@@ -4548,6 +4563,29 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en markPostedToSAP:', error);
       res.status(500).json({ success: false, error: 'Error al marcar como enviado a SAP' });
+    }
+  }
+
+  async markPostedAPS(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { aps } = req.body as { aps: number[] };
+
+      const current = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT posted_aps FROM campania WHERE id = ?', campanaId
+      );
+      const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
+      const merged = Array.from(new Set([...existing, ...aps]));
+
+      await prisma.$queryRawUnsafe(
+        'UPDATE campania SET posted_aps = ? WHERE id = ?',
+        JSON.stringify(merged), campanaId
+      );
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: merged });
+      res.json({ success: true, posted_aps: merged });
+    } catch (error) {
+      console.error('Error en markPostedAPS:', error);
+      res.status(500).json({ success: false, error: 'Error al marcar APS como enviados' });
     }
   }
 

@@ -42,6 +42,7 @@ router.post('/:id/comentarios', campanasController.addComment.bind(campanasContr
 
 // SAP
 router.post('/:id/mark-posted-sap', campanasController.markPostedToSAP.bind(campanasController));
+router.post('/:id/mark-posted-aps', campanasController.markPostedAPS.bind(campanasController));
 
 // APS
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
