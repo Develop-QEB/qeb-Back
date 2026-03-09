@@ -801,20 +801,42 @@ export class PropuestasController {
           where: { id: solicitud.usuario_id },
           select: { nombre: true, correo_electronico: true },
         });
-        if (creadorAtendida?.correo_electronico) {
+        if (creadorAtendida) {
           const cotizacionAtendida = await prisma.cotizacion.findFirst({
             where: { id_propuesta: propuestaId },
             select: { nombre_campania: true },
           });
           const nombreCampAtendida = cotizacionAtendida?.nombre_campania || nombrePropuesta;
-          enviarCorreoNotificacion(
-            propuesta.solicitud_id || 0,
-            `Ajuste completado: ${nombreCampAtendida}`,
-            `${userName} cambió el estado de la propuesta "${nombreCampAtendida}" a "Atendida"`,
-            creadorAtendida.correo_electronico,
-            creadorAtendida.nombre,
-            { accion: 'Cambio de estado', usuario: userName, cliente: solicitud?.razon_social || undefined }
-          ).catch(err => console.error('Error enviando correo Atendida:', err));
+
+          const nowNotif = new Date();
+          await prisma.tareas.create({
+            data: {
+              titulo: `Ajuste completado: ${nombreCampAtendida}`,
+              descripcion: 'El estado de la propuesta cambió a Atendida.',
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: solicitud!.usuario_id,
+              responsable: '',
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuestaId.toString(),
+              campania_id: campania?.id || null,
+              fecha_inicio: nowNotif,
+              fecha_fin: new Date(nowNotif.getTime() + 24 * 60 * 60 * 1000),
+              asignado: userName,
+              id_asignado: userId.toString(),
+            },
+          });
+
+          if (creadorAtendida.correo_electronico) {
+            enviarCorreoNotificacion(
+              propuesta.solicitud_id || 0,
+              `Ajuste completado: ${nombreCampAtendida}`,
+              `${userName} cambió el estado de la propuesta "${nombreCampAtendida}" a "Atendida"`,
+              creadorAtendida.correo_electronico,
+              creadorAtendida.nombre,
+              { accion: 'Cambio de estado', usuario: userName, cliente: solicitud?.razon_social || undefined }
+            ).catch(err => console.error('Error enviando correo Atendida:', err));
+          }
         }
       }
 
