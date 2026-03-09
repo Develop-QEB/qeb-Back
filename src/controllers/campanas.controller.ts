@@ -554,6 +554,7 @@ export class CampanasController {
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
+        posted_aps: JSON.parse((campana as any).posted_aps || '[]'),
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
@@ -4555,6 +4556,29 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en markPostedToSAP:', error);
       res.status(500).json({ success: false, error: 'Error al marcar como enviado a SAP' });
+    }
+  }
+
+  async markPostedAPS(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { aps } = req.body as { aps: number[] };
+
+      const current = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT posted_aps FROM campania WHERE id = ?', campanaId
+      );
+      const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
+      const merged = Array.from(new Set([...existing, ...aps]));
+
+      await prisma.$queryRawUnsafe(
+        'UPDATE campania SET posted_aps = ? WHERE id = ?',
+        JSON.stringify(merged), campanaId
+      );
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: merged });
+      res.json({ success: true, posted_aps: merged });
+    } catch (error) {
+      console.error('Error en markPostedAPS:', error);
+      res.status(500).json({ success: false, error: 'Error al marcar APS como enviados' });
     }
   }
 
