@@ -1457,14 +1457,10 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE
-          sc.idquote = (
-            SELECT ct.id_propuesta
-            FROM campania cm
-              INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-            WHERE cm.id = ?
-            LIMIT 1
-          )
+          cm.id = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
