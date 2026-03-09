@@ -1289,6 +1289,12 @@ export class PropuestasController {
           data: { estatus: 'Aprobada' },
         });
 
+        // Autocomplete "Seguimiento Propuesta" task for the creator
+        await tx.tareas.updateMany({
+          where: { id_propuesta: String(propuestaId), tipo: 'Seguimiento Propuesta' },
+          data: { estatus: 'Completado' },
+        });
+
         // 3. Update propuesta
         await tx.propuesta.update({
           where: { id: propuestaId },
