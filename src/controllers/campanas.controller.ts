@@ -3611,7 +3611,14 @@ export class CampanasController {
         } else {
           console.log('createTarea - num_impresiones NO llegó del frontend');
         }
-      } else if (evidencia) {
+      }
+
+      // Guardar num_impresiones para cualquier tipo de tarea (Recepción, etc.)
+      if (numImpresionesTotal === null && num_impresiones !== undefined && num_impresiones !== null && Number(num_impresiones) > 0) {
+        numImpresionesTotal = Number(num_impresiones);
+      }
+
+      if (evidencia && !evidenciaData) {
         // Usar evidencia enviada desde el frontend (ej: para Recepción Faltantes, Programación)
         // IMPORTANTE: Limpiar archivoData de la evidencia para evitar problemas de memoria y truncamiento
         // Los archivos base64/URLs son muy grandes y deben cargarse desde la API cuando se necesiten
