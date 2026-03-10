@@ -161,7 +161,7 @@ router.get('/file', (req: Request, res: Response) => {
     const encodedKey = key.split('/').map(encodeURIComponent).join('/');
     const url = `${baseUrl}/${encodedKey}`;
 
-    return res.redirect(url);
+    return res.json({ success: true, data: { url } });
   } catch (error: any) {
     console.error('Error serving ficha tecnica file:', error);
     return res.status(500).json({
