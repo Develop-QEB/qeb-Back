@@ -648,18 +648,53 @@ export class PropuestasController {
         return;
       }
 
-      // Si intenta cambiar a "Aprobada", verificar que no haya caras pendientes de autorización
-      if (status === 'Aprobada') {
+      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar autorizaciones y reservas
+      if (status === 'Aprobada' || status === 'Pase a ventas') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         if (autorizacion.tienePendientes) {
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
           res.status(400).json({
             success: false,
-            error: `No se puede aprobar la propuesta. ${totalPendientes} cara(s) están pendientes de autorización.`,
+            error: `No se puede cambiar a "${status}". ${totalPendientes} cara(s) están pendientes de autorización.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length
             }
+          });
+          return;
+        }
+
+        // Verificar que todas las reservas estén completas
+        const caras = await prisma.solicitudCaras.findMany({
+          where: { idquote: String(propuestaId) },
+        });
+        const reservasQuery = `
+          SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
+          FROM reservas rsv
+            INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+            INNER JOIN inventarios i ON epIn.inventario_id = i.id
+            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          WHERE sc.idquote = ?
+            AND rsv.deleted_at IS NULL
+        `;
+        const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
+
+        const reservasIncompletas = caras.some(cara => {
+          const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
+          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
+          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
+          const flujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Flujo').length;
+          const contraflujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Contraflujo').length;
+          const flujoRequerido = Number(cara.caras_flujo) || 0;
+          const contraflujoRequerido = Number(cara.caras_contraflujo) || 0;
+          const bonificacionRequerido = Number(cara.bonificacion) || 0;
+          return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
+        });
+
+        if (reservasIncompletas) {
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". No todos los grupos tienen sus reservas completas.`,
           });
           return;
         }
