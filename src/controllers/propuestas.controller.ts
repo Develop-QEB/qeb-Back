@@ -2760,6 +2760,16 @@ export class PropuestasController {
           }
 
           if (fechaInicio || fechaFin) {
+            // Update cotizacion dates (source of truth for frontend)
+            await prisma.cotizacion.update({
+              where: { id: cotizacion.id },
+              data: {
+                ...(fechaInicio && { fecha_inicio: fechaInicio }),
+                ...(fechaFin && { fecha_fin: fechaFin }),
+              },
+            });
+
+            // Update campania dates
             await prisma.campania.updateMany({
               where: { cotizacion_id: cotizacion.id },
               data: {
