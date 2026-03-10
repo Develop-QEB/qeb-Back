@@ -293,6 +293,20 @@ export class CampanasController {
 
       const campana = await prisma.campania.findUnique({
         where: { id: parseInt(id) },
+        select: {
+          id: true,
+          cliente_id: true,
+          nombre: true,
+          fecha_inicio: true,
+          fecha_fin: true,
+          total_caras: true,
+          bonificacion: true,
+          status: true,
+          cotizacion_id: true,
+          articulo: true,
+          fecha_aprobacion: true,
+          posted_to_sap: true,
+        },
       });
 
       if (!campana) {
@@ -302,6 +316,17 @@ export class CampanasController {
         });
         return;
       }
+
+      // Obtener posted_aps de forma segura (columna puede no existir en producción)
+      let postedAps: string[] = [];
+      try {
+        const apsResult = await prisma.$queryRawUnsafe<{ posted_aps: string | null }[]>(
+          `SELECT posted_aps FROM campania WHERE id = ?`, parseInt(id)
+        );
+        if (apsResult[0]?.posted_aps) {
+          postedAps = JSON.parse(apsResult[0].posted_aps);
+        }
+      } catch { /* Column may not exist yet */ }
 
       // Obtener info del cliente - buscar por id, si no tiene datos buscar por CUIC
       let cliente = await prisma.cliente.findUnique({
@@ -554,7 +579,7 @@ export class CampanasController {
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
-        posted_aps: JSON.parse((campana as any).posted_aps || '[]'),
+        posted_aps: postedAps,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
