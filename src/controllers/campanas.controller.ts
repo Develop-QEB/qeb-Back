@@ -293,6 +293,20 @@ export class CampanasController {
 
       const campana = await prisma.campania.findUnique({
         where: { id: parseInt(id) },
+        select: {
+          id: true,
+          cliente_id: true,
+          nombre: true,
+          fecha_inicio: true,
+          fecha_fin: true,
+          total_caras: true,
+          bonificacion: true,
+          status: true,
+          cotizacion_id: true,
+          articulo: true,
+          fecha_aprobacion: true,
+          posted_to_sap: true,
+        },
       });
 
       if (!campana) {
@@ -302,6 +316,17 @@ export class CampanasController {
         });
         return;
       }
+
+      // Obtener posted_aps de forma segura (columna puede no existir en producción)
+      let postedAps: string[] = [];
+      try {
+        const apsResult = await prisma.$queryRawUnsafe<{ posted_aps: string | null }[]>(
+          `SELECT posted_aps FROM campania WHERE id = ?`, parseInt(id)
+        );
+        if (apsResult[0]?.posted_aps) {
+          postedAps = JSON.parse(apsResult[0].posted_aps);
+        }
+      } catch { /* Column may not exist yet */ }
 
       // Obtener info del cliente - buscar por id, si no tiene datos buscar por CUIC
       let cliente = await prisma.cliente.findUnique({
@@ -554,7 +579,7 @@ export class CampanasController {
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
-        posted_aps: JSON.parse((campana as any).posted_aps || '[]'),
+        posted_aps: postedAps,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
@@ -2352,6 +2377,13 @@ export class CampanasController {
         `;
         await prisma.$executeRawUnsafe(deleteImagenesQuery, ...reservaIds);
 
+        // Eliminar registros de artes_tradicionales para estas reservas
+        const deleteArtTradQuery = `
+          DELETE FROM artes_tradicionales
+          WHERE id_reserva IN (${placeholders})
+        `;
+        await prisma.$executeRawUnsafe(deleteArtTradQuery, ...reservaIds);
+
         // Actualizar reservas del mismo grupo_completo
         if (grupoIds.length > 0) {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
@@ -2371,6 +2403,15 @@ export class CampanasController {
             )
           `;
           await prisma.$executeRawUnsafe(deleteImagenesGrupoQuery, ...grupoIds);
+
+          // También eliminar artes_tradicionales de reservas del mismo grupo
+          const deleteArtTradGrupoQuery = `
+            DELETE FROM artes_tradicionales
+            WHERE id_reserva IN (
+              SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})
+            )
+          `;
+          await prisma.$executeRawUnsafe(deleteArtTradGrupoQuery, ...grupoIds);
         }
 
         // Eliminar reservas de las tareas asociadas
@@ -3307,7 +3348,8 @@ export class CampanasController {
             titulo: t.titulo,
             tipo: t.tipo,
             estatus: t.estatus,
-            responsable: t.responsable
+            responsable: t.responsable,
+            ids_reservas: t.ids_reservas,
           }))
         }
       });
@@ -4865,23 +4907,38 @@ export class CampanasController {
       const { id } = req.params;
 
       const query = `
-        SELECT DISTINCT
-          r.archivo as url,
-          SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
-          COUNT(*) as uso_count
-        FROM reservas r
-        JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
-        JOIN campania cm ON cm.cotizacion_id = ct.id
-        WHERE cm.id = ?
-          AND r.archivo IS NOT NULL
-          AND r.archivo != ''
-          AND r.deleted_at IS NULL
-        GROUP BY r.archivo
+        SELECT url, nombre, SUM(uso_count) as uso_count FROM (
+          SELECT DISTINCT
+            r.archivo as url,
+            SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
+            COUNT(*) as uso_count
+          FROM reservas r
+          JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
+          JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+          JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE cm.id = ?
+            AND r.archivo IS NOT NULL
+            AND r.archivo != ''
+            AND r.deleted_at IS NULL
+          GROUP BY r.archivo
+          UNION ALL
+          SELECT DISTINCT
+            at2.archivo as url,
+            SUBSTRING_INDEX(at2.archivo, '/', -1) as nombre,
+            COUNT(*) as uso_count
+          FROM artes_tradicionales at2
+          JOIN reservas r2 ON r2.id = at2.id_reserva
+          JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+          JOIN cotizacion ct2 ON sc2.idquote = ct2.id_propuesta
+          JOIN campania cm2 ON cm2.cotizacion_id = ct2.id
+          WHERE cm2.id = ?
+          GROUP BY at2.archivo
+        ) combined
+        GROUP BY url, nombre
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint }[]>(query, parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint }[]>(query, parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -6078,6 +6135,255 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getReservaArchivo:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener archivo de reserva';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Asignar artes tradicionales (múltiples imágenes con notas obligatorias)
+   */
+  async assignArteTradicional(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { reservaIds, archivos } = req.body;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de reservaIds' });
+        return;
+      }
+
+      if (!archivos || !Array.isArray(archivos) || archivos.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de archivos con notas' });
+        return;
+      }
+
+      // Validar que cada archivo tenga nota
+      for (const a of archivos) {
+        if (!a.archivo || !a.nota || typeof a.nota !== 'string' || a.nota.trim() === '') {
+          res.status(400).json({ success: false, error: 'Cada archivo debe tener una nota obligatoria' });
+          return;
+        }
+      }
+
+      // Obtener grupo_completo_id de las reservas seleccionadas
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const gruposQuery = `
+        SELECT DISTINCT grupo_completo_id
+        FROM reservas
+        WHERE id IN (${placeholders})
+        AND grupo_completo_id IS NOT NULL
+      `;
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Expandir a todas las reservas del grupo
+      let allReservaIds = [...reservaIds];
+      if (grupoIds.length > 0) {
+        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+        const grupoReservasQuery = `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`;
+        const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(grupoReservasQuery, ...grupoIds);
+        allReservaIds = [...new Set([...allReservaIds, ...grupoReservas.map(r => r.id)])];
+      }
+
+      // Eliminar registros anteriores de artes_tradicionales para estas reservas
+      const deleteOldQuery = `DELETE FROM artes_tradicionales WHERE id_reserva IN (${allReservaIds.map(() => '?').join(',')})`;
+      await prisma.$executeRawUnsafe(deleteOldQuery, ...allReservaIds);
+
+      // Insertar cada archivo con su nota para cada reserva (skip duplicates)
+      const savedFiles: string[] = [];
+      const insertedPairs = new Set<string>();
+      for (const archivo of archivos) {
+        const { archivo: archivoUrl, nota, spot } = archivo;
+
+        // Asegurar que el archivo está almacenado
+        const archivoFinal = await ensureStoredFileUrl(
+          archivoUrl,
+          `qeb/campana-${campanaId}/artes`,
+          'image'
+        );
+        savedFiles.push(archivoFinal);
+
+        for (const reservaId of allReservaIds) {
+          const pairKey = `${reservaId}:${archivoFinal}`;
+          if (insertedPairs.has(pairKey)) continue;
+          insertedPairs.add(pairKey);
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot)
+            VALUES (?, ?, ?, ?)
+          `, reservaId, archivoFinal, nota.trim(), spot || 1);
+        }
+      }
+
+      // Actualizar reservas.archivo con la primera imagen (para fallback y preview)
+      const firstFileUrl = savedFiles[0] || '';
+      const updateReservasQuery = `
+        UPDATE reservas
+        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        WHERE id IN (${allReservaIds.map(() => '?').join(',')})
+      `;
+      await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
+
+      // Registrar en historial
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      if (campana?.cotizacion_id) {
+        const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+        if (cotizacion?.id_propuesta) {
+          await prisma.historial.create({
+            data: {
+              tipo: 'Arte Tradicional',
+              ref_id: cotizacion.id_propuesta,
+              accion: 'Asignación',
+              fecha_hora: new Date(),
+              detalles: `${userName} asignó ${archivos.length} arte(s) tradicional(es) a ${allReservaIds.length} reserva(s)`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          message: `Arte tradicional asignado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
+          affected: allReservaIds.length,
+          files: savedFiles,
+        },
+      });
+
+      // Emitir evento WebSocket
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_SUBIDO, {
+        campanaId,
+        reservaIds: allReservaIds,
+        tipo: 'tradicional',
+        usuario: userName,
+        archivosCount: archivos.length,
+      });
+    } catch (error) {
+      console.error('Error en assignArteTradicional:', error);
+      const message = error instanceof Error ? error.message : 'Error al asignar arte tradicional';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Obtener artes tradicionales de una o varias reservas
+   * Con fallback a reservas.archivo para campañas existentes
+   */
+  async getArtesTradicionales(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { reservaId } = req.params;
+
+      // Soportar múltiples reserva IDs separados por coma
+      const reservaIds = reservaId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+      if (reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'ID de reserva inválido' });
+        return;
+      }
+
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const artes = await prisma.$queryRawUnsafe<{
+        id: number;
+        id_reserva: number;
+        archivo: string;
+        nota: string;
+        spot: number;
+        created_at: Date;
+      }[]>(`
+        SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot, MIN(created_at) as created_at
+        FROM artes_tradicionales
+        WHERE id_reserva IN (${placeholders})
+        GROUP BY archivo, nota, spot
+        ORDER BY spot ASC
+      `, ...reservaIds);
+
+      if (artes.length > 0) {
+        res.json({
+          success: true,
+          data: artes.map(a => ({
+            id: a.id,
+            idReserva: a.id_reserva,
+            archivo: a.archivo,
+            nota: a.nota,
+            spot: a.spot,
+            createdAt: a.created_at,
+          })),
+        });
+        return;
+      }
+
+      // Fallback: si no hay registros en artes_tradicionales, usar reservas.archivo
+      const fallback = await prisma.$queryRawUnsafe<{ id: number; archivo: string | null }[]>(
+        `SELECT id, archivo FROM reservas WHERE id IN (${placeholders}) AND archivo IS NOT NULL AND archivo != '' LIMIT 1`,
+        ...reservaIds
+      );
+
+      if (fallback.length > 0 && fallback[0].archivo) {
+        res.json({
+          success: true,
+          data: [{
+            id: 0,
+            idReserva: fallback[0].id,
+            archivo: fallback[0].archivo,
+            nota: '',
+            spot: 1,
+            createdAt: null,
+          }],
+        });
+        return;
+      }
+
+      res.json({ success: true, data: [] });
+    } catch (error) {
+      console.error('Error en getArtesTradicionales:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener artes tradicionales';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Obtener resumen de archivos tradicionales por reserva para toda la campaña
+   */
+  async getTradicionalFileSummaries(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      if (isNaN(campanaId)) {
+        res.status(400).json({ success: false, error: 'ID de campaña inválido' });
+        return;
+      }
+
+      const summaries = await prisma.$queryRaw<{
+        id_reserva: number;
+        total_archivos: number;
+        first_nota: string | null;
+      }[]>`
+        SELECT
+          at2.id_reserva,
+          COUNT(*) as total_archivos,
+          SUBSTRING(MIN(at2.nota), 1, 80) as first_nota
+        FROM artes_tradicionales at2
+        INNER JOIN reservas r ON r.id = at2.id_reserva
+        INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+        INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ${campanaId}
+        GROUP BY at2.id_reserva
+      `;
+
+      res.json({
+        success: true,
+        data: summaries.map(s => ({
+          idReserva: Number(s.id_reserva),
+          totalArchivos: Number(s.total_archivos),
+          firstNota: s.first_nota || '',
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getTradicionalFileSummaries:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener resumen de artes tradicionales';
       res.status(500).json({ success: false, error: message });
     }
   }
