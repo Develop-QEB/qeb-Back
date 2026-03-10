@@ -636,9 +636,23 @@ export class SolicitudesController {
         where: { id_propuesta: propuesta.id },
       }) : null;
 
-      // Get related campania
+      // Get related campania (exclude posted_aps - column may not exist in production)
       const campania = cotizacion ? await prisma.campania.findFirst({
         where: { cotizacion_id: cotizacion.id },
+        select: {
+          id: true,
+          cliente_id: true,
+          nombre: true,
+          fecha_inicio: true,
+          fecha_fin: true,
+          total_caras: true,
+          bonificacion: true,
+          status: true,
+          cotizacion_id: true,
+          articulo: true,
+          fecha_aprobacion: true,
+          posted_to_sap: true,
+        },
       }) : null;
 
       // Get solicitudCaras by propuesta id (idquote)
