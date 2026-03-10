@@ -130,10 +130,9 @@ export class DashboardController {
 
       inventariosBase.forEach((inv) => {
         const estatus = inventarioEstatus[inv.id];
-        if (estatus === 'Vendido') {
+        if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte') {
           vendidos++;
-          reservados++; // Vendido también cuenta como reservado
-        } else if (estatus === 'Vendido bonificado' || estatus === 'Con Arte' || estatus === 'Reservado') {
+        } else if (estatus === 'Reservado') {
           reservados++;
         } else if (estatus === 'Bloqueado') {
           bloqueados++;
