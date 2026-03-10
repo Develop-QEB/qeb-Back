@@ -15,6 +15,22 @@ import { hasFullVisibility } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 
+// Select seguro para campania - excluye posted_aps que puede no existir en producción
+const CAMPANIA_SAFE_SELECT = {
+  id: true,
+  cliente_id: true,
+  nombre: true,
+  fecha_inicio: true,
+  fecha_fin: true,
+  total_caras: true,
+  bonificacion: true,
+  status: true,
+  cotizacion_id: true,
+  articulo: true,
+  fecha_aprobacion: true,
+  posted_to_sap: true,
+} as const;
+
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -293,20 +309,7 @@ export class CampanasController {
 
       const campana = await prisma.campania.findUnique({
         where: { id: parseInt(id) },
-        select: {
-          id: true,
-          cliente_id: true,
-          nombre: true,
-          fecha_inicio: true,
-          fecha_fin: true,
-          total_caras: true,
-          bonificacion: true,
-          status: true,
-          cotizacion_id: true,
-          articulo: true,
-          fecha_aprobacion: true,
-          posted_to_sap: true,
-        },
+        select: CAMPANIA_SAFE_SELECT,
       });
 
       if (!campana) {
@@ -616,6 +619,7 @@ export class CampanasController {
       // Obtener campaña antes de actualizar
       const campanaAnterior = await prisma.campania.findUnique({
         where: { id: campanaId },
+        select: CAMPANIA_SAFE_SELECT,
       });
 
       if (!campanaAnterior) {
@@ -914,6 +918,7 @@ export class CampanasController {
       // Obtener la campaña actual para conseguir cotizacion_id
       const campanaActual = await prisma.campania.findUnique({
         where: { id: campanaId },
+        select: CAMPANIA_SAFE_SELECT,
       });
 
       if (!campanaActual) {
@@ -1216,6 +1221,7 @@ export class CampanasController {
       // Obtener campaña para conseguir cotizacion_id
       const campana = await prisma.campania.findUnique({
         where: { id: campanaId },
+        select: CAMPANIA_SAFE_SELECT,
       });
 
       if (!campana) {
@@ -1860,6 +1866,7 @@ export class CampanasController {
       if (campanaId) {
         const campana = await prisma.campania.findUnique({
           where: { id: campanaId },
+          select: CAMPANIA_SAFE_SELECT,
         });
 
         if (campana?.cotizacion_id) {
@@ -2076,6 +2083,7 @@ export class CampanasController {
       // Obtener la campaña para conseguir el id_propuesta
       const campana = await prisma.campania.findUnique({
         where: { id: campanaId },
+        select: CAMPANIA_SAFE_SELECT,
       });
 
       if (!campana) {
@@ -2461,7 +2469,7 @@ export class CampanasController {
         }
 
         // Registrar en historial
-        const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+        const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
         if (campana?.cotizacion_id) {
           const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
           if (cotizacion?.id_propuesta) {
@@ -2524,7 +2532,7 @@ export class CampanasController {
       }
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
@@ -2663,7 +2671,7 @@ export class CampanasController {
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
@@ -2785,7 +2793,7 @@ export class CampanasController {
       }
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
@@ -3107,7 +3115,7 @@ export class CampanasController {
       }
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
@@ -3264,7 +3272,7 @@ export class CampanasController {
       await prisma.$executeRawUnsafe(updateQuery, ...updateParams, ...reservaIds);
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
@@ -3611,7 +3619,7 @@ export class CampanasController {
       }
 
       // Obtener info de la campaña para el id_propuesta
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       let propuestaId = '';
       let solicitudId = '';
       const campanaNombre = campana?.nombre || 'Campaña';
@@ -4701,7 +4709,7 @@ export class CampanasController {
       let solicitud = null;
 
       if (campanaId) {
-        campana = await prisma.campania.findUnique({ where: { id: parseInt(campanaId) } });
+        campana = await prisma.campania.findUnique({ where: { id: parseInt(campanaId) }, select: CAMPANIA_SAFE_SELECT });
         if (campana?.cotizacion_id) {
           const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
           if (cotizacion?.id_propuesta) {
@@ -6226,7 +6234,7 @@ export class CampanasController {
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
 
       // Registrar en historial
-      const campana = await prisma.campania.findUnique({ where: { id: campanaId } });
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
