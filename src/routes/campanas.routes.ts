@@ -58,6 +58,9 @@ router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesD
 router.get('/:id/reserva-archivo/:reservaId', campanasController.getReservaArchivo.bind(campanasController));
 router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
 router.delete('/:id/imagenes-digitales', campanasController.deleteImagenesDigitales.bind(campanasController));
+router.post('/:id/assign-arte-tradicional', campanasController.assignArteTradicional.bind(campanasController));
+router.get('/:id/artes-tradicionales/:reservaId', campanasController.getArtesTradicionales.bind(campanasController));
+router.get('/:id/tradicional-file-summaries', campanasController.getTradicionalFileSummaries.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
 router.post('/:id/check-reservas-tareas', campanasController.checkReservasTareas.bind(campanasController));

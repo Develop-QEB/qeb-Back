@@ -14,6 +14,7 @@ import uploadsRoutes from './uploads.routes';
 import usuariosRoutes from './usuarios.routes';
 import equiposRoutes from './equipos.routes';
 import ticketsRoutes from './tickets.routes';
+import fichasTecnicasRoutes from './fichas-tecnicas.routes';
 
 import publicRoutes from './public.routes';
 
@@ -35,5 +36,6 @@ router.use('/uploads', uploadsRoutes);
 router.use('/usuarios', usuariosRoutes);
 router.use('/equipos', equiposRoutes);
 router.use('/tickets', ticketsRoutes);
+router.use('/fichas-tecnicas', fichasTecnicasRoutes);
 
 export default router;

@@ -215,6 +215,17 @@ model imagenes_digitales {
   @@index([id_reserva], map: "idx_id_reserva")
 }
 
+model artes_tradicionales {
+  id         Int      @id @default(autoincrement())
+  id_reserva Int
+  archivo    String   @db.VarChar(255)
+  nota       String   @db.Text
+  spot       Int      @default(1)
+  created_at DateTime @default(now()) @db.DateTime(0)
+
+  @@index([id_reserva], map: "idx_at_id_reserva")
+}
+
 model propuesta {
   id                       Int       @id @default(autoincrement())
   cliente_id               Int
