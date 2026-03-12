@@ -1349,6 +1349,64 @@ export class InventariosController {
       res.status(500).json({ success: false, error: message });
     }
   }
+  async downloadCSV(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const search = req.query.search as string;
+      const tipo = req.query.tipo as string;
+      const estatus = req.query.estatus as string;
+      const plaza = req.query.plaza as string;
+
+      const where: Record<string, unknown> = {};
+
+      if (search) {
+        const searchNum = parseInt(search);
+        const orConditions: Record<string, unknown>[] = [
+          { codigo_unico: { contains: search } },
+          { ubicacion: { contains: search } },
+          { municipio: { contains: search } },
+        ];
+        if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
+        where.OR = orConditions;
+      }
+      if (tipo) where.tipo_de_mueble = tipo;
+      if (estatus) where.estatus = estatus;
+      if (plaza) where.plaza = plaza;
+
+      const inventarios = await prisma.inventarios.findMany({
+        where,
+        orderBy: { codigo_unico: 'asc' },
+      });
+
+      const headers = ['ID', 'Código Único', 'Ubicación', 'Municipio', 'Plaza', 'Estado', 'Tipo de Mueble', 'Tipo de Cara', 'Cara', 'Estatus', 'NSE', 'Latitud', 'Longitud', 'Tarifa Piso', 'Tarifa Pública'];
+      const rows = inventarios.map(inv => [
+        inv.id,
+        inv.codigo_unico ?? '',
+        inv.ubicacion ?? '',
+        inv.municipio ?? '',
+        inv.plaza ?? '',
+        inv.estado ?? '',
+        inv.tipo_de_mueble ?? '',
+        inv.tipo_de_cara ?? '',
+        inv.cara ?? '',
+        inv.estatus ?? '',
+        inv.nivel_socioeconomico ?? '',
+        inv.latitud ?? '',
+        inv.longitud ?? '',
+        inv.tarifa_piso ?? '',
+        inv.tarifa_publica ?? '',
+      ]);
+
+      const escape = (val: unknown) => `"${String(val).replace(/"/g, '""')}"`;
+      const csv = [headers.map(escape).join(','), ...rows.map(r => r.map(escape).join(','))].join('\n');
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="inventario.csv"');
+      res.send('\uFEFF' + csv);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al descargar inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const inventariosController = new InventariosController();

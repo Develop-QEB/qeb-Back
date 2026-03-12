@@ -678,6 +678,14 @@ export class DashboardController {
 
       const inventarioIds = inventarios.map((i) => i.id);
 
+      // Obtener espacio_inventario para mapear espacio.id -> inventario.id
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: { in: inventarioIds } },
+        select: { id: true, inventario_id: true },
+      });
+      const espacioIds = espacios.map((e) => e.id);
+      const espacioToInventario = new Map(espacios.map((e) => [e.id, e.inventario_id]));
+
       // Filtro de fechas
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
@@ -697,7 +705,7 @@ export class DashboardController {
 
       const reservasWhere: Record<string, unknown> = {
         deleted_at: null,
-        inventario_id: { in: inventarioIds },
+        inventario_id: { in: espacioIds },
       };
 
       if (fechaInicio && fechaFin) {
@@ -717,7 +725,7 @@ export class DashboardController {
       const reservas = await prisma.reservas.findMany({
         where: reservasWhere,
         select: {
-          inventario_id: true,
+          inventario_id: true, // este es espacio_inventario.id
           estatus: true,
           cliente_id: true,
           APS: true,
@@ -742,7 +750,10 @@ export class DashboardController {
       }> = {};
 
       reservas.forEach((r) => {
-        const current = inventarioInfo[r.inventario_id];
+        // r.inventario_id es espacio_inventario.id, convertir a inventarios.id
+        const invId = espacioToInventario.get(r.inventario_id);
+        if (!invId) return;
+        const current = inventarioInfo[invId];
         // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const prioridad: Record<string, number> = {
           'Vendido': 5,
@@ -755,7 +766,7 @@ export class DashboardController {
         const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
-          inventarioInfo[r.inventario_id] = {
+          inventarioInfo[invId] = {
             estatus: r.estatus, // Guardar estatus original
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
             APS: r.APS,
