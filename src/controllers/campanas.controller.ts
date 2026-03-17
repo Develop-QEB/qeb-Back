@@ -1340,7 +1340,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const [inventario, tareas] = await Promise.all([
@@ -1365,7 +1365,7 @@ export class CampanasController {
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
                   : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
                   : recepcionByReserva;
@@ -1510,7 +1510,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -1552,7 +1552,7 @@ export class CampanasController {
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
                   : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
                   : recepcionByReserva;
@@ -3641,8 +3641,8 @@ export class CampanasController {
       fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
-      // Para Revision de artes, Impresión y Programación, estatus siempre es Activo
-      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Programación') {
+      // Para Revision de artes, Impresión, Re-impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Re-impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
       }
 
@@ -3729,8 +3729,8 @@ export class CampanasController {
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
-          asignado: tipo === 'Impresión' ? (responsableNombre || null) : (asignado || responsableNombre || null),
-          id_asignado: tipo === 'Impresión' ? String(responsableId) : (id_asignado || String(responsableId)),
+          asignado: (tipo === 'Impresión') ? (responsableNombre || null) : (asignado || responsableNombre || null),
+          id_asignado: (tipo === 'Impresión') ? String(responsableId) : (id_asignado || String(responsableId)),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -3769,6 +3769,8 @@ export class CampanasController {
             tareaValue = 'Pendiente instalación';
           } else if (tipo === 'Orden de Instalación') {
             tareaValue = 'Orden de instalación';
+          } else if (tipo === 'Re-impresión') {
+            tareaValue = 'Re-impresión Solicitada';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
