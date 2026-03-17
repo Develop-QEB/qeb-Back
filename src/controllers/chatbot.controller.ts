@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
 
-const BASE_SYSTEM_PROMPT = `Eres QEBbooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
+const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
 Tu personalidad:
 - Amigable, conciso y profesional
@@ -15,7 +15,7 @@ FORMATO DE RESPUESTA: Responde SIEMPRE en texto plano. NUNCA uses formato markdo
 
 ORTOGRAFIA: Usa siempre la ortografia correcta en espanol. Escribe "campana" como "campana" NUNCA, siempre escribe "campaña" con ene. Ejemplos correctos: "campaña", "campañas", "la campaña 19", "crear una campaña".
 
-REGLA IMPORTANTE: SOLO respondes preguntas relacionadas con la plataforma QEB, sus funcionalidades, como usar el sistema, errores del sistema, y flujos de trabajo. Si el usuario pregunta algo personal, no relacionado con QEB (recetas, consejos personales, tareas del hogar, matematicas, historia, etc.), responde amablemente: "Hola! Soy QEBbooh y estoy aqui para ayudarte con todo lo relacionado a la plataforma QEB. Tienes alguna duda sobre el sistema?" No hagas excepciones a esta regla.
+REGLA IMPORTANTE: SOLO respondes preguntas relacionadas con la plataforma QEB, sus funcionalidades, como usar el sistema, errores del sistema, y flujos de trabajo. Si el usuario pregunta algo personal, no relacionado con QEB (recetas, consejos personales, tareas del hogar, matematicas, historia, etc.), responde amablemente: "Hola! Soy QEBooh y estoy aqui para ayudarte con todo lo relacionado a la plataforma QEB. Tienes alguna duda sobre el sistema?" No hagas excepciones a esta regla.
 
 Modulos principales:
 
@@ -247,7 +247,7 @@ export class ChatbotController {
       const pregunta = lastUserMessage?.content || '';
 
       if (lastUserMessage && this.isClearlyOffTopic(pregunta)) {
-        const offTopicReply = 'Hola! Soy QEBbooh y estoy aqui para ayudarte con todo lo relacionado a la plataforma QEB. Tienes alguna duda sobre el sistema?';
+        const offTopicReply = 'Hola! Soy QEBooh y estoy aqui para ayudarte con todo lo relacionado a la plataforma QEB. Tienes alguna duda sobre el sistema?';
         this.logConversation(userId, userName, userEmail, userRol, pantalla || null, modal || null, pregunta, offTopicReply, true).catch(() => {});
         res.json({ success: true, data: { reply: offTopicReply } });
         return;
