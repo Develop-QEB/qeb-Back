@@ -233,7 +233,7 @@ export class ChatbotController {
 
   async chat(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { messages, pantalla, modal, permisos } = req.body;
+      const { messages, pantalla, modal, permisos, contextoUI } = req.body;
 
       if (!messages || !Array.isArray(messages) || messages.length === 0) {
         res.status(400).json({ success: false, error: 'Se requiere un array de messages' });
@@ -256,7 +256,10 @@ export class ChatbotController {
       }
 
       const client = this.getClient();
-      const systemPrompt = BASE_SYSTEM_PROMPT + buildUserContext(userName, userRol, permisos || null);
+      const uiSection = contextoUI
+        ? `\n\n---\nPANTALLA ACTUAL DEL USUARIO:\nEl usuario está viendo lo siguiente en este momento:\n${contextoUI}\n\nUSA ESTE CONTEXTO: Si el usuario pregunta por un campo, botón o sección de la pantalla, responde usando exactamente la información de arriba. No inventes elementos que no estén descritos. Si menciona "este botón", "este campo", "aquí", asume que se refiere a lo que está descrito en el contexto de pantalla.`
+        : '';
+      const systemPrompt = BASE_SYSTEM_PROMPT + uiSection + buildUserContext(userName, userRol, permisos || null);
 
       const response = await client.messages.create({
         model: 'claude-haiku-4-5-20251001',
