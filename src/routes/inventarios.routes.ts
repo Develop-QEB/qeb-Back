@@ -10,6 +10,7 @@ router.post('/reservas/arreglar-huerfanas', inventariosController.arreglarReserv
 router.use(authMiddleware);
 
 router.get('/', inventariosController.getAll.bind(inventariosController));
+router.get('/download/csv', inventariosController.downloadCSV.bind(inventariosController));
 router.get('/map', inventariosController.getForMap.bind(inventariosController));
 router.get('/disponibles', inventariosController.getDisponibles.bind(inventariosController));
 router.get('/stats', inventariosController.getStats.bind(inventariosController));

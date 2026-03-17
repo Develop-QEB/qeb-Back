@@ -676,6 +676,14 @@ export class DashboardController {
 
       const inventarioIds = inventarios.map((i) => i.id);
 
+      // Obtener espacio_inventario para mapear espacio.id -> inventario.id
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: { in: inventarioIds } },
+        select: { id: true, inventario_id: true },
+      });
+      const espacioIds = espacios.map((e) => e.id);
+      const espacioToInventario = new Map(espacios.map((e) => [e.id, e.inventario_id]));
+
       // Filtro de fechas
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
@@ -695,7 +703,7 @@ export class DashboardController {
 
       const reservasWhere: Record<string, unknown> = {
         deleted_at: null,
-        inventario_id: { in: inventarioIds },
+        inventario_id: { in: espacioIds },
       };
 
       if (fechaInicio && fechaFin) {
@@ -715,10 +723,11 @@ export class DashboardController {
       const reservas = await prisma.reservas.findMany({
         where: reservasWhere,
         select: {
-          inventario_id: true,
+          inventario_id: true, // este es espacio_inventario.id
           estatus: true,
           cliente_id: true,
           APS: true,
+          solicitudCaras_id: true,
         },
       });
 
@@ -732,15 +741,53 @@ export class DashboardController {
       }) : [];
       const clienteMap = new Map(clientes.map((c) => [c.id, c.T0_U_Cliente || c.T0_U_RazonSocial || null]));
 
+      // Construir mapa solicitudCaras_id → campana_id
+      const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
+      const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: solicitudCarasIds } },
+        select: { id: true, idquote: true },
+      }) : [];
+      const idquoteValues = solicitudCarasList
+        .map((sc) => parseInt(sc.idquote || ''))
+        .filter((v) => !isNaN(v));
+      const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
+        where: { id_propuesta: { in: idquoteValues } },
+        select: { id: true, id_propuesta: true },
+      }) : [];
+      const cotizacionIds = cotizaciones.map((c) => c.id);
+      const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
+        where: { cotizacion_id: { in: cotizacionIds } },
+        select: { id: true, cotizacion_id: true },
+      }) : [];
+      // idquote → cotizacion_id
+      const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
+      // cotizacion_id → campana_id
+      const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c.id]));
+      // solicitudCaras_id → campana_id
+      const solicitudToCampana = new Map(
+        solicitudCarasList
+          .map((sc) => {
+            const idquote = parseInt(sc.idquote || '');
+            const cotizId = idquoteToCotizacion.get(idquote);
+            const campanaId = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+            return [sc.id, campanaId ?? null] as [number, number | null];
+          })
+      );
+
       // Mapear info de reserva por inventario
       const inventarioInfo: Record<number, {
         estatus: string;
         cliente_nombre: string | null;
         APS: number | null;
+        campana_id: number | null;
+        solicitudCaras_id: number;
       }> = {};
 
       reservas.forEach((r) => {
-        const current = inventarioInfo[r.inventario_id];
+        // r.inventario_id es espacio_inventario.id, convertir a inventarios.id
+        const invId = espacioToInventario.get(r.inventario_id);
+        if (!invId) return;
+        const current = inventarioInfo[invId];
         // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const prioridad: Record<string, number> = {
           'Vendido': 5,
@@ -753,10 +800,12 @@ export class DashboardController {
         const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
-          inventarioInfo[r.inventario_id] = {
+          inventarioInfo[invId] = {
             estatus: r.estatus, // Guardar estatus original
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
             APS: r.APS,
+            campana_id: solicitudToCampana.get(r.solicitudCaras_id) ?? null,
+            solicitudCaras_id: r.solicitudCaras_id,
           };
         }
       });
@@ -781,6 +830,7 @@ export class DashboardController {
             estatus: estatusActual,
             cliente_nombre: info?.cliente_nombre || null,
             APS: info?.APS || null,
+            campana_id: info?.campana_id ?? null,
           };
         })
         .filter((inv) => {

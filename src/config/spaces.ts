@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { PutObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 
 const getSpacesRegion = (): string => process.env.SPACES_REGION || 'sfo3';
 const getSpacesEndpoint = (): string => process.env.SPACES_ENDPOINT || `https://${getSpacesRegion()}.digitaloceanspaces.com`;
@@ -52,6 +52,20 @@ const getSpacesClient = (): S3Client => {
 
   return spacesClient;
 };
+
+export { ListObjectsV2Command };
+
+export function getClient(): S3Client {
+  return getSpacesClient();
+}
+
+export function getBucket(): string {
+  return getSpacesBucket();
+}
+
+export function getPublicBaseUrl(): string {
+  return getSpacesPublicBaseUrl();
+}
 
 export interface UploadToSpacesResult {
   key: string;
