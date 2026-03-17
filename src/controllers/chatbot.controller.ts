@@ -2,6 +2,7 @@ import { Response } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
+import { emitToChatbotAdmin } from '../config/socket';
 
 const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
@@ -179,6 +180,7 @@ export class ChatbotController {
         'INSERT INTO chatbot_logs (user_id, user_nombre, user_email, rol, pantalla, modal, pregunta, respuesta, categoria, off_topic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         userId, nombre, email, rol, pantalla, modal, pregunta, respuesta, categoria, offTopic ? 1 : 0,
       );
+      emitToChatbotAdmin({ user_nombre: nombre, user_email: email, rol, pantalla, modal, pregunta, respuesta, categoria, off_topic: offTopic });
     } catch (err) {
       console.error('[Chatbot] Error logging conversation:', err);
     }

@@ -152,6 +152,16 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de inventario`);
     });
 
+    socket.on('join-chatbot-admin', () => {
+      socket.join('chatbot-admin');
+      console.log(`[Socket] ${socket.id} se unió a chatbot-admin`);
+    });
+
+    socket.on('leave-chatbot-admin', () => {
+      socket.leave('chatbot-admin');
+      console.log(`[Socket] ${socket.id} salió de chatbot-admin`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`[Socket] Cliente desconectado: ${socket.id}`);
     });
@@ -234,6 +244,9 @@ export const SOCKET_EVENTS = {
 
   // General
   DATOS_ACTUALIZADOS: 'datos:actualizados',
+
+  // Chatbot
+  CHATBOT_LOG_NUEVO: 'chatbot:log:nuevo',
 };
 
 // Helper para emitir a una campaña específica
@@ -321,5 +334,13 @@ export function emitToInventario(event: string, data: unknown): void {
   if (io) {
     io.to('inventario').emit(event, data);
     console.log(`[Socket] Emitido ${event} a inventario`);
+  }
+}
+
+// Helper para emitir a los admins del historial de chatbot
+export function emitToChatbotAdmin(data: unknown): void {
+  if (io) {
+    io.to('chatbot-admin').emit(SOCKET_EVENTS.CHATBOT_LOG_NUEVO, data);
+    console.log(`[Socket] Emitido chatbot:log:nuevo a chatbot-admin`);
   }
 }
