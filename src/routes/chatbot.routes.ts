@@ -7,5 +7,6 @@ const router = Router();
 router.use(authMiddleware);
 
 router.post('/', chatbotController.chat.bind(chatbotController));
+router.get('/logs', chatbotController.getLogs.bind(chatbotController));
 
 export default router;

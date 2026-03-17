@@ -278,6 +278,78 @@ export class ChatbotController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  async getLogs(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (req.user?.rol !== 'Administrador') {
+        res.status(403).json({ success: false, error: 'Acceso denegado' });
+        return;
+      }
+
+      const rows = await prisma.$queryRawUnsafe<any[]>(`
+        SELECT id, user_id, user_nombre, user_email, rol, pantalla, modal,
+               pregunta, respuesta, categoria, off_topic, created_at
+        FROM chatbot_logs
+        ORDER BY created_at ASC
+      `);
+
+      // Group into sessions: same user_id, gap <= 30 min between messages
+      const SESSION_GAP_MS = 30 * 60 * 1000;
+      const sessions: {
+        session_id: string;
+        user_id: number;
+        user_nombre: string;
+        user_email: string;
+        rol: string;
+        started_at: Date;
+        ended_at: Date;
+        messages: any[];
+      }[] = [];
+
+      for (const row of rows) {
+        const ts = new Date(row.created_at);
+        const last = sessions[sessions.length - 1];
+        const isNewSession =
+          !last ||
+          last.user_id !== Number(row.user_id) ||
+          ts.getTime() - last.ended_at.getTime() > SESSION_GAP_MS;
+
+        if (isNewSession) {
+          sessions.push({
+            session_id: `${row.user_id}_${ts.getTime()}`,
+            user_id: Number(row.user_id),
+            user_nombre: row.user_nombre,
+            user_email: row.user_email,
+            rol: row.rol || '',
+            started_at: ts,
+            ended_at: ts,
+            messages: [],
+          });
+        } else {
+          last.ended_at = ts;
+        }
+
+        sessions[sessions.length - 1].messages.push({
+          id: Number(row.id),
+          pantalla: row.pantalla,
+          modal: row.modal,
+          pregunta: row.pregunta,
+          respuesta: row.respuesta,
+          categoria: row.categoria,
+          off_topic: Boolean(row.off_topic),
+          created_at: ts,
+        });
+      }
+
+      // Return newest sessions first
+      sessions.reverse();
+
+      res.json({ success: true, data: sessions });
+    } catch (error) {
+      console.error('Error obteniendo logs del chatbot:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener historial' });
+    }
+  }
 }
 
 export const chatbotController = new ChatbotController();
