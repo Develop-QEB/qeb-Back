@@ -1462,7 +1462,7 @@ export class CampanasController {
           MIN(i.plaza) as plaza,
           MIN(i.estado) as estado,
           MIN(i.municipio) as municipio,
-          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.mueble) as tipo_de_mueble,
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
@@ -1955,7 +1955,7 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           MIN(inv.estado) AS estado,
           MIN(inv.municipio) AS municipio,
-          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.mueble) AS tipo_de_mueble,
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
@@ -2152,7 +2152,7 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           MIN(inv.estado) AS estado,
           MIN(inv.municipio) AS municipio,
-          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.mueble) AS tipo_de_mueble,
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
@@ -5076,7 +5076,7 @@ export class CampanasController {
       const query = `
         -- FILA PARA BONIFICACIONES
         SELECT
-          MIN(inv.municipio) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           pr.asignado AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -5123,7 +5123,7 @@ export class CampanasController {
 
         -- FILA PARA RENTA
         SELECT
-          MIN(inv.municipio) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           pr.asignado AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -5622,7 +5622,7 @@ export class CampanasController {
           i.latitud,
           i.longitud,
           i.plaza,
-          i.tipo_de_mueble as formato,
+          i.mueble as formato,
           i.ubicacion,
           i.isla,
           rsv.estatus,

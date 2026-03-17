@@ -29,7 +29,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
@@ -41,7 +41,6 @@ export class DashboardController {
         where: inventarioWhere,
         select: {
           id: true,
-          tipo_de_mueble: true,
           mueble: true,
           municipio: true,
           plaza: true,
@@ -244,7 +243,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
@@ -255,7 +254,6 @@ export class DashboardController {
         where: inventarioWhere,
         select: {
           id: true,
-          tipo_de_mueble: true,
           mueble: true,
           municipio: true,
           plaza: true,
@@ -405,11 +403,11 @@ export class DashboardController {
               distinct: ['plaza'],
               where: { plaza: { not: null } },
             }),
-            // Formatos (tipo de mueble)
+            // Formatos (mueble)
             prisma.inventarios.findMany({
-              select: { tipo_de_mueble: true },
-              distinct: ['tipo_de_mueble'],
-              where: { tipo_de_mueble: { not: null } },
+              select: { mueble: true },
+              distinct: ['mueble'],
+              where: { mueble: { not: null } },
             }),
             // Nivel Socioeconomico
             prisma.inventarios.findMany({
@@ -437,7 +435,7 @@ export class DashboardController {
           return {
             estados: estados.map((e) => e.estado).filter(Boolean).sort(),
             ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
-            formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
+            formatos: formatos.map((f) => f.mueble).filter(Boolean).sort(),
             nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
             catorcenaActual: catorcenaActual ? {
               id: catorcenaActual.id,
@@ -651,7 +649,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
