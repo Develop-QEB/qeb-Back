@@ -66,7 +66,6 @@ export class InventariosController {
            WHERE ei.inventario_id IN (${placeholders})
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
-             AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
              AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
           ...invIds
@@ -82,11 +81,11 @@ export class InventariosController {
 
       const dataWithRealStatus = inventarios.map(inv => {
         const reservaEstatus = reservedMap[inv.id];
-        let estatus_real = inv.estatus || 'Disponible';
+        let estatus_real = inv.estatus || 'Activo';
         if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
           if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
           else if (reservaEstatus) estatus_real = 'Reservado';
-          else estatus_real = 'Disponible';
+          else estatus_real = 'Activo';
         }
         return { ...inv, estatus_real };
       });
@@ -1111,6 +1110,9 @@ export class InventariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
       const data = req.body;
+      const totalEspacios = data.total_espacios ? parseInt(data.total_espacios) : null;
+      const isDigital = data.tradicional_digital === 'Digital' && totalEspacios && totalEspacios > 0;
+
       const inventario = await prisma.inventarios.create({
         data: {
           codigo_unico: data.codigo_unico || null,
@@ -1130,7 +1132,7 @@ export class InventariosController {
           ancho: parseFloat(data.ancho) || 0,
           alto: parseFloat(data.alto) || 0,
           nivel_socioeconomico: data.nivel_socioeconomico || null,
-          total_espacios: data.total_espacios ? parseInt(data.total_espacios) : null,
+          total_espacios: totalEspacios,
           estatus: data.estatus || 'Disponible',
           codigo: data.codigo || null,
           isla: data.isla || null,
@@ -1142,6 +1144,16 @@ export class InventariosController {
           tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : null,
         },
       });
+
+      // Auto-crear espacios en espacio_inventario
+      const numEspacios = isDigital ? totalEspacios! : 1;
+      await prisma.espacio_inventario.createMany({
+        data: Array.from({ length: numEspacios }, (_, i) => ({
+          inventario_id: inventario.id,
+          numero_espacio: i + 1,
+        })),
+      });
+
       res.json({ success: true, data: inventario });
     } catch (error) {
       console.error('Error creating inventario:', error);
@@ -1252,6 +1264,21 @@ export class InventariosController {
             data: toInsert,
             skipDuplicates: true,
           });
+
+          // Auto-crear espacio_inventario para los recién insertados
+          const codigosInsertados = toInsert.map(r => r.codigo_unico).filter(Boolean);
+          const insertados = await prisma.inventarios.findMany({
+            where: { codigo_unico: { in: codigosInsertados } },
+            select: { id: true, tradicional_digital: true, total_espacios: true },
+          });
+          const espacios = insertados.flatMap(inv => {
+            const isDigital = inv.tradicional_digital === 'Digital' && inv.total_espacios && inv.total_espacios > 0;
+            const n = isDigital ? inv.total_espacios! : 1;
+            return Array.from({ length: n }, (_, i) => ({ inventario_id: inv.id, numero_espacio: i + 1 }));
+          });
+          if (espacios.length > 0) {
+            await prisma.espacio_inventario.createMany({ data: espacios });
+          }
         }
 
         res.json({
