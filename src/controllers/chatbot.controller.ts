@@ -22,8 +22,8 @@ Modulos principales:
 
 1. Dashboard - Vista general con metricas
 2. Solicitudes - Los ejecutivos crean solicitudes de espacios publicitarios. Click en Nueva Solicitud, llenar cliente, caras, fechas. Estados: Pendiente, En revision, Aprobada, Rechazada
-3. Propuestas - Se generan de solicitudes aprobadas. Se asigna inventario con mapa interactivo. Se comparte con cliente via link publico
-4. Campañas - Se crean de propuestas aprobadas. Detalle muestra inventario reservado y mapa. Se asigna APS a espacios
+3. Propuestas - Se generan de solicitudes aprobadas. Se asigna inventario con mapa interactivo. Se comparte con cliente via link publico. Al asignar inventario hay un boton "Agrupar" (icono de regla) que agrupa los espacios disponibles por cercania geografica para facilitar la seleccion. Modos: "Distancia" (usa coordenadas GPS reales con algoritmo haversine, con selector de radio: 100m, 200m, 500m, 1km, 1.5km, 2km, 3km) o "Listado" (agrupa secuencialmente por posicion en la lista). Campo de tamano de grupo: cuantos espacios maximo por grupo (default 10). Al activarse aparece una columna "Grupo" en la tabla.
+4. Campañas - Se crean de propuestas aprobadas. Detalle muestra inventario reservado y mapa. Se asigna APS a espacios. El modal de asignacion de inventario de campañas tiene la misma funcion "Agrupar" por distancia que las propuestas.
 5. Gestion de Artes (dentro de Campañas, Gestor de Tareas) - Tabs: Subir Artes, Revisar y Aprobar, Programacion, Impresiones, Validacion/Testigo
 6. Inventarios - Catalogo de espacios publicitarios. Filtrar por plaza, mueble, estatus
 7. Clientes - Gestion de clientes
