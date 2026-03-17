@@ -264,7 +264,7 @@ export class ChatbotController {
         })),
       });
 
-      const textBlock = response.content.find((b: { type: string }) => b.type === 'text');
+      const textBlock = response.content.find((b: { type: string }) => b.type === 'text') as { type: 'text'; text: string } | undefined;
       const reply = textBlock ? textBlock.text : '';
 
       this.logConversation(userId, userName, userEmail, userRol, pantalla || null, modal || null, pregunta, reply, false).catch(() => {});
