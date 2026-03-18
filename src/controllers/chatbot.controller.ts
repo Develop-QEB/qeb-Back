@@ -296,6 +296,8 @@ export class ChatbotController {
         return;
       }
 
+      await this.ensureTable();
+
       const rows = await prisma.$queryRawUnsafe<any[]>(`
         SELECT id, user_id, user_nombre, user_email, rol, pantalla, modal,
                pregunta, respuesta, categoria, off_topic, created_at
