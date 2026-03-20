@@ -680,6 +680,10 @@ export class PropuestasController {
         const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
 
         const reservasIncompletas = caras.some(cara => {
+          // Artículos de impresión (IM) no requieren reservas — siempre completos
+          const articulo = (cara.articulo || '').toUpperCase();
+          if (articulo.startsWith('IM')) return false;
+
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
