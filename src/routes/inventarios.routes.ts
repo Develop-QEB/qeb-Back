@@ -13,6 +13,7 @@ router.get('/', inventariosController.getAll.bind(inventariosController));
 router.get('/download/csv', inventariosController.downloadCSV.bind(inventariosController));
 router.get('/map', inventariosController.getForMap.bind(inventariosController));
 router.get('/disponibles', inventariosController.getDisponibles.bind(inventariosController));
+router.get('/categorias-cliente', inventariosController.getCategoriasCliente.bind(inventariosController));
 router.get('/stats', inventariosController.getStats.bind(inventariosController));
 router.get('/tipos', inventariosController.getTipos.bind(inventariosController));
 router.get('/plazas', inventariosController.getPlazas.bind(inventariosController));

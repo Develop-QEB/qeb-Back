@@ -3,6 +3,16 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -343,6 +353,7 @@ export class InventariosController {
         fecha_inicio,
         fecha_fin,
         solicitudCaraId,
+        excluir_categoria,
       } = req.query;
 
       console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
@@ -620,10 +631,46 @@ export class InventariosController {
         }
       }
 
+      // Filter out inventory near reserved locations for excluded category
+      let resultados = disponibles;
+      if (excluir_categoria && fecha_inicio && fecha_fin) {
+        const categoriaCoordenadas = await prisma.$queryRaw<
+          Array<{ id: number; latitud: number; longitud: number }>
+        >`
+          SELECT DISTINCT i.id, i.latitud, i.longitud
+          FROM reservas r
+          JOIN espacio_inventario ei ON ei.id = r.inventario_id
+          JOIN inventarios i ON i.id = ei.inventario_id
+          JOIN calendario cal ON cal.id = r.calendario_id
+          JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+          JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
+          JOIN solicitud s ON s.id = p.solicitud_id
+          JOIN cliente c ON c.id = s.id_cliente
+          WHERE c.T2_U_Categoria = ${excluir_categoria as string}
+          AND r.deleted_at IS NULL
+          AND cal.deleted_at IS NULL
+          AND cal.fecha_inicio <= ${new Date(fecha_fin as string)}
+          AND cal.fecha_fin >= ${new Date(fecha_inicio as string)}
+          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido')
+        `;
+
+        if (categoriaCoordenadas.length > 0) {
+          resultados = disponibles.filter(item => {
+            if (item.latitud == null || item.longitud == null) return true;
+            for (const coord of categoriaCoordenadas) {
+              if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < 1) {
+                return false;
+              }
+            }
+            return true;
+          });
+        }
+      }
+
       res.json({
         success: true,
-        data: disponibles,
-        total: disponibles.length,
+        data: resultados,
+        total: resultados.length,
         filtros_aplicados: {
           ciudad,
           estado,
@@ -633,6 +680,7 @@ export class InventariosController {
           tipo,
           fecha_inicio,
           fecha_fin,
+          excluir_categoria,
         },
       });
     } catch (error) {
@@ -1581,6 +1629,28 @@ export class InventariosController {
       res.send('\uFEFF' + csv);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al descargar inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async getCategoriasCliente(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const categorias = await prisma.$queryRaw<
+        Array<{ T2_U_Categoria: string }>
+      >`
+        SELECT DISTINCT T2_U_Categoria
+        FROM cliente
+        WHERE T2_U_Categoria IS NOT NULL AND T2_U_Categoria != ''
+        ORDER BY T2_U_Categoria
+      `;
+
+      res.json({
+        success: true,
+        data: categorias.map(c => c.T2_U_Categoria),
+      });
+    } catch (error) {
+      console.error('Error getCategoriasCliente:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener categorías de cliente';
       res.status(500).json({ success: false, error: message });
     }
   }
