@@ -1319,6 +1319,7 @@ export class CampanasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales
@@ -1491,7 +1492,8 @@ export class CampanasController {
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
-          MAX(sc.costo) as renta
+          MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
