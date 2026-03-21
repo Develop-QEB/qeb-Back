@@ -10,8 +10,10 @@ router.post('/reservas/arreglar-huerfanas', inventariosController.arreglarReserv
 router.use(authMiddleware);
 
 router.get('/', inventariosController.getAll.bind(inventariosController));
+router.get('/download/csv', inventariosController.downloadCSV.bind(inventariosController));
 router.get('/map', inventariosController.getForMap.bind(inventariosController));
 router.get('/disponibles', inventariosController.getDisponibles.bind(inventariosController));
+router.get('/categorias-cliente', inventariosController.getCategoriasCliente.bind(inventariosController));
 router.get('/stats', inventariosController.getStats.bind(inventariosController));
 router.get('/tipos', inventariosController.getTipos.bind(inventariosController));
 router.get('/plazas', inventariosController.getPlazas.bind(inventariosController));
@@ -26,6 +28,7 @@ router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.b
 router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
 
 // CRUD
+router.post('/bulk-check', inventariosController.bulkCheck.bind(inventariosController));
 router.post('/bulk', inventariosController.bulkCreate.bind(inventariosController));
 router.post('/', inventariosController.create.bind(inventariosController));
 router.put('/:id', inventariosController.update.bind(inventariosController));
