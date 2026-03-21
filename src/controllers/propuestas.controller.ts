@@ -648,8 +648,20 @@ export class PropuestasController {
         return;
       }
 
-      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar autorizaciones y reservas
+      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
+        // Verificar que la solicitud tenga un cliente con CUIC
+        const solicitud = await prisma.solicitud.findFirst({
+          where: { id: propuestaAnterior.solicitud_id },
+        });
+        if (solicitud && (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL')) {
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". La solicitud no tiene un cliente con CUIC asignado.`,
+          });
+          return;
+        }
+
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         if (autorizacion.tienePendientes) {
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
