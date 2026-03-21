@@ -22,6 +22,7 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
 
@@ -51,6 +52,31 @@ export class InventariosController {
 
       if (plaza) {
         where.plaza = plaza;
+      }
+
+      // Filter by campaign: get inventario IDs linked to this campaign
+      if (campanaId) {
+        const campanaInvRows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number }>>(
+          `SELECT DISTINCT epIn.inventario_id
+           FROM campania cm
+           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+           WHERE cm.id = ?`,
+          campanaId
+        );
+        const invIds = campanaInvRows.map(r => r.inventario_id);
+        if (invIds.length === 0) {
+          // No inventarios for this campaign, return empty
+          res.json({
+            success: true,
+            data: [],
+            pagination: { page, limit, total: 0, totalPages: 0 },
+          });
+          return;
+        }
+        where.id = { in: invIds };
       }
 
       const [inventarios, total] = await Promise.all([
