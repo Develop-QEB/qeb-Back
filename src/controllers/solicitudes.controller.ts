@@ -414,13 +414,19 @@ export class SolicitudesController {
 
       // Search filter
       if (search) {
-        where.OR = [
+        const orConditions: any[] = [
           { razon_social: { contains: search } },
           { descripcion: { contains: search } },
           { marca_nombre: { contains: search } },
           { asignado: { contains: search } },
           { cuic: { contains: search } },
+          { nombre_usuario: { contains: search } },
         ];
+        const searchAsInt = parseInt(search);
+        if (!isNaN(searchAsInt)) {
+          orConditions.push({ id: searchAsInt });
+        }
+        where.OR = orConditions;
       }
 
       // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
