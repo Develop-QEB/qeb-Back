@@ -1,29 +1,13 @@
 import { PrismaClient } from '@prisma/client';
+import { getMexicoDate } from './dateHelper';
 
-// Ensure DATABASE_URL has proper pool and timeout settings
+// Use DATABASE_URL exactly as provided by environment
 function getDatasourceUrl(): string {
-  let url = process.env.DATABASE_URL || '';
+  const url = process.env.DATABASE_URL || '';
   if (!url) return url;
 
-  // Force connection_limit to 2 (minimal - prevents exhausting Hostinger MySQL
-  // during Render rolling deploys where old+new instances overlap)
-  if (url.includes('connection_limit')) {
-    url = url.replace(/connection_limit=\d+/, 'connection_limit=2');
-  } else {
-    url += (url.includes('?') ? '&' : '?') + 'connection_limit=2';
-  }
-
-  // Force pool_timeout to 15s (fail fast instead of hanging)
-  if (url.includes('pool_timeout')) {
-    url = url.replace(/pool_timeout=\d+/, 'pool_timeout=15');
-  } else {
-    url += '&pool_timeout=15';
-  }
-
-  // TCP-level timeouts
-  if (!url.includes('connect_timeout')) url += '&connect_timeout=15';
-  if (!url.includes('socket_timeout')) url += '&socket_timeout=15';
-
+  const safeUrl = url.replace(/\/\/[^@]+@/, '//***@');
+  console.log('[Prisma] Using datasource URL:', safeUrl);
   return url;
 }
 
@@ -32,13 +16,62 @@ const globalForPrisma = globalThis as unknown as {
 };
 
 const createPrismaClient = () => {
-  const datasourceUrl = getDatasourceUrl();
-  console.log(`[Prisma] Pool config: connection_limit=${datasourceUrl.match(/connection_limit=(\d+)/)?.[1]}, pool_timeout=${datasourceUrl.match(/pool_timeout=(\d+)/)?.[1]}`);
-
-  return new PrismaClient({
+  const client = new PrismaClient({
     log: ['error'],
-    datasourceUrl,
+    datasourceUrl: getDatasourceUrl(),
   });
+
+  // Retry middleware for transient connection errors (Hostinger drops connections frequently)
+  client.$use(async (params, next) => {
+    const MAX_RETRIES = 5;
+    const BASE_DELAY = 3000; // 3 seconds
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await next(params);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Only retry real connection errors — NOT pool exhaustion (retrying makes it worse)
+        const isConnectionError = message.includes("Can't reach database server") ||
+          message.includes('Connection refused') ||
+          message.includes('ETIMEDOUT') ||
+          message.includes('ECONNREFUSED') ||
+          message.includes('Connection lost');
+
+        if (isConnectionError && attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * attempt; // 3s, 6s, 9s, 12s
+          console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+    }
+  });
+
+  // Middleware: fechas de México y fecha_fin +7 días en tareas
+  client.$use(async (params, next) => {
+    if (params.model === 'tareas' && params.action === 'create') {
+      const now = getMexicoDate();
+      const fin = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      params.args.data.fecha_inicio = params.args.data.fecha_inicio || now;
+      params.args.data.created_at = params.args.data.created_at || now;
+      params.args.data.fecha_fin = fin;
+    }
+    return next(params);
+  });
+
+  // Keepalive: ping DB every 4 minutes to prevent Hostinger from dropping idle connections
+  setInterval(async () => {
+    try {
+      await client.$queryRaw`SELECT 1`;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[Prisma] Keepalive ping failed:', msg);
+    }
+  }, 4 * 60 * 1000);
+
+  return client;
 };
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
@@ -47,3 +80,5 @@ export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 globalForPrisma.prisma = prisma;
 
 export default prisma;
+
+

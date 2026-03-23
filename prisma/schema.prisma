@@ -69,6 +69,7 @@ model catorcenas {
   fecha_inicio     DateTime @db.Date
   fecha_fin        DateTime @db.Date
 
+  @@index([fecha_inicio, fecha_fin], map: "idx_fechas")
   @@map("catorcenas")
 }
 
@@ -102,6 +103,10 @@ model campania {
   cotizacion_id    Int?
   articulo         String    @db.VarChar(20)
   fecha_aprobacion DateTime? @db.DateTime(0)
+  posted_to_sap    Int?      @default(0) @db.TinyInt
+  posted_aps       String?   @db.Text
+
+  @@index([cotizacion_id], map: "idx_cotizacion_id")
 }
 
 model cliente {
@@ -129,9 +134,9 @@ model cliente {
   T2_U_Producto      String?   @db.VarChar(255)
   T2_U_ValidFrom     DateTime? @db.Date
   T2_U_ValidTo       DateTime? @db.Date
-  sap_database       String?   @db.VarChar(10)
   card_code          String?   @db.VarChar(50)
   salesperson_code   Int?
+  sap_database       String?   @db.VarChar(10)
 }
 
 model comentarios {
@@ -164,12 +169,17 @@ model cotizacion {
   id_propuesta         Int
   fecha_expiracion     DateTime? @db.Date
   articulo             String    @db.VarChar(20)
+  tipo_periodo         String?   @default("catorcena") @db.VarChar(20)
+
+  @@index([id_propuesta], map: "idx_id_propuesta")
 }
 
 model espacio_inventario {
   id             Int @id @default(autoincrement())
   inventario_id  Int
   numero_espacio Int
+
+  @@index([inventario_id], map: "idx_inventario_id")
 }
 
 model historial {
@@ -201,6 +211,19 @@ model imagenes_digitales {
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
   archivo_data       String?  @db.LongText
+
+  @@index([id_reserva], map: "idx_id_reserva")
+}
+
+model artes_tradicionales {
+  id         Int      @id @default(autoincrement())
+  id_reserva Int
+  archivo    String   @db.VarChar(255)
+  nota       String   @db.Text
+  spot       Int      @default(1)
+  created_at DateTime @default(now()) @db.DateTime(0)
+
+  @@index([id_reserva], map: "idx_at_id_reserva")
 }
 
 model propuesta {
@@ -242,6 +265,11 @@ model reservas {
   APS                Int?
   tarea              String    @db.VarChar(50)
   grupo_completo_id  Int?
+
+  @@index([solicitudCaras_id])
+  @@index([APS])
+  @@index([deleted_at], map: "idx_deleted_at")
+  @@index([inventario_id], map: "idx_inventario_id")
 }
 
 model session_locks {
@@ -305,6 +333,10 @@ model solicitudCaras {
   descuento            Decimal? @db.Decimal(5, 2)
   autorizacion_dg      String?  @default("aprobado") @db.VarChar(20)
   autorizacion_dcm     String?  @default("aprobado") @db.VarChar(20)
+  cortesia             Int?     @default(0)
+
+  @@index([idquote])
+  @@index([inicio_periodo, fin_periodo], map: "idx_periodos")
 }
 
 model tareas {
@@ -332,6 +364,8 @@ model tareas {
   num_impresiones    Int?
   archivo_testigo    String?   @db.VarChar(1000)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([campania_id])
 }
 
 model usuario {
@@ -346,6 +380,8 @@ model usuario {
   deleted_at         DateTime?        @db.Timestamp(0)
   user_role          String           @default("Normal") @db.VarChar(50)
   foto_perfil        String?          @db.VarChar(500)
+  reset_token        String?          @db.VarChar(6)
+  reset_token_expiry DateTime?        @db.DateTime(0)
   equipos            usuario_equipo[]
 }
 

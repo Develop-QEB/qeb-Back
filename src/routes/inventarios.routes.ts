@@ -10,6 +10,7 @@ router.post('/reservas/arreglar-huerfanas', inventariosController.arreglarReserv
 router.use(authMiddleware);
 
 router.get('/', inventariosController.getAll.bind(inventariosController));
+router.get('/download/csv', inventariosController.downloadCSV.bind(inventariosController));
 router.get('/map', inventariosController.getForMap.bind(inventariosController));
 router.get('/disponibles', inventariosController.getDisponibles.bind(inventariosController));
 router.get('/stats', inventariosController.getStats.bind(inventariosController));
@@ -24,6 +25,12 @@ router.get('/nse', inventariosController.getNSE.bind(inventariosController));
 // Espacios digitales
 router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.bind(inventariosController));
 router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
+
+// CRUD
+router.post('/bulk', inventariosController.bulkCreate.bind(inventariosController));
+router.post('/', inventariosController.create.bind(inventariosController));
+router.put('/:id', inventariosController.update.bind(inventariosController));
+router.patch('/:id/toggle-block', inventariosController.toggleBlock.bind(inventariosController));
 
 router.get('/:id/historial', inventariosController.getHistorial.bind(inventariosController));
 router.get('/:id', inventariosController.getById.bind(inventariosController));

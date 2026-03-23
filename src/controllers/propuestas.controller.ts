@@ -8,6 +8,7 @@ import {
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility } from '../utils/permissions';
+import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 
 // transporter
@@ -387,6 +388,11 @@ export class PropuestasController {
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      const yearInicio = req.query.yearInicio as string;
+      const yearFin = req.query.yearFin as string;
+      const catorcenaInicio = req.query.catorcenaInicio as string;
+      const catorcenaFin = req.query.catorcenaFin as string;
 
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
@@ -402,10 +408,35 @@ export class PropuestasController {
         params.push(status);
       }
 
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`;
+        params.push(tipoPeriodo);
+      }
+
       if (search) {
         whereConditions += ` AND (pr.articulo LIKE ? OR pr.descripcion LIKE ? OR pr.asignado LIKE ? OR cl.T1_U_Cliente LIKE ?)`;
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Period filter — filter by cotizacion/campania dates
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
+        });
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
+        });
+        if (catorcenasInicioData && catorcenasFinData) {
+          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+          params.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+        }
+      } else if (yearInicio && yearFin) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        params.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      } else if (yearInicio) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        params.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
       // Visibility filter: non-leadership roles only see records where they participate
@@ -466,7 +497,8 @@ export class PropuestasController {
           cat_inicio.numero_catorcena AS catorcena_inicio,
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
-          cat_fin.año AS anio_fin
+          cat_fin.año AS anio_fin,
+          ct.tipo_periodo AS tipo_periodo
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -498,6 +530,7 @@ export class PropuestasController {
         anio_inicio: p.anio_inicio ? Number(p.anio_inicio) : null,
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
+        tipo_periodo: p.tipo_periodo || 'catorcena',
       }));
 
       res.json({
@@ -615,18 +648,53 @@ export class PropuestasController {
         return;
       }
 
-      // Si intenta cambiar a "Aprobada", verificar que no haya caras pendientes de autorización
-      if (status === 'Aprobada') {
+      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar autorizaciones y reservas
+      if (status === 'Aprobada' || status === 'Pase a ventas') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         if (autorizacion.tienePendientes) {
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
           res.status(400).json({
             success: false,
-            error: `No se puede aprobar la propuesta. ${totalPendientes} cara(s) están pendientes de autorización.`,
+            error: `No se puede cambiar a "${status}". ${totalPendientes} cara(s) están pendientes de autorización.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length
             }
+          });
+          return;
+        }
+
+        // Verificar que todas las reservas estén completas
+        const caras = await prisma.solicitudCaras.findMany({
+          where: { idquote: String(propuestaId) },
+        });
+        const reservasQuery = `
+          SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
+          FROM reservas rsv
+            INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+            INNER JOIN inventarios i ON epIn.inventario_id = i.id
+            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          WHERE sc.idquote = ?
+            AND rsv.deleted_at IS NULL
+        `;
+        const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
+
+        const reservasIncompletas = caras.some(cara => {
+          const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
+          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
+          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
+          const flujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Flujo').length;
+          const contraflujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Contraflujo').length;
+          const flujoRequerido = Number(cara.caras_flujo) || 0;
+          const contraflujoRequerido = Number(cara.caras_contraflujo) || 0;
+          const bonificacionRequerido = Number(cara.bonificacion) || 0;
+          return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
+        });
+
+        if (reservasIncompletas) {
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". No todos los grupos tienen sus reservas completas.`,
           });
           return;
         }
@@ -680,22 +748,20 @@ export class PropuestasController {
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-      // Si el cambio es a "Ajuste Cto Cliente", crear tareas específicas para Tráfico
+      // Si el cambio es a "Ajuste Cto Cliente", crear tareas para los asignados de la propuesta
       if (status === 'Ajuste Cto-Cliente') {
-        const usuariosTrafico = await prisma.usuario.findMany({
-          where: {
-            OR: [
-              { puesto: { contains: 'Tráfico' } },
-              { puesto: { contains: 'Trafico' } },
-              { area: { contains: 'Tráfico' } },
-              { area: { contains: 'Trafico' } }
-            ],
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
-        
-        // Crear tarea para cada usuario de Tráfico
+        const idsAsignados = propuesta.id_asignado
+          ? propuesta.id_asignado.split(',').map(i => parseInt(i.trim())).filter(i => !isNaN(i) && i !== userId)
+          : [];
+
+        const usuariosTrafico = idsAsignados.length > 0
+          ? await prisma.usuario.findMany({
+              where: { id: { in: idsAsignados }, deleted_at: null },
+              select: { id: true, nombre: true, correo_electronico: true },
+            })
+          : [];
+
+        // Crear tarea para cada usuario de Tráfico seleccionado
         for (const usuarioTrafico of usuariosTrafico) {
           if (usuarioTrafico.id !== userId) {
             // Crear tarea
@@ -764,8 +830,53 @@ export class PropuestasController {
         }
       }
 
+      // Si el cambio es manual a "Atendida", notificar al creador con correo específico
+      if (status === 'Atendida' && solicitud?.usuario_id) {
+        const creadorAtendida = await prisma.usuario.findUnique({
+          where: { id: solicitud.usuario_id },
+          select: { nombre: true, correo_electronico: true },
+        });
+        if (creadorAtendida) {
+          const cotizacionAtendida = await prisma.cotizacion.findFirst({
+            where: { id_propuesta: propuestaId },
+            select: { nombre_campania: true },
+          });
+          const nombreCampAtendida = cotizacionAtendida?.nombre_campania || nombrePropuesta;
+
+          const nowNotif = new Date();
+          await prisma.tareas.create({
+            data: {
+              titulo: `Ajuste completado: ${nombreCampAtendida}`,
+              descripcion: 'El estado de la propuesta cambió a Atendida.',
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: solicitud!.usuario_id,
+              responsable: '',
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuestaId.toString(),
+              campania_id: campania?.id || null,
+              fecha_inicio: nowNotif,
+              fecha_fin: new Date(nowNotif.getTime() + 24 * 60 * 60 * 1000),
+              asignado: userName,
+              id_asignado: userId.toString(),
+            },
+          });
+
+          if (creadorAtendida.correo_electronico) {
+            enviarCorreoNotificacion(
+              propuesta.solicitud_id || 0,
+              `Ajuste completado: ${nombreCampAtendida}`,
+              `${userName} cambió el estado de la propuesta "${nombreCampAtendida}" a "Atendida"`,
+              creadorAtendida.correo_electronico,
+              creadorAtendida.nombre,
+              { accion: 'Cambio de estado', usuario: userName, cliente: solicitud?.razon_social || undefined }
+            ).catch(err => console.error('Error enviando correo Atendida:', err));
+          }
+        }
+      }
+
       // Si el cambio es de "Ajuste Cto-Cliente" a otro status, notificar al creador de la solicitud
-      if (statusAnterior === 'Ajuste Cto-Cliente' && solicitud?.usuario_id) {
+      if (statusAnterior === 'Ajuste Cto-Cliente' && status !== 'Atendida' && solicitud?.usuario_id) {
         const creador = await prisma.usuario.findUnique({
           where: { id: solicitud.usuario_id },
           select: { nombre: true, correo_electronico: true }
@@ -1233,6 +1344,12 @@ export class PropuestasController {
         await tx.tareas.updateMany({
           where: { id_propuesta: String(propuestaId) },
           data: { estatus: 'Aprobada' },
+        });
+
+        // Autocomplete "Seguimiento Propuesta" task for the creator
+        await tx.tareas.updateMany({
+          where: { id_propuesta: String(propuestaId), tipo: 'Seguimiento Propuesta' },
+          data: { estatus: 'Atendido' },
         });
 
         // 3. Update propuesta
@@ -1918,19 +2035,27 @@ export class PropuestasController {
         return;
       }
 
-      // Check for pending authorizations - block inventory assignment if there are pending caras
-      const autorizacion = await verificarCarasPendientes(propuestaId.toString());
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        res.status(400).json({
-          success: false,
-          error: `No se puede asignar inventario. ${totalPendientes} cara(s) están pendientes de autorización.`,
-          autorizacion: {
-            pendientesDg: autorizacion.pendientesDg.length,
-            pendientesDcm: autorizacion.pendientesDcm.length
-          }
+      // Check authorization only for the specific cara being reserved (not all caras in propuesta)
+      if (solicitudCaraId) {
+        const caraToReserve = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId) },
+          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
         });
-        return;
+        if (caraToReserve) {
+          const pendingDg = caraToReserve.autorizacion_dg === 'pendiente';
+          const pendingDcm = caraToReserve.autorizacion_dcm === 'pendiente';
+          if (pendingDg || pendingDcm) {
+            const reasons = [];
+            if (pendingDg) reasons.push('Dirección General');
+            if (pendingDcm) reasons.push('DCM');
+            res.status(400).json({
+              success: false,
+              error: `No se puede asignar inventario a esta cara. Pendiente de autorización: ${reasons.join(' y ')}.`,
+              autorizacion: { pendientesDg: pendingDg ? 1 : 0, pendientesDcm: pendingDcm ? 1 : 0 }
+            });
+            return;
+          }
+        }
       }
 
       // Create calendario entry
@@ -2670,6 +2795,16 @@ export class PropuestasController {
           }
 
           if (fechaInicio || fechaFin) {
+            // Update cotizacion dates (source of truth for frontend)
+            await prisma.cotizacion.update({
+              where: { id: cotizacion.id },
+              data: {
+                ...(fechaInicio && { fecha_inicio: fechaInicio }),
+                ...(fechaFin && { fecha_fin: fechaFin }),
+              },
+            });
+
+            // Update campania dates
             await prisma.campania.updateMany({
               where: { cotizacion_id: cotizacion.id },
               data: {
@@ -2713,18 +2848,22 @@ export class PropuestasController {
         return;
       }
 
-      const fileUrl = `/uploads/${req.file.filename}`;
+      const uploaded = await uploadBufferToSpaces(req.file.buffer, {
+        folder: 'propuestas',
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
 
       // Update propuesta with file URL in database
       await prisma.propuesta.update({
         where: { id: parseInt(id) },
         data: {
-          archivo: fileUrl,
+          archivo: uploaded.url,
           updated_at: new Date(),
         },
       });
 
-      res.json({ success: true, data: { url: fileUrl } });
+      res.json({ success: true, data: { url: uploaded.url } });
     } catch (error) {
       console.error('Error uploading archivo:', error);
       const message = error instanceof Error ? error.message : 'Error al subir archivo';
@@ -2801,6 +2940,7 @@ export class PropuestasController {
           descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
+          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
 
@@ -2892,7 +3032,7 @@ export class PropuestasController {
           idquote: id, // Link to propuesta
           ciudad,
           estados,
-          tipo,
+          tipo: tipo || 'Tradicional',
           flujo,
           bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
           caras: caras ? parseInt(caras) : 0,
@@ -2908,8 +3048,29 @@ export class PropuestasController {
           descuento: descuento ? parseFloat(descuento) : 0,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
+          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
+
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+      const todasCaras = await prisma.solicitudCaras.findMany({
+        where: { idquote: id },
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
+      });
+      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      if (totalCarasGlobal % 2 !== 0) {
+        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
+        if (carasNoP.length > 0) {
+          await prisma.solicitudCaras.updateMany({
+            where: {
+              idquote: id,
+              autorizacion_dg: { not: 'pendiente' }
+            },
+            data: { autorizacion_dg: 'pendiente' }
+          });
+          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+        }
+      }
 
       // Check for pending authorizations and create tasks if needed
       const autorizacion = await verificarCarasPendientes(id);

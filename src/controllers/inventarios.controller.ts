@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { serializeBigInt } from '../utils/serialization';
 
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -52,9 +53,47 @@ export class InventariosController {
         prisma.inventarios.count({ where }),
       ]);
 
+      // Compute real status: check reservas for today
+      const invIds = inventarios.map(i => i.id);
+      let reservedMap: Record<number, string> = {};
+      if (invIds.length > 0) {
+        const placeholders = invIds.map(() => '?').join(',');
+        const rows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number; estatus: string }>>(
+          `SELECT DISTINCT ei.inventario_id, rsv.estatus
+           FROM reservas rsv
+           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+           INNER JOIN calendario cal ON cal.id = rsv.calendario_id
+           WHERE ei.inventario_id IN (${placeholders})
+             AND rsv.deleted_at IS NULL
+             AND cal.deleted_at IS NULL
+             AND cal.fecha_inicio <= CURDATE()
+             AND cal.fecha_fin >= CURDATE()
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+          ...invIds
+        );
+        for (const row of rows) {
+          // Priority: Vendido > Reservado/Bonificado
+          const current = reservedMap[row.inventario_id];
+          if (!current || row.estatus === 'Vendido') {
+            reservedMap[row.inventario_id] = row.estatus;
+          }
+        }
+      }
+
+      const dataWithRealStatus = inventarios.map(inv => {
+        const reservaEstatus = reservedMap[inv.id];
+        let estatus_real = inv.estatus || 'Disponible';
+        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+          if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
+          else if (reservaEstatus) estatus_real = 'Reservado';
+          else estatus_real = 'Disponible';
+        }
+        return { ...inv, estatus_real };
+      });
+
       res.json({
         success: true,
-        data: inventarios,
+        data: dataWithRealStatus,
         pagination: {
           page,
           limit,
@@ -88,6 +127,8 @@ export class InventariosController {
 
       if (estatus) {
         where.estatus = estatus;
+      } else {
+        where.estatus = { not: 'Bloqueado' };
       }
 
       if (plaza) {
@@ -158,19 +199,42 @@ export class InventariosController {
     }
   }
 
-  async getStats(_req: AuthRequest, res: Response): Promise<void> {
+  async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [total, disponibles, ocupados, mantenimiento, byTipo, byPlaza] = await Promise.all([
-        prisma.inventarios.count(),
-        prisma.inventarios.count({ where: { estatus: 'Disponible' } }),
-        prisma.inventarios.count({ where: { estatus: 'Ocupado' } }),
-        prisma.inventarios.count({ where: { estatus: 'Mantenimiento' } }),
+      const search = req.query.search as string;
+      const tipo = req.query.tipo as string;
+      const estatus = req.query.estatus as string;
+      const plaza = req.query.plaza as string;
+
+      // Build Prisma where filter — same logic as getAll
+      const where: Record<string, unknown> = {};
+      if (search) {
+        where.OR = [
+          { clave: { contains: search } },
+          { nombre_del_mueble: { contains: search } },
+          { ubicacion: { contains: search } },
+          { plaza: { contains: search } },
+        ];
+      }
+      if (tipo) where.tipo_de_mueble = tipo;
+      if (estatus) where.estatus = estatus;
+      if (plaza) where.plaza = plaza;
+
+      const [total, disponibles, ocupados, mantenimiento, reservados, bloqueados, byTipo, byPlaza] = await Promise.all([
+        prisma.inventarios.count({ where }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Disponible' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Ocupado' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Mantenimiento' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Reservado' } }),
+        prisma.inventarios.count({ where: { ...where, estatus: 'Bloqueado' } }),
         prisma.inventarios.groupBy({
           by: ['tipo_de_mueble'],
+          where,
           _count: { id: true },
         }),
         prisma.inventarios.groupBy({
           by: ['plaza'],
+          where,
           _count: { id: true },
         }),
       ]);
@@ -182,6 +246,8 @@ export class InventariosController {
           disponibles,
           ocupados,
           mantenimiento,
+          reservados,
+          bloqueados,
           porTipo: byTipo
             .filter((item) => item.tipo_de_mueble)
             .map((item) => ({
@@ -286,6 +352,7 @@ export class InventariosController {
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
+        estatus: { not: 'Bloqueado' },
       };
 
       // Filter by city (plaza) - puede ser múltiples ciudades separadas por coma
@@ -745,10 +812,7 @@ export class InventariosController {
 
       const historial = await prisma.$queryRawUnsafe(query, inventarioId);
 
-      // Convertir BigInt a Number
-      const historialSerializable = JSON.parse(JSON.stringify(historial, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const historialSerializable = serializeBigInt(historial);
 
       res.json({
         success: true,
@@ -1041,6 +1105,306 @@ export class InventariosController {
         success: false,
         error: message,
       });
+    }
+  }
+  // Create a new inventario
+  async create(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const data = req.body;
+      const inventario = await prisma.inventarios.create({
+        data: {
+          codigo_unico: data.codigo_unico || null,
+          ubicacion: data.ubicacion || null,
+          tipo_de_cara: data.tipo_de_cara || null,
+          cara: data.cara || null,
+          mueble: data.mueble || null,
+          latitud: parseFloat(data.latitud) || 0,
+          longitud: parseFloat(data.longitud) || 0,
+          plaza: data.plaza || null,
+          estado: data.estado || null,
+          municipio: data.municipio || null,
+          cp: data.cp ? parseInt(data.cp) : null,
+          tradicional_digital: data.tradicional_digital || null,
+          sentido: data.sentido || null,
+          tipo_de_mueble: data.tipo_de_mueble || null,
+          ancho: parseFloat(data.ancho) || 0,
+          alto: parseFloat(data.alto) || 0,
+          nivel_socioeconomico: data.nivel_socioeconomico || null,
+          total_espacios: data.total_espacios ? parseInt(data.total_espacios) : null,
+          estatus: data.estatus || 'Disponible',
+          codigo: data.codigo || null,
+          isla: data.isla || null,
+          mueble_isla: data.mueble_isla || null,
+          entre_calle_1: data.entre_calle_1 || null,
+          entre_calle_2: data.entre_calle_2 || null,
+          orientacion: data.orientacion || null,
+          tarifa_piso: data.tarifa_piso ? parseFloat(data.tarifa_piso) : null,
+          tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : null,
+        },
+      });
+      res.json({ success: true, data: inventario });
+    } catch (error) {
+      console.error('Error creating inventario:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Bulk create inventarios from CSV
+  async bulkCreate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { inventarios } = req.body;
+      if (!Array.isArray(inventarios) || inventarios.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de inventarios' });
+        return;
+      }
+
+      const REQUIRED_FIELDS = ['codigo_unico', 'tipo_de_mueble', 'tipo_de_cara', 'tradicional_digital', 'plaza', 'estado', 'municipio'];
+      const errores: { fila: number; campo: string; mensaje: string }[] = [];
+      const validRows: any[] = [];
+      const codigosInBatch = new Set<string>();
+
+      // Validate each row
+      for (let i = 0; i < inventarios.length; i++) {
+        const row = inventarios[i];
+        const filaNum = i + 1;
+        let hasError = false;
+
+        // Check required fields
+        for (const field of REQUIRED_FIELDS) {
+          if (!row[field] || String(row[field]).trim() === '') {
+            errores.push({ fila: filaNum, campo: field, mensaje: `Campo requerido vacío` });
+            hasError = true;
+          }
+        }
+
+        // Check duplicate within batch
+        const codigo = String(row.codigo_unico || '').trim();
+        if (codigo && codigosInBatch.has(codigo)) {
+          errores.push({ fila: filaNum, campo: 'codigo_unico', mensaje: `Duplicado dentro del CSV` });
+          hasError = true;
+        }
+        if (codigo) codigosInBatch.add(codigo);
+
+        // Validate enum values
+        if (row.tipo_de_cara && !['Flujo', 'Contraflujo'].includes(row.tipo_de_cara)) {
+          errores.push({ fila: filaNum, campo: 'tipo_de_cara', mensaje: `Debe ser Flujo o Contraflujo` });
+          hasError = true;
+        }
+        if (row.tradicional_digital && !['Tradicional', 'Digital'].includes(row.tradicional_digital)) {
+          errores.push({ fila: filaNum, campo: 'tradicional_digital', mensaje: `Debe ser Tradicional o Digital` });
+          hasError = true;
+        }
+
+        if (!hasError) {
+          validRows.push({
+            codigo_unico: codigo || null,
+            ubicacion: row.ubicacion || null,
+            tipo_de_cara: row.tipo_de_cara || null,
+            cara: row.cara || null,
+            mueble: row.mueble || null,
+            latitud: parseFloat(row.latitud) || 0,
+            longitud: parseFloat(row.longitud) || 0,
+            plaza: row.plaza || null,
+            estado: row.estado || null,
+            municipio: row.municipio || null,
+            cp: row.cp ? parseInt(row.cp) : null,
+            tradicional_digital: row.tradicional_digital || null,
+            sentido: row.sentido || null,
+            tipo_de_mueble: row.tipo_de_mueble || null,
+            ancho: parseFloat(row.ancho) || 0,
+            alto: parseFloat(row.alto) || 0,
+            nivel_socioeconomico: row.nivel_socioeconomico || null,
+            total_espacios: row.total_espacios ? parseInt(row.total_espacios) : null,
+            estatus: row.estatus || 'Disponible',
+            codigo: row.codigo || null,
+            isla: row.isla || null,
+            mueble_isla: row.mueble_isla || null,
+            entre_calle_1: row.entre_calle_1 || null,
+            entre_calle_2: row.entre_calle_2 || null,
+            orientacion: row.orientacion || null,
+            tarifa_piso: row.tarifa_piso ? parseFloat(row.tarifa_piso) : null,
+            tarifa_publica: row.tarifa_publica ? parseFloat(row.tarifa_publica) : null,
+          });
+        }
+      }
+
+      // Check which codigos already exist in DB
+      let duplicados = 0;
+      if (validRows.length > 0) {
+        const codigos = validRows.map(r => r.codigo_unico).filter(Boolean);
+        const existing = await prisma.inventarios.findMany({
+          where: { codigo_unico: { in: codigos } },
+          select: { codigo_unico: true },
+        });
+        const existingSet = new Set(existing.map(e => e.codigo_unico));
+
+        const toInsert = validRows.filter(r => {
+          if (r.codigo_unico && existingSet.has(r.codigo_unico)) {
+            duplicados++;
+            return false;
+          }
+          return true;
+        });
+
+        if (toInsert.length > 0) {
+          await prisma.inventarios.createMany({
+            data: toInsert,
+            skipDuplicates: true,
+          });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            insertados: toInsert.length,
+            duplicados,
+            errores,
+            total: inventarios.length,
+          },
+        });
+      } else {
+        res.json({
+          success: true,
+          data: {
+            insertados: 0,
+            duplicados: 0,
+            errores,
+            total: inventarios.length,
+          },
+        });
+      }
+    } catch (error) {
+      console.error('Error in bulk create:', error);
+      const message = error instanceof Error ? error.message : 'Error al crear inventarios masivamente';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Update an existing inventario
+  async update(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id);
+      const data = req.body;
+
+      const updateData: Record<string, unknown> = {};
+      if (data.codigo_unico !== undefined) updateData.codigo_unico = data.codigo_unico || null;
+      if (data.ubicacion !== undefined) updateData.ubicacion = data.ubicacion || null;
+      if (data.tipo_de_cara !== undefined) updateData.tipo_de_cara = data.tipo_de_cara || null;
+      if (data.cara !== undefined) updateData.cara = data.cara || null;
+      if (data.mueble !== undefined) updateData.mueble = data.mueble || null;
+      if (data.latitud !== undefined) updateData.latitud = parseFloat(data.latitud) || 0;
+      if (data.longitud !== undefined) updateData.longitud = parseFloat(data.longitud) || 0;
+      if (data.plaza !== undefined) updateData.plaza = data.plaza || null;
+      if (data.estado !== undefined) updateData.estado = data.estado || null;
+      if (data.municipio !== undefined) updateData.municipio = data.municipio || null;
+      if (data.cp !== undefined) updateData.cp = data.cp ? parseInt(data.cp) : null;
+      if (data.tradicional_digital !== undefined) updateData.tradicional_digital = data.tradicional_digital || null;
+      if (data.sentido !== undefined) updateData.sentido = data.sentido || null;
+      if (data.tipo_de_mueble !== undefined) updateData.tipo_de_mueble = data.tipo_de_mueble || null;
+      if (data.ancho !== undefined) updateData.ancho = parseFloat(data.ancho) || 0;
+      if (data.alto !== undefined) updateData.alto = parseFloat(data.alto) || 0;
+      if (data.nivel_socioeconomico !== undefined) updateData.nivel_socioeconomico = data.nivel_socioeconomico || null;
+      if (data.total_espacios !== undefined) updateData.total_espacios = data.total_espacios ? parseInt(data.total_espacios) : null;
+      if (data.estatus !== undefined) updateData.estatus = data.estatus || null;
+      if (data.codigo !== undefined) updateData.codigo = data.codigo || null;
+      if (data.isla !== undefined) updateData.isla = data.isla || null;
+      if (data.mueble_isla !== undefined) updateData.mueble_isla = data.mueble_isla || null;
+      if (data.entre_calle_1 !== undefined) updateData.entre_calle_1 = data.entre_calle_1 || null;
+      if (data.entre_calle_2 !== undefined) updateData.entre_calle_2 = data.entre_calle_2 || null;
+      if (data.orientacion !== undefined) updateData.orientacion = data.orientacion || null;
+      if (data.tarifa_piso !== undefined) updateData.tarifa_piso = data.tarifa_piso ? parseFloat(data.tarifa_piso) : null;
+      if (data.tarifa_publica !== undefined) updateData.tarifa_publica = data.tarifa_publica ? parseFloat(data.tarifa_publica) : null;
+
+      const inventario = await prisma.inventarios.update({
+        where: { id },
+        data: updateData,
+      });
+      res.json({ success: true, data: inventario });
+    } catch (error) {
+      console.error('Error updating inventario:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Toggle block/unblock inventario
+  async toggleBlock(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id);
+      const inventario = await prisma.inventarios.findUnique({ where: { id } });
+      if (!inventario) {
+        res.status(404).json({ success: false, error: 'Inventario no encontrado' });
+        return;
+      }
+      const newEstatus = inventario.estatus === 'Bloqueado' ? 'Disponible' : 'Bloqueado';
+      const updated = await prisma.inventarios.update({
+        where: { id },
+        data: { estatus: newEstatus },
+      });
+      res.json({ success: true, data: updated });
+    } catch (error) {
+      console.error('Error toggling block:', error);
+      const message = error instanceof Error ? error.message : 'Error al bloquear/desbloquear inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+  async downloadCSV(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const search = req.query.search as string;
+      const tipo = req.query.tipo as string;
+      const estatus = req.query.estatus as string;
+      const plaza = req.query.plaza as string;
+
+      const where: Record<string, unknown> = {};
+
+      if (search) {
+        const searchNum = parseInt(search);
+        const orConditions: Record<string, unknown>[] = [
+          { codigo_unico: { contains: search } },
+          { ubicacion: { contains: search } },
+          { municipio: { contains: search } },
+        ];
+        if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
+        where.OR = orConditions;
+      }
+      if (tipo) where.tipo_de_mueble = tipo;
+      if (estatus) where.estatus = estatus;
+      if (plaza) where.plaza = plaza;
+
+      const inventarios = await prisma.inventarios.findMany({
+        where,
+        orderBy: { codigo_unico: 'asc' },
+      });
+
+      const headers = ['ID', 'Código Único', 'Ubicación', 'Municipio', 'Plaza', 'Estado', 'Tipo de Mueble', 'Tipo de Cara', 'Cara', 'Estatus', 'NSE', 'Latitud', 'Longitud', 'Tarifa Piso', 'Tarifa Pública'];
+      const rows = inventarios.map(inv => [
+        inv.id,
+        inv.codigo_unico ?? '',
+        inv.ubicacion ?? '',
+        inv.municipio ?? '',
+        inv.plaza ?? '',
+        inv.estado ?? '',
+        inv.tipo_de_mueble ?? '',
+        inv.tipo_de_cara ?? '',
+        inv.cara ?? '',
+        inv.estatus ?? '',
+        inv.nivel_socioeconomico ?? '',
+        inv.latitud ?? '',
+        inv.longitud ?? '',
+        inv.tarifa_piso ?? '',
+        inv.tarifa_publica ?? '',
+      ]);
+
+      const escape = (val: unknown) => `"${String(val).replace(/"/g, '""')}"`;
+      const csv = [headers.map(escape).join(','), ...rows.map(r => r.map(escape).join(','))].join('\n');
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="inventario.csv"');
+      res.send('\uFEFF' + csv);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al descargar inventario';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }
