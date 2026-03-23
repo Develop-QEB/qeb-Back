@@ -264,7 +264,7 @@ Compartir propuesta: Genera link publico que el cliente puede ver sin cuenta QEB
 --- 6. CAMPAÑAS ---
 Se crean automaticamente cuando una propuesta es aprobada formalmente. Representan la ejecucion real.
 
-Columnas de tabla: ID, Periodo, Creador, Campaña, Marca, Estatus, Actividad, Fecha Inicio, Fecha Fin, APS, Acciones (Compartir, Editar, Gestion de Artes, Ordenes de Montaje).
+Columnas de tabla: ID, Periodo, Creador, Campaña, Marca, Estatus, Actividad, Fecha Inicio, Fecha Fin, APS, Acciones (Ver detalle, Compartir, Editar). Cada fila se puede expandir para ver los APS y grupos de caras con iconos de etapas (Subir Artes, Revisar, Impresiones/Programacion, Testigos).
 
 Vistas: Vista de Tabla (lista) y Vista de Catorcena (calendario visual donde cada catorcena es una columna y las campañas aparecen como tarjetas). Se puede navegar entre años.
 
@@ -300,7 +300,7 @@ Ordenes de Montaje: Documentos operativos que resumen que materiales instalar, d
 Datos: numero de orden, fecha, campaña, espacios con ubicaciones, material/arte con imagen de referencia, fecha de instalacion, proveedor asignado, estatus (Pendiente, En proceso, Completada).
 
 --- 7. GESTION DE ARTES ---
-Se accede desde el boton "Gestion de Artes" en la tabla de campañas (solo visible cuando campaña esta "Aprobada" o "En curso/En pauta").
+Flujo para acceder: 1) Ir a Campañas (/campanas), 2) Hacer clic en el nombre de una campaña para abrir su Detalle (/campanas/detail/:id), 3) Desde el detalle, hacer clic en el boton "Gestión de Artes" para ir a la pagina de seguimiento (/campanas/:id/tareas). Solo disponible cuando la campaña tiene APS asignados y esta "Aprobada" o "En curso/En pauta".
 
 Tabs disponibles (segun rol):
 
