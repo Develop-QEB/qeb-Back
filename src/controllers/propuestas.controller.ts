@@ -648,8 +648,20 @@ export class PropuestasController {
         return;
       }
 
-      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar autorizaciones y reservas
+      // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
+        // Verificar que la solicitud tenga un cliente con CUIC
+        const solicitud = await prisma.solicitud.findFirst({
+          where: { id: propuestaAnterior.solicitud_id },
+        });
+        if (solicitud && (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL')) {
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". La solicitud no tiene un cliente con CUIC asignado.`,
+          });
+          return;
+        }
+
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         if (autorizacion.tienePendientes) {
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
@@ -680,6 +692,10 @@ export class PropuestasController {
         const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
 
         const reservasIncompletas = caras.some(cara => {
+          // Artículos de impresión (IM) no requieren reservas — siempre completos
+          const articulo = (cara.articulo || '').toUpperCase();
+          if (articulo.startsWith('IM')) return false;
+
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
@@ -1799,7 +1815,7 @@ export class PropuestasController {
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
           MIN(i.tradicional_digital) as tradicional_digital,
-          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.mueble) as tipo_de_mueble,
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
@@ -1932,7 +1948,7 @@ export class PropuestasController {
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
           MIN(i.tradicional_digital) as tradicional_digital,
-          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.mueble) as tipo_de_mueble,
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
@@ -2421,7 +2437,7 @@ export class PropuestasController {
           i.latitud,
           i.longitud,
           i.plaza,
-          i.tipo_de_mueble as formato,
+          i.mueble as formato,
           i.ubicacion,
           i.isla,
           rsv.estatus,

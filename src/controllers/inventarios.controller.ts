@@ -3,6 +3,16 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -12,6 +22,7 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
 
@@ -32,7 +43,7 @@ export class InventariosController {
       }
 
       if (tipo) {
-        where.tipo_de_mueble = tipo;
+        where.mueble = tipo;
       }
 
       if (estatus) {
@@ -41,6 +52,31 @@ export class InventariosController {
 
       if (plaza) {
         where.plaza = plaza;
+      }
+
+      // Filter by campaign: get inventario IDs linked to this campaign
+      if (campanaId) {
+        const campanaInvRows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number }>>(
+          `SELECT DISTINCT epIn.inventario_id
+           FROM campania cm
+           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+           WHERE cm.id = ?`,
+          campanaId
+        );
+        const invIds = campanaInvRows.map(r => r.inventario_id);
+        if (invIds.length === 0) {
+          // No inventarios for this campaign, return empty
+          res.json({
+            success: true,
+            data: [],
+            pagination: { page, limit, total: 0, totalPages: 0 },
+          });
+          return;
+        }
+        where.id = { in: invIds };
       }
 
       const [inventarios, total] = await Promise.all([
@@ -66,7 +102,6 @@ export class InventariosController {
            WHERE ei.inventario_id IN (${placeholders})
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
-             AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
              AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
           ...invIds
@@ -82,11 +117,11 @@ export class InventariosController {
 
       const dataWithRealStatus = inventarios.map(inv => {
         const reservaEstatus = reservedMap[inv.id];
-        let estatus_real = inv.estatus || 'Disponible';
+        let estatus_real = inv.estatus || 'Activo';
         if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
           if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
           else if (reservaEstatus) estatus_real = 'Reservado';
-          else estatus_real = 'Disponible';
+          else estatus_real = 'Activo';
         }
         return { ...inv, estatus_real };
       });
@@ -122,7 +157,7 @@ export class InventariosController {
       };
 
       if (tipo) {
-        where.tipo_de_mueble = tipo;
+        where.mueble = tipo;
       }
 
       if (estatus) {
@@ -141,7 +176,7 @@ export class InventariosController {
           id: true,
           codigo_unico: true,
           ubicacion: true,
-          tipo_de_mueble: true,
+          mueble: true,
           tipo_de_cara: true,
           cara: true,
           latitud: true,
@@ -216,7 +251,7 @@ export class InventariosController {
           { plaza: { contains: search } },
         ];
       }
-      if (tipo) where.tipo_de_mueble = tipo;
+      if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
 
@@ -228,7 +263,7 @@ export class InventariosController {
         prisma.inventarios.count({ where: { ...where, estatus: 'Reservado' } }),
         prisma.inventarios.count({ where: { ...where, estatus: 'Bloqueado' } }),
         prisma.inventarios.groupBy({
-          by: ['tipo_de_mueble'],
+          by: ['mueble'],
           where,
           _count: { id: true },
         }),
@@ -249,9 +284,9 @@ export class InventariosController {
           reservados,
           bloqueados,
           porTipo: byTipo
-            .filter((item) => item.tipo_de_mueble)
+            .filter((item) => item.mueble)
             .map((item) => ({
-              tipo: item.tipo_de_mueble,
+              tipo: item.mueble,
               cantidad: item._count.id,
             })),
           porPlaza: byPlaza
@@ -274,13 +309,13 @@ export class InventariosController {
   async getTipos(_req: AuthRequest, res: Response): Promise<void> {
     try {
       const tipos = await prisma.inventarios.findMany({
-        select: { tipo_de_mueble: true },
-        distinct: ['tipo_de_mueble'],
+        select: { mueble: true },
+        distinct: ['mueble'],
       });
 
       res.json({
         success: true,
-        data: tipos.map((t) => t.tipo_de_mueble).filter(Boolean),
+        data: tipos.map((t) => t.mueble).filter(Boolean),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener tipos';
@@ -344,6 +379,7 @@ export class InventariosController {
         fecha_inicio,
         fecha_fin,
         solicitudCaraId,
+        excluir_categoria,
       } = req.query;
 
       console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
@@ -375,13 +411,13 @@ export class InventariosController {
         }
       }
 
-      // Filter by format (tipo_de_mueble) - puede ser múltiples formatos separados por coma
+      // Filter by format (mueble) - puede ser múltiples formatos separados por coma
       if (formato) {
         const formatoList = (formato as string).split(',').map(f => f.trim()).filter(Boolean);
         if (formatoList.length === 1) {
-          where.tipo_de_mueble = { contains: formatoList[0] };
+          where.mueble = { contains: formatoList[0] };
         } else if (formatoList.length > 1) {
-          where.OR = formatoList.map(f => ({ tipo_de_mueble: { contains: f } }));
+          where.OR = formatoList.map(f => ({ mueble: { contains: f } }));
         }
       }
 
@@ -409,7 +445,7 @@ export class InventariosController {
           id: true,
           codigo_unico: true,
           ubicacion: true,
-          tipo_de_mueble: true,
+          mueble: true,
           tipo_de_cara: true,
           cara: true,
           latitud: true,
@@ -552,7 +588,7 @@ export class InventariosController {
         id: number;
         codigo_unico: string | null;
         ubicacion: string | null;
-        tipo_de_mueble: string | null;
+        mueble: string | null;
         tipo_de_cara: string | null;
         cara: string | null;
         latitud: number | null;
@@ -621,10 +657,46 @@ export class InventariosController {
         }
       }
 
+      // Filter out inventory near reserved locations for excluded category
+      let resultados = disponibles;
+      if (excluir_categoria && fecha_inicio && fecha_fin) {
+        const categoriaCoordenadas = await prisma.$queryRaw<
+          Array<{ id: number; latitud: number; longitud: number }>
+        >`
+          SELECT DISTINCT i.id, i.latitud, i.longitud
+          FROM reservas r
+          JOIN espacio_inventario ei ON ei.id = r.inventario_id
+          JOIN inventarios i ON i.id = ei.inventario_id
+          JOIN calendario cal ON cal.id = r.calendario_id
+          JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+          JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
+          JOIN solicitud s ON s.id = p.solicitud_id
+          JOIN cliente c ON c.id = s.id_cliente
+          WHERE c.T2_U_Categoria = ${excluir_categoria as string}
+          AND r.deleted_at IS NULL
+          AND cal.deleted_at IS NULL
+          AND cal.fecha_inicio <= ${new Date(fecha_fin as string)}
+          AND cal.fecha_fin >= ${new Date(fecha_inicio as string)}
+          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido')
+        `;
+
+        if (categoriaCoordenadas.length > 0) {
+          resultados = disponibles.filter(item => {
+            if (item.latitud == null || item.longitud == null) return true;
+            for (const coord of categoriaCoordenadas) {
+              if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < 1) {
+                return false;
+              }
+            }
+            return true;
+          });
+        }
+      }
+
       res.json({
         success: true,
-        data: disponibles,
-        total: disponibles.length,
+        data: resultados,
+        total: resultados.length,
         filtros_aplicados: {
           ciudad,
           estado,
@@ -634,6 +706,7 @@ export class InventariosController {
           tipo,
           fecha_inicio,
           fecha_fin,
+          excluir_categoria,
         },
       });
     } catch (error) {
@@ -658,13 +731,13 @@ export class InventariosController {
 
       const formatos = await prisma.inventarios.findMany({
         where,
-        select: { tipo_de_mueble: true },
-        distinct: ['tipo_de_mueble'],
+        select: { mueble: true },
+        distinct: ['mueble'],
       });
 
       res.json({
         success: true,
-        data: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+        data: formatos.map(f => f.mueble).filter(Boolean),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener formatos';
@@ -848,7 +921,7 @@ export class InventariosController {
           id: true,
           codigo_unico: true,
           total_espacios: true,
-          tipo_de_mueble: true,
+          mueble: true,
           tradicional_digital: true
         }
       });
@@ -907,7 +980,7 @@ export class InventariosController {
           detalle_digitales: inventariosDigitales.map(inv => ({
             id: inv.id,
             codigo: inv.codigo_unico,
-            tipo: inv.tipo_de_mueble,
+            tipo: inv.mueble,
             espacios: inv.total_espacios
           }))
         }
@@ -1111,6 +1184,9 @@ export class InventariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
       const data = req.body;
+      const totalEspacios = data.total_espacios ? parseInt(data.total_espacios) : null;
+      const isDigital = data.tradicional_digital === 'Digital' && totalEspacios && totalEspacios > 0;
+
       const inventario = await prisma.inventarios.create({
         data: {
           codigo_unico: data.codigo_unico || null,
@@ -1130,7 +1206,7 @@ export class InventariosController {
           ancho: parseFloat(data.ancho) || 0,
           alto: parseFloat(data.alto) || 0,
           nivel_socioeconomico: data.nivel_socioeconomico || null,
-          total_espacios: data.total_espacios ? parseInt(data.total_espacios) : null,
+          total_espacios: totalEspacios,
           estatus: data.estatus || 'Disponible',
           codigo: data.codigo || null,
           isla: data.isla || null,
@@ -1142,6 +1218,16 @@ export class InventariosController {
           tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : null,
         },
       });
+
+      // Auto-crear espacios en espacio_inventario
+      const numEspacios = isDigital ? totalEspacios! : 1;
+      await prisma.espacio_inventario.createMany({
+        data: Array.from({ length: numEspacios }, (_, i) => ({
+          inventario_id: inventario.id,
+          numero_espacio: i + 1,
+        })),
+      });
+
       res.json({ success: true, data: inventario });
     } catch (error) {
       console.error('Error creating inventario:', error);
@@ -1153,11 +1239,13 @@ export class InventariosController {
   // Bulk create inventarios from CSV
   async bulkCreate(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { inventarios } = req.body;
+      const { inventarios, overwrite_codigos } = req.body;
       if (!Array.isArray(inventarios) || inventarios.length === 0) {
         res.status(400).json({ success: false, error: 'Se requiere un array de inventarios' });
         return;
       }
+
+      const overwriteSet = new Set<string>(Array.isArray(overwrite_codigos) ? overwrite_codigos : []);
 
       const REQUIRED_FIELDS = ['codigo_unico', 'tipo_de_mueble', 'tipo_de_cara', 'tradicional_digital', 'plaza', 'estado', 'municipio'];
       const errores: { fila: number; campo: string; mensaje: string }[] = [];
@@ -1230,35 +1318,114 @@ export class InventariosController {
       }
 
       // Check which codigos already exist in DB
-      let duplicados = 0;
+      let duplicados_ocupados = 0;
+      let actualizados = 0;
       if (validRows.length > 0) {
         const codigos = validRows.map(r => r.codigo_unico).filter(Boolean);
         const existing = await prisma.inventarios.findMany({
           where: { codigo_unico: { in: codigos } },
-          select: { codigo_unico: true },
+          select: { id: true, codigo_unico: true, estatus: true },
         });
-        const existingSet = new Set(existing.map(e => e.codigo_unico));
+        const existingMap = new Map(existing.map(e => [e.codigo_unico, e]));
 
-        const toInsert = validRows.filter(r => {
-          if (r.codigo_unico && existingSet.has(r.codigo_unico)) {
-            duplicados++;
-            return false;
+        // Compute estatus_real for existing items that are in overwrite list
+        const overwriteExisting = existing.filter(e => e.codigo_unico && overwriteSet.has(e.codigo_unico));
+        let reservedMap: Record<number, string> = {};
+        if (overwriteExisting.length > 0) {
+          const invIds = overwriteExisting.map(e => e.id);
+          const placeholders = invIds.map(() => '?').join(',');
+          const rows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number; estatus: string }>>(
+            `SELECT DISTINCT ei.inventario_id, rsv.estatus
+             FROM reservas rsv
+             INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+             INNER JOIN calendario cal ON cal.id = rsv.calendario_id
+             WHERE ei.inventario_id IN (${placeholders})
+               AND rsv.deleted_at IS NULL
+               AND cal.deleted_at IS NULL
+               AND cal.fecha_inicio <= CURDATE()
+               AND cal.fecha_fin >= CURDATE()
+               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+            ...invIds
+          );
+          for (const row of rows) {
+            const current = reservedMap[row.inventario_id];
+            if (!current || row.estatus === 'Vendido') {
+              reservedMap[row.inventario_id] = row.estatus;
+            }
           }
-          return true;
-        });
+        }
+
+        const toInsert: any[] = [];
+        for (const row of validRows) {
+          const existingItem = row.codigo_unico ? existingMap.get(row.codigo_unico) : null;
+
+          if (!existingItem) {
+            // New item - insert
+            toInsert.push(row);
+            continue;
+          }
+
+          // Existing item - check if we should overwrite
+          if (!overwriteSet.has(row.codigo_unico)) {
+            // Not in overwrite list - skip as duplicate (old behavior)
+            duplicados_ocupados++;
+            continue;
+          }
+
+          // In overwrite list - check if occupied
+          const reservaEstatus = reservedMap[existingItem.id];
+          let estatus_real = existingItem.estatus || 'Disponible';
+          if (existingItem.estatus !== 'Bloqueado' && existingItem.estatus !== 'Mantenimiento') {
+            if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
+            else if (reservaEstatus) estatus_real = 'Reservado';
+            else estatus_real = 'Disponible';
+          }
+
+          const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
+            existingItem.estatus === 'Bloqueado' || existingItem.estatus === 'Mantenimiento';
+
+          if (isOcupado) {
+            duplicados_ocupados++;
+            continue;
+          }
+
+          // Safe to overwrite - update
+          const { codigo_unico, ...updateData } = row;
+          await prisma.inventarios.update({
+            where: { id: existingItem.id },
+            data: updateData,
+          });
+          actualizados++;
+        }
 
         if (toInsert.length > 0) {
           await prisma.inventarios.createMany({
             data: toInsert,
             skipDuplicates: true,
           });
+
+          // Auto-crear espacio_inventario para los recién insertados
+          const codigosInsertados = toInsert.map(r => r.codigo_unico).filter(Boolean);
+          const insertados = await prisma.inventarios.findMany({
+            where: { codigo_unico: { in: codigosInsertados } },
+            select: { id: true, tradicional_digital: true, total_espacios: true },
+          });
+          const espacios = insertados.flatMap(inv => {
+            const isDigital = inv.tradicional_digital === 'Digital' && inv.total_espacios && inv.total_espacios > 0;
+            const n = isDigital ? inv.total_espacios! : 1;
+            return Array.from({ length: n }, (_, i) => ({ inventario_id: inv.id, numero_espacio: i + 1 }));
+          });
+          if (espacios.length > 0) {
+            await prisma.espacio_inventario.createMany({ data: espacios });
+          }
         }
 
         res.json({
           success: true,
           data: {
             insertados: toInsert.length,
-            duplicados,
+            actualizados,
+            duplicados_ocupados,
             errores,
             total: inventarios.length,
           },
@@ -1268,7 +1435,8 @@ export class InventariosController {
           success: true,
           data: {
             insertados: 0,
-            duplicados: 0,
+            actualizados: 0,
+            duplicados_ocupados: 0,
             errores,
             total: inventarios.length,
           },
@@ -1277,6 +1445,89 @@ export class InventariosController {
     } catch (error) {
       console.error('Error in bulk create:', error);
       const message = error instanceof Error ? error.message : 'Error al crear inventarios masivamente';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async bulkCheck(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { codigos } = req.body;
+      if (!Array.isArray(codigos) || codigos.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de codigos' });
+        return;
+      }
+
+      // Find all inventarios matching the codigos
+      const existing = await prisma.inventarios.findMany({
+        where: { codigo_unico: { in: codigos } },
+        select: { id: true, codigo_unico: true, estatus: true },
+      });
+
+      const existingMap = new Map(existing.map(e => [e.codigo_unico, e]));
+
+      // Compute estatus_real for found items
+      const invIds = existing.map(e => e.id);
+      let reservedMap: Record<number, string> = {};
+      if (invIds.length > 0) {
+        const placeholders = invIds.map(() => '?').join(',');
+        const rows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number; estatus: string }>>(
+          `SELECT DISTINCT ei.inventario_id, rsv.estatus
+           FROM reservas rsv
+           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+           INNER JOIN calendario cal ON cal.id = rsv.calendario_id
+           WHERE ei.inventario_id IN (${placeholders})
+             AND rsv.deleted_at IS NULL
+             AND cal.deleted_at IS NULL
+             AND cal.fecha_inicio <= CURDATE()
+             AND cal.fecha_fin >= CURDATE()
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+          ...invIds
+        );
+        for (const row of rows) {
+          const current = reservedMap[row.inventario_id];
+          if (!current || row.estatus === 'Vendido') {
+            reservedMap[row.inventario_id] = row.estatus;
+          }
+        }
+      }
+
+      const nuevos: string[] = [];
+      const sobreescribibles: Array<{ codigo_unico: string | null; estatus: string | null; estatus_real: string; id: number }> = [];
+      const ocupados: Array<{ codigo_unico: string | null; estatus: string | null; estatus_real: string; id: number }> = [];
+
+      for (const codigo of codigos) {
+        const inv = existingMap.get(codigo);
+        if (!inv) {
+          nuevos.push(codigo);
+          continue;
+        }
+
+        // Compute estatus_real
+        const reservaEstatus = reservedMap[inv.id];
+        let estatus_real = inv.estatus || 'Disponible';
+        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+          if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
+          else if (reservaEstatus) estatus_real = 'Reservado';
+          else estatus_real = 'Disponible';
+        }
+
+        const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
+          inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento';
+
+        if (isOcupado) {
+          ocupados.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id });
+        } else {
+          sobreescribibles.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: { nuevos, sobreescribibles, ocupados },
+      });
+    } catch (error) {
+      console.error('Error in bulk check:', error);
+      const message = error instanceof Error ? error.message : 'Error al verificar inventarios';
       res.status(500).json({ success: false, error: message });
     }
   }
@@ -1404,6 +1655,28 @@ export class InventariosController {
       res.send('\uFEFF' + csv);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al descargar inventario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async getCategoriasCliente(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const categorias = await prisma.$queryRaw<
+        Array<{ T2_U_Categoria: string }>
+      >`
+        SELECT DISTINCT T2_U_Categoria
+        FROM cliente
+        WHERE T2_U_Categoria IS NOT NULL AND T2_U_Categoria != ''
+        ORDER BY T2_U_Categoria
+      `;
+
+      res.json({
+        success: true,
+        data: categorias.map(c => c.T2_U_Categoria),
+      });
+    } catch (error) {
+      console.error('Error getCategoriasCliente:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener categorías de cliente';
       res.status(500).json({ success: false, error: message });
     }
   }

@@ -29,7 +29,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
@@ -41,7 +41,6 @@ export class DashboardController {
         where: inventarioWhere,
         select: {
           id: true,
-          tipo_de_mueble: true,
           mueble: true,
           municipio: true,
           plaza: true,
@@ -244,7 +243,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
@@ -255,7 +254,6 @@ export class DashboardController {
         where: inventarioWhere,
         select: {
           id: true,
-          tipo_de_mueble: true,
           mueble: true,
           municipio: true,
           plaza: true,
@@ -405,11 +403,11 @@ export class DashboardController {
               distinct: ['plaza'],
               where: { plaza: { not: null } },
             }),
-            // Formatos (tipo de mueble)
+            // Formatos (mueble)
             prisma.inventarios.findMany({
-              select: { tipo_de_mueble: true },
-              distinct: ['tipo_de_mueble'],
-              where: { tipo_de_mueble: { not: null } },
+              select: { mueble: true },
+              distinct: ['mueble'],
+              where: { mueble: { not: null } },
             }),
             // Nivel Socioeconomico
             prisma.inventarios.findMany({
@@ -437,7 +435,7 @@ export class DashboardController {
           return {
             estados: estados.map((e) => e.estado).filter(Boolean).sort(),
             ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
-            formatos: formatos.map((f) => f.tipo_de_mueble).filter(Boolean).sort(),
+            formatos: formatos.map((f) => f.mueble).filter(Boolean).sort(),
             nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
             catorcenaActual: catorcenaActual ? {
               id: catorcenaActual.id,
@@ -651,7 +649,7 @@ export class DashboardController {
       }
 
       if (formato) {
-        inventarioWhere.tipo_de_mueble = formato as string;
+        inventarioWhere.mueble = formato as string;
       }
 
       if (nse) {
@@ -729,6 +727,7 @@ export class DashboardController {
           estatus: true,
           cliente_id: true,
           APS: true,
+          solicitudCaras_id: true,
         },
       });
 
@@ -742,11 +741,46 @@ export class DashboardController {
       }) : [];
       const clienteMap = new Map(clientes.map((c) => [c.id, c.T0_U_Cliente || c.T0_U_RazonSocial || null]));
 
+      // Construir mapa solicitudCaras_id → campana_id
+      const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
+      const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: solicitudCarasIds } },
+        select: { id: true, idquote: true },
+      }) : [];
+      const idquoteValues = solicitudCarasList
+        .map((sc) => parseInt(sc.idquote || ''))
+        .filter((v) => !isNaN(v));
+      const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
+        where: { id_propuesta: { in: idquoteValues } },
+        select: { id: true, id_propuesta: true },
+      }) : [];
+      const cotizacionIds = cotizaciones.map((c) => c.id);
+      const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
+        where: { cotizacion_id: { in: cotizacionIds } },
+        select: { id: true, cotizacion_id: true },
+      }) : [];
+      // idquote → cotizacion_id
+      const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
+      // cotizacion_id → campana_id
+      const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c.id]));
+      // solicitudCaras_id → campana_id
+      const solicitudToCampana = new Map(
+        solicitudCarasList
+          .map((sc) => {
+            const idquote = parseInt(sc.idquote || '');
+            const cotizId = idquoteToCotizacion.get(idquote);
+            const campanaId = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+            return [sc.id, campanaId ?? null] as [number, number | null];
+          })
+      );
+
       // Mapear info de reserva por inventario
       const inventarioInfo: Record<number, {
         estatus: string;
         cliente_nombre: string | null;
         APS: number | null;
+        campana_id: number | null;
+        solicitudCaras_id: number;
       }> = {};
 
       reservas.forEach((r) => {
@@ -770,6 +804,8 @@ export class DashboardController {
             estatus: r.estatus, // Guardar estatus original
             cliente_nombre: clienteMap.get(r.cliente_id) || null,
             APS: r.APS,
+            campana_id: solicitudToCampana.get(r.solicitudCaras_id) ?? null,
+            solicitudCaras_id: r.solicitudCaras_id,
           };
         }
       });
@@ -794,6 +830,7 @@ export class DashboardController {
             estatus: estatusActual,
             cliente_nombre: info?.cliente_nombre || null,
             APS: info?.APS || null,
+            campana_id: info?.campana_id ?? null,
           };
         })
         .filter((inv) => {

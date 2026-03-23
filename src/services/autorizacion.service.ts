@@ -439,7 +439,7 @@ export async function crearTareasAutorizacion(
       puesto: { contains: 'DCM' },
       deleted_at: null
     },
-    select: { id: true, nombre: true }
+    select: { id: true, nombre: true, correo_electronico: true }
   });
 
   console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
@@ -537,6 +537,20 @@ export async function crearTareasAutorizacion(
       tipo: 'Autorización DCM',
       solicitudId
     });
+
+    // Enviar correo a usuarios DCM
+    for (const usuario of usuariosDcm) {
+      if (usuario.correo_electronico) {
+        enviarCorreoAutorizacion(
+          tareaDcm.id,
+          `Autorización requerida - Solicitud #${solicitudId}`,
+          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
+          usuario.correo_electronico,
+          usuario.nombre,
+          responsableNombre
+        ).catch(err => console.error('Error enviando correo autorización DCM:', err));
+      }
+    }
   }
 }
 

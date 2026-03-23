@@ -1348,12 +1348,12 @@ export class SolicitudesController {
         orderBy: { municipio: 'asc' },
       });
 
-      // Get distinct tipo_de_mueble (formatos)
+      // Get distinct mueble (formatos)
       const formatos = await prisma.inventarios.findMany({
-        select: { tipo_de_mueble: true },
-        distinct: ['tipo_de_mueble'],
-        where: { tipo_de_mueble: { not: null } },
-        orderBy: { tipo_de_mueble: 'asc' },
+        select: { mueble: true },
+        distinct: ['mueble'],
+        where: { mueble: { not: null } },
+        orderBy: { mueble: 'asc' },
       });
 
       // Get distinct nivel_socioeconomico
@@ -1369,7 +1369,7 @@ export class SolicitudesController {
         data: {
           estados: estados.map(e => e.estado).filter(Boolean),
           ciudades: ciudades.map(c => ({ ciudad: c.municipio, estado: c.estado })),
-          formatos: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+          formatos: formatos.map(f => f.mueble).filter(Boolean),
           nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
         },
       });
@@ -1394,18 +1394,18 @@ export class SolicitudesController {
       const ciudadesArray = ciudades.split(',').map(c => c.trim());
 
       const formatos = await prisma.inventarios.findMany({
-        select: { tipo_de_mueble: true },
-        distinct: ['tipo_de_mueble'],
+        select: { mueble: true },
+        distinct: ['mueble'],
         where: {
           municipio: { in: ciudadesArray },
-          tipo_de_mueble: { not: null },
+          mueble: { not: null },
         },
-        orderBy: { tipo_de_mueble: 'asc' },
+        orderBy: { mueble: 'asc' },
       });
 
       res.json({
         success: true,
-        data: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+        data: formatos.map(f => f.mueble).filter(Boolean),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener formatos';
@@ -1438,10 +1438,10 @@ export class SolicitudesController {
 
       const [formatos, tipos, nse] = await Promise.all([
         prisma.inventarios.findMany({
-          select: { tipo_de_mueble: true },
-          distinct: ['tipo_de_mueble'],
-          where: { ...whereCondition, tipo_de_mueble: { not: null } },
-          orderBy: { tipo_de_mueble: 'asc' },
+          select: { mueble: true },
+          distinct: ['mueble'],
+          where: { ...whereCondition, mueble: { not: null } },
+          orderBy: { mueble: 'asc' },
         }),
         prisma.inventarios.findMany({
           select: { tradicional_digital: true },
@@ -1460,7 +1460,7 @@ export class SolicitudesController {
       res.json({
         success: true,
         data: {
-          formatos: formatos.map(f => f.tipo_de_mueble).filter(Boolean),
+          formatos: formatos.map(f => f.mueble).filter(Boolean),
           tipos: tipos.map(t => t.tradicional_digital).filter(Boolean),
           nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
         },

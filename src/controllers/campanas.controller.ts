@@ -1319,6 +1319,7 @@ export class CampanasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales
@@ -1340,18 +1341,72 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
-      const [inventario, tareas] = await Promise.all([
+      // Query para artículos IM sin reservas (impresión) que pertenecen a esta campaña
+      const imQuery = `
+        SELECT
+          CONCAT('sc_', sc.id) as rsv_ids,
+          0 as id,
+          sc.articulo as codigo_unico,
+          NULL as mueble,
+          sc.estados as estado,
+          'Impresión' as tipo_de_cara,
+          NULL as latitud,
+          NULL as longitud,
+          NULL as ancho,
+          NULL as alto,
+          sc.ciudad as plaza,
+          NULL as tradicional_digital,
+          NULL as tarifa_publica,
+          'Impresión' as estatus_reserva,
+          NULL as archivo,
+          NULL as calendario_id,
+          NULL as arte_aprobado,
+          0 as instalado,
+          CONCAT('sc_', sc.id) as grupo_completo_id,
+          sc.id AS solicitud_caras_id,
+          sc.articulo as articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo as inicio_periodo,
+          sc.fin_periodo as fin_periodo,
+          sc.formato as formato,
+          COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
+          sc.cortesia as cortesia,
+          sc.ciudad as ciudad,
+          sc.estados as estados,
+          sc.nivel_socioeconomico as nivel_socioeconomico,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          sc.caras AS caras_totales
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id = ?
+          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND rsv.id IS NULL
+      `;
+
+      const [inventario, tareas, imArticulos] = await Promise.all([
         prisma.$queryRawUnsafe(query, campanaId),
         prisma.$queryRawUnsafe(tareasQuery, campanaId),
+        prisma.$queryRawUnsafe(imQuery, campanaId),
       ]);
 
       const inventarioArr = inventario as any[];
       const tareasArr = tareas as any[];
+      const imArr = imArticulos as any[];
 
-      if (!inventarioArr.length) {
+      // Combinar inventario normal + artículos IM sin reservas
+      const combinedArr = [...inventarioArr, ...imArr];
+
+      if (!combinedArr.length) {
         res.json({ success: true, data: [] });
         return;
       }
@@ -1365,7 +1420,7 @@ export class CampanasController {
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
                   : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
                   : recepcionByReserva;
@@ -1374,14 +1429,17 @@ export class CampanasController {
         }
       }
 
-      const inventarioConEstatus = inventarioArr.map((row: any) => {
-        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
-        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+      const inventarioConEstatus = combinedArr.map((row: any) => {
+        // Los artículos IM no tienen rsv_ids numéricos, skip tarea lookup
+        const isIM = String(row.rsv_ids).startsWith('sc_');
+        const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
-        if (Number(row.instalado) === 1) {
+        if (isIM) {
+          estatus_arte = 'Impresión';
+        } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
         } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
           estatus_arte = 'Artes Recibidos';
@@ -1468,7 +1526,7 @@ export class CampanasController {
           MIN(i.plaza) as plaza,
           MIN(i.estado) as estado,
           MIN(i.municipio) as municipio,
-          MIN(i.tipo_de_mueble) as tipo_de_mueble,
+          MIN(i.mueble) as tipo_de_mueble,
           MIN(i.ancho) as ancho,
           MIN(i.alto) as alto,
           MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
@@ -1491,7 +1549,8 @@ export class CampanasController {
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
-          MAX(sc.costo) as renta
+          MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -1510,7 +1569,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, contenido, evidencia
         FROM tareas
         WHERE campania_id = ?
-          AND tipo IN ('Impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -1525,11 +1584,66 @@ export class CampanasController {
         setTimeout(() => reject(new Error('Query timeout: las consultas tardaron más de 45s')), QUERY_TIMEOUT)
       );
 
-      const [inventario, tareas, catorcenas] = await Promise.race([
+      // Query para artículos IM con reservas que ya tienen APS asignado (inventario_id = 0)
+      const imAPSQuery = `
+        SELECT
+          CONCAT('sc_', sc.id) as rsv_ids,
+          0 as id,
+          sc.articulo as codigo_unico,
+          NULL as ubicacion,
+          'Impresión' as tipo_de_cara,
+          NULL as cara,
+          NULL as mueble,
+          NULL as latitud,
+          NULL as longitud,
+          sc.ciudad as plaza,
+          sc.estados as estado,
+          NULL as municipio,
+          NULL as tipo_de_mueble,
+          NULL as ancho,
+          NULL as alto,
+          sc.nivel_socioeconomico as nivel_socioeconomico,
+          NULL as tarifa_publica,
+          NULL as tradicional_digital,
+          NULL as archivo,
+          'Impresión' as estatus_reserva,
+          NULL as calendario_id,
+          MAX(rsv.APS) as aps,
+          CONCAT('sc_', sc.id) as grupo_completo_id,
+          NULL as espacios,
+          sc.id AS solicitud_caras_id,
+          sc.articulo as articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo as inicio_periodo,
+          sc.fin_periodo as fin_periodo,
+          sc.caras AS caras_totales,
+          NULL as arte_aprobado,
+          0 as instalado,
+          sc.formato as formato,
+          COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
+          sc.cortesia as cortesia,
+          sc.ciudad as ciudad,
+          sc.estados as estados
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
+        WHERE
+          cm.id = ?
+          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+        GROUP BY sc.id
+      `;
+
+      const [inventario, tareas, catorcenas, imAPSArticulos] = await Promise.race([
         Promise.all([
           prisma.$queryRawUnsafe(query, campanaId),
           prisma.$queryRawUnsafe(tareasQuery, campanaId),
           prisma.$queryRawUnsafe(catorcenasQuery),
+          prisma.$queryRawUnsafe(imAPSQuery, campanaId),
         ]),
         timeoutPromise as never,
       ]);
@@ -1537,8 +1651,12 @@ export class CampanasController {
       const inventarioArr = inventario as any[];
       const tareasArr = tareas as any[];
       const catorcenasArr = catorcenas as any[];
+      const imAPSArr = imAPSArticulos as any[];
 
-      if (!inventarioArr.length) {
+      // Combinar inventario normal + artículos IM con APS
+      const combinedArr = [...inventarioArr, ...imAPSArr];
+
+      if (!combinedArr.length) {
         res.json({ success: true, data: [] });
         return;
       }
@@ -1552,7 +1670,7 @@ export class CampanasController {
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = tarea.tipo === 'Impresión' ? impresionByReserva
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
                   : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
                   : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
                   : recepcionByReserva;
@@ -1589,15 +1707,17 @@ export class CampanasController {
       }
 
       // Calcular estatus_arte y catorcena en código
-      const inventarioConEstatus = inventarioArr.map((row: any) => {
-        // Parsear rsv_ids (puede ser comma-separated para grupos completos)
-        const rsvIds = String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+      const inventarioConEstatus = combinedArr.map((row: any) => {
+        const isIM = String(row.rsv_ids).startsWith('sc_');
+        const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
 
         // estatus_arte
         let estatus_arte: string;
-        if (Number(row.instalado) === 1) {
+        if (isIM) {
+          estatus_arte = 'Impresión';
+        } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
         } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
           estatus_arte = 'Artes Recibidos';
@@ -1962,7 +2082,7 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           MIN(inv.estado) AS estado,
           MIN(inv.municipio) AS municipio,
-          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.mueble) AS tipo_de_mueble,
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
@@ -2160,7 +2280,7 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           MIN(inv.estado) AS estado,
           MIN(inv.municipio) AS municipio,
-          MIN(inv.tipo_de_mueble) AS tipo_de_mueble,
+          MIN(inv.mueble) AS tipo_de_mueble,
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
@@ -3641,8 +3761,8 @@ export class CampanasController {
       fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
-      // Para Revision de artes, Impresión y Programación, estatus siempre es Activo
-      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Programación') {
+      // Para Revision de artes, Impresión, Re-impresión y Programación, estatus siempre es Activo
+      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Re-impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
       }
 
@@ -3729,8 +3849,8 @@ export class CampanasController {
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
-          asignado: tipo === 'Impresión' ? (responsableNombre || null) : (asignado || responsableNombre || null),
-          id_asignado: tipo === 'Impresión' ? String(responsableId) : (id_asignado || String(responsableId)),
+          asignado: (tipo === 'Impresión') ? (responsableNombre || null) : (asignado || responsableNombre || null),
+          id_asignado: (tipo === 'Impresión') ? String(responsableId) : (id_asignado || String(responsableId)),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -3769,6 +3889,8 @@ export class CampanasController {
             tareaValue = 'Pendiente instalación';
           } else if (tipo === 'Orden de Instalación') {
             tareaValue = 'Orden de instalación';
+          } else if (tipo === 'Re-impresión') {
+            tareaValue = 'Re-impresión Solicitada';
           }
           await prisma.$executeRawUnsafe(
             `UPDATE reservas SET tarea = ? WHERE id IN (${placeholders})`,
@@ -4641,19 +4763,22 @@ export class CampanasController {
 
   async assignAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { inventarioIds, campanaId } = req.body;
+      const { inventarioIds, campanaId, solicitudCarasIds } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
 
-      if (!inventarioIds || !Array.isArray(inventarioIds) || inventarioIds.length === 0) {
+      const hasInventario = inventarioIds && Array.isArray(inventarioIds) && inventarioIds.length > 0;
+      const hasIM = solicitudCarasIds && Array.isArray(solicitudCarasIds) && solicitudCarasIds.length > 0;
+
+      if (!hasInventario && !hasIM) {
         res.status(400).json({
           success: false,
-          error: 'Se requiere un array de inventarioIds',
+          error: 'Se requiere un array de inventarioIds o solicitudCarasIds',
         });
         return;
       }
 
-      console.log('assignAPS - inventarioIds recibidos:', inventarioIds);
+      console.log('assignAPS - inventarioIds recibidos:', inventarioIds, '| solicitudCarasIds:', solicitudCarasIds);
 
       // Paso 1: Obtener el siguiente número APS
       const maxAPSResult = await prisma.$queryRaw<{ maxAPS: bigint | null }[]>`
@@ -4662,46 +4787,88 @@ export class CampanasController {
       const newAPS = Number(maxAPSResult[0]?.maxAPS || 0) + 1;
       console.log('assignAPS - nuevo APS:', newAPS);
 
-      // Paso 2: Obtener los grupo_completo_id de las reservas seleccionadas
-      const placeholders = inventarioIds.map(() => '?').join(',');
+      // Paso 2 y 3: Procesar artículos con inventario (flujo normal)
+      if (hasInventario) {
+        const placeholders = inventarioIds.map(() => '?').join(',');
 
-      const gruposQuery = `
-        SELECT DISTINCT r.grupo_completo_id
-        FROM reservas r
-        JOIN espacio_inventario ei ON r.inventario_id = ei.id
-        WHERE ei.inventario_id IN (${placeholders})
-        AND r.grupo_completo_id IS NOT NULL
-      `;
-
-      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds);
-      const grupoIds = grupos.map(g => g.grupo_completo_id);
-      console.log('assignAPS - grupos encontrados:', grupoIds);
-
-      // Paso 3: Actualizar reservas directamente seleccionadas
-      const updateDirectQuery = `
-        UPDATE reservas r
-        JOIN espacio_inventario ei ON r.inventario_id = ei.id
-        SET r.APS = ?
-        WHERE ei.inventario_id IN (${placeholders})
-        AND (r.APS IS NULL OR r.APS = 0)
-      `;
-
-      await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds);
-      console.log('assignAPS - actualizadas reservas directas');
-
-      // Paso 4: Actualizar reservas del mismo grupo_completo (si hay grupos)
-      if (grupoIds.length > 0) {
-        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
-        const updateGruposQuery = `
-          UPDATE reservas
-          SET APS = ?
-          WHERE grupo_completo_id IN (${grupoPlaceholders})
-          AND (APS IS NULL OR APS = 0)
+        const gruposQuery = `
+          SELECT DISTINCT r.grupo_completo_id
+          FROM reservas r
+          JOIN espacio_inventario ei ON r.inventario_id = ei.id
+          WHERE ei.inventario_id IN (${placeholders})
+          AND r.grupo_completo_id IS NOT NULL
         `;
 
-        await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
-        console.log('assignAPS - actualizadas reservas de grupos');
+        const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds);
+        const grupoIds = grupos.map(g => g.grupo_completo_id);
+        console.log('assignAPS - grupos encontrados:', grupoIds);
+
+        const updateDirectQuery = `
+          UPDATE reservas r
+          JOIN espacio_inventario ei ON r.inventario_id = ei.id
+          SET r.APS = ?
+          WHERE ei.inventario_id IN (${placeholders})
+          AND (r.APS IS NULL OR r.APS = 0)
+        `;
+
+        await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds);
+        console.log('assignAPS - actualizadas reservas directas');
+
+        // Actualizar reservas del mismo grupo_completo (si hay grupos)
+        if (grupoIds.length > 0) {
+          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+          const updateGruposQuery = `
+            UPDATE reservas
+            SET APS = ?
+            WHERE grupo_completo_id IN (${grupoPlaceholders})
+            AND (APS IS NULL OR APS = 0)
+          `;
+
+          await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
+          console.log('assignAPS - actualizadas reservas de grupos');
+        }
       }
+
+      // Paso 2b: Procesar artículos IM (sin inventario) — crear reservas virtuales con APS
+      if (hasIM) {
+        // Obtener info de campaña para el calendario_id y cliente_id
+        const campanaInfo = await prisma.$queryRawUnsafe<any[]>(`
+          SELECT cm.id, ct.id as cotizacion_id, s.cliente_id, s.id as solicitud_id
+          FROM campania cm
+            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            INNER JOIN propuesta p ON p.id = ct.id_propuesta
+            INNER JOIN solicitud s ON s.id = p.solicitud_id
+          WHERE cm.id = ?
+        `, parseInt(campanaId));
+
+        const clienteId = campanaInfo[0]?.cliente_id || 0;
+
+        for (const scId of solicitudCarasIds) {
+          // Verificar que no exista ya una reserva para este solicitudCaras IM
+          const existingReserva = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT id FROM reservas WHERE solicitudCaras_id = ? AND deleted_at IS NULL LIMIT 1',
+            scId
+          );
+
+          if (existingReserva.length === 0) {
+            // Crear reserva virtual para artículo IM (inventario_id = 0, sin inventario real)
+            await prisma.$executeRawUnsafe(`
+              INSERT INTO reservas (inventario_id, calendario_id, cliente_id, fecha_reserva, solicitudCaras_id, estatus, arte_aprobado, comentario_rechazo, estatus_original, fecha_testigo, imagen_testigo, instalado, APS, tarea)
+              VALUES (0, 0, ?, NOW(), ?, 'Impresión', '', '', '', '1970-01-01', '', 0, ?, '')
+            `, clienteId, scId, newAPS);
+            console.log(`assignAPS - creada reserva IM para solicitudCaras ${scId}`);
+          } else {
+            // Ya existe reserva, solo actualizar APS
+            await prisma.$executeRawUnsafe(
+              'UPDATE reservas SET APS = ? WHERE solicitudCaras_id = ? AND deleted_at IS NULL AND (APS IS NULL OR APS = 0)',
+              newAPS, scId
+            );
+            console.log(`assignAPS - actualizada reserva existente para solicitudCaras ${scId}`);
+          }
+        }
+      }
+
+      const totalItems = (hasInventario ? inventarioIds.length : 0) + (hasIM ? solicitudCarasIds.length : 0);
 
       // Paso 5: Crear notificaciones para los involucrados
       let campana = null;
@@ -4723,7 +4890,7 @@ export class CampanasController {
 
       const nombreCampana = campana?.nombre || 'Campaña';
       const tituloNotificacion = `APS #${newAPS} asignado - ${nombreCampana}`;
-      const descripcionNotificacion = `${userName} asignó APS #${newAPS} a ${inventarioIds.length} ubicación(es)`;
+      const descripcionNotificacion = `${userName} asignó APS #${newAPS} a ${totalItems} ubicación(es)`;
 
       // Recopilar involucrados
       const involucrados = new Set<number>();
@@ -4772,7 +4939,7 @@ export class CampanasController {
             ref_id: propuesta.id,
             accion: 'Asignación APS',
             fecha_hora: now,
-            detalles: `${userName} asignó APS #${newAPS} a ${inventarioIds.length} ubicación(es)`,
+            detalles: `${userName} asignó APS #${newAPS} a ${totalItems} ubicación(es)`,
           },
         });
       }
@@ -5084,7 +5251,7 @@ export class CampanasController {
       const query = `
         -- FILA PARA BONIFICACIONES
         SELECT
-          MIN(inv.municipio) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           pr.asignado AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -5131,7 +5298,7 @@ export class CampanasController {
 
         -- FILA PARA RENTA
         SELECT
-          MIN(inv.municipio) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           pr.asignado AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -5630,7 +5797,7 @@ export class CampanasController {
           i.latitud,
           i.longitud,
           i.plaza,
-          i.tipo_de_mueble as formato,
+          i.mueble as formato,
           i.ubicacion,
           i.isla,
           rsv.estatus,
