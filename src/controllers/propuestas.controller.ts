@@ -414,9 +414,9 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ?)`;
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       // Period filter — filter by cotizacion/campania dates
@@ -457,6 +457,8 @@ export class PropuestasController {
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
       `;
       const countResult = await prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params);
