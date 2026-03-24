@@ -137,7 +137,7 @@ export class CampanasController {
 
       const whereClause = conditions.join(' AND ');
 
-      // Query with JOINs to get additional data
+      // Query with LEFT JOINs — subqueries pre-aggregated for performance
       const query = `
         SELECT
           cm.*,
@@ -160,62 +160,12 @@ export class CampanasController {
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
           pr.inversion as propuesta_inversion,
-          CASE
-            WHEN EXISTS (
-              SELECT 1
-              FROM cotizacion ct2
-              INNER JOIN propuesta pr2 ON pr2.id = ct2.id_propuesta
-              INNER JOIN solicitudCaras sc2 ON sc2.idquote = ct2.id_propuesta
-              INNER JOIN reservas rsv2 ON rsv2.solicitudCaras_id = sc2.id AND rsv2.deleted_at IS NULL
-              WHERE ct2.id = cm.cotizacion_id
-                AND rsv2.APS IS NOT NULL
-                AND rsv2.APS > 0
-            )
-            THEN 1 ELSE 0
-          END AS has_aps,
-          (
-            SELECT COUNT(*)
-            FROM reservas rsv3
-            INNER JOIN solicitudCaras sc3 ON sc3.id = rsv3.solicitudCaras_id
-            INNER JOIN cotizacion ct3 ON ct3.id_propuesta = sc3.idquote
-            WHERE ct3.id = cm.cotizacion_id
-              AND rsv3.deleted_at IS NULL
-          ) AS reservas_count,
-          (
-            SELECT COUNT(*)
-            FROM reservas rsv5
-            INNER JOIN solicitudCaras sc5 ON sc5.id = rsv5.solicitudCaras_id
-            INNER JOIN cotizacion ct5 ON ct5.id_propuesta = sc5.idquote
-            INNER JOIN calendario cal5 ON cal5.id = rsv5.calendario_id
-            INNER JOIN catorcenas cat5 ON cal5.fecha_inicio >= cat5.fecha_inicio AND cal5.fecha_fin <= cat5.fecha_fin
-            WHERE ct5.id = cm.cotizacion_id
-              AND rsv5.deleted_at IS NULL
-              AND cm.fecha_fin BETWEEN cat5.fecha_inicio AND cat5.fecha_fin
-          ) AS reservas_count_ultima_cat,
-          (
-            SELECT COALESCE(SUM(sc6.caras + sc6.bonificacion), 0)
-            FROM solicitudCaras sc6
-            INNER JOIN cotizacion ct6 ON ct6.id_propuesta = sc6.idquote
-            INNER JOIN catorcenas cat6 ON sc6.inicio_periodo >= cat6.fecha_inicio AND sc6.fin_periodo <= cat6.fecha_fin
-            WHERE ct6.id = cm.cotizacion_id
-              AND cm.fecha_fin BETWEEN cat6.fecha_inicio AND cat6.fecha_fin
-          ) AS caras_ultima_cat
-          ,
-          (
-            SELECT COUNT(DISTINCT CONCAT(COALESCE(rsv4.APS, 0), '-', rsv4.solicitudCaras_id))
-            FROM reservas rsv4
-            INNER JOIN solicitudCaras sc4 ON sc4.id = rsv4.solicitudCaras_id
-            INNER JOIN cotizacion ct4 ON ct4.id_propuesta = sc4.idquote
-            WHERE ct4.id = cm.cotizacion_id
-              AND rsv4.deleted_at IS NULL
-          ) AS circuitos,
-          (
-            SELECT GROUP_CONCAT(DISTINCT CONCAT(cat7.numero_catorcena, ':', cat7.año) ORDER BY cat7.año, cat7.numero_catorcena SEPARATOR ',')
-            FROM solicitudCaras sc7
-            INNER JOIN cotizacion ct7 ON ct7.id_propuesta = sc7.idquote
-            INNER JOIN catorcenas cat7 ON sc7.inicio_periodo BETWEEN cat7.fecha_inicio AND cat7.fecha_fin
-            WHERE ct7.id = cm.cotizacion_id
-          ) AS catorcenas_con_contenido
+          COALESCE(rsv_agg.has_aps, 0) AS has_aps,
+          COALESCE(rsv_agg.reservas_count, 0) AS reservas_count,
+          COALESCE(rsv_agg.circuitos, 0) AS circuitos,
+          COALESCE(uc_agg.reservas_count_ultima_cat, 0) AS reservas_count_ultima_cat,
+          COALESCE(uc_agg.caras_ultima_cat, 0) AS caras_ultima_cat,
+          cat_content.catorcenas_con_contenido
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -223,6 +173,41 @@ export class CampanasController {
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        LEFT JOIN (
+          SELECT
+            ct_a.id AS cotizacion_id,
+            COUNT(*) AS reservas_count,
+            MAX(CASE WHEN rsv_a.APS IS NOT NULL AND rsv_a.APS > 0 THEN 1 ELSE 0 END) AS has_aps,
+            COUNT(DISTINCT rsv_a.solicitudCaras_id) AS circuitos
+          FROM reservas rsv_a
+          INNER JOIN solicitudCaras sc_a ON sc_a.id = rsv_a.solicitudCaras_id
+          INNER JOIN cotizacion ct_a ON ct_a.id_propuesta = sc_a.idquote
+          WHERE rsv_a.deleted_at IS NULL
+          GROUP BY ct_a.id
+        ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
+        LEFT JOIN (
+          SELECT
+            cm_b.id AS campania_id,
+            COUNT(rsv_b.id) AS reservas_count_ultima_cat,
+            COALESCE(SUM(sc_b.caras + sc_b.bonificacion), 0) AS caras_ultima_cat
+          FROM campania cm_b
+          INNER JOIN cotizacion ct_b ON ct_b.id = cm_b.cotizacion_id
+          INNER JOIN solicitudCaras sc_b ON sc_b.idquote = ct_b.id_propuesta
+          INNER JOIN catorcenas cat_b ON sc_b.inicio_periodo >= cat_b.fecha_inicio AND sc_b.fin_periodo <= cat_b.fecha_fin
+            AND cm_b.fecha_fin BETWEEN cat_b.fecha_inicio AND cat_b.fecha_fin
+          LEFT JOIN reservas rsv_b ON rsv_b.solicitudCaras_id = sc_b.id AND rsv_b.deleted_at IS NULL
+            AND rsv_b.calendario_id IS NOT NULL
+          GROUP BY cm_b.id
+        ) uc_agg ON uc_agg.campania_id = cm.id
+        LEFT JOIN (
+          SELECT
+            ct_c.id AS cotizacion_id,
+            GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
+          FROM solicitudCaras sc_c
+          INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
+          INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+          GROUP BY ct_c.id
+        ) cat_content ON cat_content.cotizacion_id = ct.id
         WHERE ${whereClause}
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
         LIMIT ? OFFSET ?
@@ -239,38 +224,12 @@ export class CampanasController {
       `;
 
       const offset = (page - 1) * limit;
-      const campanas = await prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset);
-      const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params);
+      // Ejecutar ambas queries en paralelo en vez de secuencial
+      const [campanas, countResult] = await Promise.all([
+        prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset),
+        prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
+      ]);
       const total = Number(countResult[0]?.total || 0);
-
-      // Recalcular circuitos por campaña en bloque para evitar inconsistencias por subqueries correlacionadas.
-      const campanaIds = (campanas || []).map((c: any) => Number(c.id)).filter((id: number) => Number.isFinite(id));
-      if (campanaIds.length > 0) {
-        const placeholders = campanaIds.map(() => '?').join(', ');
-        const circuitosPorCampana = await prisma.$queryRawUnsafe<Array<{ campania_id: number; circuitos: bigint | number | string }>>(
-          `
-            SELECT
-              cm.id AS campania_id,
-              COUNT(DISTINCT rsv.solicitudCaras_id) AS circuitos
-            FROM reservas rsv
-            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-            INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
-            INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-            WHERE rsv.deleted_at IS NULL
-              AND cm.id IN (${placeholders})
-            GROUP BY cm.id
-          `,
-          ...campanaIds
-        );
-
-        const circuitosMap = new Map<number, number>(
-          (circuitosPorCampana || []).map(row => [Number(row.campania_id), Number(row.circuitos || 0)])
-        );
-
-        campanas.forEach((campana: any) => {
-          campana.circuitos = circuitosMap.get(Number(campana.id)) ?? 0;
-        });
-      }
 
       // Remap propuesta_inversion → inversion to avoid cm.* column name collision
       // when campania table has its own inversion column (not in Prisma schema)
@@ -1168,19 +1127,19 @@ export class CampanasController {
         SELECT
           cm.status,
           COUNT(*) as cnt,
-          SUM(CASE
-            WHEN EXISTS (
-              SELECT 1 FROM cotizacion ct2
-              INNER JOIN solicitudCaras sc2 ON sc2.idquote = ct2.id_propuesta
-              INNER JOIN reservas rsv2 ON rsv2.solicitudCaras_id = sc2.id AND rsv2.deleted_at IS NULL
-              WHERE ct2.id = cm.cotizacion_id AND rsv2.APS IS NOT NULL AND rsv2.APS > 0
-            ) THEN 1 ELSE 0
-          END) as con_aps
+          SUM(CASE WHEN aps_check.cotizacion_id IS NOT NULL THEN 1 ELSE 0 END) as con_aps
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        LEFT JOIN (
+          SELECT DISTINCT ct_a.id AS cotizacion_id
+          FROM cotizacion ct_a
+          INNER JOIN solicitudCaras sc_a ON sc_a.idquote = ct_a.id_propuesta
+          INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id AND rsv_a.deleted_at IS NULL
+          WHERE rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
+        ) aps_check ON aps_check.cotizacion_id = ct.id
         WHERE ${whereClause}
         GROUP BY cm.status
       `, ...params);
@@ -6742,6 +6701,99 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getTradicionalFileSummaries:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener resumen de artes tradicionales';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+  /**
+   * Batch: obtener resumen (inversión, circuitos, bonificación, caras netas) por campaña+catorcena.
+   * 1 sola query reemplaza 720 requests individuales.
+   * POST /campanas/batch-inversiones  body: { ids: number[] }
+   */
+  async getBatchInversiones(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const campanaIds = ids.map(Number).filter(id => Number.isFinite(id));
+      if (campanaIds.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const placeholders = campanaIds.map(() => '?').join(', ');
+
+      const query = `
+        SELECT
+          cm.id AS campania_id,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COALESCE(SUM(COALESCE(sc.tarifa_publica, i.tarifa_publica, 0)), 0) AS inversion,
+          COUNT(DISTINCT COALESCE(rsv.grupo_completo_id, rsv.id)) AS circuitos,
+          SUM(CASE WHEN COALESCE(sc.tarifa_publica, 0) = 0 OR COALESCE(sc.bonificacion, 0) > 0 THEN 1 ELSE 0 END) AS bonificadas,
+          COUNT(*) AS total_caras
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE cm.id IN (${placeholders})
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+        GROUP BY cm.id, cat.numero_catorcena, cat.año
+      `;
+
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        campania_id: number;
+        numero_catorcena: number | null;
+        anio_catorcena: number | null;
+        inversion: bigint | number;
+        circuitos: bigint | number;
+        bonificadas: bigint | number;
+        total_caras: bigint | number;
+      }>>(query, ...campanaIds);
+
+      // Agrupar: { campania_id: { "catNum:catAnio": { inversion, circuitos, bonificadas, carasNetas }, total: {...} } }
+      const result: Record<number, Record<string, { inversion: number; circuitos: number; bonificadas: number; carasNetas: number }>> = {};
+      for (const row of rows) {
+        const cid = Number(row.campania_id);
+        if (!result[cid]) result[cid] = {};
+        const inv = Number(row.inversion || 0);
+        const circ = Number(row.circuitos || 0);
+        const bonif = Number(row.bonificadas || 0);
+        const total = Number(row.total_caras || 0);
+        const netas = Math.max(total - bonif, 0);
+
+        const entry = { inversion: inv, circuitos: circ, bonificadas: bonif, carasNetas: netas };
+
+        if (row.numero_catorcena != null && row.anio_catorcena != null) {
+          const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
+          if (!result[cid][catKey]) {
+            result[cid][catKey] = { inversion: 0, circuitos: 0, bonificadas: 0, carasNetas: 0 };
+          }
+          result[cid][catKey].inversion += inv;
+          result[cid][catKey].circuitos += circ;
+          result[cid][catKey].bonificadas += bonif;
+          result[cid][catKey].carasNetas += netas;
+        }
+
+        if (!result[cid]['total']) {
+          result[cid]['total'] = { inversion: 0, circuitos: 0, bonificadas: 0, carasNetas: 0 };
+        }
+        result[cid]['total'].inversion += inv;
+        result[cid]['total'].circuitos += circ;
+        result[cid]['total'].bonificadas += bonif;
+        result[cid]['total'].carasNetas += netas;
+      }
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error en getBatchInversiones:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inversiones batch';
       res.status(500).json({ success: false, error: message });
     }
   }

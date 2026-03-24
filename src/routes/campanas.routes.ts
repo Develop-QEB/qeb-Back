@@ -12,6 +12,9 @@ router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasContro
 router.get('/ordenes-montaje/cat', campanasController.getOrdenMontajeCAT.bind(campanasController));
 router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.bind(campanasController));
 
+// Batch endpoints
+router.post('/batch-inversiones', campanasController.getBatchInversiones.bind(campanasController));
+
 // Rutas dinámicas con :id
 router.get('/', campanasController.getAll.bind(campanasController));
 router.get('/:id', campanasController.getById.bind(campanasController));
