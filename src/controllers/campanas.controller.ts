@@ -870,7 +870,9 @@ export class CampanasController {
         catorcenaInicioNum,
         catorcenaInicioAnio,
         catorcenaFinNum,
-        catorcenaFinAnio
+        catorcenaFinAnio,
+        asignados,
+        id_asignado,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -937,6 +939,8 @@ export class CampanasController {
             data: {
               ...(descripcion !== undefined && { descripcion }),
               ...(notas !== undefined && { notas }),
+              ...(asignados !== undefined && { asignado: asignados }),
+              ...(id_asignado !== undefined && { id_asignado }),
             },
           });
         }
