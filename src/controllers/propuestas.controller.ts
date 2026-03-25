@@ -2780,7 +2780,13 @@ export class PropuestasController {
   async updatePropuesta(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { nombre_campania, notas, descripcion, year_inicio, catorcena_inicio, year_fin, catorcena_fin } = req.body;
+      const {
+        nombre_campania, notas, descripcion, year_inicio, catorcena_inicio, year_fin, catorcena_fin,
+        // Client fields
+        cliente_id, cuic, razon_social, unidad_negocio, marca_id, marca_nombre,
+        asesor, producto_id, producto_nombre, agencia, categoria_id, categoria_nombre,
+        card_code, salesperson_code, sap_database,
+      } = req.body;
 
       // Update propuesta fields
       const updatedPropuesta = await prisma.propuesta.update({
@@ -2788,9 +2794,40 @@ export class PropuestasController {
         data: {
           notas: notas !== undefined ? notas : undefined,
           descripcion: descripcion !== undefined ? descripcion : undefined,
+          ...(cliente_id !== undefined && { cliente_id }),
           updated_at: new Date(),
         },
       });
+
+      // Update solicitud client fields if provided
+      if (cliente_id !== undefined) {
+        await prisma.solicitud.update({
+          where: { id: updatedPropuesta.solicitud_id },
+          data: {
+            cliente_id,
+            cuic: cuic?.toString(),
+            razon_social,
+            unidad_negocio,
+            marca_id,
+            marca_nombre,
+            asesor,
+            producto_id,
+            producto_nombre,
+            agencia,
+            categoria_id,
+            categoria_nombre,
+            card_code,
+            salesperson_code,
+            sap_database,
+          },
+        });
+
+        // Also update cotizacion client reference
+        await prisma.cotizacion.updateMany({
+          where: { id_propuesta: parseInt(id) },
+          data: { clientes_id: cliente_id },
+        });
+      }
 
       // Update cotizacion nombre_campania if provided
       if (nombre_campania !== undefined) {
