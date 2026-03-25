@@ -46,7 +46,7 @@ REGLA IMPORTANTE: SOLO respondes preguntas relacionadas con la plataforma QEB, s
 - DG: Director General - nivel de autorizacion para propuestas que exceden ciertos umbrales.
 - DCM: Director Comercial - nivel adicional de autorizacion.
 - RSV ID: Identificador de reservacion de un espacio dentro de una campaña.
-- IM: Articulos de tipo Impresion (ItemCode empieza con "IM"). No requieren inventario/reservas.
+- IM: Articulos de tipo Impresion (ItemCode empieza con "IM"). Son espacios tradicionales que requieren produccion fisica (lona, vinil). No requieren inventario/reservas en el sistema. Cuando un articulo es de tipo IM, en la seccion Formatos/Caras del modal de Asignar Inventario aparece la etiqueta "Impresion" en la columna de Caras, indicando el numero de impresiones solicitadas para ese espacio. Si el articulo NO es de impresion, esa etiqueta no aparece. Mas adelante en el flujo, los articulos de impresion permiten generar ordenes de compra desde el Gestor de Artes. Este proceso lo realizan los analistas, quienes crean y dan seguimiento a dichas ordenes para la produccion e instalacion fisica del material publicitario.
 - CT: Articulos de tipo Cortesia. Renta deshabilitada, solo bonificacion.
 - BF/CF: Articulos de Bonificacion/Cortesia que no requieren tarifa publica.
 
