@@ -52,6 +52,14 @@ export class DashboardController {
 
       const inventarioIds = inventariosBase.map((i) => i.id);
 
+      // Mapear espacio_inventario -> inventario
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: { in: inventarioIds } },
+        select: { id: true, inventario_id: true },
+      });
+      const espacioIds = espacios.map((e) => e.id);
+      const espacioToInventario = new Map(espacios.map((e) => [e.id, e.inventario_id]));
+
       // Construir filtro de fechas para reservas (catorcena o fechas manuales)
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
@@ -72,7 +80,7 @@ export class DashboardController {
       // Obtener reservas activas para el periodo
       const reservasWhere: Record<string, unknown> = {
         deleted_at: null,
-        inventario_id: { in: inventarioIds },
+        inventario_id: { in: espacioIds },
       };
 
       // Si hay filtro de fecha, buscar reservas en calendarios que coincidan
@@ -98,23 +106,24 @@ export class DashboardController {
         },
       });
 
-      // Mapear estatus de reserva por inventario (guardar estatus original)
+      // Mapear estatus de reserva por inventario (via espacio_inventario)
       const inventarioEstatus: Record<number, string> = {};
+      const prioridad: Record<string, number> = {
+        'Vendido': 5,
+        'Vendido bonificado': 4,
+        'Con Arte': 3,
+        'Reservado': 2,
+        'Bloqueado': 1,
+      };
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
-        const current = inventarioEstatus[r.inventario_id];
-        const prioridad: Record<string, number> = {
-          'Vendido': 5,
-          'Vendido bonificado': 4,
-          'Con Arte': 3,
-          'Reservado': 2,
-          'Bloqueado': 1,
-        };
+        const invId = espacioToInventario.get(r.inventario_id);
+        if (!invId) return;
+        const current = inventarioEstatus[invId];
         const currentPrioridad = current ? (prioridad[current] || 0) : 0;
         const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
-          inventarioEstatus[r.inventario_id] = r.estatus;
+          inventarioEstatus[invId] = r.estatus;
         }
       });
 
@@ -265,6 +274,14 @@ export class DashboardController {
 
       const inventarioIds = inventariosBase.map((i) => i.id);
 
+      // Mapear espacio_inventario -> inventario
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: { in: inventarioIds } },
+        select: { id: true, inventario_id: true },
+      });
+      const espacioIds = espacios.map((e) => e.id);
+      const espacioToInventario = new Map(espacios.map((e) => [e.id, e.inventario_id]));
+
       // Filtro de fechas
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
@@ -284,7 +301,7 @@ export class DashboardController {
 
       const reservasWhere: Record<string, unknown> = {
         deleted_at: null,
-        inventario_id: { in: inventarioIds },
+        inventario_id: { in: espacioIds },
       };
 
       if (fechaInicio && fechaFin) {
@@ -309,35 +326,33 @@ export class DashboardController {
       });
 
       const inventarioEstatus: Record<number, string> = {};
+      const prioridadMap: Record<string, number> = {
+        'Vendido': 5,
+        'Vendido bonificado': 4,
+        'Con Arte': 3,
+        'Reservado': 2,
+        'Bloqueado': 1,
+      };
       reservas.forEach((r) => {
-        // Priorizar: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
-        const current = inventarioEstatus[r.inventario_id];
-        const prioridad: Record<string, number> = {
-          'Vendido': 5,
-          'Vendido bonificado': 4,
-          'Con Arte': 3,
-          'Reservado': 2,
-          'Bloqueado': 1,
-        };
-        const currentPrioridad = current ? (prioridad[current] || 0) : 0;
-        const newPrioridad = prioridad[r.estatus] || 0;
+        const invId = espacioToInventario.get(r.inventario_id);
+        if (!invId) return;
+        const current = inventarioEstatus[invId];
+        const currentPrioridad = current ? (prioridadMap[current] || 0) : 0;
+        const newPrioridad = prioridadMap[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
-          inventarioEstatus[r.inventario_id] = r.estatus;
+          inventarioEstatus[invId] = r.estatus;
         }
       });
 
       // Filtrar inventarios por estatus seleccionado
-      // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
       const inventariosFiltrados = inventariosBase.filter((inv) => {
         const est = inventarioEstatus[inv.id] || 'Disponible';
 
         if (estatus_filtro === 'Reservado') {
-          // Reservado muestra todo lo ocupado
-          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte' || est === 'Reservado';
+          return est === 'Reservado' || est === 'Bonificado';
         } else if (estatus_filtro === 'Vendido') {
-          // Vendido solo muestra Vendido
-          return est === 'Vendido';
+          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte';
         }
         return est === estatus_filtro;
       });
@@ -836,12 +851,11 @@ export class DashboardController {
         .filter((inv) => {
           if (!estatusFiltro) return true;
 
-          // Reservado incluye: Vendido, Vendido bonificado, Con Arte, Reservado
+          // Reservado = solo estatus Reservado o Bonificado (propuestas sin pase a ventas)
           if (estatusFiltro === 'Reservado') {
-            return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' ||
-                   inv.estatus === 'Con Arte' || inv.estatus === 'Reservado';
+            return inv.estatus === 'Reservado' || inv.estatus === 'Bonificado';
           } else if (estatusFiltro === 'Vendido') {
-            return inv.estatus === 'Vendido';
+            return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' || inv.estatus === 'Con Arte';
           }
           return inv.estatus === estatusFiltro;
         });
