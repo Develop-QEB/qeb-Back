@@ -380,6 +380,7 @@ export class InventariosController {
         fecha_fin,
         solicitudCaraId,
         excluir_categoria,
+        excluir_distancia_km,
       } = req.query;
 
       console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
@@ -681,10 +682,11 @@ export class InventariosController {
         `;
 
         if (categoriaCoordenadas.length > 0) {
+          const distanciaKm = excluir_distancia_km ? parseFloat(excluir_distancia_km as string) : 1;
           resultados = disponibles.filter(item => {
             if (item.latitud == null || item.longitud == null) return true;
             for (const coord of categoriaCoordenadas) {
-              if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < 1) {
+              if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < distanciaKm) {
                 return false;
               }
             }

@@ -729,6 +729,24 @@ export class PropuestasController {
         },
       });
 
+      // Si se descarta, liberar todas las reservas (soft delete)
+      if (status === 'Descartada') {
+        const caras = await prisma.solicitudCaras.findMany({
+          where: { idquote: String(propuestaId) },
+        });
+        const caraIds = caras.map(c => c.id);
+        if (caraIds.length > 0) {
+          const liberadas = await prisma.reservas.updateMany({
+            where: {
+              solicitudCaras_id: { in: caraIds },
+              deleted_at: null,
+            },
+            data: { deleted_at: new Date() },
+          });
+          console.log(`[Descartada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
+        }
+      }
+
       // Obtener datos relacionados para la notificación
       const cotizacion = await prisma.cotizacion.findFirst({
         where: { id_propuesta: propuestaId },
