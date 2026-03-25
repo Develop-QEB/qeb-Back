@@ -25,6 +25,7 @@ export interface CaraData {
   bonificacion?: number | null;
   costo: number;
   tarifa_publica?: number;
+  articulo?: string | null;
 }
 
 export interface EstadoAutorizacionResult {
@@ -164,6 +165,14 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     costo: cara.costo,
     tarifa_publica: cara.tarifa_publica
   });
+
+  // Artículos de impresión (IM) siempre aprobados
+  if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
+    return {
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'aprobado',
+    };
+  }
 
   // Calcular tarifa efectiva y total caras
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
