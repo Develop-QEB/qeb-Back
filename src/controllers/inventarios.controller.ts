@@ -672,7 +672,7 @@ export class InventariosController {
           JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
           JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
           JOIN solicitud s ON s.id = p.solicitud_id
-          JOIN cliente c ON c.id = s.id_cliente
+          JOIN cliente c ON c.id = s.cliente_id
           WHERE c.T2_U_Categoria = ${excluir_categoria as string}
           AND r.deleted_at IS NULL
           AND cal.deleted_at IS NULL
