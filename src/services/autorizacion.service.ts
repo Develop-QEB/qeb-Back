@@ -425,22 +425,59 @@ export async function crearTareasAutorizacion(
     pendientesDcm
   });
 
-  // Obtener usuarios DG y DCM
-  const usuariosDg = await prisma.usuario.findMany({
-    where: {
-      puesto: { contains: 'DG' },
-      deleted_at: null
-    },
-    select: { id: true, nombre: true, correo_electronico: true }
+  // Obtener los equipos del creador/responsable
+  const equiposDelCreador = await prisma.usuario_equipo.findMany({
+    where: { usuario_id: responsableId },
+    select: { equipo_id: true }
   });
+  const equipoIds = equiposDelCreador.map(e => e.equipo_id);
 
-  const usuariosDcm = await prisma.usuario.findMany({
-    where: {
-      puesto: { contains: 'DCM' },
-      deleted_at: null
-    },
-    select: { id: true, nombre: true, correo_electronico: true }
-  });
+  console.log('[crearTareasAutorizacion] Equipos del creador:', equipoIds);
+
+  // Obtener usuarios DG y DCM del mismo equipo que el creador
+  let usuariosDg: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+  let usuariosDcm: { id: number; nombre: string; correo_electronico: string | null }[] = [];
+
+  if (equipoIds.length > 0) {
+    usuariosDg = await prisma.usuario.findMany({
+      where: {
+        puesto: { contains: 'DG' },
+        deleted_at: null,
+        equipos: {
+          some: { equipo_id: { in: equipoIds } }
+        }
+      },
+      select: { id: true, nombre: true, correo_electronico: true }
+    });
+
+    usuariosDcm = await prisma.usuario.findMany({
+      where: {
+        puesto: { contains: 'DCM' },
+        deleted_at: null,
+        equipos: {
+          some: { equipo_id: { in: equipoIds } }
+        }
+      },
+      select: { id: true, nombre: true, correo_electronico: true }
+    });
+  }
+
+  // Fallback: si no se encontraron usuarios en el equipo, buscar todos los DG/DCM
+  if (usuariosDg.length === 0) {
+    usuariosDg = await prisma.usuario.findMany({
+      where: { puesto: { contains: 'DG' }, deleted_at: null },
+      select: { id: true, nombre: true, correo_electronico: true }
+    });
+    console.log('[crearTareasAutorizacion] Fallback DG: no se encontraron en el equipo, usando todos');
+  }
+
+  if (usuariosDcm.length === 0) {
+    usuariosDcm = await prisma.usuario.findMany({
+      where: { puesto: { contains: 'DCM' }, deleted_at: null },
+      select: { id: true, nombre: true, correo_electronico: true }
+    });
+    console.log('[crearTareasAutorizacion] Fallback DCM: no se encontraron en el equipo, usando todos');
+  }
 
   console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
     usuariosDg,
