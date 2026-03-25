@@ -82,7 +82,9 @@ function normalizarPlaza(ciudad: string | null | undefined, estado: string | nul
     return 'MONTERREY';
   }
 
-  return 'OTRAS';
+  // Plazas no principales: usar el nombre real (no "OTRAS")
+  // Si no existe criterio para esta plaza, se aprueba automáticamente
+  return ciudadNorm || 'OTRAS';
 }
 
 /**
@@ -230,7 +232,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     plazaNormalizada
   });
 
-  // Buscar criterio: primero plaza específica, luego fallback a "TODAS"
+  // Buscar criterio: solo plaza específica (si no hay match exacto, se aprueba automáticamente)
   let criterio = await prisma.criterios_autorizacion.findFirst({
     where: {
       formato: formatoNormalizado,
@@ -240,19 +242,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     }
   });
 
-  if (!criterio) {
-    criterio = await prisma.criterios_autorizacion.findFirst({
-      where: {
-        formato: formatoNormalizado,
-        tipo: tipoNormalizado,
-        plaza: 'TODAS',
-        activo: true
-      }
-    });
-  }
-
-  // Fallback: si no encontró criterio específico, intentar con formato genérico
-  // Ej: "Bajo Puente Gran Terraza" no encontrado → buscar "Bajo Puente"
+  // Fallback: si no encontró criterio específico, intentar con formato genérico y misma plaza
   if (!criterio && formatoNormalizado) {
     const formatoGenerico = getFormatoGenerico(formatoNormalizado);
     if (formatoGenerico) {
@@ -265,16 +255,6 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
           activo: true
         }
       });
-      if (!criterio) {
-        criterio = await prisma.criterios_autorizacion.findFirst({
-          where: {
-            formato: formatoGenerico,
-            tipo: tipoNormalizado,
-            plaza: 'TODAS',
-            activo: true
-          }
-        });
-      }
     }
   }
 
