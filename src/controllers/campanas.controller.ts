@@ -4909,12 +4909,13 @@ export class CampanasController {
 
   async assignAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { inventarioIds, campanaId, solicitudCarasIds } = req.body;
+      const { inventarioIds, campanaId, solicitudCarasIds, rsvIds } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
 
       const hasInventario = inventarioIds && Array.isArray(inventarioIds) && inventarioIds.length > 0;
       const hasIM = solicitudCarasIds && Array.isArray(solicitudCarasIds) && solicitudCarasIds.length > 0;
+      const hasRsvIds = rsvIds && Array.isArray(rsvIds) && rsvIds.length > 0;
 
       if (!hasInventario && !hasIM) {
         res.status(400).json({
@@ -4935,43 +4936,83 @@ export class CampanasController {
 
       // Paso 2 y 3: Procesar artículos con inventario (flujo normal)
       if (hasInventario) {
-        const placeholders = inventarioIds.map(() => '?').join(',');
+        if (hasRsvIds) {
+          // Usar rsvIds directos para actualizar solo las reservas seleccionadas
+          const rsvPlaceholders = rsvIds.map(() => '?').join(',');
 
-        const gruposQuery = `
-          SELECT DISTINCT r.grupo_completo_id
-          FROM reservas r
-          JOIN espacio_inventario ei ON r.inventario_id = ei.id
-          WHERE ei.inventario_id IN (${placeholders})
-          AND r.grupo_completo_id IS NOT NULL
-        `;
+          // Obtener grupo_completo_id de las reservas seleccionadas
+          const gruposQuery = `
+            SELECT DISTINCT grupo_completo_id
+            FROM reservas
+            WHERE id IN (${rsvPlaceholders})
+            AND grupo_completo_id IS NOT NULL
+          `;
+          const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...rsvIds);
+          const grupoIds = grupos.map(g => g.grupo_completo_id);
+          console.log('assignAPS - grupos encontrados:', grupoIds);
 
-        const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds);
-        const grupoIds = grupos.map(g => g.grupo_completo_id);
-        console.log('assignAPS - grupos encontrados:', grupoIds);
-
-        const updateDirectQuery = `
-          UPDATE reservas r
-          JOIN espacio_inventario ei ON r.inventario_id = ei.id
-          SET r.APS = ?
-          WHERE ei.inventario_id IN (${placeholders})
-          AND (r.APS IS NULL OR r.APS = 0)
-        `;
-
-        await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds);
-        console.log('assignAPS - actualizadas reservas directas');
-
-        // Actualizar reservas del mismo grupo_completo (si hay grupos)
-        if (grupoIds.length > 0) {
-          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
-          const updateGruposQuery = `
+          // Actualizar solo las reservas seleccionadas
+          const updateDirectQuery = `
             UPDATE reservas
             SET APS = ?
-            WHERE grupo_completo_id IN (${grupoPlaceholders})
+            WHERE id IN (${rsvPlaceholders})
             AND (APS IS NULL OR APS = 0)
           `;
+          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...rsvIds);
+          console.log('assignAPS - actualizadas reservas directas por rsvIds');
 
-          await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
-          console.log('assignAPS - actualizadas reservas de grupos');
+          // Actualizar reservas del mismo grupo_completo (si hay grupos)
+          if (grupoIds.length > 0) {
+            const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+            const updateGruposQuery = `
+              UPDATE reservas
+              SET APS = ?
+              WHERE grupo_completo_id IN (${grupoPlaceholders})
+              AND (APS IS NULL OR APS = 0)
+            `;
+            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
+            console.log('assignAPS - actualizadas reservas de grupos');
+          }
+        } else {
+          // Fallback: comportamiento original por inventarioIds (compatibilidad)
+          const placeholders = inventarioIds.map(() => '?').join(',');
+
+          const gruposQuery = `
+            SELECT DISTINCT r.grupo_completo_id
+            FROM reservas r
+            JOIN espacio_inventario ei ON r.inventario_id = ei.id
+            WHERE ei.inventario_id IN (${placeholders})
+            AND r.grupo_completo_id IS NOT NULL
+          `;
+
+          const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds);
+          const grupoIds = grupos.map(g => g.grupo_completo_id);
+          console.log('assignAPS - grupos encontrados (fallback):', grupoIds);
+
+          const updateDirectQuery = `
+            UPDATE reservas r
+            JOIN espacio_inventario ei ON r.inventario_id = ei.id
+            SET r.APS = ?
+            WHERE ei.inventario_id IN (${placeholders})
+            AND (r.APS IS NULL OR r.APS = 0)
+          `;
+
+          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds);
+          console.log('assignAPS - actualizadas reservas directas (fallback)');
+
+          // Actualizar reservas del mismo grupo_completo (si hay grupos)
+          if (grupoIds.length > 0) {
+            const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+            const updateGruposQuery = `
+              UPDATE reservas
+              SET APS = ?
+              WHERE grupo_completo_id IN (${grupoPlaceholders})
+              AND (APS IS NULL OR APS = 0)
+            `;
+
+            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
+            console.log('assignAPS - actualizadas reservas de grupos (fallback)');
+          }
         }
       }
 
