@@ -7,8 +7,8 @@ import { initializeSocket } from './config/socket';
 if (process.env.NODE_ENV !== 'production') {
   console.warn(`[Config] NODE_ENV=${process.env.NODE_ENV || 'undefined'}; forcing production mode`);
   process.env.NODE_ENV = 'production';
-}
-
+} 
+ 
 const PORT = process.env.PORT || 3000;
 
 // Crear servidor HTTP para Socket.io

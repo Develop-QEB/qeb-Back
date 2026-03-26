@@ -7,7 +7,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 
@@ -443,12 +443,23 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        whereConditions += ` AND (
-          FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-          OR sl.usuario_id = ?
-          OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-        )`;
-        params.push(String(userId), userId, String(userId));
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id IN (${placeholders})
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
+          params.push(String(userId), ...teamIds, String(userId));
+        } else {
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id = ?
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
+          params.push(String(userId), userId, String(userId));
+        }
       }
 
       // Get total count
@@ -1116,13 +1127,25 @@ export class PropuestasController {
       let visibilityClause = '';
       const statsParams: (string | number)[] = [];
       if (userId && !hasFullVisibility(userRol)) {
-        visibilityClause = `
-          AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id = ?
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-        statsParams.push(String(userId), userId, String(userId));
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          visibilityClause = `
+            AND (
+              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+              OR sl.usuario_id IN (${placeholders})
+              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+            )`;
+          statsParams.push(String(userId), ...teamIds, String(userId));
+        } else {
+          visibilityClause = `
+            AND (
+              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+              OR sl.usuario_id = ?
+              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+            )`;
+          statsParams.push(String(userId), userId, String(userId));
+        }
       }
 
       // Count propuestas grouped by status, filtering only those with solicitud.status = 'Atendida'

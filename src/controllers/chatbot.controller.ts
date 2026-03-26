@@ -637,6 +637,42 @@ Historial QEBooh: Log de conversaciones del chatbot. Solo lectura. Muestra sesio
 - La vista Kanban de notificaciones permite arrastrar tareas entre columnas de estado.
 - Las notas personales en Notificaciones son privadas y solo las ves tu.
 
+=== SISTEMA DE TICKETS DE SOPORTE ===
+
+El sistema de tickets permite a todos los usuarios reportar problemas, solicitar ayuda o enviar sugerencias al equipo de soporte tecnico.
+
+COMO ACCEDER:
+- Haz clic en el boton de ayuda (icono de signo de interrogacion) en la parte superior derecha de cualquier pantalla.
+- Se abrira el modal de Ayuda con los tutoriales disponibles.
+- En la parte inferior del panel izquierdo del modal, encontraras el boton "Mis Tickets de Soporte".
+- Haz clic en ese boton para ir a la pagina de tickets (/tickets).
+
+COMO CREAR UN TICKET:
+1. En la pagina de tickets, haz clic en el boton morado "Nuevo Ticket".
+2. Completa el formulario con los siguientes campos:
+   - Titulo: Un titulo breve y descriptivo que resuma tu problema o solicitud.
+   - Descripcion: Detalla la situacion: que sucedia, que esperabas y que ocurrio realmente. Se lo mas claro y especifico posible.
+   - Prioridad: Selecciona el nivel de urgencia segun el impacto:
+     * Baja: No urgente, puede esperar.
+     * Normal: Problema comun sin bloqueo.
+     * Alta: Afecta tu trabajo directamente.
+     * Urgente: Bloquea operaciones criticas (usar solo cuando realmente aplique).
+   - Captura de pantalla (opcional): Adjunta una imagen que muestre el error o situacion. Maximo 5MB.
+3. Haz clic en "Enviar Ticket".
+
+DAR SEGUIMIENTO A UN TICKET:
+- En la pagina de tickets veras la lista de todos tus tickets creados con su estado actual.
+- Los estados posibles son: Nuevo, En Progreso, Resuelto y Cerrado.
+- Haz clic en cualquier ticket para ver su detalle completo, incluyendo la respuesta del equipo de soporte.
+- El equipo de atencion recibira tu ticket y se pondra en contacto contigo a traves del sistema o por correo electronico.
+
+CONSEJOS PARA TICKETS:
+- Se claro y especifico en la descripcion. Incluye que estabas haciendo y que esperabas que sucediera.
+- Adjunta capturas de pantalla siempre que sea posible, ayudan enormemente.
+- Clasifica bien la prioridad. Usa "Urgente" solo para problemas que realmente bloquean tu trabajo.
+- Revisa si ya tienes un ticket abierto sobre el mismo tema antes de crear uno nuevo para evitar duplicados.
+- Revisa periodicamente tus tickets y tu correo para ver las respuestas del equipo.
+
 NAVEGACION: Al final de cada respuesta, agrega sugerencias de navegacion usando este formato exacto (una por linea):
 [NAV:ruta|texto del boton]
 
@@ -654,11 +690,13 @@ Rutas disponibles:
 - /correos - Correos
 - /perfil - Perfil
 - /admin/usuarios - Administrar usuarios
+- /tickets - Mis Tickets de Soporte
 
 Ejemplos:
 - Si preguntan "como edito la campaña 19" -> [NAV:/campanas/detail/19|Ir a Campaña 19]
 - Si preguntan "donde veo las propuestas" -> [NAV:/propuestas|Ir a Propuestas]
 - Si preguntan "como creo una solicitud" -> [NAV:/solicitudes|Ir a Solicitudes]
+- Si preguntan "como reporto un problema" o "tengo un error" -> [NAV:/tickets|Ir a Mis Tickets]
 - Si mencionan varios modulos, agrega multiples NAV
 - Si la pregunta es muy general y no aplica navegacion, no agregues NAV
 

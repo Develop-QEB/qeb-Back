@@ -4,7 +4,7 @@ import { AuthRequest } from '../types';
 import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
 
 export class DashboardController {
-  // Obtener estadisticas del dashboard con filtros
+  // Obtener estadisticas del dashboard con filtros (cached 10min)
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const {
@@ -17,6 +17,12 @@ export class DashboardController {
         fecha_fin,
       } = req.query;
 
+      // Cache key based on filters
+      const cacheKey = CACHE_KEYS.DASHBOARD_STATS(
+        JSON.stringify({ estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin })
+      );
+
+      const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
@@ -128,8 +134,6 @@ export class DashboardController {
       });
 
       // Calcular KPIs
-      // Reservado = Vendido + Vendido bonificado + Con Arte (todo lo ocupado)
-      // Vendido = solo estatus "Vendido"
       const total = inventariosBase.length;
       let disponibles = 0;
       let reservados = 0;
@@ -159,7 +163,6 @@ export class DashboardController {
         inventariosBase.forEach((inv) => {
           const estatusInv = inventarioEstatus[inv.id] || 'Disponible';
 
-          // Si hay filtro de estatus, solo contar ese
           if (estatusFiltro && estatusInv !== estatusFiltro) {
             return;
           }
@@ -175,7 +178,6 @@ export class DashboardController {
           .sort((a, b) => b.cantidad - a.cantidad);
       };
 
-      // Calcular distribucion por tradicional_digital
       const calcularDistribucionTipo = (estatusFiltro?: string): Array<{ nombre: string; cantidad: number }> => {
         const conteo: Record<string, number> = {};
 
@@ -197,9 +199,7 @@ export class DashboardController {
           .sort((a, b) => b.cantidad - a.cantidad);
       };
 
-      res.json({
-        success: true,
-        data: {
+      return {
           kpis: {
             total,
             disponibles,
@@ -214,8 +214,10 @@ export class DashboardController {
             porPlaza: calcularDistribucion('plaza'),
             porNSE: calcularDistribucion('nivel_socioeconomico'),
           },
-        },
-      });
+      };
+      }, CACHE_TTL.DASHBOARD_STATS);
+
+      res.json({ success: true, data });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error al obtener estadisticas';
@@ -487,55 +489,56 @@ export class DashboardController {
     }
   }
 
-  // Widget: Actividad reciente
+  // Widget: Actividad reciente (cached 5min)
   async getRecentActivity(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const [ultimasSolicitudes, ultimasReservas, ultimasCampanas] =
-        await Promise.all([
-          prisma.solicitud.findMany({
-            take: 5,
-            orderBy: { fecha: 'desc' },
-            where: { deleted_at: null },
-            select: {
-              id: true,
-              descripcion: true,
-              status: true,
-              fecha: true,
-              razon_social: true,
-            },
-          }),
-          prisma.reservas.findMany({
-            take: 5,
-            orderBy: { fecha_reserva: 'desc' },
-            where: { deleted_at: null },
-            select: {
-              id: true,
-              estatus: true,
-              fecha_reserva: true,
-              inventario_id: true,
-            },
-          }),
-          prisma.campania.findMany({
-            take: 5,
-            orderBy: { fecha_inicio: 'desc' },
-            select: {
-              id: true,
-              nombre: true,
-              status: true,
-              fecha_inicio: true,
-              fecha_fin: true,
-            },
-          }),
-        ]);
+      const data = await cache.getOrSet('dashboard:recent-activity', async () => {
+        const [ultimasSolicitudes, ultimasReservas, ultimasCampanas] =
+          await Promise.all([
+            prisma.solicitud.findMany({
+              take: 5,
+              orderBy: { fecha: 'desc' },
+              where: { deleted_at: null },
+              select: {
+                id: true,
+                descripcion: true,
+                status: true,
+                fecha: true,
+                razon_social: true,
+              },
+            }),
+            prisma.reservas.findMany({
+              take: 5,
+              orderBy: { fecha_reserva: 'desc' },
+              where: { deleted_at: null },
+              select: {
+                id: true,
+                estatus: true,
+                fecha_reserva: true,
+                inventario_id: true,
+              },
+            }),
+            prisma.campania.findMany({
+              take: 5,
+              orderBy: { fecha_inicio: 'desc' },
+              select: {
+                id: true,
+                nombre: true,
+                status: true,
+                fecha_inicio: true,
+                fecha_fin: true,
+              },
+            }),
+          ]);
 
-      res.json({
-        success: true,
-        data: {
+        return {
           solicitudes: ultimasSolicitudes,
           reservas: ultimasReservas,
           campanas: ultimasCampanas,
-        },
-      });
+        };
+      }, CACHE_TTL.DASHBOARD_STATS);
+
+      res.json({ success: true, data });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error al obtener actividad';
@@ -586,40 +589,40 @@ export class DashboardController {
     }
   }
 
-  // Widget: Top clientes por reservas
+  // Widget: Top clientes por reservas (cached 10min)
   async getTopClientes(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const topClientes = await prisma.$queryRaw<
-        Array<{ cliente_id: number; total: bigint }>
-      >`
-        SELECT cliente_id, COUNT(*) as total
-        FROM reservas
-        WHERE deleted_at IS NULL
-        GROUP BY cliente_id
-        ORDER BY total DESC
-        LIMIT 5
-      `;
+      const data = await cache.getOrSet('dashboard:top-clientes', async () => {
+        const topClientes = await prisma.$queryRaw<
+          Array<{ cliente_id: number; total: bigint }>
+        >`
+          SELECT cliente_id, COUNT(*) as total
+          FROM reservas
+          WHERE deleted_at IS NULL
+          GROUP BY cliente_id
+          ORDER BY total DESC
+          LIMIT 5
+        `;
 
-      // Obtener nombres de clientes
-      const clienteIds = topClientes.map((c) => c.cliente_id);
-      const clientes = await prisma.cliente.findMany({
-        where: { id: { in: clienteIds } },
-        select: { id: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
-      });
+        const clienteIds = topClientes.map((c) => c.cliente_id);
+        const clientes = await prisma.cliente.findMany({
+          where: { id: { in: clienteIds } },
+          select: { id: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+        });
 
-      const clienteMap = new Map(clientes.map((c) => [c.id, c]));
+        const clienteMap = new Map(clientes.map((c) => [c.id, c]));
 
-      res.json({
-        success: true,
-        data: topClientes.map((tc) => {
+        return topClientes.map((tc) => {
           const cliente = clienteMap.get(tc.cliente_id);
           return {
             id: tc.cliente_id,
             nombre: cliente?.T0_U_Cliente || cliente?.T0_U_RazonSocial || 'Sin nombre',
             totalReservas: Number(tc.total),
           };
-        }),
-      });
+        });
+      }, CACHE_TTL.DASHBOARD_STATS);
+
+      res.json({ success: true, data });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error al obtener top clientes';

@@ -139,18 +139,18 @@ export const cache = new MemoryCache();
 // TTLs predefinidos para diferentes tipos de datos
 export const CACHE_TTL = {
   // Datos que cambian muy poco (filtros, catálogos)
-  FILTER_OPTIONS: 30 * 60 * 1000, // 30 minutos
-  CATORCENAS: 60 * 60 * 1000, // 1 hora
+  FILTER_OPTIONS: 60 * 60 * 1000, // 1 hora — estados, plazas, formatos casi nunca cambian
+  CATORCENAS: 2 * 60 * 60 * 1000, // 2 horas
 
   // Datos que cambian moderadamente
-  DASHBOARD_STATS: 5 * 60 * 1000, // 5 minutos
-  INVENTORY_COUNTS: 5 * 60 * 1000, // 5 minutos
+  DASHBOARD_STATS: 10 * 60 * 1000, // 10 minutos — reduce DB hits con 150 usuarios
+  INVENTORY_COUNTS: 10 * 60 * 1000, // 10 minutos
 
   // Datos que cambian frecuentemente
-  NOTIFICATIONS_STATS: 2 * 60 * 1000, // 2 minutos
+  NOTIFICATIONS_STATS: 5 * 60 * 1000, // 5 minutos
 
   // Cache corto para datos volátiles
-  SHORT: 1 * 60 * 1000, // 1 minuto
+  SHORT: 2 * 60 * 1000, // 2 minutos
 };
 
 // Claves de cache predefinidas
