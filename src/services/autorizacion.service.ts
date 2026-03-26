@@ -25,6 +25,7 @@ export interface CaraData {
   bonificacion?: number | null;
   costo: number;
   tarifa_publica?: number;
+  articulo?: string | null;
 }
 
 export interface EstadoAutorizacionResult {
@@ -82,7 +83,9 @@ function normalizarPlaza(ciudad: string | null | undefined, estado: string | nul
     return 'MONTERREY';
   }
 
-  return 'OTRAS';
+  // Plazas no principales: usar el nombre real (no "OTRAS")
+  // Si no existe criterio para esta plaza, se aprueba automáticamente
+  return ciudadNorm || 'OTRAS';
 }
 
 /**
@@ -163,6 +166,14 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     tarifa_publica: cara.tarifa_publica
   });
 
+  // Artículos de impresión (IM) siempre aprobados
+  if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
+    return {
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'aprobado',
+    };
+  }
+
   // Calcular tarifa efectiva y total caras
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
@@ -230,7 +241,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     plazaNormalizada
   });
 
-  // Buscar criterio: primero plaza específica, luego fallback a "TODAS"
+  // Buscar criterio: solo plaza específica (si no hay match exacto, se aprueba automáticamente)
   let criterio = await prisma.criterios_autorizacion.findFirst({
     where: {
       formato: formatoNormalizado,
@@ -240,19 +251,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     }
   });
 
-  if (!criterio) {
-    criterio = await prisma.criterios_autorizacion.findFirst({
-      where: {
-        formato: formatoNormalizado,
-        tipo: tipoNormalizado,
-        plaza: 'TODAS',
-        activo: true
-      }
-    });
-  }
-
-  // Fallback: si no encontró criterio específico, intentar con formato genérico
-  // Ej: "Bajo Puente Gran Terraza" no encontrado → buscar "Bajo Puente"
+  // Fallback: si no encontró criterio específico, intentar con formato genérico y misma plaza
   if (!criterio && formatoNormalizado) {
     const formatoGenerico = getFormatoGenerico(formatoNormalizado);
     if (formatoGenerico) {
@@ -265,16 +264,6 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
           activo: true
         }
       });
-      if (!criterio) {
-        criterio = await prisma.criterios_autorizacion.findFirst({
-          where: {
-            formato: formatoGenerico,
-            tipo: tipoNormalizado,
-            plaza: 'TODAS',
-            activo: true
-          }
-        });
-      }
     }
   }
 
@@ -425,59 +414,35 @@ export async function crearTareasAutorizacion(
     pendientesDcm
   });
 
-  // Obtener los equipos del creador/responsable
-  const equiposDelCreador = await prisma.usuario_equipo.findMany({
-    where: { usuario_id: responsableId },
-    select: { equipo_id: true }
+  // Obtener usuarios DG y DCM (buscar por puesto, role o area con múltiples variantes)
+  const usuariosDg = await prisma.usuario.findMany({
+    where: {
+      deleted_at: null,
+      OR: [
+        { puesto: { contains: 'DG' } },
+        { puesto: { contains: 'Director General' } },
+        { user_role: { contains: 'Director General' } },
+        { area: { contains: 'Dirección General' } },
+        { area: { contains: 'Direccion General' } },
+      ],
+    },
+    select: { id: true, nombre: true, correo_electronico: true }
   });
-  const equipoIds = equiposDelCreador.map(e => e.equipo_id);
 
-  console.log('[crearTareasAutorizacion] Equipos del creador:', equipoIds);
-
-  // Obtener usuarios DG y DCM del mismo equipo que el creador
-  let usuariosDg: { id: number; nombre: string; correo_electronico: string | null }[] = [];
-  let usuariosDcm: { id: number; nombre: string; correo_electronico: string | null }[] = [];
-
-  if (equipoIds.length > 0) {
-    usuariosDg = await prisma.usuario.findMany({
-      where: {
-        puesto: { contains: 'DG' },
-        deleted_at: null,
-        equipos: {
-          some: { equipo_id: { in: equipoIds } }
-        }
-      },
-      select: { id: true, nombre: true, correo_electronico: true }
-    });
-
-    usuariosDcm = await prisma.usuario.findMany({
-      where: {
-        puesto: { contains: 'DCM' },
-        deleted_at: null,
-        equipos: {
-          some: { equipo_id: { in: equipoIds } }
-        }
-      },
-      select: { id: true, nombre: true, correo_electronico: true }
-    });
-  }
-
-  // Fallback: si no se encontraron usuarios en el equipo, buscar todos los DG/DCM
-  if (usuariosDg.length === 0) {
-    usuariosDg = await prisma.usuario.findMany({
-      where: { puesto: { contains: 'DG' }, deleted_at: null },
-      select: { id: true, nombre: true, correo_electronico: true }
-    });
-    console.log('[crearTareasAutorizacion] Fallback DG: no se encontraron en el equipo, usando todos');
-  }
-
-  if (usuariosDcm.length === 0) {
-    usuariosDcm = await prisma.usuario.findMany({
-      where: { puesto: { contains: 'DCM' }, deleted_at: null },
-      select: { id: true, nombre: true, correo_electronico: true }
-    });
-    console.log('[crearTareasAutorizacion] Fallback DCM: no se encontraron en el equipo, usando todos');
-  }
+  const usuariosDcm = await prisma.usuario.findMany({
+    where: {
+      deleted_at: null,
+      OR: [
+        { puesto: { contains: 'DCM' } },
+        { puesto: { contains: 'Director Comercial' } },
+        { puesto: { contains: 'Dirección Comercial' } },
+        { user_role: { contains: 'Director Comercial' } },
+        { area: { contains: 'Dirección Comercial' } },
+        { area: { contains: 'Direccion Comercial' } },
+      ],
+    },
+    select: { id: true, nombre: true, correo_electronico: true }
+  });
 
   console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
     usuariosDg,

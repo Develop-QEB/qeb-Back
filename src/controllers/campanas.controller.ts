@@ -6209,7 +6209,8 @@ export class CampanasController {
         caras: data.caras ? parseInt(data.caras) : 0,
         bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
         costo: data.costo ? parseInt(data.costo) : 0,
-        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0
+        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+        articulo: data.articulo || null
       });
 
       const updateData: any = {
@@ -6329,7 +6330,8 @@ export class CampanasController {
         caras: data.caras ? parseInt(data.caras) : 0,
         bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
         costo: data.costo ? parseInt(data.costo) : 0,
-        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0
+        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+        articulo: data.articulo || null
       });
 
       const createData: any = {

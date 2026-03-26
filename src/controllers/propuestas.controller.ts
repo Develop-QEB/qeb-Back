@@ -2989,7 +2989,8 @@ export class PropuestasController {
         caras: caras ? parseInt(caras) : 0,
         bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
         costo: costo ? parseInt(costo) : 0,
-        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0
+        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+        articulo: articulo || null
       });
 
       const updatedCara = await prisma.solicitudCaras.update({
@@ -3097,7 +3098,8 @@ export class PropuestasController {
         caras: caras ? parseInt(caras) : 0,
         bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
         costo: costo ? parseInt(costo) : 0,
-        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0
+        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+        articulo: articulo || null
       });
 
       const newCara = await prisma.solicitudCaras.create({

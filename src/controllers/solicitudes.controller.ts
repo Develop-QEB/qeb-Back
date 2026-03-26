@@ -739,6 +739,12 @@ export class SolicitudesController {
 
       const statusAnterior = solicitudAnterior.status;
 
+      // Bloquear aprobación si no tiene CUIC
+      if (status === 'Aprobada' && (!solicitudAnterior.cuic || solicitudAnterior.cuic === '0' || solicitudAnterior.cuic === 'NULL')) {
+        res.status(400).json({ success: false, error: 'No se puede aprobar esta solicitud. No tiene un cliente con CUIC asignado.' });
+        return;
+      }
+
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
@@ -1730,7 +1736,8 @@ export class SolicitudesController {
             caras: cara.caras,
             bonificacion: cara.bonificacion || 0,
             costo: cara.costo,
-            tarifa_publica: cara.tarifa_publica || 0
+            tarifa_publica: cara.tarifa_publica || 0,
+            articulo: cara.articulo || null
           });
 
           const solicitudCara = await tx.solicitudCaras.create({
@@ -2105,6 +2112,12 @@ export class SolicitudesController {
 
       if (solicitud.status !== 'Aprobada') {
         res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
+        return;
+      }
+
+      // Verificar que la solicitud tenga un cliente con CUIC
+      if (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL') {
+        res.status(400).json({ success: false, error: 'No se puede atender esta solicitud. No tiene un cliente con CUIC asignado.' });
         return;
       }
 
@@ -2630,7 +2643,8 @@ export class SolicitudesController {
               caras: cara.caras,
               bonificacion: cara.bonificacion || 0,
               costo: cara.costo,
-              tarifa_publica: cara.tarifa_publica || 0
+              tarifa_publica: cara.tarifa_publica || 0,
+              articulo: cara.articulo || null
             });
 
             await tx.solicitudCaras.create({
@@ -2928,7 +2942,7 @@ export class SolicitudesController {
   async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
     try {
       console.log('[evaluarAutorizacion] Body recibido:', req.body);
-      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica } = req.body;
+      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica, articulo } = req.body;
 
       // Validar datos requeridos
       if (!formato || caras === undefined || costo === undefined) {
@@ -2948,7 +2962,8 @@ export class SolicitudesController {
         caras: Number(caras) || 0,
         bonificacion: Number(bonificacion) || 0,
         costo: Number(costo) || 0,
-        tarifa_publica: Number(tarifa_publica) || 0
+        tarifa_publica: Number(tarifa_publica) || 0,
+        articulo: articulo || null
       });
 
       res.json({
