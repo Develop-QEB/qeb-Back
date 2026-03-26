@@ -454,12 +454,14 @@ export async function crearTareasAutorizacion(
     where: {
       deleted_at: null,
       OR: [
-        { puesto: { contains: 'DCM' } },
-        { puesto: { contains: 'Director Comercial' } },
-        { puesto: { contains: 'Dirección Comercial' } },
-        { user_role: { contains: 'Director Comercial' } },
-        { area: { contains: 'Dirección Comercial' } },
-        { area: { contains: 'Direccion Comercial' } },
+        { puesto: 'DCM' },
+        { puesto: 'Director Comercial' },
+        { puesto: 'Dirección Comercial' },
+        { puesto: 'Direccion Comercial' },
+        { user_role: 'Director Comercial' },
+        { user_role: 'Dirección Comercial' },
+        { area: 'Dirección Comercial' },
+        { area: 'Direccion Comercial' },
       ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
