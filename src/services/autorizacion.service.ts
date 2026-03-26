@@ -414,19 +414,32 @@ export async function crearTareasAutorizacion(
     pendientesDcm
   });
 
-  // Obtener usuarios DG y DCM
+  // Obtener usuarios DG y DCM (buscar por puesto, role o area con múltiples variantes)
   const usuariosDg = await prisma.usuario.findMany({
     where: {
-      puesto: { contains: 'DG' },
-      deleted_at: null
+      deleted_at: null,
+      OR: [
+        { puesto: { contains: 'DG' } },
+        { puesto: { contains: 'Director General' } },
+        { user_role: { contains: 'Director General' } },
+        { area: { contains: 'Dirección General' } },
+        { area: { contains: 'Direccion General' } },
+      ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
   });
 
   const usuariosDcm = await prisma.usuario.findMany({
     where: {
-      puesto: { contains: 'DCM' },
-      deleted_at: null
+      deleted_at: null,
+      OR: [
+        { puesto: { contains: 'DCM' } },
+        { puesto: { contains: 'Director Comercial' } },
+        { puesto: { contains: 'Dirección Comercial' } },
+        { user_role: { contains: 'Director Comercial' } },
+        { area: { contains: 'Dirección Comercial' } },
+        { area: { contains: 'Direccion Comercial' } },
+      ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
   });
