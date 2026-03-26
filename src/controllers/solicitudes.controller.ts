@@ -1325,6 +1325,7 @@ export class SolicitudesController {
           nombre: true,
           area: true,
           puesto: true,
+          sap_asesor_id: true,
         },
         orderBy: { nombre: 'asc' },
       });

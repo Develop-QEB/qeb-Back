@@ -382,6 +382,7 @@ model usuario {
   foto_perfil        String?          @db.VarChar(500)
   reset_token        String?          @db.VarChar(6)
   reset_token_expiry DateTime?        @db.DateTime(0)
+  sap_asesor_id      Int?
   equipos            usuario_equipo[]
 }
 
