@@ -83,9 +83,7 @@ function normalizarPlaza(ciudad: string | null | undefined, estado: string | nul
     return 'MONTERREY';
   }
 
-  // Plazas no principales: usar el nombre real (no "OTRAS")
-  // Si no existe criterio para esta plaza, se aprueba automáticamente
-  return ciudadNorm || 'OTRAS';
+  return 'OTRAS';
 }
 
 /**
@@ -174,6 +172,18 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     };
   }
 
+  // Cortesías (CT) e Intercambio (IN) siempre requieren autorización DCM
+  if (cara.articulo) {
+    const artUpper = cara.articulo.toUpperCase();
+    if (artUpper.startsWith('CT') || artUpper.startsWith('IN')) {
+      return {
+        autorizacion_dg: 'aprobado',
+        autorizacion_dcm: 'pendiente',
+        motivo_dcm: `Artículo ${artUpper.startsWith('CT') ? 'Cortesía' : 'Intercambio'} requiere autorización DCM`,
+      };
+    }
+  }
+
   // Calcular tarifa efectiva y total caras
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
@@ -241,7 +251,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
     plazaNormalizada
   });
 
-  // Buscar criterio: solo plaza específica (si no hay match exacto, se aprueba automáticamente)
+  // Buscar criterio: primero plaza específica, luego fallback a "TODAS"
   let criterio = await prisma.criterios_autorizacion.findFirst({
     where: {
       formato: formatoNormalizado,
@@ -250,6 +260,17 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
       activo: true
     }
   });
+
+  if (!criterio) {
+    criterio = await prisma.criterios_autorizacion.findFirst({
+      where: {
+        formato: formatoNormalizado,
+        tipo: tipoNormalizado,
+        plaza: 'TODAS',
+        activo: true
+      }
+    });
+  }
 
   // Fallback: si no encontró criterio específico, intentar con formato genérico y misma plaza
   if (!criterio && formatoNormalizado) {
