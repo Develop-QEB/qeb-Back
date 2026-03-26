@@ -75,7 +75,13 @@ async function main() {
   initializeSocket(httpServer);
   console.log('[Socket] WebSocket server inicializado');
 
-  // Conectar a DB ANTES de aceptar requests para evitar saturar el pool
+  // Arrancar servidor HTTP PRIMERO para pasar health checks
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+
+  // Conectar a DB en background (no bloquea el health check)
   try {
     await connectWithRetry();
 
@@ -87,14 +93,8 @@ async function main() {
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
-    console.log('[DB] Server will start anyway but DB may be slow on first requests.');
+    console.log('[DB] Server running without DB — requests will retry on demand.');
   }
-
-  // Arrancar servidor HTTP DESPUÉS de intentar conectar a DB
-  httpServer.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  });
 }
 
 // Graceful shutdown: disconnect DB immediately, then close HTTP
