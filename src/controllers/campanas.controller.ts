@@ -188,16 +188,20 @@ export class CampanasController {
         LEFT JOIN (
           SELECT
             cm_b.id AS campania_id,
-            COUNT(rsv_b.id) AS reservas_count_ultima_cat,
-            COALESCE(SUM(sc_b.caras + sc_b.bonificacion), 0) AS caras_ultima_cat
+            (SELECT COUNT(*) FROM reservas rsv_b2
+              INNER JOIN solicitudCaras sc_b2 ON sc_b2.id = rsv_b2.solicitudCaras_id
+              INNER JOIN cotizacion ct_b2 ON ct_b2.id_propuesta = sc_b2.idquote
+              INNER JOIN catorcenas cat_b2 ON sc_b2.inicio_periodo >= cat_b2.fecha_inicio AND sc_b2.fin_periodo <= cat_b2.fecha_fin
+                AND cm_b.fecha_fin BETWEEN cat_b2.fecha_inicio AND cat_b2.fecha_fin
+              WHERE ct_b2.id = cm_b.cotizacion_id AND rsv_b2.deleted_at IS NULL
+            ) AS reservas_count_ultima_cat,
+            (SELECT COALESCE(SUM(sc_b3.caras + sc_b3.bonificacion), 0) FROM solicitudCaras sc_b3
+              INNER JOIN cotizacion ct_b3 ON ct_b3.id_propuesta = sc_b3.idquote
+              INNER JOIN catorcenas cat_b3 ON sc_b3.inicio_periodo >= cat_b3.fecha_inicio AND sc_b3.fin_periodo <= cat_b3.fecha_fin
+                AND cm_b.fecha_fin BETWEEN cat_b3.fecha_inicio AND cat_b3.fecha_fin
+              WHERE ct_b3.id = cm_b.cotizacion_id
+            ) AS caras_ultima_cat
           FROM campania cm_b
-          INNER JOIN cotizacion ct_b ON ct_b.id = cm_b.cotizacion_id
-          INNER JOIN solicitudCaras sc_b ON sc_b.idquote = ct_b.id_propuesta
-          INNER JOIN catorcenas cat_b ON sc_b.inicio_periodo >= cat_b.fecha_inicio AND sc_b.fin_periodo <= cat_b.fecha_fin
-            AND cm_b.fecha_fin BETWEEN cat_b.fecha_inicio AND cat_b.fecha_fin
-          LEFT JOIN reservas rsv_b ON rsv_b.solicitudCaras_id = sc_b.id AND rsv_b.deleted_at IS NULL
-            AND rsv_b.calendario_id IS NOT NULL
-          GROUP BY cm_b.id
         ) uc_agg ON uc_agg.campania_id = cm.id
         LEFT JOIN (
           SELECT
