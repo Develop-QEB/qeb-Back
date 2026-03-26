@@ -721,6 +721,7 @@ export async function rechazarSolicitud(
         id_responsable: solicitud.usuario_id,
         responsable: solicitud.nombre_usuario || '',
         id_solicitud: solicitudId.toString(),
+        id_propuesta: idquote,
         id_asignado: solicitud.usuario_id.toString(),
         asignado: solicitud.nombre_usuario || '',
         fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
