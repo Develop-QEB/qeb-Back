@@ -16,14 +16,19 @@ const globalForPrisma = globalThis as unknown as {
 };
 
 const createPrismaClient = () => {
+  const url = getDatasourceUrl();
+  // Append connection_limit if not already set — keeps pool small for Hostinger's 500 conn/hour cap
+  const hasLimit = url.includes('connection_limit');
+  const datasourceUrl = hasLimit ? url : `${url}${url.includes('?') ? '&' : '?'}connection_limit=2`;
+
   const client = new PrismaClient({
     log: ['error'],
-    datasourceUrl: getDatasourceUrl(),
+    datasourceUrl,
   });
 
   // Retry middleware for transient connection errors (Hostinger drops connections frequently)
   client.$use(async (params, next) => {
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 3;
     const BASE_DELAY = 3000; // 3 seconds
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -38,8 +43,18 @@ const createPrismaClient = () => {
           message.includes('ECONNREFUSED') ||
           message.includes('Connection lost');
 
+        // max_connections_per_hour: wait longer before retrying
+        const isRateLimited = message.includes('max_connections_per_hour') || message.includes('1226');
+
+        if (isRateLimited && attempt < MAX_RETRIES) {
+          const delay = 30000 * attempt; // 30s, 60s, 90s — wait for connections to free up
+          console.warn(`[Prisma] Rate limited (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
         if (isConnectionError && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY * attempt; // 3s, 6s, 9s, 12s
+          const delay = BASE_DELAY * attempt; // 3s, 6s, 9s
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
@@ -69,7 +84,7 @@ const createPrismaClient = () => {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn('[Prisma] Keepalive ping failed:', msg);
     }
-  }, 4 * 60 * 1000);
+  }, 30 * 60 * 1000); // 30 min — ~2 pings/hour to stay within Hostinger's 500 conn/hour cap
 
   return client;
 };

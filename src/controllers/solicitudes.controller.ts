@@ -9,7 +9,7 @@ import {
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 
@@ -499,12 +499,25 @@ export class SolicitudesController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT id FROM solicitud
-           WHERE deleted_at IS NULL
-             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
-          userId, String(userId)
-        );
+        let visibleIds: { id: number }[];
+        if (hasTeamVisibility(userRol)) {
+          // Asesor Analista: ve lo propio + lo de miembros de su red de trabajo
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            ...teamIds, String(userId)
+          );
+        } else {
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            userId, String(userId)
+          );
+        }
         const visibleSet = new Set(visibleIds.map(r => r.id));
         // Intersect with period filter if both are active
         const existingIn = (where.id as any)?.in as number[] | undefined;
@@ -997,12 +1010,24 @@ export class SolicitudesController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT id FROM solicitud
-           WHERE deleted_at IS NULL
-             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
-          userId, String(userId)
-        );
+        let visibleIds: { id: number }[];
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            ...teamIds, String(userId)
+          );
+        } else {
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            userId, String(userId)
+          );
+        }
         where.id = { in: visibleIds.map(r => r.id) };
       }
 
@@ -1145,12 +1170,24 @@ export class SolicitudesController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        const visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT id FROM solicitud
-           WHERE deleted_at IS NULL
-             AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
-          userId, String(userId)
-        );
+        let visibleIds: { id: number }[];
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            ...teamIds, String(userId)
+          );
+        } else {
+          visibleIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT id FROM solicitud
+             WHERE deleted_at IS NULL
+               AND (usuario_id = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+            userId, String(userId)
+          );
+        }
         where.id = { in: visibleIds.map(r => r.id) };
       }
 

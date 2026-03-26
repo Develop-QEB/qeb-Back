@@ -11,7 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 
@@ -127,12 +127,23 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        conditions.push(`EXISTS (
-          SELECT 1 FROM tareas t
-          WHERE t.campania_id = cm.id
-            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-        )`);
-        params.push(userId, String(userId));
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`);
+          params.push(...teamIds, String(userId));
+        } else {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`);
+          params.push(userId, String(userId));
+        }
       }
 
       const whereClause = conditions.join(' AND ');
@@ -1112,12 +1123,23 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        conditions.push(`EXISTS (
-          SELECT 1 FROM tareas t
-          WHERE t.campania_id = cm.id
-            AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-        )`);
-        params.push(userId, String(userId));
+        if (hasTeamVisibility(userRol)) {
+          const teamIds = await getTeamMemberIds(prisma, userId);
+          const placeholders = teamIds.map(() => '?').join(',');
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`);
+          params.push(...teamIds, String(userId));
+        } else {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tareas t
+            WHERE t.campania_id = cm.id
+              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          )`);
+          params.push(userId, String(userId));
+        }
       }
 
       const whereClause = conditions.join(' AND ');
