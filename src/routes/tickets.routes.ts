@@ -7,6 +7,12 @@ import {
   createTicket,
   updateTicketStatus,
   getTicketStats,
+  getTicketsHistorial,
+  getTicketsUnreadCount,
+  markTicketOpened,
+  getTicketMensajes,
+  createTicketMensaje,
+  markTicketMensajesRead,
 } from '../controllers/tickets.controller';
 
 const router = Router();
@@ -17,6 +23,14 @@ router.use(authMiddleware);
 // Rutas para usuarios normales
 router.get('/my', getMyTickets);
 router.post('/', createTicket);
+
+// Historial de tickets (usuarios autorizados)
+router.get('/historial', getTicketsHistorial);
+router.get('/unread-count', getTicketsUnreadCount);
+router.post('/:id/opened', markTicketOpened);
+router.get('/:id/mensajes', getTicketMensajes);
+router.post('/:id/mensajes', createTicketMensaje);
+router.post('/:id/mensajes/read', markTicketMensajesRead);
 
 // Rutas para ver tickets (accesibles por todos para ver su propio ticket)
 router.get('/stats', getTicketStats);

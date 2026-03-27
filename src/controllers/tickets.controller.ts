@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
 import { AuthRequest } from '../types';
+import { getIO, SOCKET_EVENTS } from '../config/socket';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
@@ -236,6 +237,7 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
 
     const updateData: any = {
       status,
+      status_cambiado_por: userName,
     };
 
     if (respuesta) {
@@ -248,6 +250,13 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
       where: { id: Number(id) },
       data: updateData,
     });
+
+    // Emitir evento de socket
+    try {
+      const io = getIO();
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, updatedTicket);
+    } catch {}
+
 
     // Notificar al usuario si hay respuesta
     if (respuesta && process.env.SMTP_USER && process.env.SMTP_PASS) {
@@ -300,6 +309,205 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Error updating ticket:', error);
     res.status(500).json({ message: 'Error al actualizar ticket' });
+  }
+};
+
+// ============================================================
+// HISTORIAL DE TICKETS - Endpoints para usuarios autorizados
+// ============================================================
+
+// Obtener todos los tickets con info de mensajes no leidos
+export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    const { status, prioridad, search } = req.query;
+
+    const where: any = {};
+    if (status && status !== 'Todos') where.status = status;
+    if (prioridad && prioridad !== 'Todos') where.prioridad = prioridad;
+    if (search) {
+      where.OR = [
+        { titulo: { contains: search as string } },
+        { descripcion: { contains: search as string } },
+        { usuario_nombre: { contains: search as string } },
+      ];
+    }
+
+    const tickets = await prisma.tickets.findMany({
+      where,
+      include: {
+        mensajes: { orderBy: { id: 'desc' }, take: 1 },
+        vistas: userId ? { where: { usuario_id: userId } } : false,
+        _count: { select: { mensajes: true } },
+      },
+      orderBy: { created_at: 'desc' },
+    });
+
+    const result = tickets.map((t) => {
+      const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
+      const ultimoMensaje = t.mensajes[0] || null;
+      const ultimoMensajeLeido = vista?.ultimo_mensaje_leido_id || 0;
+      const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido : false;
+      const isOpened = !!vista;
+
+      return {
+        id: t.id,
+        titulo: t.titulo,
+        descripcion: t.descripcion,
+        imagen: t.imagen,
+        status: t.status,
+        prioridad: t.prioridad,
+        usuario_id: t.usuario_id,
+        usuario_nombre: t.usuario_nombre,
+        usuario_email: t.usuario_email,
+        status_cambiado_por: t.status_cambiado_por,
+        total_mensajes: t._count.mensajes,
+        has_unread: hasUnread,
+        is_opened: isOpened,
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+      };
+    });
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error fetching tickets historial:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener historial de tickets' });
+  }
+};
+
+// Obtener conteo de tickets con mensajes no leidos (para badge sidebar)
+export const getTicketsUnreadCount = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    const tickets = await prisma.tickets.findMany({
+      include: {
+        mensajes: { orderBy: { id: 'desc' }, take: 1 },
+        vistas: { where: { usuario_id: userId } },
+      },
+    });
+
+    let unreadCount = 0;
+    for (const t of tickets) {
+      const vista = t.vistas[0];
+      const ultimoMensaje = t.mensajes[0];
+      if (ultimoMensaje) {
+        const ultimoLeido = vista?.ultimo_mensaje_leido_id || 0;
+        if (ultimoMensaje.id > ultimoLeido) unreadCount++;
+      }
+    }
+
+    res.json({ success: true, data: { unreadCount } });
+  } catch (error) {
+    console.error('Error fetching unread count:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener conteo' });
+  }
+};
+
+// Marcar ticket como abierto/visto
+export const markTicketOpened = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    const ticketId = Number(req.params.id);
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    await prisma.ticket_vistas.upsert({
+      where: { ticket_id_usuario_id: { ticket_id: ticketId, usuario_id: userId } },
+      create: { ticket_id: ticketId, usuario_id: userId, opened_at: new Date() },
+      update: {},
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking ticket opened:', error);
+    res.status(500).json({ success: false, error: 'Error al marcar como visto' });
+  }
+};
+
+// Obtener mensajes de un ticket
+export const getTicketMensajes = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+
+    const mensajes = await prisma.ticket_mensajes.findMany({
+      where: { ticket_id: ticketId },
+      orderBy: { created_at: 'asc' },
+    });
+
+    res.json({ success: true, data: mensajes });
+  } catch (error) {
+    console.error('Error fetching mensajes:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener mensajes' });
+  }
+};
+
+// Crear mensaje en un ticket
+export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const userId = req.user?.userId;
+    const userName = req.user?.nombre || 'Usuario';
+    const { mensaje, archivo_url, archivo_nombre, archivo_tipo } = req.body;
+
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+    if (!mensaje && !archivo_url) {
+      return res.status(400).json({ success: false, error: 'Mensaje o archivo requerido' });
+    }
+
+    const nuevoMensaje = await prisma.ticket_mensajes.create({
+      data: {
+        ticket_id: ticketId,
+        usuario_id: userId,
+        usuario_nombre: userName,
+        mensaje: mensaje || null,
+        archivo_url: archivo_url || null,
+        archivo_nombre: archivo_nombre || null,
+        archivo_tipo: archivo_tipo || null,
+      },
+    });
+
+    // Actualizar lectura del autor
+    await prisma.ticket_vistas.upsert({
+      where: { ticket_id_usuario_id: { ticket_id: ticketId, usuario_id: userId } },
+      create: { ticket_id: ticketId, usuario_id: userId, ultimo_mensaje_leido_id: nuevoMensaje.id },
+      update: { ultimo_mensaje_leido_id: nuevoMensaje.id },
+    });
+
+    // Emitir por socket
+    try {
+      const io = getIO();
+      io.to(`ticket-${ticketId}`).emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, nuevoMensaje);
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId, mensaje: nuevoMensaje });
+    } catch {}
+
+    res.status(201).json({ success: true, data: nuevoMensaje });
+  } catch (error) {
+    console.error('Error creating mensaje:', error);
+    res.status(500).json({ success: false, error: 'Error al crear mensaje' });
+  }
+};
+
+// Marcar mensajes como leidos
+export const markTicketMensajesRead = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const userId = req.user?.userId;
+    const { ultimo_mensaje_id } = req.body;
+
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    await prisma.ticket_vistas.upsert({
+      where: { ticket_id_usuario_id: { ticket_id: ticketId, usuario_id: userId } },
+      create: { ticket_id: ticketId, usuario_id: userId, ultimo_mensaje_leido_id: ultimo_mensaje_id },
+      update: { ultimo_mensaje_leido_id: ultimo_mensaje_id },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking messages read:', error);
+    res.status(500).json({ success: false, error: 'Error al marcar como leido' });
   }
 };
 

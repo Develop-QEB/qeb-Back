@@ -162,6 +162,27 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de chatbot-admin`);
     });
 
+    // Tickets historial rooms
+    socket.on('join-tickets-historial', () => {
+      socket.join('tickets-historial');
+      console.log(`[Socket] ${socket.id} se unió a tickets-historial`);
+    });
+
+    socket.on('leave-tickets-historial', () => {
+      socket.leave('tickets-historial');
+      console.log(`[Socket] ${socket.id} salió de tickets-historial`);
+    });
+
+    socket.on('join-ticket', (ticketId: number) => {
+      socket.join(`ticket-${ticketId}`);
+      console.log(`[Socket] ${socket.id} se unió a ticket-${ticketId}`);
+    });
+
+    socket.on('leave-ticket', (ticketId: number) => {
+      socket.leave(`ticket-${ticketId}`);
+      console.log(`[Socket] ${socket.id} salió de ticket-${ticketId}`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`[Socket] Cliente desconectado: ${socket.id}`);
     });
@@ -247,6 +268,10 @@ export const SOCKET_EVENTS = {
 
   // Chatbot
   CHATBOT_LOG_NUEVO: 'chatbot:log:nuevo',
+
+  // Tickets Historial
+  TICKET_MENSAJE_NUEVO: 'ticket:mensaje:nuevo',
+  TICKET_STATUS_CHANGED: 'ticket:status:changed',
 };
 
 // Helper para emitir a una campaña específica
