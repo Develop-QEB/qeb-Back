@@ -179,8 +179,12 @@ export class NotificacionesController {
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
         leida: tarea.estatus === 'Atendido',
-        referencia_tipo: tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
+        referencia_tipo: tarea.tipo?.includes('Autorización') && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+          ? tarea.contenido
+          : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
+        referencia_id: tarea.tipo?.includes('Autorización') && tarea.contenido === 'campana' ? tarea.campania_id
+          : tarea.tipo?.includes('Autorización') && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+          : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.created_at || tarea.fecha_inicio,
         created_at: tarea.created_at,
         fecha_inicio: tarea.fecha_inicio,
@@ -302,8 +306,12 @@ export class NotificacionesController {
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
         leida: tarea.estatus === 'Atendido',
-        referencia_tipo: tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
+        referencia_tipo: tarea.tipo?.includes('Autorización') && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+          ? tarea.contenido
+          : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
+        referencia_id: tarea.tipo?.includes('Autorización') && tarea.contenido === 'campana' ? tarea.campania_id
+          : tarea.tipo?.includes('Autorización') && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+          : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.fecha_inicio,
         fecha_inicio: tarea.fecha_inicio,
         fecha_fin: tarea.fecha_fin,
@@ -601,8 +609,12 @@ export class NotificacionesController {
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
         leida: true,
-        referencia_tipo: tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
+        referencia_tipo: tarea.tipo?.includes('Autorización') && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+          ? tarea.contenido
+          : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
+        referencia_id: tarea.tipo?.includes('Autorización') && tarea.contenido === 'campana' ? tarea.campania_id
+          : tarea.tipo?.includes('Autorización') && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+          : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.fecha_inicio,
         estatus: tarea.estatus,
       };
