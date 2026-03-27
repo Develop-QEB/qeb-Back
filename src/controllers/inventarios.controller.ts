@@ -490,8 +490,8 @@ export class InventariosController {
             deleted_at: null,
             OR: [
               {
-                fecha_inicio: { lte: fechaFin },
-                fecha_fin: { gte: fechaIni },
+                fecha_inicio: { lt: fechaFin },
+                fecha_fin: { gt: fechaIni },
               },
             ],
           },
@@ -506,7 +506,7 @@ export class InventariosController {
             where: {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
-              estatus: { in: ['Reservado', 'Bonificado'] },
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
             },
             select: { inventario_id: true },
           });
@@ -555,7 +555,7 @@ export class InventariosController {
         const calendarios2 = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            OR: [{ fecha_inicio: { lte: fechaFin2 }, fecha_fin: { gte: fechaIni2 } }],
+            OR: [{ fecha_inicio: { lt: fechaFin2 }, fecha_fin: { gt: fechaIni2 } }],
           },
           select: { id: true },
         });
@@ -565,7 +565,7 @@ export class InventariosController {
             where: {
               deleted_at: null,
               calendario_id: { in: calendarios2.map(c => c.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
             },
             select: { inventario_id: true }, // This is actually espacio_inventario.id
           });
@@ -1136,7 +1136,7 @@ export class InventariosController {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
               inventario_id: { in: espacios.map(e => e.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] }
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] }
             },
             select: { inventario_id: true }
           });
