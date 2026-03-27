@@ -6251,7 +6251,8 @@ export class CampanasController {
 
   async updateCara(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { caraId } = req.params;
+      const { id, caraId } = req.params;
+      const campanaId = parseInt(id);
       const data = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -6323,7 +6324,9 @@ export class CampanasController {
             userId,
             userName,
             autorizacion.pendientesDg,
-            autorizacion.pendientesDcm
+            autorizacion.pendientesDcm,
+            'campana',
+            campanaId
           );
         }
       }
@@ -6436,7 +6439,9 @@ export class CampanasController {
           userId,
           userName,
           autorizacion.pendientesDg,
-          autorizacion.pendientesDcm
+          autorizacion.pendientesDcm,
+          'campana',
+          campanaId
         );
       }
 

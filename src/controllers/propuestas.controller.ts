@@ -3058,7 +3058,8 @@ export class PropuestasController {
             userId,
             userName,
             autorizacion.pendientesDg,
-            autorizacion.pendientesDcm
+            autorizacion.pendientesDcm,
+            'propuesta'
           );
         }
       }
@@ -3186,7 +3187,8 @@ export class PropuestasController {
             userId,
             userName,
             autorizacion.pendientesDg,
-            autorizacion.pendientesDcm
+            autorizacion.pendientesDcm,
+            'propuesta'
           );
         }
       }

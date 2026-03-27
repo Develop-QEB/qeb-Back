@@ -426,7 +426,9 @@ export async function crearTareasAutorizacion(
   responsableId: number,
   responsableNombre: string,
   pendientesDg: number[],
-  pendientesDcm: number[]
+  pendientesDcm: number[],
+  origen: 'solicitud' | 'propuesta' | 'campana' = 'solicitud',
+  campaniaId?: number
 ): Promise<void> {
   console.log('[crearTareasAutorizacion] Iniciando con:', {
     solicitudId,
@@ -500,6 +502,8 @@ export async function crearTareasAutorizacion(
         responsable: responsableNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
+        campania_id: campaniaId || null,
+        contenido: origen,
         id_asignado: usuariosDg.map(u => u.id).join(','),
         asignado: usuariosDg.map(u => u.nombre).join(', '),
         fecha_fin: fechaFin
@@ -510,12 +514,18 @@ export async function crearTareasAutorizacion(
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
       tareaId: tareaDg.id,
       tipo: 'Autorización DG',
-      solicitudId
+      origen,
+      solicitudId,
+      propuestaId,
+      campaniaId: campaniaId || null
     });
     emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
       tareaId: tareaDg.id,
       tipo: 'Autorización DG',
-      solicitudId
+      origen,
+      solicitudId,
+      propuestaId,
+      campaniaId: campaniaId || null
     });
 
     // Enviar correo a usuarios DG
@@ -545,6 +555,8 @@ export async function crearTareasAutorizacion(
         responsable: responsableNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: propuestaId?.toString() || null,
+        campania_id: campaniaId || null,
+        contenido: origen,
         id_asignado: usuariosDcm.map(u => u.id).join(','),
         asignado: usuariosDcm.map(u => u.nombre).join(', '),
         fecha_fin: fechaFin
@@ -555,12 +567,18 @@ export async function crearTareasAutorizacion(
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
       tareaId: tareaDcm.id,
       tipo: 'Autorización DCM',
-      solicitudId
+      origen,
+      solicitudId,
+      propuestaId,
+      campaniaId: campaniaId || null
     });
     emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
       tareaId: tareaDcm.id,
       tipo: 'Autorización DCM',
-      solicitudId
+      origen,
+      solicitudId,
+      propuestaId,
+      campaniaId: campaniaId || null
     });
 
     // Enviar correo a usuarios DCM
