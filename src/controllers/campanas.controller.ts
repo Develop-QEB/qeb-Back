@@ -6323,7 +6323,8 @@ export class CampanasController {
             userId,
             userName,
             autorizacion.pendientesDg,
-            autorizacion.pendientesDcm
+            autorizacion.pendientesDcm,
+            'campana'
           );
         }
       }
@@ -6436,7 +6437,8 @@ export class CampanasController {
           userId,
           userName,
           autorizacion.pendientesDg,
-          autorizacion.pendientesDcm
+          autorizacion.pendientesDcm,
+          'campana'
         );
       }
 

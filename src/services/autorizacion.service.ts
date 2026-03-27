@@ -426,7 +426,8 @@ export async function crearTareasAutorizacion(
   responsableId: number,
   responsableNombre: string,
   pendientesDg: number[],
-  pendientesDcm: number[]
+  pendientesDcm: number[],
+  origen: 'solicitud' | 'propuesta' | 'campana' = 'solicitud'
 ): Promise<void> {
   console.log('[crearTareasAutorizacion] Iniciando con:', {
     solicitudId,
@@ -493,8 +494,8 @@ export async function crearTareasAutorizacion(
     const tareaDg = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
-        titulo: `Autorización requerida - Solicitud #${solicitudId}`,
-        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
+        titulo: `Autorización requerida - ${origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud'} #${solicitudId}`,
+        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${origen === 'campana' ? 'campaña' : origen === 'propuesta' ? 'propuesta' : 'solicitud'} #${solicitudId}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -523,8 +524,8 @@ export async function crearTareasAutorizacion(
       if (usuario.correo_electronico) {
         enviarCorreoAutorizacion(
           tareaDg.id,
-          `Autorización requerida - Solicitud #${solicitudId}`,
-          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
+          `Autorización requerida - ${origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud'} #${solicitudId}`,
+          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${origen === 'campana' ? 'campaña' : origen === 'propuesta' ? 'propuesta' : 'solicitud'} #${solicitudId}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
@@ -538,8 +539,8 @@ export async function crearTareasAutorizacion(
     const tareaDcm = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
-        titulo: `Autorización requerida - Solicitud #${solicitudId}`,
-        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
+        titulo: `Autorización requerida - ${origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud'} #${solicitudId}`,
+        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${origen === 'campana' ? 'campaña' : origen === 'propuesta' ? 'propuesta' : 'solicitud'} #${solicitudId}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -568,8 +569,8 @@ export async function crearTareasAutorizacion(
       if (usuario.correo_electronico) {
         enviarCorreoAutorizacion(
           tareaDcm.id,
-          `Autorización requerida - Solicitud #${solicitudId}`,
-          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
+          `Autorización requerida - ${origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud'} #${solicitudId}`,
+          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${origen === 'campana' ? 'campaña' : origen === 'propuesta' ? 'propuesta' : 'solicitud'} #${solicitudId}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
