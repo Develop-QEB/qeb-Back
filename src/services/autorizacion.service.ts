@@ -434,8 +434,14 @@ export async function crearTareasAutorizacion(
     solicitudId,
     propuestaId,
     pendientesDg,
-    pendientesDcm
+    pendientesDcm,
+    origen,
+    campaniaId
   });
+
+  // Determinar etiqueta e ID para título/descripción según origen
+  const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
+  const idOrigen = origen === 'campana' ? campaniaId : origen === 'propuesta' ? propuestaId : solicitudId;
 
   // Obtener usuarios DG y DCM (buscar por puesto, role o area con múltiples variantes)
   const usuariosDg = await prisma.usuario.findMany({
@@ -495,8 +501,8 @@ export async function crearTareasAutorizacion(
     const tareaDg = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DG',
-        titulo: `Autorización requerida - Solicitud #${solicitudId}`,
-        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
+        titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -533,8 +539,8 @@ export async function crearTareasAutorizacion(
       if (usuario.correo_electronico) {
         enviarCorreoAutorizacion(
           tareaDg.id,
-          `Autorización requerida - Solicitud #${solicitudId}`,
-          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la solicitud #${solicitudId}`,
+          `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
@@ -548,8 +554,8 @@ export async function crearTareasAutorizacion(
     const tareaDcm = await prisma.tareas.create({
       data: {
         tipo: 'Autorización DCM',
-        titulo: `Autorización requerida - Solicitud #${solicitudId}`,
-        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
+        titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -586,8 +592,8 @@ export async function crearTareasAutorizacion(
       if (usuario.correo_electronico) {
         enviarCorreoAutorizacion(
           tareaDcm.id,
-          `Autorización requerida - Solicitud #${solicitudId}`,
-          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la solicitud #${solicitudId}`,
+          `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
