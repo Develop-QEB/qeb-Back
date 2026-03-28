@@ -1096,10 +1096,15 @@ export class NotificacionesController {
         return;
       }
 
-      const puestoUpper = (usuario.puesto || '').toUpperCase();
+      const puestoUpper = (usuario.puesto || '').toUpperCase().trim();
       const tipoUpper = tipo.toUpperCase();
 
-      if (!puestoUpper.includes(tipoUpper)) {
+      // Validar permiso: DG puede aprobar DG, DCM puede aprobar DCM
+      const esDG = puestoUpper === 'DG' || puestoUpper === 'DIRECTOR GENERAL' || puestoUpper === 'DIRECCIÓN GENERAL' || puestoUpper === 'DIRECCION GENERAL';
+      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL';
+      const tienePermiso = (tipoUpper === 'DG' && esDG) || (tipoUpper === 'DCM' && esDCM);
+
+      if (!tienePermiso) {
         res.status(403).json({
           success: false,
           error: `No tienes permiso para aprobar autorizaciones de ${tipoUpper}`,
@@ -1169,13 +1174,16 @@ export class NotificacionesController {
         return;
       }
 
-      const puestoUpper = (usuario.puesto || '').toUpperCase();
+      const puestoUpper = (usuario.puesto || '').toUpperCase().trim();
 
       // Determinar el tipo de autorización según el puesto del usuario
+      const esDG = puestoUpper === 'DG' || puestoUpper === 'DIRECTOR GENERAL' || puestoUpper === 'DIRECCIÓN GENERAL' || puestoUpper === 'DIRECCION GENERAL';
+      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL';
+
       let tipoAutorizacion: 'dg' | 'dcm';
-      if (puestoUpper.includes('DG')) {
+      if (esDG) {
         tipoAutorizacion = 'dg';
-      } else if (puestoUpper.includes('DCM')) {
+      } else if (esDCM) {
         tipoAutorizacion = 'dcm';
       } else {
         res.status(403).json({

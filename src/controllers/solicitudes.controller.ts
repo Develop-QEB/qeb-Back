@@ -1003,8 +1003,30 @@ export class SolicitudesController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const status = req.query.status as string;
+      const search = req.query.search as string;
 
       const where: Record<string, unknown> = { deleted_at: null };
+
+      if (status) {
+        where.status = status;
+      }
+
+      if (search) {
+        const orConditions: any[] = [
+          { razon_social: { contains: search } },
+          { descripcion: { contains: search } },
+          { marca_nombre: { contains: search } },
+          { asignado: { contains: search } },
+          { cuic: { contains: search } },
+          { nombre_usuario: { contains: search } },
+        ];
+        const searchAsInt = parseInt(search);
+        if (!isNaN(searchAsInt)) {
+          orConditions.push({ id: searchAsInt });
+        }
+        where.OR = orConditions;
+      }
 
       // Visibility filter
       const userId = req.user?.userId;
