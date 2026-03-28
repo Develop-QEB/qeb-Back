@@ -1866,7 +1866,7 @@ export class SolicitudesController {
       let mensaje = 'Solicitud creada exitosamente';
       if (autorizacionInfo.tienePendientes) {
         const totalPendientes = autorizacionInfo.pendientesDg.length + autorizacionInfo.pendientesDcm.length;
-        mensaje = `Solicitud creada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Solicitud creada. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       // SIEMPRE enviar respuesta exitosa si la transacción commiteó
@@ -2890,7 +2890,7 @@ export class SolicitudesController {
       let mensaje = 'Solicitud actualizada exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Solicitud actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Solicitud actualizada. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       // Notificar a Tráfico sobre el ajuste de caras si hay propuesta

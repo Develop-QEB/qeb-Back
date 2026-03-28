@@ -1122,7 +1122,7 @@ export class NotificacionesController {
 
       res.json({
         success: true,
-        message: `${result.carasAprobadas} cara(s) aprobada(s) exitosamente`,
+        message: `${result.carasAprobadas} circuito(s) aprobado(s) exitosamente`,
         data: result,
       });
     } catch (error) {

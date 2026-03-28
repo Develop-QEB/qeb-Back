@@ -680,7 +680,7 @@ export class PropuestasController {
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". ${totalPendientes} cara(s) están pendientes de autorización.`,
+            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length
@@ -3065,10 +3065,10 @@ export class PropuestasController {
       }
 
       // Build response message
-      let mensaje = 'Cara actualizada exitosamente';
+      let mensaje = 'Circuito actualizado exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Cara actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       res.json({
@@ -3194,10 +3194,10 @@ export class PropuestasController {
       }
 
       // Build response message
-      let mensaje = 'Cara creada exitosamente';
+      let mensaje = 'Circuito creado exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Cara creada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       res.json({

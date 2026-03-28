@@ -618,7 +618,7 @@ export class CampanasController {
               const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
               res.status(400).json({
                 success: false,
-                error: `No se puede activar la campaña. ${totalPendientes} cara(s) están pendientes de autorización.`,
+                error: `No se puede activar la campaña. ${totalPendientes} circuito(s) están pendientes de autorización.`,
                 autorizacion: {
                   pendientesDg: autorizacion.pendientesDg.length,
                   pendientesDcm: autorizacion.pendientesDcm.length
@@ -6073,7 +6073,7 @@ export class CampanasController {
             const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
             res.status(400).json({
               success: false,
-              error: `No se pueden asignar APs. ${totalPendientes} cara(s) están pendientes de autorización.`,
+              error: `No se pueden asignar APs. ${totalPendientes} circuito(s) están pendientes de autorización.`,
               autorizacion: {
                 pendientesDg: autorizacion.pendientesDg.length,
                 pendientesDcm: autorizacion.pendientesDcm.length
@@ -6332,10 +6332,10 @@ export class CampanasController {
       }
 
       // Build response message
-      let mensaje = 'Cara actualizada exitosamente';
+      let mensaje = 'Circuito actualizado exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Cara actualizada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       res.json({
@@ -6446,10 +6446,10 @@ export class CampanasController {
       }
 
       // Build response message
-      let mensaje = 'Cara creada exitosamente';
+      let mensaje = 'Circuito creado exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Cara creada. ${totalPendientes} cara(s) requieren autorización.`;
+        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
       res.json({

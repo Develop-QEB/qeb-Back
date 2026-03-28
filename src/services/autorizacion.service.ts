@@ -521,7 +521,7 @@ export async function crearTareasAutorizacion(
       data: {
         tipo: 'Autorización DG',
         titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
+        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -559,7 +559,7 @@ export async function crearTareasAutorizacion(
         enviarCorreoAutorizacion(
           tareaDg.id,
           `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-          `Se requiere autorización de Dirección General para ${pendientesDg.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
+          `Se requiere autorización de Dirección General para ${pendientesDg.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
@@ -574,7 +574,7 @@ export async function crearTareasAutorizacion(
       data: {
         tipo: 'Autorización DCM',
         titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
+        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
         estatus: 'Pendiente',
         id_responsable: responsableId,
         responsable: responsableNombre,
@@ -612,7 +612,7 @@ export async function crearTareasAutorizacion(
         enviarCorreoAutorizacion(
           tareaDcm.id,
           `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} cara(s) de la ${etiquetaOrigen} #${idOrigen}`,
+          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
           usuario.correo_electronico,
           usuario.nombre,
           responsableNombre
@@ -701,7 +701,7 @@ export async function aprobarCaras(
         data: {
           tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
           titulo: `Solicitud #${propuesta.solicitud_id} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
-          descripcion: `${result.count} cara(s) de tu solicitud han sido aprobadas por ${tipoLabel} (${aprobadorNombre}).`,
+          descripcion: `${result.count} circuito(s) de tu solicitud han sido aprobados por ${tipoLabel} (${aprobadorNombre}).`,
           estatus: 'Pendiente',
           id_responsable: solicitud.usuario_id,
           responsable: solicitud.nombre_usuario || '',
