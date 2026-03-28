@@ -242,6 +242,9 @@ export class DashboardController {
         fecha_fin,
       } = req.query;
 
+      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin })}`;
+
+      const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
@@ -377,9 +380,7 @@ export class DashboardController {
           .sort((a, b) => b.cantidad - a.cantidad);
       };
 
-      res.json({
-        success: true,
-        data: {
+      return {
           total: inventariosFiltrados.length,
           estatus: estatus_filtro,
           graficas: {
@@ -389,8 +390,10 @@ export class DashboardController {
             porPlaza: calcularDistribucion('plaza'),
             porNSE: calcularDistribucion('nivel_socioeconomico'),
           },
-        },
-      });
+      };
+      }, CACHE_TTL.DASHBOARD_STATS);
+
+      res.json({ success: true, data });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error al obtener estadisticas';
@@ -655,6 +658,11 @@ export class DashboardController {
       const limitNum = parseInt(limit as string) || 50;
       const skip = (pageNum - 1) * limitNum;
 
+      const cacheKey = CACHE_KEYS.INVENTORY_DETAIL(
+        JSON.stringify({ estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin, estatus: estatusFiltro, page, limit, includeCoords })
+      );
+
+      const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
@@ -881,9 +889,7 @@ export class DashboardController {
             }))
         : [];
 
-      res.json({
-        success: true,
-        data: {
+      return {
           items: paginatedResults,
           pagination: {
             page: pageNum,
@@ -891,7 +897,6 @@ export class DashboardController {
             total,
             totalPages,
           },
-          // Resumen por plaza para el mapa
           byPlaza: Object.entries(
             allResults.reduce((acc, inv) => {
               const plaza = inv.plaza || 'Sin plaza';
@@ -911,10 +916,11 @@ export class DashboardController {
             lat: data.lat,
             lng: data.lng,
           })).sort((a, b) => b.count - a.count),
-          // Coordenadas para pines/heatmap (solo con includeCoords=true)
           allCoords,
-        },
-      });
+      };
+      }, CACHE_TTL.SHORT); // 2 min cache for inventory detail
+
+      res.json({ success: true, data });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error al obtener inventario detallado';
