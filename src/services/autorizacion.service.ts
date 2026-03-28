@@ -496,6 +496,25 @@ export async function crearTareasAutorizacion(
   const existeTareaDg = tareasExistentes.some(t => t.tipo === 'Autorización DG');
   const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM');
 
+  // DG contamina: si hay al menos 1 DG pendiente, TODO pasa a DG
+  if (pendientesDg.length > 0 && pendientesDcm.length > 0) {
+    console.log('[crearTareasAutorizacion] Mixta DG+DCM → todo va a DG');
+    pendientesDg.push(...pendientesDcm.filter(id => !pendientesDg.includes(id)));
+    // Actualizar en BD: por propuesta o por solicitud
+    if (propuestaId) {
+      await prisma.solicitudCaras.updateMany({
+        where: { idquote: propuestaId.toString(), autorizacion_dcm: 'pendiente' },
+        data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
+      });
+    } else {
+      await prisma.solicitudCaras.updateMany({
+        where: { id: { in: pendientesDcm.map(Number).filter(n => !isNaN(n)) }, autorizacion_dcm: 'pendiente' },
+        data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
+      });
+    }
+    pendientesDcm.length = 0;
+  }
+
   // Crear tarea para DG si hay pendientes y no existe ya una tarea
   if (pendientesDg.length > 0 && usuariosDg.length > 0 && !existeTareaDg) {
     const tareaDg = await prisma.tareas.create({
