@@ -1621,7 +1621,7 @@ export class InventariosController {
         if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
         where.OR = orConditions;
       }
-      if (tipo) where.tipo_de_mueble = tipo;
+      if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
 
