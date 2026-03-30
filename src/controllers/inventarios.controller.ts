@@ -392,13 +392,13 @@ export class InventariosController {
         estatus: { not: 'Bloqueado' },
       };
 
-      // Filter by city (plaza) - puede ser múltiples ciudades separadas por coma
+      // Filter by city (municipio) - puede ser múltiples ciudades separadas por coma
       if (ciudad) {
         const ciudadList = (ciudad as string).split(',').map(c => c.trim()).filter(Boolean);
         if (ciudadList.length === 1) {
-          where.plaza = ciudadList[0];
+          where.municipio = ciudadList[0];
         } else if (ciudadList.length > 1) {
-          where.plaza = { in: ciudadList };
+          where.municipio = { in: ciudadList };
         }
       }
 
@@ -728,7 +728,7 @@ export class InventariosController {
 
       const where: Record<string, unknown> = {};
       if (ciudad) {
-        where.plaza = ciudad;
+        where.municipio = ciudad;
       }
 
       const formatos = await prisma.inventarios.findMany({
