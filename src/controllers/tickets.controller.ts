@@ -386,6 +386,7 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
 };
 
 // Obtener conteo de tickets con mensajes no leidos (para badge sidebar)
+// Cuenta tanto notas internas (mensajes) como chat de soporte
 export const getTicketsUnreadCount = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.userId;
@@ -395,17 +396,24 @@ export const getTicketsUnreadCount = async (req: AuthRequest, res: Response) => 
       include: {
         mensajes: { orderBy: { id: 'desc' }, take: 1 },
         vistas: { where: { usuario_id: userId } },
+        chat: { orderBy: { id: 'desc' }, take: 1 },
+        chat_vistas: { where: { usuario_id: userId } },
       },
     });
 
     let unreadCount = 0;
     for (const t of tickets) {
+      // Check notas internas unread
       const vista = t.vistas[0];
       const ultimoMensaje = t.mensajes[0];
-      if (ultimoMensaje) {
-        const ultimoLeido = vista?.ultimo_mensaje_leido_id || 0;
-        if (ultimoMensaje.id > ultimoLeido) unreadCount++;
-      }
+      const notasUnread = ultimoMensaje && ultimoMensaje.id > (vista?.ultimo_mensaje_leido_id || 0);
+
+      // Check chat de soporte unread
+      const chatVista = t.chat_vistas[0];
+      const ultimoChat = t.chat[0];
+      const chatUnread = ultimoChat && ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0);
+
+      if (notasUnread || chatUnread) unreadCount++;
     }
 
     res.json({ success: true, data: { unreadCount } });
@@ -576,6 +584,12 @@ export const createTicketChatMessage = async (req: AuthRequest, res: Response) =
       const io = getIO();
       io.to(`ticket-chat-${ticketId}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, nuevoMensaje);
       io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId, mensaje: nuevoMensaje });
+
+      // Notificar al creador del ticket (para punto rojo en sidebar)
+      const ticket = await prisma.tickets.findUnique({ where: { id: ticketId }, select: { usuario_id: true } });
+      if (ticket && ticket.usuario_id !== userId) {
+        io.to(`user-notifications-${ticket.usuario_id}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId });
+      }
     } catch {}
 
     res.status(201).json({ success: true, data: nuevoMensaje });
