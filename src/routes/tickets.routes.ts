@@ -13,6 +13,10 @@ import {
   getTicketMensajes,
   createTicketMensaje,
   markTicketMensajesRead,
+  getTicketChat,
+  createTicketChatMessage,
+  markTicketChatRead,
+  getTicketChatUnreadCount,
 } from '../controllers/tickets.controller';
 
 const router = Router();
@@ -31,6 +35,12 @@ router.post('/:id/opened', markTicketOpened);
 router.get('/:id/mensajes', getTicketMensajes);
 router.post('/:id/mensajes', createTicketMensaje);
 router.post('/:id/mensajes/read', markTicketMensajesRead);
+
+// Chat de soporte (comunicacion entre creador y admins)
+router.get('/chat/unread-count', getTicketChatUnreadCount);
+router.get('/:id/chat', getTicketChat);
+router.post('/:id/chat', createTicketChatMessage);
+router.post('/:id/chat/read', markTicketChatRead);
 
 // Rutas para ver tickets (accesibles por todos para ver su propio ticket)
 router.get('/stats', getTicketStats);

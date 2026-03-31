@@ -338,7 +338,9 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       include: {
         mensajes: { orderBy: { id: 'desc' }, take: 1 },
         vistas: userId ? { where: { usuario_id: userId } } : false,
-        _count: { select: { mensajes: true } },
+        chat: { orderBy: { id: 'desc' }, take: 1 },
+        chat_vistas: userId ? { where: { usuario_id: userId } } : false,
+        _count: { select: { mensajes: true, chat: true } },
       },
       orderBy: { created_at: 'desc' },
     });
@@ -349,6 +351,11 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const ultimoMensajeLeido = vista?.ultimo_mensaje_leido_id || 0;
       const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido : false;
       const isOpened = !!vista;
+
+      const chatVista = Array.isArray(t.chat_vistas) ? t.chat_vistas[0] : null;
+      const ultimoChat = t.chat[0] || null;
+      const ultimoChatLeido = chatVista?.ultimo_mensaje_leido_id || 0;
+      const hasChatUnread = ultimoChat ? ultimoChat.id > ultimoChatLeido : false;
 
       return {
         id: t.id,
@@ -362,7 +369,9 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
         usuario_email: t.usuario_email,
         status_cambiado_por: t.status_cambiado_por,
         total_mensajes: t._count.mensajes,
+        total_chat: t._count.chat,
         has_unread: hasUnread,
+        has_chat_unread: hasChatUnread,
         is_opened: isOpened,
         created_at: t.created_at,
         updated_at: t.updated_at,
@@ -508,6 +517,125 @@ export const markTicketMensajesRead = async (req: AuthRequest, res: Response) =>
   } catch (error) {
     console.error('Error marking messages read:', error);
     res.status(500).json({ success: false, error: 'Error al marcar como leido' });
+  }
+};
+
+// ==================== CHAT DE SOPORTE (ticket_chat) ====================
+
+// Obtener mensajes del chat de soporte de un ticket
+export const getTicketChat = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+
+    const mensajes = await prisma.ticket_chat.findMany({
+      where: { ticket_id: ticketId },
+      orderBy: { created_at: 'asc' },
+    });
+
+    res.json({ success: true, data: mensajes });
+  } catch (error) {
+    console.error('Error fetching ticket chat:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener chat' });
+  }
+};
+
+// Crear mensaje en el chat de soporte
+export const createTicketChatMessage = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const userId = req.user?.userId;
+    const userName = req.user?.nombre || 'Usuario';
+    const { mensaje, archivo_url, archivo_nombre, archivo_tipo } = req.body;
+
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+    if (!mensaje && !archivo_url) {
+      return res.status(400).json({ success: false, error: 'Mensaje o archivo requerido' });
+    }
+
+    const nuevoMensaje = await prisma.ticket_chat.create({
+      data: {
+        ticket_id: ticketId,
+        usuario_id: userId,
+        usuario_nombre: userName,
+        mensaje: mensaje || null,
+        archivo_url: archivo_url || null,
+        archivo_nombre: archivo_nombre || null,
+        archivo_tipo: archivo_tipo || null,
+      },
+    });
+
+    // Actualizar lectura del autor
+    await prisma.ticket_chat_vistas.upsert({
+      where: { ticket_id_usuario_id: { ticket_id: ticketId, usuario_id: userId } },
+      create: { ticket_id: ticketId, usuario_id: userId, ultimo_mensaje_leido_id: nuevoMensaje.id },
+      update: { ultimo_mensaje_leido_id: nuevoMensaje.id },
+    });
+
+    // Emitir por socket
+    try {
+      const io = getIO();
+      io.to(`ticket-chat-${ticketId}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, nuevoMensaje);
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId, mensaje: nuevoMensaje });
+    } catch {}
+
+    res.status(201).json({ success: true, data: nuevoMensaje });
+  } catch (error) {
+    console.error('Error creating chat message:', error);
+    res.status(500).json({ success: false, error: 'Error al crear mensaje de chat' });
+  }
+};
+
+// Marcar mensajes del chat como leidos
+export const markTicketChatRead = async (req: AuthRequest, res: Response) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const userId = req.user?.userId;
+    const { ultimo_mensaje_id } = req.body;
+
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    await prisma.ticket_chat_vistas.upsert({
+      where: { ticket_id_usuario_id: { ticket_id: ticketId, usuario_id: userId } },
+      create: { ticket_id: ticketId, usuario_id: userId, ultimo_mensaje_leido_id: ultimo_mensaje_id },
+      update: { ultimo_mensaje_leido_id: ultimo_mensaje_id },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking chat read:', error);
+    res.status(500).json({ success: false, error: 'Error al marcar chat como leido' });
+  }
+};
+
+// Obtener conteo de chats no leidos para un ticket (para el creador del ticket)
+export const getTicketChatUnreadCount = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    // Solo contar para tickets del usuario actual
+    const tickets = await prisma.tickets.findMany({
+      where: { usuario_id: userId },
+      include: {
+        chat: { orderBy: { id: 'desc' }, take: 1 },
+        chat_vistas: { where: { usuario_id: userId } },
+      },
+    });
+
+    let unreadCount = 0;
+    for (const t of tickets) {
+      const vista = t.chat_vistas[0];
+      const ultimoChat = t.chat[0];
+      if (ultimoChat) {
+        const ultimoLeido = vista?.ultimo_mensaje_leido_id || 0;
+        if (ultimoChat.id > ultimoLeido) unreadCount++;
+      }
+    }
+
+    res.json({ success: true, data: { unreadCount } });
+  } catch (error) {
+    console.error('Error fetching chat unread count:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener conteo' });
   }
 };
 
