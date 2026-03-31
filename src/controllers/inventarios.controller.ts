@@ -1498,14 +1498,13 @@ export class InventariosController {
       if (invIds.length > 0) {
         const placeholders2 = invIds.map(() => '?').join(',');
         const campRows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number; campana: string }>>(
-          `SELECT DISTINCT ei.inventario_id, COALESCE(camp.descripcion, CONCAT('Campaña #', camp.id)) as campana
+          `SELECT DISTINCT ei.inventario_id, COALESCE(camp.nombre, CONCAT('Campaña #', camp.id)) as campana
            FROM reservas rsv
            INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
            INNER JOIN calendario cal ON cal.id = rsv.calendario_id
            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
            INNER JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
-           INNER JOIN solicitud s ON s.id = p.solicitud_id
-           INNER JOIN campania camp ON camp.solicitud_id = s.id
+           INNER JOIN campania camp ON camp.cotizacion_id = p.id
            WHERE ei.inventario_id IN (${placeholders2})
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
