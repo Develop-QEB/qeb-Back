@@ -4375,7 +4375,7 @@ export class CampanasController {
       // Si es tarea de ajuste y se finaliza, verificar si todas las hermanas ya están finalizadas
       if (
         ['Atendido', 'Completado', 'Finalizada'].includes(tarea.estatus || '') &&
-        ['Ajuste Cto Cliente', 'Ajuste de Caras'].includes(tarea.tipo || '') &&
+        ['Ajuste Cto Cliente', 'Ajuste de Caras', 'Ajuste Comercial'].includes(tarea.tipo || '') &&
         tarea.id_propuesta
       ) {
         const tareasHermanas = await prisma.tareas.findMany({
@@ -4401,7 +4401,7 @@ export class CampanasController {
 
           const propuestaAtendida = await prisma.propuesta.findUnique({
             where: { id: parseInt(tarea.id_propuesta) },
-            select: { solicitud_id: true },
+            select: { solicitud_id: true, id_asignado: true },
           });
 
           const cotizacionAjuste = await prisma.cotizacion.findFirst({
@@ -4410,8 +4410,98 @@ export class CampanasController {
           });
           const nombreCampaniaAjuste = cotizacionAjuste?.nombre_campania || 'Propuesta';
 
-          // Notificar al creador al cambiar el status
-          if (propuestaAtendida?.solicitud_id) {
+          // Para "Ajuste Comercial", notificar a los asignados de tráfico (inverso)
+          if (tarea.tipo === 'Ajuste Comercial' && propuestaAtendida?.id_asignado) {
+            const idsTrafico = propuestaAtendida.id_asignado
+              .split(',')
+              .map(i => parseInt(i.trim()))
+              .filter(i => !isNaN(i));
+
+            const usuariosTrafico = idsTrafico.length > 0
+              ? await prisma.usuario.findMany({
+                  where: { id: { in: idsTrafico }, deleted_at: null },
+                  select: { id: true, nombre: true, correo_electronico: true },
+                })
+              : [];
+
+            const nowNotif = new Date();
+            for (const usuarioTrafico of usuariosTrafico) {
+              await prisma.tareas.create({
+                data: {
+                  titulo: `Ajuste completado: ${nombreCampaniaAjuste}`,
+                  descripcion: 'Todos los ajustes comerciales han sido atendidos. El estado de la propuesta cambió a Atendida.',
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: usuarioTrafico.id,
+                  responsable: '',
+                  id_solicitud: tarea.id_solicitud || '',
+                  id_propuesta: tarea.id_propuesta,
+                  campania_id: tarea.campania_id,
+                  fecha_inicio: nowNotif,
+                  fecha_fin: new Date(nowNotif.getTime() + 24 * 60 * 60 * 1000),
+                  asignado: req.user?.nombre || 'Usuario',
+                  id_asignado: (req.user?.userId || 0).toString(),
+                },
+              });
+
+              if (usuarioTrafico.correo_electronico) {
+                const nombrePropuesta = nombreCampaniaAjuste;
+                const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+                <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                  <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+                    <tr><td align="center">
+                      <table width="500" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                        <tr><td style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); padding: 32px 40px; text-align: center;">
+                          <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700;">QEB</h1>
+                          <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0 0; font-size: 13px; font-weight: 500;">OOH Management</p>
+                        </td></tr>
+                        <tr><td style="padding: 40px;">
+                          <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Ajuste Comercial Completado</h2>
+                          <p style="color: #6b7280; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5;">
+                            Hola <strong style="color: #374151;">${usuarioTrafico.nombre}</strong>, todos los ajustes comerciales de la siguiente propuesta han sido atendidos.
+                          </p>
+                          <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; border-radius: 12px; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+                            <tr><td style="padding: 20px;">
+                              <span style="display: inline-block; background-color: #10b981; color: #ffffff; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;">Atendida</span>
+                              <h3 style="color: #1f2937; margin: 8px 0; font-size: 18px; font-weight: 600;">${nombrePropuesta}</h3>
+                            </td></tr>
+                          </table>
+                          <table width="100%" cellpadding="0" cellspacing="0">
+                            <tr><td align="center">
+                              <a href="https://app.qeb.mx/propuestas?viewId=${tarea.id_propuesta}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Propuesta</a>
+                            </td></tr>
+                          </table>
+                        </td></tr>
+                        <tr><td style="background-color: #1f2937; padding: 24px 40px; text-align: center;">
+                          <p style="color: #9ca3af; font-size: 12px; margin: 0;">Mensaje automático del sistema QEB.</p>
+                          <p style="color: #6b7280; font-size: 11px; margin: 8px 0 0 0;">© ${new Date().getFullYear()} QEB OOH Management</p>
+                        </td></tr>
+                      </table>
+                    </td></tr>
+                  </table>
+                </body></html>`;
+
+                transporter.sendMail({
+                  from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+                  to: usuarioTrafico.correo_electronico,
+                  subject: `Ajuste comercial completado: ${nombrePropuesta}`,
+                  html: htmlBody,
+                }).then(() => {
+                  prisma.correos_enviados.create({
+                    data: {
+                      remitente: 'no-reply@qeb.mx',
+                      destinatario: usuarioTrafico.correo_electronico!,
+                      asunto: `Ajuste comercial completado: ${nombrePropuesta}`,
+                      cuerpo: htmlBody,
+                    },
+                  }).catch((err: any) => console.error('Error guardando correo ajuste comercial completado:', err));
+                }).catch((err: any) => console.error('Error enviando correo ajuste comercial completado:', err));
+              }
+            }
+          }
+
+          // Notificar al creador al cambiar el status (para Ajuste CTO y Ajuste de Caras)
+          if (tarea.tipo !== 'Ajuste Comercial' && propuestaAtendida?.solicitud_id) {
             const solicitudCreador = await prisma.solicitud.findUnique({
               where: { id: propuestaAtendida.solicitud_id },
               select: { usuario_id: true },
