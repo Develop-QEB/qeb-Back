@@ -83,9 +83,21 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
     const tickets = await prisma.tickets.findMany({
       where: { usuario_id: userId },
       orderBy: { created_at: 'desc' },
+      include: {
+        chat: { orderBy: { id: 'desc' }, take: 1 },
+        chat_vistas: { where: { usuario_id: userId } },
+      },
     });
 
-    res.json({ data: tickets });
+    const result = tickets.map((t) => {
+      const chatVista = t.chat_vistas[0];
+      const ultimoChat = t.chat[0];
+      const hasChatUnread = ultimoChat ? ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0) : false;
+      const { chat, chat_vistas, ...ticketData } = t;
+      return { ...ticketData, has_chat_unread: hasChatUnread };
+    });
+
+    res.json({ data: result });
   } catch (error) {
     console.error('Error fetching my tickets:', error);
     res.status(500).json({ message: 'Error al obtener tus tickets' });
