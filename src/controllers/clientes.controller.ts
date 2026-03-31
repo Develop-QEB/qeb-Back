@@ -596,14 +596,14 @@ export class ClientesController {
         }
       }
 
-      // Filter out clients already in local DB (any database - avoid duplicates across tabs)
+      // Filter out clients already in local DB for this specific database
       const dbCuics = await prisma.cliente.findMany({
         select: { CUIC: true },
-        where: { CUIC: { not: null } },
+        where: { CUIC: { not: null }, sap_database: database },
         distinct: ['CUIC'],
       });
       const dbCuicSet = new Set(dbCuics.map(c => c.CUIC));
-      console.log(`[SAP ${database}] DB has ${dbCuicSet.size} unique CUICs (all DBs), SAP returned ${sapClientes.length} items`);
+      console.log(`[SAP ${database}] DB has ${dbCuicSet.size} CUICs for ${database}, SAP returned ${sapClientes.length} items`);
 
       const filteredClientes = (sapClientes as Array<Record<string, unknown>>)
         .filter(c => c.CUIC != null && !dbCuicSet.has(c.CUIC as number))
