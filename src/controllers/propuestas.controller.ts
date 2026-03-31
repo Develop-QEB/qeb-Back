@@ -1223,43 +1223,85 @@ export class PropuestasController {
 
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      const yearInicio = req.query.yearInicio as string;
+      const yearFin = req.query.yearFin as string;
+      const catorcenaInicio = req.query.catorcenaInicio as string;
+      const catorcenaFin = req.query.catorcenaFin as string;
+
+      // Build WHERE conditions (same logic as getAll)
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
+      const statsParams: any[] = [];
+
+      if (status) {
+        whereConditions += ` AND pr.status = ?`;
+        statsParams.push(status);
+      }
+
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`;
+        statsParams.push(tipoPeriodo);
+      }
+
+      if (search) {
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
+        const searchPattern = `%${search}%`;
+        statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Period filter
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
+        });
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
+        });
+        if (catorcenasInicioData && catorcenasFinData) {
+          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+          statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+        }
+      } else if (yearInicio && yearFin) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        statsParams.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      } else if (yearInicio) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        statsParams.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
       // Visibility filter
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
-      let visibilityClause = '';
-      const statsParams: (string | number)[] = [];
       if (userId && !hasFullVisibility(userRol)) {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          visibilityClause = `
-            AND (
-              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-              OR sl.usuario_id IN (${placeholders})
-              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-            )`;
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id IN (${placeholders})
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
           statsParams.push(String(userId), ...teamIds, String(userId));
         } else {
-          visibilityClause = `
-            AND (
-              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-              OR sl.usuario_id = ?
-              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-            )`;
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id = ?
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
           statsParams.push(String(userId), userId, String(userId));
         }
       }
 
-      // Count propuestas grouped by status, filtering only those with solicitud.status = 'Atendida'
-      // This matches the same filter used by getAll (soloAtendidas: true)
       const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
-        SELECT pr.status, COUNT(*) as count
+        SELECT pr.status, COUNT(DISTINCT pr.id) as count
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        WHERE pr.deleted_at IS NULL
-          AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa')
-          AND sl.status = 'Atendida'
-          ${visibilityClause}
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE ${whereConditions}
         GROUP BY pr.status
       `, ...statsParams);
 
