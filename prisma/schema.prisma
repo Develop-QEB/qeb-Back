@@ -161,7 +161,7 @@ model cotizacion {
   fecha_fin            DateTime  @db.Date
   frontal              Int
   cruzada              Int
-  nivel_socioeconomico String?   @db.VarChar(50)
+  nivel_socioeconomico String?   @db.VarChar(500)
   observaciones        String    @db.VarChar(255)
   bonificacion         Float
   descuento            Float
@@ -379,12 +379,12 @@ model usuario {
   nombre             String           @db.VarChar(255)
   correo_electronico String           @db.VarChar(100)
   user_password      String?          @db.VarChar(255)
-  area               String           @db.VarChar(50)
-  puesto             String           @db.VarChar(50)
+  area               String           @db.VarChar(255)
+  puesto             String           @db.VarChar(255)
   updated_at         DateTime?        @db.Timestamp(0)
   created_at         DateTime?        @default(now()) @db.Timestamp(0)
   deleted_at         DateTime?        @db.Timestamp(0)
-  user_role          String           @default("Normal") @db.VarChar(50)
+  user_role          String           @default("Normal") @db.VarChar(255)
   foto_perfil        String?          @db.VarChar(500)
   reset_token        String?          @db.VarChar(6)
   reset_token_expiry DateTime?        @db.DateTime(0)
