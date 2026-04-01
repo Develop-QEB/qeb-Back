@@ -122,6 +122,7 @@ export class AuthService {
       puesto: user.puesto || '',
       foto_perfil: user.foto_perfil,
       equipos,
+      light_theme_notified: user.light_theme_notified,
     };
 
     return {
@@ -217,6 +218,7 @@ export class AuthService {
       puesto: user.puesto,
       foto_perfil: user.foto_perfil,
       equipos,
+      light_theme_notified: user.light_theme_notified,
     };
   }
 
