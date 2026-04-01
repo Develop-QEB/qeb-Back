@@ -132,6 +132,59 @@ export class AuthService {
     };
   }
 
+  async impersonate(targetUserId: number): Promise<AuthResponse> {
+    const user = await prisma.usuario.findFirst({
+      where: { id: targetUserId, deleted_at: null },
+    });
+
+    if (!user) {
+      throw new Error('Usuario no encontrado');
+    }
+
+    const userTeams = await prisma.usuario_equipo.findMany({
+      where: {
+        usuario_id: user.id,
+        equipo: { deleted_at: null },
+      },
+      include: {
+        equipo: { select: { id: true, nombre: true, color: true } },
+      },
+    });
+
+    const equipos = userTeams.map((t: { equipo: { id: number; nombre: string; color: string | null }; rol: string | null }) => ({
+      id: t.equipo.id,
+      nombre: t.equipo.nombre,
+      color: t.equipo.color,
+      rol_equipo: t.rol,
+    }));
+
+    const payload: JwtPayload = {
+      userId: user.id,
+      email: user.correo_electronico,
+      rol: user.user_role,
+      nombre: user.nombre,
+    };
+
+    const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+    const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+    return {
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        nombre: user.nombre,
+        email: user.correo_electronico,
+        rol: user.user_role,
+        area: user.area || '',
+        puesto: user.puesto || '',
+        foto_perfil: user.foto_perfil,
+        equipos,
+        light_theme_notified: user.light_theme_notified,
+      },
+    };
+  }
+
   async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
     try {
       const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as JwtPayload;

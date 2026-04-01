@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import bcrypt from 'bcryptjs';
+import { authService } from '../services/auth.service';
 
 export class UsuariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
@@ -308,6 +309,31 @@ export class UsuariosController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar usuarios';
+      res.status(500).json({
+        success: false,
+        error: message,
+      });
+    }
+  }
+  async impersonate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo el rol DEV puede realizar esta acción',
+        });
+        return;
+      }
+
+      const targetId = parseInt(req.params.id);
+      const result = await authService.impersonate(targetId);
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al impersonar usuario';
       res.status(500).json({
         success: false,
         error: message,
