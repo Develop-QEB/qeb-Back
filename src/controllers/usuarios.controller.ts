@@ -283,7 +283,7 @@ export class UsuariosController {
       }
 
       // No permitir que el admin se elimine a sí mismo
-      if (ids.includes(req.user.userId)) {
+      if (ids.includes(req.user!.userId)) {
         res.status(400).json({
           success: false,
           error: 'No puedes eliminarte a ti mismo',
