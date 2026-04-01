@@ -389,6 +389,7 @@ model usuario {
   reset_token        String?          @db.VarChar(6)
   reset_token_expiry DateTime?        @db.DateTime(0)
   sap_asesor_id      Int?
+  light_theme_notified Boolean @default(false)
   equipos            usuario_equipo[]
 }
 
@@ -529,6 +530,8 @@ model tickets {
   status_cambiado_por String?           @db.VarChar(255)
   mensajes            ticket_mensajes[]
   vistas              ticket_vistas[]
+  chat                ticket_chat[]
+  chat_vistas         ticket_chat_vistas[]
 
   @@map("tickets")
 }
@@ -559,6 +562,33 @@ model ticket_vistas {
 
   @@unique([ticket_id, usuario_id])
   @@map("ticket_vistas")
+}
+
+model ticket_chat {
+  id             Int      @id @default(autoincrement())
+  ticket_id      Int
+  usuario_id     Int
+  usuario_nombre String   @db.VarChar(255)
+  mensaje        String?  @db.Text
+  archivo_url    String?  @db.VarChar(500)
+  archivo_nombre String?  @db.VarChar(255)
+  archivo_tipo   String?  @db.VarChar(50)
+  created_at     DateTime @default(now()) @db.DateTime(0)
+  ticket         tickets  @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+
+  @@index([ticket_id])
+  @@map("ticket_chat")
+}
+
+model ticket_chat_vistas {
+  id                      Int      @id @default(autoincrement())
+  ticket_id               Int
+  usuario_id              Int
+  ultimo_mensaje_leido_id Int?
+  ticket                  tickets  @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+
+  @@unique([ticket_id, usuario_id])
+  @@map("ticket_chat_vistas")
 }
 
 model chatbot_logs {
