@@ -183,6 +183,28 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de ticket-${ticketId}`);
     });
 
+    // User notification rooms (per-user, for unread indicators)
+    socket.on('join-user-notifications', (userId: number) => {
+      socket.join(`user-notifications-${userId}`);
+      console.log(`[Socket] ${socket.id} se unió a user-notifications-${userId}`);
+    });
+
+    socket.on('leave-user-notifications', (userId: number) => {
+      socket.leave(`user-notifications-${userId}`);
+      console.log(`[Socket] ${socket.id} salió de user-notifications-${userId}`);
+    });
+
+    // Ticket chat de soporte rooms
+    socket.on('join-ticket-chat', (ticketId: number) => {
+      socket.join(`ticket-chat-${ticketId}`);
+      console.log(`[Socket] ${socket.id} se unió a ticket-chat-${ticketId}`);
+    });
+
+    socket.on('leave-ticket-chat', (ticketId: number) => {
+      socket.leave(`ticket-chat-${ticketId}`);
+      console.log(`[Socket] ${socket.id} salió de ticket-chat-${ticketId}`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`[Socket] Cliente desconectado: ${socket.id}`);
     });
@@ -272,6 +294,7 @@ export const SOCKET_EVENTS = {
   // Tickets Historial
   TICKET_MENSAJE_NUEVO: 'ticket:mensaje:nuevo',
   TICKET_STATUS_CHANGED: 'ticket:status:changed',
+  TICKET_CHAT_NUEVO: 'ticket:chat:nuevo',
 };
 
 // Helper para emitir a una campaña específica

@@ -877,6 +877,108 @@ export class PropuestasController {
         }
       }
 
+      // Si el cambio es a "Ajuste Comercial", crear tareas para el creador/asesor de la solicitud
+      if (status === 'Ajuste Comercial' && solicitud?.usuario_id) {
+        const creadorSolicitud = await prisma.usuario.findUnique({
+          where: { id: solicitud.usuario_id, deleted_at: null },
+          select: { id: true, nombre: true, correo_electronico: true },
+        });
+
+        if (creadorSolicitud && creadorSolicitud.id !== userId) {
+          // Crear tarea para el asesor/creador
+          await prisma.tareas.create({
+            data: {
+              titulo: `Ajuste comercial: ${nombrePropuesta}`,
+              descripcion: `Ajuste comercial: ${nombrePropuesta}`,
+              tipo: 'Ajuste Comercial',
+              estatus: 'Pendiente',
+              id_responsable: creadorSolicitud.id,
+              responsable: creadorSolicitud.nombre,
+              asignado: creadorSolicitud.nombre,
+              id_asignado: creadorSolicitud.id.toString(),
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuestaId.toString(),
+              campania_id: campania?.id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+            },
+          });
+
+          // Obtener catorcenas para el correo
+          const catorcenaInicio = cotizacion?.fecha_inicio ? await prisma.catorcenas.findFirst({
+            where: {
+              fecha_inicio: { lte: cotizacion.fecha_inicio },
+              fecha_fin: { gte: cotizacion.fecha_inicio },
+            },
+          }) : null;
+
+          const catorcenaFin = cotizacion?.fecha_fin ? await prisma.catorcenas.findFirst({
+            where: {
+              fecha_inicio: { lte: cotizacion.fecha_fin },
+              fecha_fin: { gte: cotizacion.fecha_fin },
+            },
+          }) : null;
+
+          const periodoInicioStr = catorcenaInicio
+            ? `Cat ${catorcenaInicio.numero_catorcena} - ${catorcenaInicio.a_o}`
+            : undefined;
+          const periodoFinStr = catorcenaFin
+            ? `Cat ${catorcenaFin.numero_catorcena} - ${catorcenaFin.a_o}`
+            : undefined;
+
+          // Enviar correo al asesor/creador
+          if (creadorSolicitud.correo_electronico) {
+            enviarCorreoTarea(
+              propuesta.solicitud_id || 0,
+              nombrePropuesta,
+              `Ajuste comercial: ${nombrePropuesta}`,
+              fechaFin,
+              creadorSolicitud.correo_electronico,
+              creadorSolicitud.nombre,
+              {
+                cliente: solicitud?.razon_social || undefined,
+                creador: userName,
+                periodoInicio: periodoInicioStr,
+                periodoFin: periodoFinStr,
+                idPropuesta: propuestaId,
+              },
+              `https://app.qeb.mx/propuestas?viewId=${propuestaId}`
+            ).catch(err => console.error('Error enviando correo:', err));
+          }
+        }
+      }
+
+      // Si el cambio es de "Ajuste Comercial" a otro status, notificar a los asignados de tráfico
+      if (statusAnterior === 'Ajuste Comercial' && status !== 'Atendida') {
+        const idsAsignados = propuesta.id_asignado
+          ? propuesta.id_asignado.split(',').map(i => parseInt(i.trim())).filter(i => !isNaN(i) && i !== userId)
+          : [];
+
+        if (idsAsignados.length > 0) {
+          const usuariosTrafico = await prisma.usuario.findMany({
+            where: { id: { in: idsAsignados }, deleted_at: null },
+            select: { id: true, nombre: true, correo_electronico: true },
+          });
+
+          for (const usuarioTrafico of usuariosTrafico) {
+            if (usuarioTrafico.correo_electronico) {
+              enviarCorreoNotificacion(
+                propuesta.solicitud_id || 0,
+                `Propuesta ajustada: ${nombrePropuesta}`,
+                `${userName} cambió el estado de la propuesta "${nombrePropuesta}" de "Ajuste Comercial" a "${status}"`,
+                usuarioTrafico.correo_electronico,
+                usuarioTrafico.nombre,
+                {
+                  accion: 'Cambio de estado',
+                  usuario: userName,
+                  cliente: solicitud?.razon_social || undefined,
+                }
+              ).catch(err => console.error('Error enviando correo:', err));
+            }
+          }
+        }
+      }
+
       // Si el cambio es manual a "Atendida", notificar al creador con correo específico
       if (status === 'Atendida' && solicitud?.usuario_id) {
         const creadorAtendida = await prisma.usuario.findUnique({
@@ -1121,43 +1223,85 @@ export class PropuestasController {
 
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      const yearInicio = req.query.yearInicio as string;
+      const yearFin = req.query.yearFin as string;
+      const catorcenaInicio = req.query.catorcenaInicio as string;
+      const catorcenaFin = req.query.catorcenaFin as string;
+
+      // Build WHERE conditions (same logic as getAll)
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
+      const statsParams: any[] = [];
+
+      if (status) {
+        whereConditions += ` AND pr.status = ?`;
+        statsParams.push(status);
+      }
+
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`;
+        statsParams.push(tipoPeriodo);
+      }
+
+      if (search) {
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
+        const searchPattern = `%${search}%`;
+        statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      // Period filter
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const catorcenasInicioData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
+        });
+        const catorcenasFinData = await prisma.catorcenas.findFirst({
+          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
+        });
+        if (catorcenasInicioData && catorcenasFinData) {
+          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+          statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+        }
+      } else if (yearInicio && yearFin) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        statsParams.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      } else if (yearInicio) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        statsParams.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
       // Visibility filter
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
-      let visibilityClause = '';
-      const statsParams: (string | number)[] = [];
       if (userId && !hasFullVisibility(userRol)) {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          visibilityClause = `
-            AND (
-              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-              OR sl.usuario_id IN (${placeholders})
-              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-            )`;
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id IN (${placeholders})
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
           statsParams.push(String(userId), ...teamIds, String(userId));
         } else {
-          visibilityClause = `
-            AND (
-              FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-              OR sl.usuario_id = ?
-              OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-            )`;
+          whereConditions += ` AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR sl.usuario_id = ?
+            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+          )`;
           statsParams.push(String(userId), userId, String(userId));
         }
       }
 
-      // Count propuestas grouped by status, filtering only those with solicitud.status = 'Atendida'
-      // This matches the same filter used by getAll (soloAtendidas: true)
       const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
-        SELECT pr.status, COUNT(*) as count
+        SELECT pr.status, COUNT(DISTINCT pr.id) as count
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        WHERE pr.deleted_at IS NULL
-          AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa')
-          AND sl.status = 'Atendida'
-          ${visibilityClause}
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE ${whereConditions}
         GROUP BY pr.status
       `, ...statsParams);
 
@@ -1808,11 +1952,20 @@ export class PropuestasController {
         prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
       ]);
 
+      // Get cliente name (fallback to razon_social if client not found)
+      let clienteNombre = '';
+      if (solicitud?.cliente_id) {
+        const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.razon_social || '';
+      } else if (solicitud?.razon_social) {
+        clienteNombre = solicitud.razon_social;
+      }
+
       res.json({
         success: true,
         data: {
           propuesta,
-          solicitud,
+          solicitud: solicitud ? { ...solicitud, cliente: clienteNombre } : null,
           cotizacion,
           campania,
           caras,
@@ -1923,11 +2076,13 @@ export class PropuestasController {
         prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
       ]);
 
-      // Get cliente name
+      // Get cliente name (fallback to razon_social if client not found)
       let clienteNombre = '';
       if (solicitud?.cliente_id) {
         const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
-        clienteNombre = cliente?.T0_U_Cliente || '';
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.razon_social || '';
+      } else if (solicitud?.razon_social) {
+        clienteNombre = solicitud.razon_social;
       }
 
       // Get catorcena info from campaign dates

@@ -271,6 +271,22 @@ async resetPassword(req: Request, res: Response): Promise<void> {
   }
 }
 
+  async markLightThemeNotified(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        res.status(401).json({ success: false, error: 'No autenticado' });
+        return;
+      }
+      await prisma.usuario.update({
+        where: { id: req.user.userId },
+        data: { light_theme_notified: true },
+      });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Error al actualizar notificacion' });
+    }
+  }
+
   async uploadPhoto(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {

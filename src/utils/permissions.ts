@@ -11,6 +11,10 @@ const FULL_VISIBILITY_ROLES = [
   'Director de Desarrollo Digital',
   'Director Comercial Aeropuerto',
   'Director de Operaciones',
+  'Gerente de Trafico',
+  'Coordinador de trafico',
+  'Especialista de trafico',
+  'Auxiliar de trafico',
 ];
 
 export function hasFullVisibility(rol: string): boolean {

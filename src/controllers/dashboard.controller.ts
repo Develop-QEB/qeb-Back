@@ -417,22 +417,22 @@ export class DashboardController {
               distinct: ['estado'],
               where: { estado: { not: null } },
             }),
-            // Ciudades/Plazas
+            // Ciudades/Plazas (con estado para cascada)
             prisma.inventarios.findMany({
-              select: { plaza: true },
-              distinct: ['plaza'],
+              select: { plaza: true, estado: true },
+              distinct: ['plaza', 'estado'],
               where: { plaza: { not: null } },
             }),
-            // Formatos (mueble)
+            // Formatos con plaza y estado (para cascada)
             prisma.inventarios.findMany({
-              select: { mueble: true },
-              distinct: ['mueble'],
+              select: { mueble: true, plaza: true, estado: true },
+              distinct: ['mueble', 'plaza', 'estado'],
               where: { mueble: { not: null } },
             }),
-            // Nivel Socioeconomico
+            // NSE con plaza y estado (para cascada)
             prisma.inventarios.findMany({
-              select: { nivel_socioeconomico: true },
-              distinct: ['nivel_socioeconomico'],
+              select: { nivel_socioeconomico: true, plaza: true, estado: true },
+              distinct: ['nivel_socioeconomico', 'plaza', 'estado'],
               where: { nivel_socioeconomico: { not: null } },
             }),
             // Catorcenas (ultimos 2 anos)
@@ -454,9 +454,9 @@ export class DashboardController {
 
           return {
             estados: estados.map((e) => e.estado).filter(Boolean).sort(),
-            ciudades: ciudades.map((c) => c.plaza).filter(Boolean).sort(),
-            formatos: formatos.map((f) => f.mueble).filter(Boolean).sort(),
-            nses: nses.map((n) => n.nivel_socioeconomico).filter(Boolean).sort(),
+            ciudades: ciudades.filter(c => c.plaza).map(c => ({ ciudad: c.plaza!, estado: c.estado || '' })).sort((a, b) => a.ciudad.localeCompare(b.ciudad)),
+            formatos: formatos.filter(f => f.mueble).map(f => ({ formato: f.mueble!, estado: f.estado || '', ciudad: f.plaza || '' })),
+            nses: nses.filter(n => n.nivel_socioeconomico).map(n => ({ nse: n.nivel_socioeconomico!, estado: n.estado || '', ciudad: n.plaza || '' })),
             catorcenaActual: catorcenaActual ? {
               id: catorcenaActual.id,
               label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,

@@ -53,6 +53,7 @@ export interface UserResponse {
   puesto: string;
   foto_perfil?: string | null;
   equipos?: UserEquipo[];
+  light_theme_notified?: boolean;
 }
 
 export interface AuthResponse {

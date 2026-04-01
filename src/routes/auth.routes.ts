@@ -42,6 +42,8 @@ router.post(
   authController.uploadPhoto.bind(authController)
 );
 
+router.post('/mark-light-theme-notified', authMiddleware, authController.markLightThemeNotified.bind(authController));
+
 router.post('/logout', authMiddleware, authController.logout.bind(authController));
 
 router.post('/forgot-password', (req, res) => authController.forgotPassword(req, res));
