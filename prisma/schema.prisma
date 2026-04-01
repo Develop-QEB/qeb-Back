@@ -9,15 +9,15 @@ datasource db {
 
 model proveedores {
   id                 Int                 @id @default(autoincrement())
-  nombre             String              @db.VarChar(100)
-  direccion          String?             @db.VarChar(200)
-  ciudad             String?             @db.VarChar(100)
-  codigo_postal      String?             @db.VarChar(20)
-  telefono           String?             @db.VarChar(20)
-  email              String?             @db.VarChar(100)
-  sitio_web          String?             @db.VarChar(200)
-  contacto_principal String?             @db.VarChar(100)
-  categoria          String?             @db.VarChar(50)
+  nombre             String              @db.VarChar(255)
+  direccion          String?             @db.VarChar(255)
+  ciudad             String?             @db.VarChar(255)
+  codigo_postal      String?             @db.VarChar(255)
+  telefono           String?             @db.VarChar(255)
+  email              String?             @db.VarChar(255)
+  sitio_web          String?             @db.VarChar(255)
+  contacto_principal String?             @db.VarChar(255)
+  categoria          String?             @db.VarChar(255)
   fecha_alta         DateTime?           @db.Date
   estado             proveedores_estado? @default(activo)
   notas              String?             @db.Text
@@ -28,19 +28,19 @@ model proveedores {
 
 model inventarios {
   id                   Int      @id @default(autoincrement())
-  codigo_unico         String?  @db.VarChar(50)
+  codigo_unico         String?  @db.VarChar(255)
   ubicacion            String?  @db.VarChar(255)
-  tipo_de_cara         String?  @db.VarChar(30)
-  cara                 String?  @db.VarChar(1)
+  tipo_de_cara         String?  @db.VarChar(255)
+  cara                 String?  @db.VarChar(255)
   mueble               String?  @db.VarChar(255)
   latitud              Float    @db.Float
   longitud             Float    @db.Float
-  plaza                String?  @db.VarChar(25)
-  estado               String?  @db.VarChar(30)
+  plaza                String?  @db.VarChar(255)
+  estado               String?  @db.VarChar(255)
   municipio            String?  @db.Text
   cp                   Int?
-  tradicional_digital  String?  @db.VarChar(11)
-  sentido              String?  @db.VarChar(5)
+  tradicional_digital  String?  @db.VarChar(255)
+  sentido              String?  @db.VarChar(255)
   tipo_de_mueble       String?  @db.Text
   ancho                Float    @db.Float
   alto                 Float    @db.Float
@@ -48,14 +48,14 @@ model inventarios {
   nivel_socioeconomico String?  @db.VarChar(255)
   total_espacios       Int?
   tiempo               Int?
-  estatus              String?  @db.VarChar(20)
-  codigo               String?  @db.VarChar(10)
+  estatus              String?  @db.VarChar(255)
+  codigo               String?  @db.VarChar(255)
   col_5354             Boolean?
-  isla                 String?  @db.VarChar(20)
-  mueble_isla          String?  @db.VarChar(20)
+  isla                 String?  @db.VarChar(255)
+  mueble_isla          String?  @db.VarChar(255)
   entre_calle_1        String?  @db.VarChar(255)
   entre_calle_2        String?  @db.VarChar(255)
-  orientacion          String?  @db.VarChar(50)
+  orientacion          String?  @db.VarChar(255)
   tarifa_piso          Decimal? @db.Decimal(12, 2)
   tarifa_publica       Decimal? @db.Decimal(12, 2)
 
@@ -76,13 +76,13 @@ model catorcenas {
 
 model archivos {
   id           Int    @id @default(autoincrement())
-  nombre       String @db.VarChar(100)
-  tipo         String @db.VarChar(50)
+  nombre       String @db.VarChar(255)
+  tipo         String @db.VarChar(255)
   campana_id   Int
   tareas_id    Int
-  alto         String @db.VarChar(100)
-  ancho        String @db.VarChar(100)
-  idinventario String @db.VarChar(100)
+  alto         String @db.VarChar(255)
+  ancho        String @db.VarChar(255)
+  idinventario String @db.VarChar(255)
 }
 
 model calendario {
@@ -95,14 +95,14 @@ model calendario {
 model campania {
   id               Int       @id @default(autoincrement())
   cliente_id       Int
-  nombre           String    @db.VarChar(100)
+  nombre           String    @db.VarChar(255)
   fecha_inicio     DateTime  @db.Date
   fecha_fin        DateTime  @db.Date
   total_caras      String    @db.VarChar(255)
   bonificacion     Int
-  status           String    @default("inactiva") @db.VarChar(50)
+  status           String    @default("inactiva") @db.VarChar(255)
   cotizacion_id    Int?
-  articulo         String    @db.VarChar(20)
+  articulo         String    @db.VarChar(255)
   fecha_aprobacion DateTime? @db.DateTime(0)
   posted_to_sap    Int?      @default(0) @db.TinyInt
   posted_aps       String?   @db.Text
@@ -136,9 +136,9 @@ model cliente {
   T2_U_Producto      String?   @db.VarChar(255)
   T2_U_ValidFrom     DateTime? @db.Date
   T2_U_ValidTo       DateTime? @db.Date
-  card_code          String?   @db.VarChar(50)
+  card_code          String?   @db.VarChar(255)
   salesperson_code   Int?
-  sap_database       String?   @db.VarChar(10)
+  sap_database       String?   @db.VarChar(255)
 }
 
 model comentarios {
@@ -148,14 +148,14 @@ model comentarios {
   creado_en    DateTime @db.Timestamp(0)
   campania_id  Int
   solicitud_id Int
-  origen       String?  @db.VarChar(20)
+  origen       String?  @db.VarChar(255)
 }
 
 model cotizacion {
   id                   Int       @id @default(autoincrement())
   user_id              Int
   clientes_id          Int
-  nombre_campania      String    @db.VarChar(100)
+  nombre_campania      String    @db.VarChar(255)
   numero_caras         Int
   fecha_inicio         DateTime  @db.Date
   fecha_fin            DateTime  @db.Date
@@ -166,12 +166,12 @@ model cotizacion {
   bonificacion         Float
   descuento            Float
   precio               Decimal?  @db.Decimal(10, 2)
-  contacto             String    @db.VarChar(200)
-  status               String    @default("Pendiente") @db.VarChar(50)
+  contacto             String    @db.VarChar(255)
+  status               String    @default("Pendiente") @db.VarChar(255)
   id_propuesta         Int
   fecha_expiracion     DateTime? @db.Date
-  articulo             String    @db.VarChar(20)
-  tipo_periodo         String?   @default("catorcena") @db.VarChar(20)
+  articulo             String    @db.VarChar(255)
+  tipo_periodo         String?   @default("catorcena") @db.VarChar(255)
 
   @@index([id_propuesta], map: "idx_id_propuesta")
 }
@@ -186,9 +186,9 @@ model espacio_inventario {
 
 model historial {
   id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  tipo       String   @db.VarChar(20)
+  tipo       String   @db.VarChar(255)
   ref_id     Int
-  accion     String   @db.VarChar(20)
+  accion     String   @db.VarChar(255)
   fecha_hora DateTime @default(now()) @db.Timestamp(0)
   detalles   String?  @db.Text
 }
@@ -207,7 +207,7 @@ model imagenes_digitales {
   id_reserva         Int
   archivo            String   @db.VarChar(255)
   comentario         String   @db.Text
-  aprobado_rechazado String   @db.VarChar(25)
+  aprobado_rechazado String   @db.VarChar(255)
   respuesta          String   @db.VarChar(255)
   spot               Int
   fecha_testigo      DateTime @db.Date
@@ -232,18 +232,18 @@ model propuesta {
   id                       Int       @id @default(autoincrement())
   cliente_id               Int
   fecha                    DateTime  @default(now()) @db.Date
-  status                   String    @default("Abierto") @db.VarChar(50)
+  status                   String    @default("Abierto") @db.VarChar(255)
   descripcion              String?   @db.Text
   precio                   Decimal?  @db.Decimal(10, 2)
   notas                    String?   @db.Text
   deleted_at               DateTime? @db.DateTime(0)
   solicitud_id             Int
   precio_simulado          Int?
-  asignado                 String    @db.VarChar(200)
+  asignado                 String    @db.VarChar(255)
   id_asignado              String?   @db.VarChar(255)
   inversion                Int
   comentario_cambio_status String    @db.Text
-  articulo                 String    @db.VarChar(20)
+  articulo                 String    @db.VarChar(255)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
   archivo                  String?   @db.VarChar(255)
 }
@@ -258,14 +258,14 @@ model reservas {
   solicitudCaras_id  Int
   archivo            String?   @db.LongText
   estatus            String    @db.VarChar(255)
-  arte_aprobado      String    @db.VarChar(25)
+  arte_aprobado      String    @db.VarChar(255)
   comentario_rechazo String    @db.VarChar(255)
-  estatus_original   String    @db.VarChar(20)
+  estatus_original   String    @db.VarChar(255)
   fecha_testigo      DateTime  @db.Date
   imagen_testigo     String    @db.Text
   instalado          Boolean
   APS                Int?
-  tarea              String    @db.VarChar(50)
+  tarea              String    @db.VarChar(255)
   grupo_completo_id  Int?
 
   @@index([solicitudCaras_id])
@@ -279,7 +279,7 @@ model reservas {
 
 model session_locks {
   id          Int       @id @default(autoincrement())
-  module_name String    @db.VarChar(100)
+  module_name String    @db.VarChar(255)
   user_id     Int?
   username    String?   @db.VarChar(255)
   locked_at   DateTime? @default(now()) @db.Timestamp(0)
@@ -296,11 +296,11 @@ model solicitud {
   status           String    @default("Pendiente") @db.VarChar(255)
   deleted_at       DateTime? @db.DateTime(0)
   nombre_usuario   String?   @db.VarChar(255)
-  asignado         String    @db.VarChar(200)
+  asignado         String    @db.VarChar(255)
   id_asignado      String?   @db.VarChar(255)
-  cuic             String?   @db.VarChar(50)
+  cuic             String?   @db.VarChar(255)
   razon_social     String?   @db.VarChar(255)
-  unidad_negocio   String?   @db.VarChar(100)
+  unidad_negocio   String?   @db.VarChar(255)
   marca_id         Int?
   marca_nombre     String?   @db.VarChar(255)
   asesor           String?   @db.VarChar(255)
@@ -311,7 +311,7 @@ model solicitud {
   categoria_nombre String?   @db.VarChar(255)
   IMU              Int
   archivo          String?   @db.LongText
-  tipo_archivo     String?   @db.VarChar(100)
+  tipo_archivo     String?   @db.VarChar(255)
   card_code        String?   @db.VarChar(255)
   salesperson_code Int?
   sap_database     String?   @db.VarChar(255)
@@ -357,7 +357,7 @@ model tareas {
   contenido          String?   @db.Text
   campania_id        Int?
   archivo            String?   @db.VarChar(1000)
-  id_solicitud       String    @db.VarChar(100)
+  id_solicitud       String    @db.VarChar(255)
   id_propuesta       String?   @db.VarChar(255)
   evidencia          String?   @db.VarChar(10000)
   proveedores_id     Int?
@@ -377,7 +377,7 @@ model tareas {
 model usuario {
   id                 Int              @id @default(autoincrement())
   nombre             String           @db.VarChar(255)
-  correo_electronico String           @db.VarChar(100)
+  correo_electronico String           @db.VarChar(255)
   user_password      String?          @db.VarChar(255)
   area               String           @db.VarChar(255)
   puesto             String           @db.VarChar(255)
@@ -395,9 +395,9 @@ model usuario {
 
 model equipo {
   id          Int              @id @default(autoincrement())
-  nombre      String           @db.VarChar(100)
+  nombre      String           @db.VarChar(255)
   descripcion String?          @db.Text
-  color       String?          @db.VarChar(20)
+  color       String?          @db.VarChar(255)
   created_at  DateTime?        @default(now()) @db.Timestamp(0)
   updated_at  DateTime?        @db.Timestamp(0)
   deleted_at  DateTime?        @db.Timestamp(0)
@@ -408,7 +408,7 @@ model usuario_equipo {
   id         Int       @id @default(autoincrement())
   usuario_id Int
   equipo_id  Int
-  rol        String?   @db.VarChar(50)
+  rol        String?   @db.VarChar(255)
   created_at DateTime? @default(now()) @db.Timestamp(0)
   equipo     equipo    @relation(fields: [equipo_id], references: [id], onDelete: Cascade)
   usuario    usuario   @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
@@ -435,7 +435,7 @@ model notas_personales {
   usuario_id          Int
   titulo              String?   @db.VarChar(255)
   contenido           String    @db.Text
-  color               String?   @db.VarChar(20)
+  color               String?   @db.VarChar(255)
   fecha_creacion      DateTime  @default(now()) @db.Timestamp(0)
   fecha_actualizacion DateTime? @db.Timestamp(0)
 
@@ -446,7 +446,7 @@ model comentarios_revision_artes {
   id           Int      @id @default(autoincrement())
   tarea_id     Int
   autor_id     Int
-  autor_nombre String   @db.VarChar(100)
+  autor_nombre String   @db.VarChar(255)
   contenido    String   @db.Text
   fecha        DateTime @default(now()) @db.Timestamp(0)
 }
@@ -461,9 +461,9 @@ model conteoTradicionalYDigital {
 
 model criterios_autorizacion {
   id             Int      @id @default(autoincrement())
-  formato        String   @db.VarChar(50)
-  tipo           String   @db.VarChar(20)
-  plaza          String   @db.VarChar(50)
+  formato        String   @db.VarChar(255)
+  tipo           String   @db.VarChar(255)
+  plaza          String   @db.VarChar(255)
   tarifa_max_dg  Decimal? @db.Decimal(10, 2)
   tarifa_min_dcm Decimal? @db.Decimal(10, 2)
   tarifa_max_dcm Decimal? @db.Decimal(10, 2)
