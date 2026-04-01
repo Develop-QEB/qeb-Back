@@ -554,8 +554,8 @@ export class SolicitudesController {
             s.id as solicitud_id,
             ct.tipo_periodo,
             ct.nombre_campania,
-            ct.fecha_inicio as periodo_fecha_inicio,
-            ct.fecha_fin as periodo_fecha_fin,
+            COALESCE(MIN(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_inicio,
+            COALESCE(MAX(sc.fin_periodo), ct.fecha_fin) as periodo_fecha_fin,
             cat_ini.numero_catorcena as catorcena_inicio,
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
@@ -563,6 +563,7 @@ export class SolicitudesController {
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
           LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
           WHERE s.id IN (${placeholders})

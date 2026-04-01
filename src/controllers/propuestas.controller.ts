@@ -2414,11 +2414,11 @@ export class PropuestasController {
 
           const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
 
-          // Verificar duplicados en la misma propuesta
+          // Verificar duplicados en la misma propuesta Y mismo período
           const exists = await prisma.reservas.findFirst({
             where: {
               inventario_id: espacioId,
-              solicitudCaras_id: { in: proposalCaraIds },
+              solicitudCaras_id: solicitudCaraId,
               deleted_at: null
             }
           });
@@ -2483,11 +2483,11 @@ export class PropuestasController {
 
         const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
 
-        // Verificar duplicados en la misma propuesta
+        // Verificar duplicados en la misma cara (mismo período)
         const exists = await prisma.reservas.findFirst({
           where: {
             inventario_id: espacioId,
-            solicitudCaras_id: { in: proposalCaraIds },
+            solicitudCaras_id: solicitudCaraId,
             deleted_at: null
           }
         });

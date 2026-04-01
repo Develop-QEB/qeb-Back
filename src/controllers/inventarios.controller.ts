@@ -1277,7 +1277,7 @@ export class InventariosController {
         if (codigo) codigosInBatch.add(codigo);
 
         // Validate enum values
-        if (row.tipo_de_cara && !['Flujo', 'Contraflujo'].includes(row.tipo_de_cara)) {
+        if (row.tipo_de_cara && !['Flujo', 'Contraflujo', 'Flujo2', 'Contraflujo2'].includes(row.tipo_de_cara)) {
           errores.push({ fila: filaNum, campo: 'tipo_de_cara', mensaje: `Debe ser Flujo o Contraflujo` });
           hasError = true;
         }
@@ -1302,8 +1302,8 @@ export class InventariosController {
             tradicional_digital: row.tradicional_digital || null,
             sentido: row.sentido || null,
             tipo_de_mueble: row.tipo_de_mueble || null,
-            ancho: parseFloat(row.ancho) || 0,
-            alto: parseFloat(row.alto) || 0,
+            ancho: row.ancho && !isNaN(parseFloat(row.ancho)) ? parseFloat(row.ancho) : null,
+            alto: row.alto && !isNaN(parseFloat(row.alto)) ? parseFloat(row.alto) : null,
             nivel_socioeconomico: row.nivel_socioeconomico || null,
             total_espacios: row.total_espacios ? parseInt(row.total_espacios) : null,
             estatus: row.estatus || 'Disponible',
