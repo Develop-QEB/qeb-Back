@@ -1056,7 +1056,7 @@ export class ChatbotController {
 
   async getLogs(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({ success: false, error: 'Acceso denegado' });
         return;
       }

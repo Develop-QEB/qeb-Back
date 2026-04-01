@@ -7,7 +7,7 @@ export class UsuariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Verificar que el usuario sea Administrador
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -84,7 +84,7 @@ export class UsuariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Verificar que el usuario sea Administrador
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para acceder a esta sección',
@@ -167,7 +167,7 @@ export class UsuariosController {
   async update(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Verificar que el usuario sea Administrador
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -229,7 +229,7 @@ export class UsuariosController {
 
   async adminResetPassword(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({ success: false, error: 'No tienes permisos para realizar esta acción' });
         return;
       }
@@ -264,7 +264,7 @@ export class UsuariosController {
   async deleteMany(req: AuthRequest, res: Response): Promise<void> {
     try {
       // Verificar que el usuario sea Administrador
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',

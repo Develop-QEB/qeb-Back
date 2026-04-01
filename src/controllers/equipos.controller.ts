@@ -7,7 +7,7 @@ export class EquiposController {
   // Obtener todos los equipos con sus miembros
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para acceder a esta sección',
@@ -75,7 +75,7 @@ export class EquiposController {
   // Crear un nuevo equipo
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -126,7 +126,7 @@ export class EquiposController {
   // Actualizar un equipo
   async update(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -211,7 +211,7 @@ export class EquiposController {
   // Eliminar un equipo (soft delete)
   async delete(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -259,7 +259,7 @@ export class EquiposController {
   // Agregar miembro(s) a un equipo
   async addMembers(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -377,7 +377,7 @@ export class EquiposController {
   // Remover miembro(s) de un equipo
   async removeMembers(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para realizar esta acción',
@@ -473,7 +473,7 @@ export class EquiposController {
   // Obtener usuarios disponibles (que no están en un equipo específico)
   async getAvailableUsers(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (req.user?.rol !== 'Administrador') {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para acceder a esta sección',

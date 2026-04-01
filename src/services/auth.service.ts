@@ -31,8 +31,8 @@ export class AuthService {
     }
 
     // El rol se asigna automáticamente basado en el puesto
-    // (el puesto y el rol son iguales excepto para Administrador)
-    const user_role = data.puesto;
+    // (el puesto y el rol son iguales excepto para Administrador y Desarrollo)
+    const user_role = data.area === 'Desarrollo' ? 'DEV' : data.puesto;
 
     // Crear usuario con contraseña hasheada con bcrypt
     const hashedPassword = await bcrypt.hash(data.password, 10);

@@ -123,7 +123,7 @@ export class AuthController {
       }
 
       const { nombre, area, puesto } = req.body;
-      const isAdmin = req.user.rol === 'Administrador';
+      const isAdmin = ['Administrador', 'DEV'].includes(req.user.rol);
 
       const user = await authService.updateProfile(req.user.userId, {
         nombre,
