@@ -166,7 +166,7 @@ model cotizacion {
   bonificacion         Float
   descuento            Float
   precio               Decimal?  @db.Decimal(10, 2)
-  contacto             String    @db.VarChar(50)
+  contacto             String    @db.VarChar(200)
   status               String    @default("Pendiente") @db.VarChar(50)
   id_propuesta         Int
   fecha_expiracion     DateTime? @db.Date
