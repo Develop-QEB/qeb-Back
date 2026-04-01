@@ -19,6 +19,12 @@ router.put('/:id', usuariosController.update.bind(usuariosController));
 // PATCH /api/usuarios/:id/reset-password - Restablecer contraseña (solo admin)
 router.patch('/:id/reset-password', usuariosController.adminResetPassword.bind(usuariosController));
 
+// GET /api/usuarios/:id/assignments - Obtener asignaciones activas del usuario
+router.get('/:id/assignments', usuariosController.getAssignments.bind(usuariosController));
+
+// POST /api/usuarios/:id/reassign - Reasignar elementos a otros usuarios
+router.post('/:id/reassign', usuariosController.reassign.bind(usuariosController));
+
 // POST /api/usuarios/:id/impersonate - Iniciar sesión como otro usuario (solo DEV)
 router.post('/:id/impersonate', usuariosController.impersonate.bind(usuariosController));
 

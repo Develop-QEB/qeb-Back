@@ -206,18 +206,30 @@ export class UsuariosController {
         },
       });
 
+      const responseData: any = {
+        id: updated.id,
+        nombre: updated.nombre,
+        email: updated.correo_electronico,
+        area: updated.area,
+        puesto: updated.puesto,
+        rol: updated.user_role,
+        foto_perfil: updated.foto_perfil,
+        created_at: updated.created_at,
+      };
+
+      // Si el usuario editado es el que está logueado, generar nuevos tokens
+      if (req.user?.userId === updated.id) {
+        const newAuth = await authService.impersonate(updated.id);
+        responseData.newTokens = {
+          accessToken: newAuth.accessToken,
+          refreshToken: newAuth.refreshToken,
+          user: newAuth.user,
+        };
+      }
+
       res.json({
         success: true,
-        data: {
-          id: updated.id,
-          nombre: updated.nombre,
-          email: updated.correo_electronico,
-          area: updated.area,
-          puesto: updated.puesto,
-          rol: updated.user_role,
-          foto_perfil: updated.foto_perfil,
-          created_at: updated.created_at,
-        },
+        data: responseData,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar usuario';
@@ -338,6 +350,150 @@ export class UsuariosController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  async getAssignments(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
+        res.status(403).json({ success: false, error: 'No tienes permisos' });
+        return;
+      }
+
+      const userId = parseInt(req.params.id);
+      const userIdStr = String(userId);
+
+      const solicitudes = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, razon_social, marca_nombre, status
+         FROM solicitud
+         WHERE deleted_at IS NULL
+         AND FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0`,
+        userIdStr
+      );
+
+      const propuestas = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, solicitud_id, status, articulo
+         FROM propuesta
+         WHERE deleted_at IS NULL
+         AND FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0`,
+        userIdStr
+      );
+
+      const tareas = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, titulo, estatus, campania_id
+         FROM tareas
+         WHERE (estatus IS NULL OR estatus NOT IN ('completada', 'Completada', 'resuelta', 'Resuelta'))
+         AND (id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0)`,
+        userId, userIdStr
+      );
+
+      const serialize = (arr: any[]) => JSON.parse(JSON.stringify(arr, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+
+      res.json({
+        success: true,
+        data: {
+          solicitudes: serialize(solicitudes),
+          propuestas: serialize(propuestas),
+          tareas: serialize(tareas),
+        }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener asignaciones';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async reassign(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
+        res.status(403).json({ success: false, error: 'No tienes permisos' });
+        return;
+      }
+
+      const userId = parseInt(req.params.id);
+      const { reassignments } = req.body;
+
+      const oldUser = await prisma.usuario.findFirst({ where: { id: userId } });
+      if (!oldUser) {
+        res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+        return;
+      }
+
+      const newUserCache = new Map<number, { id: number; nombre: string }>();
+
+      for (const r of reassignments) {
+        if (!newUserCache.has(r.newUserId)) {
+          const u = await prisma.usuario.findFirst({ where: { id: r.newUserId, deleted_at: null } });
+          if (u) newUserCache.set(r.newUserId, { id: u.id, nombre: u.nombre });
+        }
+        const newUser = newUserCache.get(r.newUserId);
+        if (!newUser) continue;
+
+        const replaceId = (str: string | null) => {
+          if (!str) return String(newUser.id);
+          const parts = str.split(',').map(s => s.trim()).filter(Boolean);
+          const idx = parts.indexOf(String(userId));
+          if (idx !== -1) parts[idx] = String(newUser.id);
+          return parts.join(', ');
+        };
+
+        const replaceName = (str: string | null) => {
+          if (!str) return newUser.nombre;
+          const parts = str.split(',').map(s => s.trim()).filter(Boolean);
+          const idx = parts.indexOf(oldUser.nombre);
+          if (idx !== -1) parts[idx] = newUser.nombre;
+          return parts.join(', ');
+        };
+
+        if (r.type === 'solicitud') {
+          const sol = await prisma.solicitud.findFirst({ where: { id: r.id } });
+          if (!sol) continue;
+          await prisma.solicitud.update({
+            where: { id: r.id },
+            data: {
+              id_asignado: replaceId(sol.id_asignado),
+              asignado: replaceName(sol.asignado),
+            }
+          });
+        } else if (r.type === 'propuesta') {
+          const prop = await prisma.propuesta.findFirst({ where: { id: r.id } });
+          if (!prop) continue;
+          await prisma.propuesta.update({
+            where: { id: r.id },
+            data: {
+              id_asignado: replaceId(prop.id_asignado),
+              asignado: replaceName(prop.asignado),
+            }
+          });
+        } else if (r.type === 'tarea') {
+          const tarea = await prisma.tareas.findFirst({ where: { id: r.id } });
+          if (!tarea) continue;
+
+          const updateData: Record<string, unknown> = {};
+
+          if (tarea.id_responsable === userId) {
+            updateData.id_responsable = newUser.id;
+            updateData.responsable = newUser.nombre;
+          }
+
+          if (tarea.id_asignado && tarea.id_asignado.split(',').map(s => s.trim()).includes(String(userId))) {
+            updateData.id_asignado = replaceId(tarea.id_asignado);
+            updateData.asignado = replaceName(tarea.asignado);
+          }
+
+          if (Object.keys(updateData).length > 0) {
+            await prisma.tareas.update({
+              where: { id: r.id },
+              data: updateData,
+            });
+          }
+        }
+      }
+
+      res.json({ success: true, message: 'Reasignaciones completadas' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al reasignar';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }
