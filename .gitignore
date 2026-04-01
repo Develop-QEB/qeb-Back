@@ -35,3 +35,4 @@ prisma/dev.db-journal
 # Testing
 coverage/
 uploads/
+upload_inventario.js
