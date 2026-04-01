@@ -87,7 +87,7 @@ model archivos {
 
 model calendario {
   id           Int       @id @default(autoincrement())
-  fecha_inicio DateTime  @default(now()) @db.Date
+  fecha_inicio DateTime  @default(dbgenerated("(curdate())")) @db.Date
   fecha_fin    DateTime  @default(dbgenerated("(curdate() + interval 3 day)")) @db.Date
   deleted_at   DateTime? @db.Date
 }
