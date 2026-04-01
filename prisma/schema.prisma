@@ -231,7 +231,7 @@ model artes_tradicionales {
 model propuesta {
   id                       Int       @id @default(autoincrement())
   cliente_id               Int
-  fecha                    DateTime  @default(now()) @db.Date
+  fecha                    DateTime  @default(dbgenerated("(curdate())")) @db.Date
   status                   String    @default("Abierto") @db.VarChar(255)
   descripcion              String?   @db.Text
   precio                   Decimal?  @db.Decimal(10, 2)
@@ -253,7 +253,7 @@ model reservas {
   inventario_id      Int
   calendario_id      Int
   cliente_id         Int
-  fecha_reserva      DateTime? @default(now()) @db.Date
+  fecha_reserva      DateTime? @default(dbgenerated("(curdate())")) @db.Date
   deleted_at         DateTime? @db.DateTime(0)
   solicitudCaras_id  Int
   archivo            String?   @db.LongText
@@ -330,8 +330,8 @@ model solicitudCaras {
   formato              String   @db.VarChar(1000)
   costo                Int
   tarifa_publica       Int
-  inicio_periodo       DateTime @default(now()) @db.Date
-  fin_periodo          DateTime @default(now()) @db.Date
+  inicio_periodo       DateTime @default(dbgenerated("(curdate())")) @db.Date
+  fin_periodo          DateTime @default(dbgenerated("(curdate())")) @db.Date
   caras_flujo          Int?     @default(0)
   caras_contraflujo    Int?     @default(0)
   articulo             String?  @db.VarChar(255)
