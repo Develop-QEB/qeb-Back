@@ -302,28 +302,28 @@ model solicitud {
   razon_social     String?   @db.VarChar(255)
   unidad_negocio   String?   @db.VarChar(100)
   marca_id         Int?
-  marca_nombre     String?   @db.VarChar(100)
-  asesor           String?   @db.VarChar(100)
+  marca_nombre     String?   @db.VarChar(255)
+  asesor           String?   @db.VarChar(255)
   producto_id      Int?
   producto_nombre  String?   @db.VarChar(255)
-  agencia          String?   @db.VarChar(100)
+  agencia          String?   @db.VarChar(255)
   categoria_id     Int?
-  categoria_nombre String?   @db.VarChar(100)
+  categoria_nombre String?   @db.VarChar(255)
   IMU              Int
   archivo          String?   @db.LongText
   tipo_archivo     String?   @db.VarChar(100)
-  card_code        String?   @db.VarChar(50)
+  card_code        String?   @db.VarChar(255)
   salesperson_code Int?
-  sap_database     String?   @db.VarChar(10)
+  sap_database     String?   @db.VarChar(255)
 }
 
 model solicitudCaras {
   id                   Int      @id @default(autoincrement())
-  idquote              String?  @db.VarChar(50)
+  idquote              String?  @db.VarChar(255)
   ciudad               String?  @db.VarChar(1000)
   estados              String?  @db.VarChar(1000)
-  tipo                 String?  @db.VarChar(50)
-  flujo                String?  @db.VarChar(50)
+  tipo                 String?  @db.VarChar(255)
+  flujo                String?  @db.VarChar(255)
   bonificacion         Decimal? @db.Decimal(10, 2)
   caras                Int
   nivel_socioeconomico String   @db.VarChar(500)
@@ -336,8 +336,8 @@ model solicitudCaras {
   caras_contraflujo    Int?     @default(0)
   articulo             String?  @db.VarChar(255)
   descuento            Decimal? @db.Decimal(5, 2)
-  autorizacion_dg      String?  @default("aprobado") @db.VarChar(20)
-  autorizacion_dcm     String?  @default("aprobado") @db.VarChar(20)
+  autorizacion_dg      String?  @default("aprobado") @db.VarChar(255)
+  autorizacion_dcm     String?  @default("aprobado") @db.VarChar(255)
   cortesia             Int?     @default(0)
 
   @@index([idquote])
@@ -348,17 +348,17 @@ model tareas {
   id                 Int       @id @default(autoincrement())
   fecha_inicio       DateTime  @default(dbgenerated("(curdate())")) @db.DateTime(0)
   fecha_fin          DateTime  @default(now()) @db.DateTime(0)
-  tipo               String?   @db.VarChar(50)
-  responsable        String?   @db.VarChar(50)
+  tipo               String?   @db.VarChar(255)
+  responsable        String?   @db.VarChar(255)
   id_responsable     Int
-  estatus            String?   @db.VarChar(50)
+  estatus            String?   @db.VarChar(255)
   descripcion        String?   @db.VarChar(255)
-  titulo             String?   @db.VarChar(50)
+  titulo             String?   @db.VarChar(255)
   contenido          String?   @db.Text
   campania_id        Int?
   archivo            String?   @db.VarChar(1000)
   id_solicitud       String    @db.VarChar(100)
-  id_propuesta       String?   @db.VarChar(100)
+  id_propuesta       String?   @db.VarChar(255)
   evidencia          String?   @db.VarChar(10000)
   proveedores_id     Int?
   listado_inventario String?   @db.VarChar(255)
@@ -493,7 +493,7 @@ model solicitud_original {
   total_flujo     Int      @default(0)
   bonificacion    Int      @default(0)
   nombre_cliente  String?  @db.VarChar(255)
-  articulo        String   @db.VarChar(20)
+  articulo        String   @db.VarChar(255)
 }
 
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
@@ -517,8 +517,8 @@ model tickets {
   titulo              String            @db.VarChar(255)
   descripcion         String            @db.Text
   imagen              String?           @db.LongText
-  status              String            @default("Nuevo") @db.VarChar(50)
-  prioridad           String            @default("Normal") @db.VarChar(20)
+  status              String            @default("Nuevo") @db.VarChar(255)
+  prioridad           String            @default("Normal") @db.VarChar(255)
   usuario_id          Int
   usuario_nombre      String            @db.VarChar(255)
   usuario_email       String            @db.VarChar(255)
@@ -544,7 +544,7 @@ model ticket_mensajes {
   mensaje        String?  @db.Text
   archivo_url    String?  @db.VarChar(500)
   archivo_nombre String?  @db.VarChar(255)
-  archivo_tipo   String?  @db.VarChar(50)
+  archivo_tipo   String?  @db.VarChar(255)
   created_at     DateTime @default(now()) @db.DateTime(0)
   ticket         tickets  @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
 
@@ -572,7 +572,7 @@ model ticket_chat {
   mensaje        String?  @db.Text
   archivo_url    String?  @db.VarChar(500)
   archivo_nombre String?  @db.VarChar(255)
-  archivo_tipo   String?  @db.VarChar(50)
+  archivo_tipo   String?  @db.VarChar(255)
   created_at     DateTime @default(now()) @db.DateTime(0)
   ticket         tickets  @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
 
