@@ -239,8 +239,8 @@ model propuesta {
   deleted_at               DateTime? @db.DateTime(0)
   solicitud_id             Int
   precio_simulado          Int?
-  asignado                 String    @db.VarChar(255)
-  id_asignado              String?   @db.VarChar(255)
+  asignado                 String    @db.Text
+  id_asignado              String?   @db.Text
   inversion                Int
   comentario_cambio_status String    @db.Text
   articulo                 String    @db.VarChar(255)
@@ -288,7 +288,7 @@ model session_locks {
 model solicitud {
   id               Int       @id @default(autoincrement())
   fecha            DateTime  @default(now()) @db.DateTime(0)
-  descripcion      String    @db.VarChar(255)
+  descripcion      String    @db.Text
   presupuesto      Decimal   @db.Decimal(10, 2)
   notas            String    @db.Text
   cliente_id       Int
@@ -296,8 +296,8 @@ model solicitud {
   status           String    @default("Pendiente") @db.VarChar(255)
   deleted_at       DateTime? @db.DateTime(0)
   nombre_usuario   String?   @db.VarChar(255)
-  asignado         String    @db.VarChar(255)
-  id_asignado      String?   @db.VarChar(255)
+  asignado         String    @db.Text
+  id_asignado      String?   @db.Text
   cuic             String?   @db.VarChar(255)
   razon_social     String?   @db.VarChar(255)
   unidad_negocio   String?   @db.VarChar(255)
@@ -352,7 +352,7 @@ model tareas {
   responsable        String?   @db.VarChar(255)
   id_responsable     Int
   estatus            String?   @db.VarChar(255)
-  descripcion        String?   @db.VarChar(255)
+  descripcion        String?   @db.Text
   titulo             String?   @db.VarChar(255)
   contenido          String?   @db.Text
   campania_id        Int?
@@ -361,10 +361,10 @@ model tareas {
   id_propuesta       String?   @db.VarChar(255)
   evidencia          String?   @db.VarChar(10000)
   proveedores_id     Int?
-  listado_inventario String?   @db.VarChar(255)
-  nombre_proveedores String?   @db.VarChar(255)
-  asignado           String?   @db.VarChar(255)
-  id_asignado        String?   @db.VarChar(255)
+  listado_inventario String?   @db.Text
+  nombre_proveedores String?   @db.Text
+  asignado           String?   @db.Text
+  id_asignado        String?   @db.Text
   ids_reservas       String?   @db.Text
   num_impresiones    Int?
   archivo_testigo    String?   @db.VarChar(1000)
@@ -477,7 +477,7 @@ model criterios_autorizacion {
 model solicitud_original {
   id              Int      @id @default(autoincrement())
   fecha           DateTime @default(now()) @db.DateTime(0)
-  descripcion     String   @db.VarChar(255)
+  descripcion     String   @db.Text
   presupuesto     Decimal  @db.Decimal(10, 2)
   notas           String   @db.Text
   cliente_id      Int
