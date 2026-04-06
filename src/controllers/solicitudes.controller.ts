@@ -1491,19 +1491,21 @@ export class SolicitudesController {
 
   async getInventarioOptions(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const estadosParam = (req.query.estados || req.query.estado) as string | undefined;
+      const estado = req.query.estado as string | undefined;
       const ciudadesParam = req.query.ciudades as string | undefined;
-      const estadosArray = estadosParam ? estadosParam.split(',').map(e => e.trim()).filter(Boolean) : [];
       const ciudadesArray = ciudadesParam ? ciudadesParam.split(',').map(c => c.trim()).filter(Boolean) : [];
 
-      // Build WHERE condition: filter by estados and/or municipios
+      // Build WHERE condition: filter by estado(s) and/or municipios
+      const estadosArray = estado ? (estado as string).split(',').map(e => e.trim()).filter(Boolean) : [];
       const whereCondition: any = {};
       if (estadosArray.length > 0 && ciudadesArray.length > 0) {
         whereCondition.OR = [
-          { estado: { in: estadosArray } },
+          { estado: estadosArray.length === 1 ? estadosArray[0] : { in: estadosArray } },
           { municipio: { in: ciudadesArray } },
         ];
-      } else if (estadosArray.length > 0) {
+      } else if (estadosArray.length === 1) {
+        whereCondition.estado = estadosArray[0];
+      } else if (estadosArray.length > 1) {
         whereCondition.estado = { in: estadosArray };
       } else if (ciudadesArray.length > 0) {
         whereCondition.municipio = { in: ciudadesArray };
