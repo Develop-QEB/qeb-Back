@@ -3147,10 +3147,9 @@ export class PropuestasController {
         descuento,
       } = req.body;
 
-      // Get current cara to get idquote
+      // Get current cara to compare auth-affecting fields
       const currentCara = await prisma.solicitudCaras.findUnique({
         where: { id: parseInt(caraId) },
-        select: { idquote: true }
       });
 
       if (!currentCara) {
@@ -3158,18 +3157,33 @@ export class PropuestasController {
         return;
       }
 
-      // Calculate authorization state for updated values
-      const estadoResult = await calcularEstadoAutorizacion({
-        ciudad: ciudad || undefined,
-        estado: estados || undefined,
-        formato: formato || '',
-        tipo: tipo || undefined,
-        caras: caras ? parseInt(caras) : 0,
-        bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
-        costo: costo ? parseInt(costo) : 0,
-        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
-        articulo: articulo || null
-      });
+      // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE)
+      const authFieldsChanged =
+        (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
+        (bonificacion !== undefined && parseFloat(bonificacion) !== Number(currentCara.bonificacion)) ||
+        (tarifa_publica !== undefined && parseInt(tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+        (formato !== undefined && formato !== currentCara.formato) ||
+        (tipo !== undefined && tipo !== currentCara.tipo) ||
+        (articulo !== undefined && articulo !== currentCara.articulo);
+
+      let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
+      let autorizacion_dcm = currentCara.autorizacion_dcm || 'aprobado';
+
+      if (authFieldsChanged) {
+        const estadoResult = await calcularEstadoAutorizacion({
+          ciudad: ciudad || undefined,
+          estado: estados || undefined,
+          formato: formato || '',
+          tipo: tipo || undefined,
+          caras: caras ? parseInt(caras) : 0,
+          bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+          costo: costo ? parseInt(costo) : 0,
+          tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+          articulo: articulo || null
+        });
+        autorizacion_dg = estadoResult.autorizacion_dg;
+        autorizacion_dcm = estadoResult.autorizacion_dcm;
+      }
 
       const updatedCara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -3190,8 +3204,8 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined,
           articulo,
           descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
-          autorizacion_dg: estadoResult.autorizacion_dg,
-          autorizacion_dcm: estadoResult.autorizacion_dcm,
+          autorizacion_dg,
+          autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
