@@ -3372,6 +3372,119 @@ export class PropuestasController {
     }
   }
 
+  // Bulk update multiple solicitudCaras in a single transaction (1 task instead of N)
+  async bulkUpdateCaras(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params; // propuesta id
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const { caras: carasToUpdate } = req.body;
+
+      if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
+        res.json({ success: true, data: [], message: 'No hay cambios que guardar' });
+        return;
+      }
+
+      console.log(`[bulkUpdateCaras] Updating ${carasToUpdate.length} caras for propuesta ${id}`);
+
+      // Run all updates in a single transaction
+      const updatedCaras = await prisma.$transaction(async (tx) => {
+        const results = [];
+
+        for (const item of carasToUpdate) {
+          const { caraId, data } = item;
+
+          // Calculate authorization state for each cara
+          const estadoResult = await calcularEstadoAutorizacion({
+            ciudad: data.ciudad || undefined,
+            estado: data.estados || undefined,
+            formato: data.formato || '',
+            tipo: data.tipo || undefined,
+            caras: data.caras ? parseInt(data.caras) : 0,
+            bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+            costo: data.costo ? parseInt(data.costo) : 0,
+            tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+            articulo: data.articulo || null
+          });
+
+          const updatedCara = await tx.solicitudCaras.update({
+            where: { id: parseInt(caraId) },
+            data: {
+              ciudad: data.ciudad,
+              estados: data.estados,
+              tipo: data.tipo,
+              flujo: data.flujo,
+              bonificacion: data.bonificacion !== undefined && data.bonificacion !== null ? parseFloat(data.bonificacion) : undefined,
+              caras: data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined,
+              nivel_socioeconomico: data.nivel_socioeconomico,
+              formato: data.formato,
+              costo: data.costo !== undefined && data.costo !== null ? parseInt(data.costo) : undefined,
+              tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseInt(data.tarifa_publica) : undefined,
+              inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
+              fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
+              caras_flujo: data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined,
+              caras_contraflujo: data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined,
+              articulo: data.articulo,
+              descuento: data.descuento !== undefined && data.descuento !== null ? parseFloat(data.descuento) : undefined,
+              autorizacion_dg: estadoResult.autorizacion_dg,
+              autorizacion_dcm: estadoResult.autorizacion_dcm,
+              cortesia: (data.articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+            },
+          });
+
+          results.push(updatedCara);
+        }
+
+        return results;
+      });
+
+      // After ALL updates: check for pending authorizations ONCE and create ONE task
+      const autorizacion = await verificarCarasPendientes(String(id));
+      if (autorizacion.tienePendientes && userId) {
+        const propuesta = await prisma.propuesta.findUnique({
+          where: { id: parseInt(id as string) },
+          select: { solicitud_id: true }
+        });
+
+        if (propuesta?.solicitud_id) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            parseInt(id as string),
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm,
+            'propuesta'
+          );
+        }
+      }
+
+      // Build response
+      let mensaje = `${updatedCaras.length} circuito(s) actualizados exitosamente`;
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `${updatedCaras.length} circuito(s) actualizados. ${totalPendientes} requieren autorización.`;
+      }
+
+      console.log(`[bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
+
+      res.json({
+        success: true,
+        data: updatedCaras,
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
+      });
+    } catch (error) {
+      console.error('Error in bulkUpdateCaras:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar caras en lote';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Delete a solicitudCara
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
