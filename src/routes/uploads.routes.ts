@@ -48,7 +48,7 @@ const uploadArte = multer({
   storage: storageMemory,
   fileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max
+    fileSize: 20 * 1024 * 1024, // 20MB max
   },
 });
 
@@ -222,7 +222,7 @@ router.use((err: Error, _req: Request, res: Response, next: Function) => {
     if (err.code === 'LIMIT_FILE_SIZE') {
       res.status(400).json({
         success: false,
-        error: 'El archivo es demasiado grande. Maximo 10MB.',
+        error: 'El archivo es demasiado grande. Maximo 20MB.',
       });
       return;
     }
