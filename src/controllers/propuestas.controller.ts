@@ -1956,13 +1956,16 @@ export class PropuestasController {
         prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
       ]);
 
-      // Get cliente name (fallback to razon_social if client not found)
+      // Get cliente name - try by CUIC first (cliente_id stores CUIC), then by id, then fallback
       let clienteNombre = '';
-      if (solicitud?.cliente_id) {
+      if (solicitud?.cuic) {
+        const cliente = await prisma.cliente.findFirst({ where: { CUIC: parseInt(solicitud.cuic) } });
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.marca_nombre || solicitud.razon_social || '';
+      } else if (solicitud?.cliente_id) {
         const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
-        clienteNombre = cliente?.T0_U_Cliente || solicitud.razon_social || '';
-      } else if (solicitud?.razon_social) {
-        clienteNombre = solicitud.razon_social;
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.marca_nombre || solicitud.razon_social || '';
+      } else {
+        clienteNombre = solicitud?.marca_nombre || solicitud?.razon_social || '';
       }
 
       res.json({
@@ -2080,13 +2083,16 @@ export class PropuestasController {
         prisma.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } }),
       ]);
 
-      // Get cliente name (fallback to razon_social if client not found)
+      // Get cliente name - try by CUIC first (cliente_id stores CUIC), then by id, then fallback
       let clienteNombre = '';
-      if (solicitud?.cliente_id) {
+      if (solicitud?.cuic) {
+        const cliente = await prisma.cliente.findFirst({ where: { CUIC: parseInt(solicitud.cuic) } });
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.marca_nombre || solicitud.razon_social || '';
+      } else if (solicitud?.cliente_id) {
         const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
-        clienteNombre = cliente?.T0_U_Cliente || solicitud.razon_social || '';
-      } else if (solicitud?.razon_social) {
-        clienteNombre = solicitud.razon_social;
+        clienteNombre = cliente?.T0_U_Cliente || solicitud.marca_nombre || solicitud.razon_social || '';
+      } else {
+        clienteNombre = solicitud?.marca_nombre || solicitud?.razon_social || '';
       }
 
       // Get catorcena info from campaign dates
