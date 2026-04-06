@@ -30,6 +30,7 @@ router.get('/:id/inventario-testigos', campanasController.getInventarioTestigos.
 
 // Caras e historial
 router.get('/:id/caras', campanasController.getCaras.bind(campanasController));
+router.patch('/:id/caras/bulk', campanasController.bulkUpdateCaras.bind(campanasController));
 router.patch('/:id/caras/:caraId', campanasController.updateCara.bind(campanasController));
 router.post('/:id/caras', campanasController.createCara.bind(campanasController));
 router.delete('/:id/caras/:caraId', campanasController.deleteCara.bind(campanasController));
