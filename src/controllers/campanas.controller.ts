@@ -137,12 +137,16 @@ export class CampanasController {
           )`);
           params.push(...teamIds, String(userId));
         } else {
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(userId, String(userId));
+          params.push(userId, String(userId), String(userId), userId);
         }
       }
 
@@ -1137,12 +1141,16 @@ export class CampanasController {
           )`);
           params.push(...teamIds, String(userId));
         } else {
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(userId, String(userId));
+          params.push(userId, String(userId), String(userId), userId);
         }
       }
 
