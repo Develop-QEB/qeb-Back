@@ -1652,19 +1652,23 @@ export class PropuestasController {
       Ver campaña: https://app.qeb.mx/campanas/${campania.id}
         `.trim();
 
-        // Obtener usuarios del área de Analista
-        const usuariosAnalista = await tx.usuario.findMany({
-          where: {
-            OR: [
-              { puesto: { contains: 'Analista' } },
-              { area: { contains: 'Analista' } }
-            ],
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
+        // Obtener los IDs de analistas asignados a esta propuesta/solicitud
+        const idsAsignados = (id_asignados || propuesta.id_asignado || '')
+          .split(',')
+          .map((id: string) => parseInt(id.trim()))
+          .filter((id: number) => !isNaN(id));
 
-        // Crear tarea "Seguimiento Campaña" para cada Analista
+        const usuariosAnalista = idsAsignados.length > 0
+          ? await tx.usuario.findMany({
+              where: {
+                id: { in: idsAsignados },
+                deleted_at: null
+              },
+              select: { id: true, nombre: true, correo_electronico: true }
+            })
+          : [];
+
+        // Crear tarea "Seguimiento Campaña" para cada Analista asignado
         for (const usuarioAnalista of usuariosAnalista) {
           await tx.tareas.create({
             data: {
