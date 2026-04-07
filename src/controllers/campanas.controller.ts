@@ -6652,17 +6652,36 @@ export class CampanasController {
         for (const item of carasToUpdate) {
           const { caraId, data } = item;
 
-          const estadoResult = await calcularEstadoAutorizacion({
-            ciudad: data.ciudad || undefined,
-            estado: data.estados || undefined,
-            formato: data.formato || '',
-            tipo: data.tipo || undefined,
-            caras: data.caras ? parseInt(data.caras) : 0,
-            bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
-            costo: data.costo ? parseInt(data.costo) : 0,
-            tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
-            articulo: data.articulo || null
-          });
+          // Get current cara to check if auth-affecting fields changed
+          const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
+
+          const authFieldsChanged = currentCara && (
+            (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
+            (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCara.bonificacion)) ||
+            (data.tarifa_publica !== undefined && parseInt(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+            (data.formato !== undefined && data.formato !== currentCara.formato) ||
+            (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
+            (data.articulo !== undefined && data.articulo !== currentCara.articulo)
+          );
+
+          let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
+          let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
+
+          if (authFieldsChanged) {
+            const estadoResult = await calcularEstadoAutorizacion({
+              ciudad: data.ciudad || undefined,
+              estado: data.estados || undefined,
+              formato: data.formato || '',
+              tipo: data.tipo || undefined,
+              caras: data.caras ? parseInt(data.caras) : 0,
+              bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+              costo: data.costo ? parseInt(data.costo) : 0,
+              tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+              articulo: data.articulo || null
+            });
+            autorizacion_dg = estadoResult.autorizacion_dg;
+            autorizacion_dcm = estadoResult.autorizacion_dcm;
+          }
 
           const updateData: any = {
             ciudad: data.ciudad,
@@ -6679,8 +6698,8 @@ export class CampanasController {
             caras_contraflujo: data.caras_contraflujo,
             articulo: data.articulo,
             descuento: data.descuento,
-            autorizacion_dg: estadoResult.autorizacion_dg,
-            autorizacion_dcm: estadoResult.autorizacion_dcm,
+            autorizacion_dg,
+            autorizacion_dcm,
           };
           if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
           if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
