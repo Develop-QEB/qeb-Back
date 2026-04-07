@@ -558,7 +558,7 @@ export class PropuestasController {
         const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
           SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
           FROM propuesta pr
-          LEFT JOIN solicitudCaras sc ON sc.idquote COLLATE utf8mb4_general_ci = CAST(pr.id AS CHAR) COLLATE utf8mb4_general_ci
+          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
             AND sc.inicio_periodo <= ?
             AND sc.fin_periodo >= ?
           WHERE pr.id IN (${placeholders})
