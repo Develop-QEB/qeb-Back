@@ -420,6 +420,9 @@ export class PropuestasController {
       }
 
       // Period filter — filter by cotizacion/campania dates
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
@@ -428,8 +431,10 @@ export class PropuestasController {
           where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
         });
         if (catorcenasInicioData && catorcenasFinData) {
+          filterFechaInicio = catorcenasInicioData.fecha_inicio;
+          filterFechaFin = catorcenasFinData.fecha_fin;
           whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
-          params.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+          params.push(filterFechaFin, filterFechaInicio);
         }
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
@@ -545,6 +550,29 @@ export class PropuestasController {
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
         tipo_periodo: p.tipo_periodo || 'catorcena',
       }));
+
+      // Recalculate inversion based on catorcena filter (sum only overlapping caras)
+      if (filterFechaInicio && filterFechaFin && formattedPropuestas.length > 0) {
+        const propuestaIds = formattedPropuestas.map(p => p.id);
+        const placeholders = propuestaIds.map(() => '?').join(',');
+        const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
+          SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+          FROM propuesta pr
+          LEFT JOIN solicitudCaras sc ON sc.idquote COLLATE utf8mb4_general_ci = CAST(pr.id AS CHAR) COLLATE utf8mb4_general_ci
+            AND sc.inicio_periodo <= ?
+            AND sc.fin_periodo >= ?
+          WHERE pr.id IN (${placeholders})
+          GROUP BY pr.id
+        `, filterFechaFin, filterFechaInicio, ...propuestaIds);
+
+        const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
+        formattedPropuestas.forEach(p => {
+          const filtered = inversionMap.get(p.id);
+          if (filtered !== undefined) {
+            p.inversion = filtered;
+          }
+        });
+      }
 
       res.json({
         success: true,
