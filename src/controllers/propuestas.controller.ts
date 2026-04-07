@@ -1827,18 +1827,22 @@ export class PropuestasController {
         }
       }, { timeout: 30000 });
 
-      // Enviar correos a Analistas (Seguimiento Campaña)
+      // Enviar correos a Analistas asignados (Seguimiento Campaña)
       if (campania) {
-        const usuariosAnalistaCorreo = await prisma.usuario.findMany({
-          where: {
-            OR: [
-              { puesto: { contains: 'Analista' } },
-              { area: { contains: 'Analista' } }
-            ],
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
+        const idsAsignadosCorreo = (id_asignados || propuesta.id_asignado || '')
+          .split(',')
+          .map((id: string) => parseInt(id.trim()))
+          .filter((id: number) => !isNaN(id));
+
+        const usuariosAnalistaCorreo = idsAsignadosCorreo.length > 0
+          ? await prisma.usuario.findMany({
+              where: {
+                id: { in: idsAsignadosCorreo },
+                deleted_at: null
+              },
+              select: { id: true, nombre: true, correo_electronico: true }
+            })
+          : [];
 
         // Obtener catorcenas para el correo
         const catorcenaInicio = cotizacion?.fecha_inicio ? await prisma.catorcenas.findFirst({
