@@ -249,7 +249,7 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
 
     const updateData: any = {
       status,
-      status_cambiado_por: userName,
+      status_cambiado_por: req.body.status_cambiado_por || userName,
     };
 
     if (respuesta) {
