@@ -2148,6 +2148,7 @@ export class CampanasController {
           END as tipo_de_cara_display,
 
           MAX(rsv.archivo) AS archivo,
+          MAX(at_grp.artes_all) AS artes_multiples,
 
           GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
 
@@ -2187,6 +2188,11 @@ export class CampanasController {
           LEFT JOIN propuesta pr ON pr.id = sc.idquote
           LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN (
+            SELECT id_reserva, GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.deleted_at IS NULL
