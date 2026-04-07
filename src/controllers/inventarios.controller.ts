@@ -240,20 +240,48 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       // Build Prisma where filter — same logic as getAll
       const where: Record<string, unknown> = {};
       if (search) {
-        where.OR = [
-          { clave: { contains: search } },
-          { nombre_del_mueble: { contains: search } },
+        const searchNum = parseInt(search);
+        const orConditions: Record<string, unknown>[] = [
+          { codigo_unico: { contains: search } },
           { ubicacion: { contains: search } },
-          { plaza: { contains: search } },
+          { municipio: { contains: search } },
         ];
+        if (!isNaN(searchNum)) {
+          orConditions.push({ id: searchNum });
+        }
+        where.OR = orConditions;
       }
       if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
+
+      // Filter by campaign: get inventario IDs linked to this campaign
+      if (campanaId) {
+        const campanaInvRows = await prisma.$queryRawUnsafe<Array<{ inventario_id: number }>>(
+          `SELECT DISTINCT epIn.inventario_id
+           FROM campania cm
+           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+           WHERE cm.id = ?`,
+          campanaId
+        );
+        const invIds = campanaInvRows.map(r => r.inventario_id);
+        if (invIds.length === 0) {
+          res.json({
+            success: true,
+            data: { total: 0, disponibles: 0, ocupados: 0, mantenimiento: 0, reservados: 0, bloqueados: 0, porTipo: [], porPlaza: [] },
+          });
+          return;
+        }
+        where.id = { in: invIds };
+      }
 
       const [total, disponibles, ocupados, mantenimiento, reservados, bloqueados, byTipo, byPlaza] = await Promise.all([
         prisma.inventarios.count({ where }),

@@ -2676,6 +2676,7 @@ export class PropuestasController {
           i.mueble as formato,
           i.ubicacion,
           i.isla,
+          i.estatus as estatus_inventario,
           rsv.estatus,
           rsv.grupo_completo_id,
           sc.id as solicitud_cara_id,
