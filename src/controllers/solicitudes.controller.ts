@@ -430,6 +430,9 @@ export class SolicitudesController {
       }
 
       // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
           where: {
@@ -445,6 +448,8 @@ export class SolicitudesController {
         });
 
         if (catorcenasInicioData && catorcenasFinData) {
+          filterFechaInicio = catorcenasInicioData.fecha_inicio;
+          filterFechaFin = catorcenasFinData.fecha_fin;
           const periodIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `SELECT DISTINCT s.id FROM solicitud s
              INNER JOIN propuesta pr ON pr.solicitud_id = s.id
@@ -593,6 +598,26 @@ export class SolicitudesController {
             const tp = s.tipo_periodo || 'catorcena';
             return tp === tipoPeriodo;
           });
+        }
+
+        // Recalculate presupuesto based on catorcena filter (sum only overlapping caras)
+        if (filterFechaInicio && filterFechaFin) {
+          const presupuestoData = await prisma.$queryRawUnsafe<{ solicitud_id: number; presupuesto_filtrado: number }[]>(`
+            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_filtrado
+            FROM solicitud s
+            LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
+            LEFT JOIN solicitudCaras sc ON sc.idquote COLLATE utf8mb4_general_ci = CAST(pr.id AS CHAR) COLLATE utf8mb4_general_ci
+              AND sc.inicio_periodo <= ?
+              AND sc.fin_periodo >= ?
+            WHERE s.id IN (${placeholders})
+            GROUP BY s.id
+          `, filterFechaFin, filterFechaInicio, ...solicitudIds);
+
+          const presupuestoMap = new Map(presupuestoData.map((p: any) => [Number(p.solicitud_id), Number(p.presupuesto_filtrado)]));
+          enrichedSolicitudes = enrichedSolicitudes.map((s: any) => ({
+            ...s,
+            presupuesto: presupuestoMap.get(s.id) ?? s.presupuesto,
+          }));
         }
       }
 
