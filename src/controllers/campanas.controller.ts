@@ -113,8 +113,8 @@ export class CampanasController {
         if (catorcenaInicio && catorcenaFin) {
           // Fetch filter dates for later inversion recalculation
           const [catIniData, catFinData] = await Promise.all([
-            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio as string), numero_catorcena: parseInt(catorcenaInicio as string) } }),
-            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin as string), numero_catorcena: parseInt(catorcenaFin as string) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: Number(yearInicio), numero_catorcena: Number(catorcenaInicio) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: Number(yearFin), numero_catorcena: Number(catorcenaFin) } }),
           ]);
           if (catIniData && catFinData) {
             filterFechaInicio = catIniData.fecha_inicio;
