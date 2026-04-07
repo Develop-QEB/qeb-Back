@@ -3516,7 +3516,7 @@ export class PropuestasController {
 
       // First check if the cara has any reservations
       const reservations = await prisma.reservas.findMany({
-        where: { solicitudCaras_id: parseInt(caraId) },
+        where: { solicitudCaras_id: parseInt(caraId), deleted_at: null },
       });
 
       if (reservations.length > 0) {
