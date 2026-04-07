@@ -106,8 +106,21 @@ export class CampanasController {
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
+          // Fetch filter dates for later inversion recalculation
+          const [catIniData, catFinData] = await Promise.all([
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio as string), numero_catorcena: parseInt(catorcenaInicio as string) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin as string), numero_catorcena: parseInt(catorcenaFin as string) } }),
+          ]);
+          if (catIniData && catFinData) {
+            filterFechaInicio = catIniData.fecha_inicio;
+            filterFechaFin = catFinData.fecha_fin;
+          }
+
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -258,6 +271,31 @@ export class CampanasController {
           delete campana.propuesta_inversion;
         }
       });
+
+      // Recalculate inversion based on catorcena filter (sum only overlapping caras)
+      if (filterFechaInicio && filterFechaFin && campanas.length > 0) {
+        const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
+        if (propuestaIds.length > 0) {
+          const placeholders = propuestaIds.map(() => '?').join(',');
+          const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
+            SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+            FROM propuesta pr
+            LEFT JOIN solicitudCaras sc ON sc.idquote COLLATE utf8mb4_general_ci = CAST(pr.id AS CHAR) COLLATE utf8mb4_general_ci
+              AND sc.inicio_periodo <= ?
+              AND sc.fin_periodo >= ?
+            WHERE pr.id IN (${placeholders})
+            GROUP BY pr.id
+          `, filterFechaFin, filterFechaInicio, ...propuestaIds);
+
+          const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
+          campanas.forEach((c: any) => {
+            const filtered = inversionMap.get(Number(c.propuesta_id));
+            if (filtered !== undefined) {
+              c.inversion = filtered;
+            }
+          });
+        }
+      }
 
       // Convert BigInt to Number for JSON serialization
       const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
