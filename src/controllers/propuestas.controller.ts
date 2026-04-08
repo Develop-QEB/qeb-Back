@@ -768,8 +768,8 @@ export class PropuestasController {
         },
       });
 
-      // Si se descarta, liberar todas las reservas (soft delete)
-      if (status === 'Descartada') {
+      // Si se descarta o rechaza, liberar todas las reservas (soft delete)
+      if (status === 'Descartada' || status === 'Rechazada') {
         const caras = await prisma.solicitudCaras.findMany({
           where: { idquote: String(propuestaId) },
         });
@@ -782,7 +782,7 @@ export class PropuestasController {
             },
             data: { deleted_at: new Date() },
           });
-          console.log(`[Descartada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
+          console.log(`[${status}] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
         }
       }
 
