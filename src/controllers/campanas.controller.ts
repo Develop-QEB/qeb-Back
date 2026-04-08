@@ -6443,7 +6443,7 @@ export class CampanasController {
           costo: data.costo ? parseInt(data.costo) : 0,
           tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
           articulo: data.articulo || null
-        });
+        }, userId);
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
@@ -6569,7 +6569,7 @@ export class CampanasController {
         costo: data.costo ? parseInt(data.costo) : 0,
         tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
         articulo: data.articulo || null
-      });
+      }, userId);
 
       const createData: any = {
         idquote: String(cotizacion.id_propuesta),
@@ -6685,7 +6685,7 @@ export class CampanasController {
               costo: data.costo ? parseInt(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
               articulo: data.articulo || null
-            });
+            }, userId);
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }

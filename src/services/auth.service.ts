@@ -123,6 +123,7 @@ export class AuthService {
       foto_perfil: user.foto_perfil,
       equipos,
       light_theme_notified: user.light_theme_notified,
+      version_notified: user.version_notified,
     };
 
     return {
@@ -181,6 +182,7 @@ export class AuthService {
         foto_perfil: user.foto_perfil,
         equipos,
         light_theme_notified: user.light_theme_notified,
+      version_notified: user.version_notified,
       },
     };
   }
@@ -272,6 +274,7 @@ export class AuthService {
       foto_perfil: user.foto_perfil,
       equipos,
       light_theme_notified: user.light_theme_notified,
+      version_notified: user.version_notified,
     };
   }
 

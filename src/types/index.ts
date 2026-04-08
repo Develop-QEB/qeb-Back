@@ -54,6 +54,7 @@ export interface UserResponse {
   foto_perfil?: string | null;
   equipos?: UserEquipo[];
   light_theme_notified?: boolean;
+  version_notified?: string | null;
 }
 
 export interface AuthResponse {

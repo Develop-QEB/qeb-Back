@@ -1844,7 +1844,7 @@ export class SolicitudesController {
             costo: cara.costo,
             tarifa_publica: cara.tarifa_publica || 0,
             articulo: cara.articulo || null
-          });
+          }, userId);
 
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
@@ -2751,7 +2751,7 @@ export class SolicitudesController {
               costo: cara.costo,
               tarifa_publica: cara.tarifa_publica || 0,
               articulo: cara.articulo || null
-            });
+            }, userId);
 
             await tx.solicitudCaras.create({
               data: {
@@ -3048,6 +3048,7 @@ export class SolicitudesController {
   async evaluarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
     try {
       console.log('[evaluarAutorizacion] Body recibido:', req.body);
+      const userId = req.user?.userId;
       const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica, articulo } = req.body;
 
       // Validar datos requeridos
@@ -3070,7 +3071,7 @@ export class SolicitudesController {
         costo: Number(costo) || 0,
         tarifa_publica: Number(tarifa_publica) || 0,
         articulo: articulo || null
-      });
+      }, userId);
 
       res.json({
         success: true,

@@ -287,6 +287,32 @@ async resetPassword(req: Request, res: Response): Promise<void> {
     }
   }
 
+  async getLatestVersion(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const latest = await prisma.version.findFirst({ orderBy: { id: 'desc' } });
+      res.json({ success: true, data: latest ? { numero: latest.numero, fecha: latest.fecha } : null });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Error al obtener versión' });
+    }
+  }
+
+  async markVersionNotified(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        res.status(401).json({ success: false, error: 'No autenticado' });
+        return;
+      }
+      const { version } = req.body;
+      await prisma.usuario.update({
+        where: { id: req.user.userId },
+        data: { version_notified: version },
+      });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Error al actualizar versión notificada' });
+    }
+  }
+
   async uploadPhoto(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
