@@ -100,9 +100,9 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
@@ -585,6 +585,7 @@ export class CampanasController {
         contacto: cotizacion?.contacto || null,
         fecha_expiracion: cotizacion?.fecha_expiracion || null,
         // Info de propuesta
+        propuesta_id: cotizacion?.id_propuesta || null,
         fecha: propuesta?.fecha || null,
         descripcion: propuesta?.descripcion || null,
         notas: propuesta?.notas || null,
@@ -1147,9 +1148,9 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       if (yearInicio && yearFin) {
