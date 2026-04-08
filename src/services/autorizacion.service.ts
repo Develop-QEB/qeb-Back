@@ -152,7 +152,7 @@ function normalizarTipo(tipo: string | null | undefined): string {
  * Calcula el estado de autorización de una cara
  * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
  */
-export async function calcularEstadoAutorizacion(cara: CaraData): Promise<EstadoAutorizacionResult> {
+export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number): Promise<EstadoAutorizacionResult> {
   console.log('[calcularEstadoAutorizacion] Datos recibidos:', {
     ciudad: cara.ciudad,
     estado: cara.estado,
@@ -183,6 +183,16 @@ export async function calcularEstadoAutorizacion(cara: CaraData): Promise<Estado
   if (cara.articulo) {
     const artUpper = cara.articulo.toUpperCase();
     if (artUpper.startsWith('CT') || artUpper.startsWith('IN')) {
+      // Asistentes de Dirección pueden crear cortesías sin autorización DCM
+      if (artUpper.startsWith('CT') && userId) {
+        const usuario = await prisma.usuario.findUnique({ where: { id: userId }, select: { puesto: true } });
+        if (usuario?.puesto && quitarAcentos(usuario.puesto.toLowerCase()).includes('asistente de direcci')) {
+          return {
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          };
+        }
+      }
       return {
         autorizacion_dg: 'aprobado',
         autorizacion_dcm: 'pendiente',

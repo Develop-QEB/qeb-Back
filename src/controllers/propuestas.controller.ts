@@ -3223,7 +3223,7 @@ export class PropuestasController {
           costo: costo ? parseInt(costo) : 0,
           tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
           articulo: articulo || null
-        });
+        }, userId);
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
@@ -3336,7 +3336,7 @@ export class PropuestasController {
         costo: costo ? parseInt(costo) : 0,
         tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
         articulo: articulo || null
-      });
+      }, userId);
 
       const newCara = await prisma.solicitudCaras.create({
         data: {
@@ -3477,7 +3477,7 @@ export class PropuestasController {
               costo: data.costo ? parseInt(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
               articulo: data.articulo || null
-            });
+            }, userId);
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }
