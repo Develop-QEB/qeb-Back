@@ -143,12 +143,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
@@ -1172,12 +1176,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
