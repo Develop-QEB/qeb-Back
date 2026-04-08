@@ -391,7 +391,14 @@ model usuario {
   reset_token_expiry DateTime?        @db.DateTime(0)
   sap_asesor_id      Int?
   light_theme_notified Boolean @default(false)
+  version_notified     String?  @db.VarChar(20)
   equipos            usuario_equipo[]
+}
+
+model version {
+  id     Int    @id @default(autoincrement())
+  numero String @db.VarChar(20)
+  fecha  DateTime @db.Date
 }
 
 model equipo {

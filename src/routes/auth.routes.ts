@@ -44,6 +44,9 @@ router.post(
 
 router.post('/mark-light-theme-notified', authMiddleware, authController.markLightThemeNotified.bind(authController));
 
+router.get('/version', authMiddleware, authController.getLatestVersion.bind(authController));
+router.post('/mark-version-notified', authMiddleware, authController.markVersionNotified.bind(authController));
+
 router.post('/logout', authMiddleware, authController.logout.bind(authController));
 
 router.post('/forgot-password', (req, res) => authController.forgotPassword(req, res));
