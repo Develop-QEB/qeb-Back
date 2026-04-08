@@ -5,10 +5,10 @@ import { uploadGeneral } from '../middleware/upload.middleware';
 
 const router = Router();
 
-// Endpoint público - no requiere autenticación (solo cálculo, no modifica datos)
-router.post('/evaluar-autorizacion', solicitudesController.evaluarAutorizacion.bind(solicitudesController));
-
 router.use(authMiddleware);
+
+// Evaluar autorización - requiere autenticación para identificar al usuario
+router.post('/evaluar-autorizacion', solicitudesController.evaluarAutorizacion.bind(solicitudesController));
 
 router.get('/', solicitudesController.getAll.bind(solicitudesController));
 router.get('/stats', solicitudesController.getStats.bind(solicitudesController));
