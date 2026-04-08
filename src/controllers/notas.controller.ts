@@ -12,7 +12,7 @@ export class NotasController {
         res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         return;
       }
-
+//testtt
       const notas = await prisma.notas_personales.findMany({
         where: { usuario_id: userId },
         orderBy: { fecha_creacion: 'desc' },
