@@ -180,13 +180,20 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   }
 
   // Cortesías (CT) e Intercambio (IN) siempre requieren autorización DCM
+  console.log('[calcularEstadoAutorizacion] articulo recibido:', JSON.stringify(cara.articulo), 'userId:', userId);
   if (cara.articulo) {
     const artUpper = cara.articulo.toUpperCase();
     if (artUpper.startsWith('CT') || artUpper.startsWith('IN')) {
-      // Asistentes de Dirección pueden crear cortesías sin autorización DCM
+      // Usuarios autorizados pueden crear cortesías sin autorización DCM
+      const CORREOS_CORTESIA_AUTO = [
+        'lflores@imu.com.mx',
+        'kbasurto@imu.com.mx',
+        'test_1057690@fake.com',
+        'test_1057689@fake.com',
+      ];
       if (artUpper.startsWith('CT') && userId) {
-        const usuario = await prisma.usuario.findUnique({ where: { id: userId }, select: { puesto: true } });
-        if (usuario?.puesto && quitarAcentos(usuario.puesto.toLowerCase()).includes('asistente de direcci')) {
+        const usuario = await prisma.usuario.findUnique({ where: { id: userId }, select: { correo_electronico: true } });
+        if (usuario?.correo_electronico && CORREOS_CORTESIA_AUTO.includes(usuario.correo_electronico.toLowerCase())) {
           return {
             autorizacion_dg: 'aprobado',
             autorizacion_dcm: 'aprobado',

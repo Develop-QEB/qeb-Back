@@ -143,12 +143,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
@@ -1173,12 +1177,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
@@ -5584,10 +5592,26 @@ export class CampanasController {
   async getOrdenMontajeCAT(req: AuthRequest, res: Response): Promise<void> {
     try {
       const status = req.query.status as string;
-      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
-      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
-      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
-      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      let catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      let catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          catorcenaInicio = catActual.numero_catorcena;
+          catorcenaFin = catActual.numero_catorcena;
+          yearInicio = catActual.a_o;
+          yearFin = catActual.a_o;
+        }
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5600,10 +5624,10 @@ export class CampanasController {
       let dateFilter = '';
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
         dateFilter = `
-          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
         `;
-        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
       }
 
       const query = `
@@ -5705,6 +5729,12 @@ export class CampanasController {
       res.json({
         success: true,
         data: dataSerializable,
+        filtroAplicado: {
+          catorcenaInicio,
+          catorcenaFin,
+          yearInicio,
+          yearFin,
+        },
       });
     } catch (error) {
       console.error('Error en getOrdenMontajeCAT:', error);
@@ -5723,10 +5753,26 @@ export class CampanasController {
   async getOrdenMontajeINVIAN(req: AuthRequest, res: Response): Promise<void> {
     try {
       const status = req.query.status as string;
-      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
-      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
-      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
-      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      let catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      let catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          catorcenaInicio = catActual.numero_catorcena;
+          catorcenaFin = catActual.numero_catorcena;
+          yearInicio = catActual.a_o;
+          yearFin = catActual.a_o;
+        }
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5739,10 +5785,10 @@ export class CampanasController {
       let dateFilter = '';
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
         dateFilter = `
-          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
         `;
-        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
       }
 
       const query = `
@@ -5918,6 +5964,12 @@ export class CampanasController {
       res.json({
         success: true,
         data: dataSerializable,
+        filtroAplicado: {
+          catorcenaInicio,
+          catorcenaFin,
+          yearInicio,
+          yearFin,
+        },
       });
     } catch (error) {
       console.error('Error en getOrdenMontajeINVIAN:', error);
