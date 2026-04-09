@@ -5602,11 +5602,20 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // Si no se envían filtros de catorcena, usar año actual para no traer todo
-      if (!yearInicio || !yearFin) {
-        const currentYear = new Date().getFullYear();
-        yearInicio = currentYear;
-        yearFin = currentYear;
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          if (!catorcenaInicio) catorcenaInicio = catActual.numero_catorcena;
+          if (!catorcenaFin) catorcenaFin = catActual.numero_catorcena;
+          if (!yearInicio) yearInicio = catActual.a_o;
+          if (!yearFin) yearFin = catActual.a_o;
+        }
       }
 
       let statusFilter = '';
@@ -5660,7 +5669,7 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -5703,7 +5712,7 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -5755,11 +5764,20 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // Si no se envían filtros de catorcena, usar año actual para no traer todo
-      if (!yearInicio || !yearFin) {
-        const currentYear = new Date().getFullYear();
-        yearInicio = currentYear;
-        yearFin = currentYear;
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          if (!catorcenaInicio) catorcenaInicio = catActual.numero_catorcena;
+          if (!catorcenaFin) catorcenaFin = catActual.numero_catorcena;
+          if (!yearInicio) yearInicio = catActual.a_o;
+          if (!yearFin) yearFin = catActual.a_o;
+        }
       }
 
       let statusFilter = '';
