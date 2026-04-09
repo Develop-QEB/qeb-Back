@@ -169,8 +169,48 @@ export class CampanasController {
 
       const whereClause = conditions.join(' AND ');
 
-      // Query with LEFT JOINs — subqueries pre-aggregated for performance
-      const query = `
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+      `;
+
+      // Paso 1: obtener IDs de la página (query liviano, sin subqueries pesadas)
+      const idsQuery = `
+        SELECT cm.id, cm.cotizacion_id
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+        ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      const offset = (page - 1) * limit;
+      const [idsResult, countResult] = await Promise.all([
+        prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number | null }[]>(idsQuery, ...params, limit, offset),
+        prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
+      ]);
+      const total = Number(countResult[0]?.total || 0);
+
+      if (idsResult.length === 0) {
+        res.json({ success: true, data: [], pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+        return;
+      }
+
+      const campaignIds = idsResult.map(r => Number(r.id));
+      const cotizacionIds = idsResult.map(r => Number(r.cotizacion_id)).filter(Boolean);
+      const cmIdPh = campaignIds.map(() => '?').join(',');
+      const ctIdPh = cotizacionIds.length > 0 ? cotizacionIds.map(() => '?').join(',') : '0';
+
+      // Paso 2: enriquecer solo las campañas de la página (subqueries filtradas por IDs)
+      const dataQuery = `
         SELECT
           cm.*,
           cl.T0_U_Cliente as cliente_nombre,
@@ -214,7 +254,7 @@ export class CampanasController {
           FROM reservas rsv_a
           INNER JOIN solicitudCaras sc_a ON sc_a.id = rsv_a.solicitudCaras_id
           INNER JOIN cotizacion ct_a ON ct_a.id_propuesta = sc_a.idquote
-          WHERE rsv_a.deleted_at IS NULL
+          WHERE rsv_a.deleted_at IS NULL AND ct_a.id IN (${ctIdPh})
           GROUP BY ct_a.id
         ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
         LEFT JOIN (
@@ -236,6 +276,7 @@ export class CampanasController {
                 AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%'
             ) AS caras_ultima_cat
           FROM campania cm_b
+          WHERE cm_b.id IN (${cmIdPh})
         ) uc_agg ON uc_agg.campania_id = cm.id
         LEFT JOIN (
           SELECT
@@ -244,33 +285,24 @@ export class CampanasController {
           FROM solicitudCaras sc_c
           INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
           INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+          WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
-        WHERE ${whereClause}
+        WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
-        LIMIT ? OFFSET ?
       `;
 
-      const countQuery = `
-        SELECT COUNT(*) as total
-        FROM campania cm
-        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
-        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
-        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        WHERE ${whereClause}
-      `;
+      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, campaignIds para WHERE
+      const dataParams = [
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
+        ...campaignIds,
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
+        ...campaignIds,
+      ];
 
-      const offset = (page - 1) * limit;
-      // Ejecutar ambas queries en paralelo en vez de secuencial
-      const [campanas, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset),
-        prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
-      ]);
-      const total = Number(countResult[0]?.total || 0);
+      const campanas = await prisma.$queryRawUnsafe<any[]>(dataQuery, ...dataParams);
 
       // Remap propuesta_inversion → inversion to avoid cm.* column name collision
-      // when campania table has its own inversion column (not in Prisma schema)
       campanas.forEach((campana: any) => {
         if ('propuesta_inversion' in campana) {
           campana.inversion = campana.propuesta_inversion ?? campana.inversion ?? null;
