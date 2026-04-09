@@ -799,18 +799,28 @@ export const getTicketRankings = async (req: AuthRequest, res: Response) => {
     const topAreas = [...areaMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
     const topRoles = [...roleMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
 
-    // Empleado del mes: tecnico con mas tickets cerrados, con foto de perfil
-    let empleadoDelMes: { nombre: string; count: number; foto_perfil: string | null } | null = null;
+    // Empleado del mes: tecnico con mas tickets cerrados, con foto y usuario top
+    let empleadoDelMes: { nombre: string; count: number; foto_perfil: string | null; top_usuario: string | null } | null = null;
     if (topTecnicos.length > 0) {
       const topNombre = topTecnicos[0].nombre;
       const topUsuario = await prisma.usuario.findFirst({
         where: { nombre: { contains: topNombre }, deleted_at: null },
         select: { nombre: true, foto_perfil: true },
       });
+
+      // A quien le resolvio mas tickets este tecnico
+      const resueltosDelTop = resueltos.filter((t) => t.status_cambiado_por?.trim() === topNombre);
+      const porUsuario = new Map<string, number>();
+      for (const t of resueltosDelTop) {
+        porUsuario.set(t.usuario_nombre, (porUsuario.get(t.usuario_nombre) || 0) + 1);
+      }
+      const topResueltoA = [...porUsuario.entries()].sort((a, b) => b[1] - a[1])[0];
+
       empleadoDelMes = {
         nombre: topTecnicos[0].nombre,
         count: topTecnicos[0].count,
         foto_perfil: topUsuario?.foto_perfil || null,
+        top_usuario: topResueltoA ? topResueltoA[0] : null,
       };
     }
 
