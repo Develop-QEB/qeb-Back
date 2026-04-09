@@ -680,15 +680,7 @@ export const getTicketChatUnreadCount = async (req: AuthRequest, res: Response) 
 // Obtener rankings de tickets (solo DEV team)
 export const getTicketRankings = async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user?.userId;
-    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
-
-    // Verificar que el usuario pertenece al equipo DEV
-    const devTeam = await prisma.equipo.findFirst({
-      where: { nombre: 'DEV', deleted_at: null },
-      include: { miembros: { select: { usuario_id: true } } },
-    });
-    if (!devTeam || !devTeam.miembros.some((m) => m.usuario_id === userId)) {
+    if (req.user?.rol !== 'DEV') {
       return res.status(403).json({ success: false, error: 'Acceso denegado' });
     }
 

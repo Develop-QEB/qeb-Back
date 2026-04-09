@@ -153,16 +153,13 @@ export class EquiposController {
         return;
       }
 
-      // Proteccion DEV: solo miembros del equipo DEV pueden editar DEV
-      if (equipo.nombre === 'DEV') {
-        const userId = req.user?.userId;
-        if (!userId || !equipo.miembros.some((m) => m.usuario_id === userId)) {
-          res.status(403).json({
-            success: false,
-            error: 'Solo los miembros del equipo DEV pueden editar este equipo',
-          });
-          return;
-        }
+      // Proteccion DEV: solo usuarios con rol DEV pueden editar el equipo DEV
+      if (equipo.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden editar este equipo',
+        });
+        return;
       }
 
       const updated = await prisma.equipo.update({
@@ -317,16 +314,13 @@ export class EquiposController {
         return;
       }
 
-      // Proteccion DEV: solo miembros del equipo DEV pueden agregar a DEV
-      if (equipo.nombre === 'DEV') {
-        const userId = req.user?.userId;
-        if (!userId || !equipo.miembros.some((m) => m.usuario_id === userId)) {
-          res.status(403).json({
-            success: false,
-            error: 'Solo los miembros del equipo DEV pueden agregar integrantes',
-          });
-          return;
-        }
+      // Proteccion DEV: solo usuarios con rol DEV pueden agregar a DEV
+      if (equipo.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden agregar integrantes a este equipo',
+        });
+        return;
       }
 
       // Crear relaciones para cada usuario
@@ -432,20 +426,16 @@ export class EquiposController {
         return;
       }
 
-      // Proteccion DEV: solo miembros del equipo DEV pueden remover de DEV
+      // Proteccion DEV: solo usuarios con rol DEV pueden remover de DEV
       const equipoCheck = await prisma.equipo.findFirst({
         where: { id: parseInt(id), deleted_at: null },
-        include: { miembros: { select: { usuario_id: true } } },
       });
-      if (equipoCheck?.nombre === 'DEV') {
-        const userId = req.user?.userId;
-        if (!userId || !equipoCheck.miembros.some((m) => m.usuario_id === userId)) {
-          res.status(403).json({
-            success: false,
-            error: 'Solo los miembros del equipo DEV pueden remover integrantes',
-          });
-          return;
-        }
+      if (equipoCheck?.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden remover integrantes de este equipo',
+        });
+        return;
       }
 
       await prisma.usuario_equipo.deleteMany({
