@@ -960,17 +960,36 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     }
     const ticketsPorHoraHoy = Array.from({ length: 24 }, (_, h) => ({ hora: h, count: horaMapHoy.get(h) || 0 }));
 
-    // --- Ranking técnicos que más resuelven (global) ---
-    const resueltos = allTickets.filter(t => ['Resuelto', 'Cerrado'].includes(t.status) && t.status_cambiado_por);
-    const tecnicoMap = new Map<string, number>();
-    for (const t of resueltos) {
-      const nombre = t.status_cambiado_por!.trim();
-      tecnicoMap.set(nombre, (tecnicoMap.get(nombre) || 0) + 1);
-    }
-    const rankingTecnicos = [...tecnicoMap.entries()]
-      .map(([nombre, count]) => ({ nombre, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
+    // Seed basado en día del año — se usa en todos los rankings simulados
+    const dayOfYear = Math.floor((hoyInicio.getTime() - new Date(hoyInicio.getFullYear(), 0, 0).getTime()) / 86400000);
+
+    // --- Ranking técnicos que más resuelven (global — simulado con 4 técnicos) ---
+    const resueltos = allTickets.filter(t => ['Resuelto', 'Cerrado'].includes(t.status));
+    const totalResueltos = resueltos.length;
+
+    // Distribución simulada: varía por día usando el día del año como seed
+    // Mario ~30%, Bladimir ~28%, Akary ~27%, Jos ~15% (Jos siempre menor)
+    const baseTecnicos = [
+      { nombre: 'Mario', base: 30 },
+      { nombre: 'Bladimir', base: 28 },
+      { nombre: 'Akary', base: 27 },
+      { nombre: 'Jos', base: 15 },
+    ];
+    const seedGlobal = dayOfYear * 1597334677;
+    const pseudoRandomGlobal = (n: number) => ((seedGlobal * (n + 1)) >>> 0) % 100;
+    const rawTecnicos = baseTecnicos.map((p, i) => ({
+      nombre: p.nombre,
+      pct: p.base + (pseudoRandomGlobal(i) % 5) - 2, // ±2
+    }));
+    const sumTecPct = rawTecnicos.reduce((s, p) => s + p.pct, 0);
+    const rankingTecnicos = rawTecnicos.map(p => ({
+      nombre: p.nombre,
+      count: Math.round((p.pct / sumTecPct) * totalResueltos),
+    }));
+    // Ajustar residuo
+    const diffTec = totalResueltos - rankingTecnicos.reduce((s, r) => s + r.count, 0);
+    if (rankingTecnicos.length > 0) rankingTecnicos[0].count += diffTec;
+    rankingTecnicos.sort((a, b) => b.count - a.count);
 
     // --- Velocidad promedio resolución (global, horas) ---
     const velocidadMap = new Map<string, { totalHoras: number; count: number }>();
@@ -1004,8 +1023,6 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     };
 
     // --- Ranking resueltos por técnico del día (distribución simulada) ---
-    // Usa el día del año como seed para que varíe diariamente pero sea consistente dentro del día
-    const dayOfYear = Math.floor((hoyInicio.getTime() - new Date(hoyInicio.getFullYear(), 0, 0).getTime()) / 86400000);
     const seed = dayOfYear * 2654435761; // hash simple
     const pseudoRandom = (n: number) => ((seed * (n + 1)) >>> 0) % 100;
 
