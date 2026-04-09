@@ -5602,7 +5602,12 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // No default catorcena filter - frontend handles filtering via selectedCatorcenas
+      // Si no se envían filtros de catorcena, usar año actual para no traer todo
+      if (!yearInicio || !yearFin) {
+        const currentYear = new Date().getFullYear();
+        yearInicio = currentYear;
+        yearFin = currentYear;
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5754,7 +5759,12 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // No default catorcena filter - frontend handles filtering via selectedCatorcenas
+      // Si no se envían filtros de catorcena, usar año actual para no traer todo
+      if (!yearInicio || !yearFin) {
+        const currentYear = new Date().getFullYear();
+        yearInicio = currentYear;
+        yearFin = currentYear;
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
