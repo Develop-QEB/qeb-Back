@@ -17,9 +17,17 @@ const globalForPrisma = globalThis as unknown as {
 
 const createPrismaClient = () => {
   const url = getDatasourceUrl();
-  // Append connection_limit if not already set — keeps pool small for Hostinger's 500 conn/hour cap
-  const hasLimit = url.includes('connection_limit');
-  const datasourceUrl = hasLimit ? url : `${url}${url.includes('?') ? '&' : '?'}connection_limit=2`;
+  // Ensure connection pool has reasonable limits — override if too low
+  let datasourceUrl = url;
+  if (!url.includes('connection_limit')) {
+    datasourceUrl += `${url.includes('?') ? '&' : '?'}connection_limit=5`;
+  }
+  if (!url.includes('pool_timeout')) {
+    datasourceUrl += '&pool_timeout=60';
+  } else {
+    // If pool_timeout is set but too low, bump it
+    datasourceUrl = datasourceUrl.replace(/pool_timeout=\d+/, 'pool_timeout=60');
+  }
 
   const client = new PrismaClient({
     log: ['error'],
