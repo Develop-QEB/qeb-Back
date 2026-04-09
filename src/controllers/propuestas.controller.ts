@@ -467,7 +467,7 @@ export class PropuestasController {
         }
       }
 
-      // Get total count
+      // Count y main query en paralelo
       const countQuery = `
         SELECT COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
@@ -477,10 +477,7 @@ export class PropuestasController {
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
       `;
-      const countResult = await prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params);
-      const total = Number(countResult[0]?.total || 0);
 
-      // Main query inspired by Retool - get propuestas with related data
       const offset = (page - 1) * limit;
       const mainQuery = `
         SELECT
@@ -530,7 +527,11 @@ export class PropuestasController {
         LIMIT ? OFFSET ?
       `;
 
-      const propuestas = await prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset);
+      const [propuestas, countResult] = await Promise.all([
+        prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset),
+        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params),
+      ]);
+      const total = Number(countResult[0]?.total || 0);
 
       // Convert BigInt values and format dates
       const formattedPropuestas = propuestas.map(p => ({

@@ -19,11 +19,11 @@ const createPrismaClient = () => {
   const url = getDatasourceUrl();
   // Ensure connection pool has reasonable limits — override if too low
   let datasourceUrl = url;
-  // connection_limit: mínimo 50 para soportar 300+ usuarios concurrentes
+  // connection_limit: 100 para soportar 300+ usuarios concurrentes
   if (!url.includes('connection_limit')) {
-    datasourceUrl += `${url.includes('?') ? '&' : '?'}connection_limit=50`;
+    datasourceUrl += `${url.includes('?') ? '&' : '?'}connection_limit=100`;
   } else {
-    datasourceUrl = datasourceUrl.replace(/connection_limit=\d+/, 'connection_limit=50');
+    datasourceUrl = datasourceUrl.replace(/connection_limit=\d+/, 'connection_limit=100');
   }
   // pool_timeout: 60s para esperar conexión disponible del pool
   if (!url.includes('pool_timeout')) {
