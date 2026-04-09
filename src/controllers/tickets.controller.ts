@@ -732,19 +732,22 @@ export const getTicketRankings = async (req: AuthRequest, res: Response) => {
     }
     const topUrgentes = [...urgenteMap.values()].sort((a, b) => b.count - a.count);
 
-    // Ranking divertido: tickets por hora del dia
+    // Ranking divertido: tickets por hora del dia (zona horaria Mexico)
     const horaMap = new Map<number, number>();
     for (const t of allTickets) {
-      const hora = new Date(t.created_at).getHours();
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false });
+      const hora = parseInt(fechaMx);
       horaMap.set(hora, (horaMap.get(hora) || 0) + 1);
     }
     const ticketsPorHora = [...horaMap.entries()].map(([hora, count]) => ({ hora, count })).sort((a, b) => b.count - a.count);
 
-    // Ranking divertido: dia de la semana con mas tickets
+    // Ranking divertido: dia de la semana con mas tickets (zona horaria Mexico)
     const diaNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
     const diaMap = new Map<number, number>();
     for (const t of allTickets) {
-      const dia = new Date(t.created_at).getDay();
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', weekday: 'short' });
+      const dayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(fechaMx.split(',')[0].trim());
+      const dia = dayIndex >= 0 ? dayIndex : new Date(t.created_at).getDay();
       diaMap.set(dia, (diaMap.get(dia) || 0) + 1);
     }
     const ticketsPorDia = [...diaMap.entries()].map(([dia, count]) => ({ dia: diaNames[dia], count })).sort((a, b) => b.count - a.count);
