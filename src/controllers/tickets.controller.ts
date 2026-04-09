@@ -875,15 +875,21 @@ export const getTicketStats = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// Reportes Especiales: métricas de tickets del día de hoy
+// Reportes Especiales: métricas de tickets filtradas por rango de fechas
 export const getReportesEspeciales = async (req: AuthRequest, res: Response) => {
   try {
-    // Rango del día de hoy en zona horaria México
-    const nowMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-    const hoyInicio = new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 0, 0, 0);
-    const hoyFin = new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 23, 59, 59);
+    const { fechaInicio: fiParam, fechaFin: ffParam } = req.query;
 
-    // Todos los tickets de hoy
+    // Default: día de hoy en zona horaria México
+    const nowMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const hoyInicio = fiParam
+      ? new Date(new Date(fiParam as string).setHours(0, 0, 0, 0))
+      : new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 0, 0, 0);
+    const hoyFin = ffParam
+      ? new Date(new Date(ffParam as string).setHours(23, 59, 59, 999))
+      : new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 23, 59, 59);
+
+    // Tickets en el rango seleccionado
     const ticketsHoy = await prisma.tickets.findMany({
       where: { created_at: { gte: hoyInicio, lte: hoyFin } },
       select: {
@@ -914,8 +920,8 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     const enValidacionGlobal = allTickets.filter(t => t.status === 'Validación').length;
     const resueltosYCerradosGlobal = allTickets.filter(t => t.status === 'Resuelto' || t.status === 'Cerrado').length;
 
-    // --- Ranking de áreas que más hacen tickets (global) ---
-    const userIds = [...new Set(allTickets.map(t => t.usuario_id))];
+    // --- Ranking de áreas (filtrado por rango) ---
+    const userIds = [...new Set(ticketsHoy.map(t => t.usuario_id))];
     const usuarios = await prisma.usuario.findMany({
       where: { id: { in: userIds } },
       select: { id: true, area: true, nombre: true },
@@ -923,7 +929,7 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     const usuarioMap = new Map(usuarios.map(u => [u.id, u]));
 
     const areaMap = new Map<string, number>();
-    for (const t of allTickets) {
+    for (const t of ticketsHoy) {
       const info = usuarioMap.get(t.usuario_id);
       const area = info?.area || 'Sin área';
       areaMap.set(area, (areaMap.get(area) || 0) + 1);
@@ -932,9 +938,9 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
       .map(([nombre, count]) => ({ nombre, count }))
       .sort((a, b) => b.count - a.count);
 
-    // --- Ranking de usuarios que más hacen tickets (global) ---
+    // --- Ranking de usuarios (filtrado por rango) ---
     const creadorMap = new Map<string, number>();
-    for (const t of allTickets) {
+    for (const t of ticketsHoy) {
       creadorMap.set(t.usuario_nombre, (creadorMap.get(t.usuario_nombre) || 0) + 1);
     }
     const rankingUsuarios = [...creadorMap.entries()]
