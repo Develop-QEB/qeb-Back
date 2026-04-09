@@ -7,7 +7,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
@@ -456,27 +456,19 @@ export class PropuestasController {
         params.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
-      // Visibility filter: non-leadership roles only see records where they participate
+      // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id IN (${placeholders})
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          params.push(String(userId), ...teamIds, String(userId));
-        } else {
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id = ?
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          params.push(String(userId), userId, String(userId));
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          res.json({ success: true, data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        whereConditions += ` AND pr.id IN (${visiblePh})`;
+        params.push(...visibleIds);
       }
 
       // Count y main query en paralelo

@@ -11,7 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
@@ -148,35 +148,19 @@ export class CampanasController {
         }
       }
 
-      // Visibility filter: non-leadership roles only see campañas where they have tareas
+      // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(...teamIds, String(userId), String(userId), userId);
-        } else {
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(userId, String(userId), String(userId), userId);
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          res.json({ success: true, data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        conditions.push(`cm.id IN (${visiblePh})`);
+        params.push(...visibleIds);
       }
 
       const whereClause = conditions.join(' AND ');
