@@ -2738,20 +2738,27 @@ export class SolicitudesController {
             where: { idquote: propuesta.id.toString() },
           });
 
-          // Create new caras with authorization calculation
+          // Create new caras - use frontend authorization if provided, otherwise recalculate
           for (const cara of caras) {
-            // Calcular estado de autorización
-            const estadoResult = await calcularEstadoAutorizacion({
-              ciudad: cara.ciudad,
-              estado: cara.estado,
-              formato: cara.formato,
-              tipo: cara.tipo,
-              caras: cara.caras,
-              bonificacion: cara.bonificacion || 0,
-              costo: cara.costo,
-              tarifa_publica: cara.tarifa_publica || 0,
-              articulo: cara.articulo || null
-            }, userId);
+            let autorizacion_dg = cara.autorizacion_dg || '';
+            let autorizacion_dcm = cara.autorizacion_dcm || '';
+
+            // If frontend didn't send authorization, recalculate
+            if (!autorizacion_dg && !autorizacion_dcm) {
+              const estadoResult = await calcularEstadoAutorizacion({
+                ciudad: cara.ciudad,
+                estado: cara.estado,
+                formato: cara.formato,
+                tipo: cara.tipo,
+                caras: cara.caras,
+                bonificacion: cara.bonificacion || 0,
+                costo: cara.costo,
+                tarifa_publica: cara.tarifa_publica || 0,
+                articulo: cara.articulo || null
+              }, userId);
+              autorizacion_dg = estadoResult.autorizacion_dg;
+              autorizacion_dcm = estadoResult.autorizacion_dcm;
+            }
 
             await tx.solicitudCaras.create({
               data: {
@@ -2772,8 +2779,8 @@ export class SolicitudesController {
                 caras_contraflujo: cara.caras_contraflujo || 0,
                 articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
-                autorizacion_dg: estadoResult.autorizacion_dg,
-                autorizacion_dcm: estadoResult.autorizacion_dcm,
+                autorizacion_dg,
+                autorizacion_dcm,
               },
             });
           }

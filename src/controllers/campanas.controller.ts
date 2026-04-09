@@ -143,12 +143,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
@@ -222,12 +226,14 @@ export class CampanasController {
               INNER JOIN catorcenas cat_b2 ON sc_b2.inicio_periodo >= cat_b2.fecha_inicio AND sc_b2.fin_periodo <= cat_b2.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b2.fecha_inicio AND cat_b2.fecha_fin
               WHERE ct_b2.id = cm_b.cotizacion_id AND rsv_b2.deleted_at IS NULL
+                AND COALESCE(sc_b2.articulo, '') NOT LIKE 'IM-%'
             ) AS reservas_count_ultima_cat,
             (SELECT COALESCE(SUM(sc_b3.caras + sc_b3.bonificacion), 0) FROM solicitudCaras sc_b3
               INNER JOIN cotizacion ct_b3 ON ct_b3.id_propuesta = sc_b3.idquote
               INNER JOIN catorcenas cat_b3 ON sc_b3.inicio_periodo >= cat_b3.fecha_inicio AND sc_b3.fin_periodo <= cat_b3.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b3.fecha_inicio AND cat_b3.fecha_fin
               WHERE ct_b3.id = cm_b.cotizacion_id
+                AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%'
             ) AS caras_ultima_cat
           FROM campania cm_b
         ) uc_agg ON uc_agg.campania_id = cm.id
@@ -460,11 +466,13 @@ export class CampanasController {
                INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                  AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
+                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%'
               ) as cnt,
               (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                FROM solicitudCaras sc3
                INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
+                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%'
               ) as caras_esperadas`,
             propuesta.solicitud_id, campana.fecha_fin,
             propuesta.solicitud_id, campana.fecha_fin
@@ -495,6 +503,7 @@ export class CampanasController {
           FROM solicitudCaras sc
           INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
           WHERE sc.idquote = ?
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%'
           ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
           propuesta.solicitud_id
         );
@@ -1173,12 +1182,16 @@ export class CampanasController {
         if (hasTeamVisibility(userRol)) {
           const teamIds = await getTeamMemberIds(prisma, userId);
           const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tareas t
-            WHERE t.campania_id = cm.id
-              AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          conditions.push(`(
+            EXISTS (
+              SELECT 1 FROM tareas t
+              WHERE t.campania_id = cm.id
+                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+            )
+            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
           )`);
-          params.push(...teamIds, String(userId));
+          params.push(...teamIds, String(userId), String(userId), userId);
         } else {
           conditions.push(`(
             EXISTS (
@@ -5584,10 +5597,26 @@ export class CampanasController {
   async getOrdenMontajeCAT(req: AuthRequest, res: Response): Promise<void> {
     try {
       const status = req.query.status as string;
-      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
-      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
-      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
-      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      let catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      let catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          if (!catorcenaInicio) catorcenaInicio = catActual.numero_catorcena;
+          if (!catorcenaFin) catorcenaFin = catActual.numero_catorcena;
+          if (!yearInicio) yearInicio = catActual.a_o;
+          if (!yearFin) yearFin = catActual.a_o;
+        }
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5600,10 +5629,10 @@ export class CampanasController {
       let dateFilter = '';
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
         dateFilter = `
-          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
         `;
-        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
       }
 
       const query = `
@@ -5611,10 +5640,11 @@ export class CampanasController {
         SELECT
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
-          pr.asignado AS asesor,
+          sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
-          sc.inicio_periodo AS fecha_inicio_periodo,
-          sc.fin_periodo AS fecha_fin_periodo,
+          ct.id_propuesta AS aps_global,
+          DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
+          DATE(sc.fin_periodo) AS fecha_fin_periodo,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
@@ -5639,18 +5669,17 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
-          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
-          AND sc.bonificacion > 0
+        WHERE sc.bonificacion > 0
+          AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
           ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 pr.asignado
+                 sol.nombre_usuario, ct.id_propuesta
 
         UNION ALL
 
@@ -5658,10 +5687,11 @@ export class CampanasController {
         SELECT
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
-          pr.asignado AS asesor,
+          sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
-          sc.inicio_periodo AS fecha_inicio_periodo,
-          sc.fin_periodo AS fecha_fin_periodo,
+          ct.id_propuesta AS aps_global,
+          DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
+          DATE(sc.fin_periodo) AS fecha_fin_periodo,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
@@ -5682,18 +5712,17 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
-          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
-          AND (sc.caras - sc.bonificacion) > 0
+        WHERE (sc.caras - sc.bonificacion) > 0
+          AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
           ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 pr.asignado, ct.descuento
+                 sol.nombre_usuario, ct.descuento, ct.id_propuesta
 
         ORDER BY campania_id, grupo_id, tipo_fila
       `;
@@ -5705,6 +5734,13 @@ export class CampanasController {
       res.json({
         success: true,
         data: dataSerializable,
+        filtroAplicado: {
+          catorcenaInicio,
+          catorcenaFin,
+          yearInicio,
+          yearFin,
+        },
+        catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
       });
     } catch (error) {
       console.error('Error en getOrdenMontajeCAT:', error);
@@ -5723,10 +5759,26 @@ export class CampanasController {
   async getOrdenMontajeINVIAN(req: AuthRequest, res: Response): Promise<void> {
     try {
       const status = req.query.status as string;
-      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
-      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
-      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
-      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      let catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      let catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+
+      // Si no se envían filtros de catorcena, usar la catorcena actual como default
+      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
+        const catActual = await prisma.catorcenas.findFirst({
+          where: {
+            fecha_inicio: { lte: new Date() },
+            fecha_fin: { gte: new Date() },
+          },
+        });
+        if (catActual) {
+          if (!catorcenaInicio) catorcenaInicio = catActual.numero_catorcena;
+          if (!catorcenaFin) catorcenaFin = catActual.numero_catorcena;
+          if (!yearInicio) yearInicio = catActual.a_o;
+          if (!yearFin) yearFin = catActual.a_o;
+        }
+      }
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5739,10 +5791,10 @@ export class CampanasController {
       let dateFilter = '';
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
         dateFilter = `
-          AND sc.inicio_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
         `;
-        params.push(yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
       }
 
       const query = `
@@ -5918,6 +5970,12 @@ export class CampanasController {
       res.json({
         success: true,
         data: dataSerializable,
+        filtroAplicado: {
+          catorcenaInicio,
+          catorcenaFin,
+          yearInicio,
+          yearFin,
+        },
       });
     } catch (error) {
       console.error('Error en getOrdenMontajeINVIAN:', error);

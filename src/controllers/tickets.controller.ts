@@ -225,6 +225,12 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Emitir evento de socket para actualizar historial y rankings
+    try {
+      const io = getIO();
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, ticket);
+    } catch {}
+
     res.status(201).json(ticket);
   } catch (error) {
     console.error('Error creating ticket:', error);
@@ -357,6 +363,14 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       orderBy: { created_at: 'desc' },
     });
 
+    // Obtener area y rol de los usuarios creadores
+    const userIds = [...new Set(tickets.map((t) => t.usuario_id))];
+    const usuarios = await prisma.usuario.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, area: true, user_role: true },
+    });
+    const usuarioMap = new Map(usuarios.map((u) => [u.id, u]));
+
     const result = tickets.map((t) => {
       const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
       const ultimoMensaje = t.mensajes[0] || null;
@@ -369,6 +383,8 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const ultimoChatLeido = chatVista?.ultimo_mensaje_leido_id || 0;
       const hasChatUnread = ultimoChat ? ultimoChat.id > ultimoChatLeido : false;
 
+      const usuarioInfo = usuarioMap.get(t.usuario_id);
+
       return {
         id: t.id,
         titulo: t.titulo,
@@ -379,6 +395,8 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
         usuario_id: t.usuario_id,
         usuario_nombre: t.usuario_nombre,
         usuario_email: t.usuario_email,
+        usuario_area: usuarioInfo?.area || null,
+        usuario_role: usuarioInfo?.user_role || null,
         status_cambiado_por: t.status_cambiado_por,
         total_mensajes: t._count.mensajes,
         total_chat: t._count.chat,
@@ -662,6 +680,173 @@ export const getTicketChatUnreadCount = async (req: AuthRequest, res: Response) 
   } catch (error) {
     console.error('Error fetching chat unread count:', error);
     res.status(500).json({ success: false, error: 'Error al obtener conteo' });
+  }
+};
+
+// Obtener rankings de tickets (solo DEV team)
+export const getTicketRankings = async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.rol !== 'DEV') {
+      return res.status(403).json({ success: false, error: 'Acceso denegado' });
+    }
+
+    const allTickets = await prisma.tickets.findMany({
+      select: {
+        id: true,
+        usuario_id: true,
+        usuario_nombre: true,
+        status: true,
+        prioridad: true,
+        status_cambiado_por: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    // Ranking: usuarios que mas tickets crearon
+    const creadorMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of allTickets) {
+      const entry = creadorMap.get(t.usuario_nombre) || { nombre: t.usuario_nombre, count: 0 };
+      entry.count++;
+      creadorMap.set(t.usuario_nombre, entry);
+    }
+    const topCreadores = [...creadorMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking: tecnicos que mas tickets resolvieron (Resuelto o Cerrado)
+    const resueltos = allTickets.filter((t) => ['Resuelto', 'Cerrado'].includes(t.status) && t.status_cambiado_por);
+    const tecnicoMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      const entry = tecnicoMap.get(nombre) || { nombre, count: 0 };
+      entry.count++;
+      tecnicoMap.set(nombre, entry);
+    }
+    const topTecnicos = [...tecnicoMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: tickets mas urgentes por usuario
+    const urgenteMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of allTickets.filter((t) => t.prioridad === 'Urgente')) {
+      const entry = urgenteMap.get(t.usuario_nombre) || { nombre: t.usuario_nombre, count: 0 };
+      entry.count++;
+      urgenteMap.set(t.usuario_nombre, entry);
+    }
+    const topUrgentes = [...urgenteMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: tickets por hora del dia (zona horaria Mexico)
+    const horaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false });
+      const hora = parseInt(fechaMx);
+      horaMap.set(hora, (horaMap.get(hora) || 0) + 1);
+    }
+    const ticketsPorHora = [...horaMap.entries()].map(([hora, count]) => ({ hora, count })).sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: dia de la semana con mas tickets (zona horaria Mexico)
+    const diaNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    const diaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', weekday: 'short' });
+      const dayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(fechaMx.split(',')[0].trim());
+      const dia = dayIndex >= 0 ? dayIndex : new Date(t.created_at).getDay();
+      diaMap.set(dia, (diaMap.get(dia) || 0) + 1);
+    }
+    const ticketsPorDia = [...diaMap.entries()].map(([dia, count]) => ({ dia: diaNames[dia], count })).sort((a, b) => b.count - a.count);
+
+    // Ranking: velocidad promedio de resolucion por tecnico (en horas)
+    const velocidadMap = new Map<string, { nombre: string; totalHoras: number; count: number }>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      const horas = (new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) / 3600000;
+      const entry = velocidadMap.get(nombre) || { nombre, totalHoras: 0, count: 0 };
+      entry.totalHoras += horas;
+      entry.count++;
+      velocidadMap.set(nombre, entry);
+    }
+    const velocidadTecnicos = [...velocidadMap.values()]
+      .map((v) => ({ nombre: v.nombre, promedio_horas: Math.round(v.totalHoras / v.count * 10) / 10 }))
+      .sort((a, b) => a.promedio_horas - b.promedio_horas);
+
+    // Ranking: usuarios reincidentes (mas tickets repetidos en 7 dias)
+    const reincidenteMap = new Map<string, { nombre: string; count: number }>();
+    const ticketsByUser = new Map<string, Date[]>();
+    for (const t of allTickets) {
+      const dates = ticketsByUser.get(t.usuario_nombre) || [];
+      dates.push(new Date(t.created_at));
+      ticketsByUser.set(t.usuario_nombre, dates);
+    }
+    for (const [nombre, dates] of ticketsByUser) {
+      dates.sort((a, b) => a.getTime() - b.getTime());
+      let streakCount = 0;
+      for (let i = 1; i < dates.length; i++) {
+        if (dates[i].getTime() - dates[i - 1].getTime() < 7 * 24 * 3600000) streakCount++;
+      }
+      if (streakCount > 0) reincidenteMap.set(nombre, { nombre, count: streakCount });
+    }
+    const topReincidentes = [...reincidenteMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking por area
+    const userIds = [...new Set(allTickets.map((t) => t.usuario_id))];
+    const usuarios = await prisma.usuario.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, area: true, user_role: true },
+    });
+    const usuarioMap = new Map(usuarios.map((u) => [u.id, u]));
+
+    const areaMap = new Map<string, number>();
+    const roleMap = new Map<string, number>();
+    for (const t of allTickets) {
+      const info = usuarioMap.get(t.usuario_id);
+      if (info?.area) areaMap.set(info.area, (areaMap.get(info.area) || 0) + 1);
+      if (info?.user_role) roleMap.set(info.user_role, (roleMap.get(info.user_role) || 0) + 1);
+    }
+    const topAreas = [...areaMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
+    const topRoles = [...roleMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
+
+    // Empleado del mes: tecnico con mas tickets cerrados, con foto y usuario top
+    let empleadoDelMes: { nombre: string; count: number; foto_perfil: string | null; top_usuario: string | null } | null = null;
+    if (topTecnicos.length > 0) {
+      const topNombre = topTecnicos[0].nombre;
+      const topUsuario = await prisma.usuario.findFirst({
+        where: { nombre: { contains: topNombre }, deleted_at: null },
+        select: { nombre: true, foto_perfil: true },
+      });
+
+      // A quien le resolvio mas tickets este tecnico
+      const resueltosDelTop = resueltos.filter((t) => t.status_cambiado_por?.trim() === topNombre);
+      const porUsuario = new Map<string, number>();
+      for (const t of resueltosDelTop) {
+        porUsuario.set(t.usuario_nombre, (porUsuario.get(t.usuario_nombre) || 0) + 1);
+      }
+      const topResueltoA = [...porUsuario.entries()].sort((a, b) => b[1] - a[1])[0];
+
+      empleadoDelMes = {
+        nombre: topTecnicos[0].nombre,
+        count: topTecnicos[0].count,
+        foto_perfil: topUsuario?.foto_perfil || null,
+        top_usuario: topResueltoA ? topResueltoA[0] : null,
+      };
+    }
+
+    res.json({
+      success: true,
+      data: {
+        empleadoDelMes,
+        topCreadores,
+        topTecnicos,
+        topUrgentes,
+        ticketsPorHora,
+        ticketsPorDia,
+        velocidadTecnicos,
+        topReincidentes,
+        topAreas,
+        topRoles,
+        totalTickets: allTickets.length,
+        totalResueltos: resueltos.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching rankings:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener rankings' });
   }
 };
 

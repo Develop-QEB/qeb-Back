@@ -194,6 +194,19 @@ export class UsuariosController {
         return;
       }
 
+      // Solo un DEV puede asignar o quitar el rol DEV
+      if (rol !== undefined) {
+        const isSettingDev = rol === 'DEV';
+        const isRemovingDev = usuario.user_role === 'DEV' && rol !== 'DEV';
+        if ((isSettingDev || isRemovingDev) && req.user?.rol !== 'DEV') {
+          res.status(403).json({
+            success: false,
+            error: 'Solo un usuario DEV puede asignar o quitar el rol DEV',
+          });
+          return;
+        }
+      }
+
       const updated = await prisma.usuario.update({
         where: { id: parseInt(id) },
         data: {

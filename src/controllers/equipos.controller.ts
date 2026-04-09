@@ -142,12 +142,22 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
         res.status(404).json({
           success: false,
           error: 'Equipo no encontrado',
+        });
+        return;
+      }
+
+      // Proteccion DEV: solo usuarios con rol DEV pueden editar el equipo DEV
+      if (equipo.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden editar este equipo',
         });
         return;
       }
@@ -226,12 +236,22 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
         res.status(404).json({
           success: false,
           error: 'Equipo no encontrado',
+        });
+        return;
+      }
+
+      // Proteccion: no se puede eliminar el equipo DEV
+      if (equipo.nombre === 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'El equipo DEV no puede ser eliminado',
         });
         return;
       }
@@ -283,12 +303,22 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
         res.status(404).json({
           success: false,
           error: 'Equipo no encontrado',
+        });
+        return;
+      }
+
+      // Proteccion DEV: solo usuarios con rol DEV pueden agregar a DEV
+      if (equipo.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden agregar integrantes a este equipo',
         });
         return;
       }
@@ -392,6 +422,18 @@ export class EquiposController {
         res.status(400).json({
           success: false,
           error: 'Debe proporcionar al menos un usuario',
+        });
+        return;
+      }
+
+      // Proteccion DEV: solo usuarios con rol DEV pueden remover de DEV
+      const equipoCheck = await prisma.equipo.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+      });
+      if (equipoCheck?.nombre === 'DEV' && req.user?.rol !== 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'Solo usuarios con rol DEV pueden remover integrantes de este equipo',
         });
         return;
       }

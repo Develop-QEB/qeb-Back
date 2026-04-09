@@ -740,8 +740,8 @@ export class PropuestasController {
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
-          const flujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Flujo').length;
-          const contraflujoReservado = nonBonificacion.filter(r => r.tipo_de_cara === 'Contraflujo').length;
+          const flujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
+          const contraflujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
           const flujoRequerido = Number(cara.caras_flujo) || 0;
           const contraflujoRequerido = Number(cara.caras_contraflujo) || 0;
           const bonificacionRequerido = Number(cara.bonificacion) || 0;

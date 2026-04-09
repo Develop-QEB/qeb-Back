@@ -72,6 +72,7 @@ model catorcenas {
   fecha_fin        DateTime @db.Date
 
   @@index([fecha_inicio, fecha_fin], map: "idx_fechas")
+  @@index([a_o, numero_catorcena], map: "idx_ano_catorcena")
   @@map("catorcenas")
 }
 
@@ -276,6 +277,7 @@ model reservas {
   @@index([grupo_completo_id], map: "idx_grupo_completo")
   @@index([archivo(length: 100)], map: "idx_rsv_archivo")
   @@index([solicitudCaras_id, deleted_at, APS, grupo_completo_id], map: "idx_rsv_query_sin_arte")
+  @@index([deleted_at, estatus], map: "idx_rsv_deleted_estatus")
 }
 
 model session_locks {
