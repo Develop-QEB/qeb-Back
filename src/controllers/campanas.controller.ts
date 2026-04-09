@@ -5602,21 +5602,7 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // Si no se envían filtros de catorcena, usar la catorcena actual como default
-      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
-        const catActual = await prisma.catorcenas.findFirst({
-          where: {
-            fecha_inicio: { lte: new Date() },
-            fecha_fin: { gte: new Date() },
-          },
-        });
-        if (catActual) {
-          catorcenaInicio = catActual.numero_catorcena;
-          catorcenaFin = catActual.numero_catorcena;
-          yearInicio = catActual.a_o;
-          yearFin = catActual.a_o;
-        }
-      }
+      // No default catorcena filter - frontend handles filtering via selectedCatorcenas
 
       let statusFilter = '';
       const params: (string | number)[] = [];
@@ -5768,21 +5754,7 @@ export class CampanasController {
       let yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
       let yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
 
-      // Si no se envían filtros de catorcena, usar la catorcena actual como default
-      if (!catorcenaInicio || !catorcenaFin || !yearInicio || !yearFin) {
-        const catActual = await prisma.catorcenas.findFirst({
-          where: {
-            fecha_inicio: { lte: new Date() },
-            fecha_fin: { gte: new Date() },
-          },
-        });
-        if (catActual) {
-          catorcenaInicio = catActual.numero_catorcena;
-          catorcenaFin = catActual.numero_catorcena;
-          yearInicio = catActual.a_o;
-          yearFin = catActual.a_o;
-        }
-      }
+      // No default catorcena filter - frontend handles filtering via selectedCatorcenas
 
       let statusFilter = '';
       const params: (string | number)[] = [];
