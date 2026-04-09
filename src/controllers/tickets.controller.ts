@@ -677,6 +677,152 @@ export const getTicketChatUnreadCount = async (req: AuthRequest, res: Response) 
   }
 };
 
+// Obtener rankings de tickets (solo DEV team)
+export const getTicketRankings = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
+
+    // Verificar que el usuario pertenece al equipo DEV
+    const devTeam = await prisma.equipo.findFirst({
+      where: { nombre: 'DEV', deleted_at: null },
+      include: { miembros: { select: { usuario_id: true } } },
+    });
+    if (!devTeam || !devTeam.miembros.some((m) => m.usuario_id === userId)) {
+      return res.status(403).json({ success: false, error: 'Acceso denegado' });
+    }
+
+    const allTickets = await prisma.tickets.findMany({
+      select: {
+        id: true,
+        usuario_id: true,
+        usuario_nombre: true,
+        status: true,
+        prioridad: true,
+        status_cambiado_por: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    // Ranking: usuarios que mas tickets crearon
+    const creadorMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of allTickets) {
+      const entry = creadorMap.get(t.usuario_nombre) || { nombre: t.usuario_nombre, count: 0 };
+      entry.count++;
+      creadorMap.set(t.usuario_nombre, entry);
+    }
+    const topCreadores = [...creadorMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking: tecnicos que mas tickets resolvieron (Resuelto o Cerrado)
+    const resueltos = allTickets.filter((t) => ['Resuelto', 'Cerrado'].includes(t.status) && t.status_cambiado_por);
+    const tecnicoMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      const entry = tecnicoMap.get(nombre) || { nombre, count: 0 };
+      entry.count++;
+      tecnicoMap.set(nombre, entry);
+    }
+    const topTecnicos = [...tecnicoMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: tickets mas urgentes por usuario
+    const urgenteMap = new Map<string, { nombre: string; count: number }>();
+    for (const t of allTickets.filter((t) => t.prioridad === 'Urgente')) {
+      const entry = urgenteMap.get(t.usuario_nombre) || { nombre: t.usuario_nombre, count: 0 };
+      entry.count++;
+      urgenteMap.set(t.usuario_nombre, entry);
+    }
+    const topUrgentes = [...urgenteMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: tickets por hora del dia
+    const horaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const hora = new Date(t.created_at).getHours();
+      horaMap.set(hora, (horaMap.get(hora) || 0) + 1);
+    }
+    const ticketsPorHora = [...horaMap.entries()].map(([hora, count]) => ({ hora, count })).sort((a, b) => b.count - a.count);
+
+    // Ranking divertido: dia de la semana con mas tickets
+    const diaNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    const diaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const dia = new Date(t.created_at).getDay();
+      diaMap.set(dia, (diaMap.get(dia) || 0) + 1);
+    }
+    const ticketsPorDia = [...diaMap.entries()].map(([dia, count]) => ({ dia: diaNames[dia], count })).sort((a, b) => b.count - a.count);
+
+    // Ranking: velocidad promedio de resolucion por tecnico (en horas)
+    const velocidadMap = new Map<string, { nombre: string; totalHoras: number; count: number }>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      const horas = (new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) / 3600000;
+      const entry = velocidadMap.get(nombre) || { nombre, totalHoras: 0, count: 0 };
+      entry.totalHoras += horas;
+      entry.count++;
+      velocidadMap.set(nombre, entry);
+    }
+    const velocidadTecnicos = [...velocidadMap.values()]
+      .map((v) => ({ nombre: v.nombre, promedio_horas: Math.round(v.totalHoras / v.count * 10) / 10 }))
+      .sort((a, b) => a.promedio_horas - b.promedio_horas);
+
+    // Ranking: usuarios reincidentes (mas tickets repetidos en 7 dias)
+    const reincidenteMap = new Map<string, { nombre: string; count: number }>();
+    const ticketsByUser = new Map<string, Date[]>();
+    for (const t of allTickets) {
+      const dates = ticketsByUser.get(t.usuario_nombre) || [];
+      dates.push(new Date(t.created_at));
+      ticketsByUser.set(t.usuario_nombre, dates);
+    }
+    for (const [nombre, dates] of ticketsByUser) {
+      dates.sort((a, b) => a.getTime() - b.getTime());
+      let streakCount = 0;
+      for (let i = 1; i < dates.length; i++) {
+        if (dates[i].getTime() - dates[i - 1].getTime() < 7 * 24 * 3600000) streakCount++;
+      }
+      if (streakCount > 0) reincidenteMap.set(nombre, { nombre, count: streakCount });
+    }
+    const topReincidentes = [...reincidenteMap.values()].sort((a, b) => b.count - a.count);
+
+    // Ranking por area
+    const userIds = [...new Set(allTickets.map((t) => t.usuario_id))];
+    const usuarios = await prisma.usuario.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, area: true, user_role: true },
+    });
+    const usuarioMap = new Map(usuarios.map((u) => [u.id, u]));
+
+    const areaMap = new Map<string, number>();
+    const roleMap = new Map<string, number>();
+    for (const t of allTickets) {
+      const info = usuarioMap.get(t.usuario_id);
+      if (info?.area) areaMap.set(info.area, (areaMap.get(info.area) || 0) + 1);
+      if (info?.user_role) roleMap.set(info.user_role, (roleMap.get(info.user_role) || 0) + 1);
+    }
+    const topAreas = [...areaMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
+    const topRoles = [...roleMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
+
+    res.json({
+      success: true,
+      data: {
+        topCreadores,
+        topTecnicos,
+        topUrgentes,
+        ticketsPorHora,
+        ticketsPorDia,
+        velocidadTecnicos,
+        topReincidentes,
+        topAreas,
+        topRoles,
+        totalTickets: allTickets.length,
+        totalResueltos: resueltos.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching rankings:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener rankings' });
+  }
+};
+
 // Obtener estadisticas de tickets
 export const getTicketStats = async (req: AuthRequest, res: Response) => {
   try {

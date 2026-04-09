@@ -142,6 +142,7 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
@@ -150,6 +151,18 @@ export class EquiposController {
           error: 'Equipo no encontrado',
         });
         return;
+      }
+
+      // Proteccion DEV: solo miembros del equipo DEV pueden editar DEV
+      if (equipo.nombre === 'DEV') {
+        const userId = req.user?.userId;
+        if (!userId || !equipo.miembros.some((m) => m.usuario_id === userId)) {
+          res.status(403).json({
+            success: false,
+            error: 'Solo los miembros del equipo DEV pueden editar este equipo',
+          });
+          return;
+        }
       }
 
       const updated = await prisma.equipo.update({
@@ -226,12 +239,22 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
         res.status(404).json({
           success: false,
           error: 'Equipo no encontrado',
+        });
+        return;
+      }
+
+      // Proteccion: no se puede eliminar el equipo DEV
+      if (equipo.nombre === 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'El equipo DEV no puede ser eliminado',
         });
         return;
       }
@@ -283,6 +306,7 @@ export class EquiposController {
           id: parseInt(id),
           deleted_at: null,
         },
+        include: { miembros: { select: { usuario_id: true } } },
       });
 
       if (!equipo) {
@@ -291,6 +315,18 @@ export class EquiposController {
           error: 'Equipo no encontrado',
         });
         return;
+      }
+
+      // Proteccion DEV: solo miembros del equipo DEV pueden agregar a DEV
+      if (equipo.nombre === 'DEV') {
+        const userId = req.user?.userId;
+        if (!userId || !equipo.miembros.some((m) => m.usuario_id === userId)) {
+          res.status(403).json({
+            success: false,
+            error: 'Solo los miembros del equipo DEV pueden agregar integrantes',
+          });
+          return;
+        }
       }
 
       // Crear relaciones para cada usuario
@@ -394,6 +430,22 @@ export class EquiposController {
           error: 'Debe proporcionar al menos un usuario',
         });
         return;
+      }
+
+      // Proteccion DEV: solo miembros del equipo DEV pueden remover de DEV
+      const equipoCheck = await prisma.equipo.findFirst({
+        where: { id: parseInt(id), deleted_at: null },
+        include: { miembros: { select: { usuario_id: true } } },
+      });
+      if (equipoCheck?.nombre === 'DEV') {
+        const userId = req.user?.userId;
+        if (!userId || !equipoCheck.miembros.some((m) => m.usuario_id === userId)) {
+          res.status(403).json({
+            success: false,
+            error: 'Solo los miembros del equipo DEV pueden remover integrantes',
+          });
+          return;
+        }
       }
 
       await prisma.usuario_equipo.deleteMany({

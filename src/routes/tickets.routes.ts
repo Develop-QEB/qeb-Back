@@ -17,6 +17,7 @@ import {
   createTicketChatMessage,
   markTicketChatRead,
   getTicketChatUnreadCount,
+  getTicketRankings,
 } from '../controllers/tickets.controller';
 
 const router = Router();
@@ -27,6 +28,9 @@ router.use(authMiddleware);
 // Rutas para usuarios normales
 router.get('/my', getMyTickets);
 router.post('/', createTicket);
+
+// Rankings de tickets (solo equipo DEV)
+router.get('/rankings', getTicketRankings);
 
 // Historial de tickets (usuarios autorizados)
 router.get('/historial', getTicketsHistorial);
