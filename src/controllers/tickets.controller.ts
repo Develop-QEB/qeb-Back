@@ -938,8 +938,7 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     }
     const rankingUsuarios = [...creadorMap.entries()]
       .map(([nombre, count]) => ({ nombre, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 15);
+      .sort((a, b) => b.count - a.count);
 
     // --- Hora pico (hora con más tickets, global) ---
     const horaMap = new Map<number, number>();
