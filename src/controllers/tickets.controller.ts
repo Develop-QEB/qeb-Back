@@ -357,6 +357,14 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       orderBy: { created_at: 'desc' },
     });
 
+    // Obtener area y rol de los usuarios creadores
+    const userIds = [...new Set(tickets.map((t) => t.usuario_id))];
+    const usuarios = await prisma.usuario.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, area: true, user_role: true },
+    });
+    const usuarioMap = new Map(usuarios.map((u) => [u.id, u]));
+
     const result = tickets.map((t) => {
       const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
       const ultimoMensaje = t.mensajes[0] || null;
@@ -369,6 +377,8 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const ultimoChatLeido = chatVista?.ultimo_mensaje_leido_id || 0;
       const hasChatUnread = ultimoChat ? ultimoChat.id > ultimoChatLeido : false;
 
+      const usuarioInfo = usuarioMap.get(t.usuario_id);
+
       return {
         id: t.id,
         titulo: t.titulo,
@@ -379,6 +389,8 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
         usuario_id: t.usuario_id,
         usuario_nombre: t.usuario_nombre,
         usuario_email: t.usuario_email,
+        usuario_area: usuarioInfo?.area || null,
+        usuario_role: usuarioInfo?.user_role || null,
         status_cambiado_por: t.status_cambiado_por,
         total_mensajes: t._count.mensajes,
         total_chat: t._count.chat,
