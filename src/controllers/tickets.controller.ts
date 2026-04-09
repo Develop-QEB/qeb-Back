@@ -3,6 +3,7 @@ import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
 import { AuthRequest } from '../types';
 import { getIO, SOCKET_EVENTS } from '../config/socket';
+import Anthropic from '@anthropic-ai/sdk';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
@@ -1084,5 +1085,109 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
   } catch (error) {
     console.error('Error fetching reportes especiales:', error);
     res.status(500).json({ success: false, error: 'Error al obtener reportes especiales' });
+  }
+};
+
+// Detalle de tickets por área o usuario
+export const getReportesDetalle = async (req: AuthRequest, res: Response) => {
+  try {
+    const { tipo, valor } = req.query;
+    if (!tipo || !valor) {
+      res.status(400).json({ success: false, error: 'Se requiere tipo y valor' });
+      return;
+    }
+
+    let userIds: number[] = [];
+
+    if (tipo === 'area') {
+      const usuarios = await prisma.usuario.findMany({
+        where: { area: valor as string },
+        select: { id: true },
+      });
+      userIds = usuarios.map(u => u.id);
+    } else if (tipo === 'usuario') {
+      const usuarios = await prisma.usuario.findMany({
+        where: { nombre: valor as string },
+        select: { id: true },
+      });
+      userIds = usuarios.map(u => u.id);
+    }
+
+    if (userIds.length === 0) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const tickets = await prisma.tickets.findMany({
+      where: { usuario_id: { in: userIds } },
+      select: {
+        id: true,
+        titulo: true,
+        status: true,
+        prioridad: true,
+        usuario_nombre: true,
+        created_at: true,
+        updated_at: true,
+        status_cambiado_por: true,
+      },
+      orderBy: { created_at: 'desc' },
+    });
+
+    // Obtener chat de cada ticket y generar resumen AI
+    const ticketIds = tickets.map(t => t.id);
+    const allChats = await prisma.ticket_chat.findMany({
+      where: { ticket_id: { in: ticketIds } },
+      orderBy: { created_at: 'asc' },
+      select: { ticket_id: true, usuario_nombre: true, mensaje: true },
+    });
+
+    const chatsByTicket = new Map<number, string[]>();
+    for (const msg of allChats) {
+      if (!msg.mensaje) continue;
+      const arr = chatsByTicket.get(msg.ticket_id) || [];
+      arr.push(`${msg.usuario_nombre}: ${msg.mensaje}`);
+      chatsByTicket.set(msg.ticket_id, arr);
+    }
+
+    // Resumir conversaciones con AI (batch, máximo 10 a la vez para no saturar)
+    let anthropic: Anthropic | null = null;
+    try { anthropic = new Anthropic(); } catch { /* no API key */ }
+
+    const ticketsConResumen = await Promise.all(tickets.map(async (t) => {
+      const chat = chatsByTicket.get(t.id);
+      let resumenAI = '';
+
+      if (chat && chat.length > 0 && anthropic) {
+        try {
+          const resp = await anthropic.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 100,
+            messages: [{ role: 'user', content: `Resume esta conversación de soporte técnico en 1 frase corta y amigable. Indica el estado actual (ej: "Por resolverse", "Esperando respuesta del usuario", "En validación", "Resuelto"). Solo la frase, sin comillas.\n\nTicket: ${t.titulo}\nEstatus: ${t.status}\nConversación:\n${chat.join('\n')}` }],
+          });
+          resumenAI = (resp.content[0] as any)?.text || '';
+        } catch {
+          resumenAI = '';
+        }
+      } else if (!chat || chat.length === 0) {
+        resumenAI = t.status === 'Nuevo' ? 'Sin conversación aún — pendiente de atención' : `Sin mensajes — estatus: ${t.status}`;
+      }
+
+      return { ...t, resumenAI };
+    }));
+
+    // Resumen por estatus
+    const resumen = {
+      total: tickets.length,
+      nuevo: tickets.filter(t => t.status === 'Nuevo').length,
+      enProgreso: tickets.filter(t => t.status === 'En Progreso').length,
+      enValidacion: tickets.filter(t => t.status === 'Validación').length,
+      resuelto: tickets.filter(t => t.status === 'Resuelto').length,
+      cerrado: tickets.filter(t => t.status === 'Cerrado').length,
+    };
+
+    res.json({ success: true, data: { resumen, tickets: ticketsConResumen } });
+  } catch (error) {
+    console.error('Error fetching reportes detalle:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener detalle' });
   }
 };
