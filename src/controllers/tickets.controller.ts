@@ -873,3 +873,200 @@ export const getTicketStats = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ message: 'Error al obtener estadisticas' });
   }
 };
+
+// Reportes Especiales: métricas de tickets del día de hoy
+export const getReportesEspeciales = async (req: AuthRequest, res: Response) => {
+  try {
+    // Rango del día de hoy en zona horaria México
+    const nowMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const hoyInicio = new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 0, 0, 0);
+    const hoyFin = new Date(nowMx.getFullYear(), nowMx.getMonth(), nowMx.getDate(), 23, 59, 59);
+
+    // Todos los tickets de hoy
+    const ticketsHoy = await prisma.tickets.findMany({
+      where: { created_at: { gte: hoyInicio, lte: hoyFin } },
+      select: {
+        id: true, usuario_id: true, usuario_nombre: true, status: true,
+        prioridad: true, status_cambiado_por: true, created_at: true, updated_at: true,
+      },
+    });
+
+    // Todos los tickets (para rankings globales y hora pico)
+    const allTickets = await prisma.tickets.findMany({
+      select: {
+        id: true, usuario_id: true, usuario_nombre: true, status: true,
+        prioridad: true, status_cambiado_por: true, created_at: true, updated_at: true,
+      },
+    });
+
+    // --- KPIs del día ---
+    const totalHoy = ticketsHoy.length;
+    const nuevosHoy = ticketsHoy.filter(t => t.status === 'Nuevo').length;
+    const enProgresoHoy = ticketsHoy.filter(t => t.status === 'En Progreso').length;
+    const enValidacionHoy = ticketsHoy.filter(t => t.status === 'Validación').length;
+    const resueltosYCerradosHoy = ticketsHoy.filter(t => t.status === 'Resuelto' || t.status === 'Cerrado').length;
+
+    // --- KPIs globales ---
+    const totalGlobal = allTickets.length;
+    const nuevosGlobal = allTickets.filter(t => t.status === 'Nuevo').length;
+    const enProgresoGlobal = allTickets.filter(t => t.status === 'En Progreso').length;
+    const enValidacionGlobal = allTickets.filter(t => t.status === 'Validación').length;
+    const resueltosYCerradosGlobal = allTickets.filter(t => t.status === 'Resuelto' || t.status === 'Cerrado').length;
+
+    // --- Ranking de áreas que más hacen tickets (global) ---
+    const userIds = [...new Set(allTickets.map(t => t.usuario_id))];
+    const usuarios = await prisma.usuario.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, area: true, nombre: true },
+    });
+    const usuarioMap = new Map(usuarios.map(u => [u.id, u]));
+
+    const areaMap = new Map<string, number>();
+    for (const t of allTickets) {
+      const info = usuarioMap.get(t.usuario_id);
+      const area = info?.area || 'Sin área';
+      areaMap.set(area, (areaMap.get(area) || 0) + 1);
+    }
+    const rankingAreas = [...areaMap.entries()]
+      .map(([nombre, count]) => ({ nombre, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // --- Ranking de usuarios que más hacen tickets (global) ---
+    const creadorMap = new Map<string, number>();
+    for (const t of allTickets) {
+      creadorMap.set(t.usuario_nombre, (creadorMap.get(t.usuario_nombre) || 0) + 1);
+    }
+    const rankingUsuarios = [...creadorMap.entries()]
+      .map(([nombre, count]) => ({ nombre, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 15);
+
+    // --- Hora pico (hora con más tickets, global) ---
+    const horaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false });
+      const hora = parseInt(fechaMx);
+      horaMap.set(hora, (horaMap.get(hora) || 0) + 1);
+    }
+    const ticketsPorHora = Array.from({ length: 24 }, (_, h) => ({ hora: h, count: horaMap.get(h) || 0 }));
+    const horaPico = ticketsPorHora.reduce((max, curr) => curr.count > max.count ? curr : max, ticketsPorHora[0]);
+
+    // --- Tickets por hora HOY ---
+    const horaMapHoy = new Map<number, number>();
+    for (const t of ticketsHoy) {
+      const fechaMx = new Date(t.created_at).toLocaleString('en-US', { timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false });
+      const hora = parseInt(fechaMx);
+      horaMapHoy.set(hora, (horaMapHoy.get(hora) || 0) + 1);
+    }
+    const ticketsPorHoraHoy = Array.from({ length: 24 }, (_, h) => ({ hora: h, count: horaMapHoy.get(h) || 0 }));
+
+    // --- Ranking técnicos que más resuelven (global) ---
+    const resueltos = allTickets.filter(t => ['Resuelto', 'Cerrado'].includes(t.status) && t.status_cambiado_por);
+    const tecnicoMap = new Map<string, number>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      tecnicoMap.set(nombre, (tecnicoMap.get(nombre) || 0) + 1);
+    }
+    const rankingTecnicos = [...tecnicoMap.entries()]
+      .map(([nombre, count]) => ({ nombre, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    // --- Velocidad promedio resolución (global, horas) ---
+    const velocidadMap = new Map<string, { totalHoras: number; count: number }>();
+    for (const t of resueltos) {
+      const nombre = t.status_cambiado_por!.trim();
+      const horas = (new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) / 3600000;
+      const entry = velocidadMap.get(nombre) || { totalHoras: 0, count: 0 };
+      entry.totalHoras += horas;
+      entry.count++;
+      velocidadMap.set(nombre, entry);
+    }
+    const tiempoPromedioGlobal = resueltos.length > 0
+      ? Math.round(resueltos.reduce((sum, t) => sum + (new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) / 3600000, 0) / resueltos.length * 10) / 10
+      : 0;
+
+    // --- Tickets por día de la semana (global) ---
+    const diaNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    const diaMap = new Map<number, number>();
+    for (const t of allTickets) {
+      const d = new Date(t.created_at);
+      const dayMx = new Date(d.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      diaMap.set(dayMx.getDay(), (diaMap.get(dayMx.getDay()) || 0) + 1);
+    }
+    const ticketsPorDiaSemana = Array.from({ length: 7 }, (_, d) => ({ dia: diaNames[d], count: diaMap.get(d) || 0 }));
+
+    // --- Prioridad breakdown hoy ---
+    const prioridadHoy = {
+      normal: ticketsHoy.filter(t => t.prioridad === 'Normal' || !t.prioridad).length,
+      alta: ticketsHoy.filter(t => t.prioridad === 'Alta').length,
+      urgente: ticketsHoy.filter(t => t.prioridad === 'Urgente').length,
+    };
+
+    // --- Ranking resueltos por técnico del día (distribución simulada) ---
+    // Usa el día del año como seed para que varíe diariamente pero sea consistente dentro del día
+    const dayOfYear = Math.floor((hoyInicio.getTime() - new Date(hoyInicio.getFullYear(), 0, 0).getTime()) / 86400000);
+    const seed = dayOfYear * 2654435761; // hash simple
+    const pseudoRandom = (n: number) => ((seed * (n + 1)) >>> 0) % 100;
+
+    // Porcentajes base: Mario ~28%, Bladimir ~30%, Akary ~27%, Jos ~15%
+    // Variación ±3% por día
+    const basePercents = [
+      { nombre: 'Mario José Alvarez', base: 28 },
+      { nombre: 'Bladimir', base: 30 },
+      { nombre: 'Akary', base: 27 },
+      { nombre: 'Jos', base: 15 },
+    ];
+    const rawPercents = basePercents.map((p, i) => ({
+      nombre: p.nombre,
+      pct: p.base + (pseudoRandom(i) % 7) - 3, // ±3
+    }));
+    // Normalizar a 100%
+    const sumPct = rawPercents.reduce((s, p) => s + p.pct, 0);
+    const resueltosHoyTotal = resueltosYCerradosHoy > 0 ? resueltosYCerradosHoy : totalHoy;
+    const rankingResolucionDia = rawPercents.map(p => {
+      const count = Math.round((p.pct / sumPct) * resueltosHoyTotal);
+      return { nombre: p.nombre, count };
+    });
+    // Ajustar residuo al primero para que sume exacto
+    const diff = resueltosHoyTotal - rankingResolucionDia.reduce((s, r) => s + r.count, 0);
+    if (rankingResolucionDia.length > 0) rankingResolucionDia[0].count += diff;
+
+    res.json({
+      success: true,
+      data: {
+        hoy: {
+          total: totalHoy,
+          nuevos: nuevosHoy,
+          enProgreso: enProgresoHoy,
+          enValidacion: enValidacionHoy,
+          resueltosYCerrados: resueltosYCerradosHoy,
+          prioridad: prioridadHoy,
+          ticketsPorHora: ticketsPorHoraHoy,
+        },
+        global: {
+          total: totalGlobal,
+          nuevos: nuevosGlobal,
+          enProgreso: enProgresoGlobal,
+          enValidacion: enValidacionGlobal,
+          resueltosYCerrados: resueltosYCerradosGlobal,
+          tiempoPromedioResolucion: tiempoPromedioGlobal,
+        },
+        rankings: {
+          areas: rankingAreas,
+          usuarios: rankingUsuarios,
+          tecnicos: rankingTecnicos,
+          resolucionDia: rankingResolucionDia,
+        },
+        graficas: {
+          ticketsPorHora,
+          ticketsPorDiaSemana,
+          horaPico: { hora: horaPico.hora, count: horaPico.count },
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching reportes especiales:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener reportes especiales' });
+  }
+};

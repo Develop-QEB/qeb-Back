@@ -18,6 +18,7 @@ import {
   markTicketChatRead,
   getTicketChatUnreadCount,
   getTicketRankings,
+  getReportesEspeciales,
 } from '../controllers/tickets.controller';
 
 const router = Router();
@@ -31,6 +32,9 @@ router.post('/', createTicket);
 
 // Rankings de tickets (solo equipo DEV)
 router.get('/rankings', getTicketRankings);
+
+// Reportes especiales (métricas del día)
+router.get('/reportes-especiales', getReportesEspeciales);
 
 // Historial de tickets (usuarios autorizados)
 router.get('/historial', getTicketsHistorial);
