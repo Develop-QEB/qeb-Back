@@ -714,12 +714,51 @@ export class CampanasController {
         }
       }
 
+      // Si tiene APS, no permitir rechazo
+      if (status === 'Rechazada' && campanaAnterior.cotizacion_id) {
+        const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
+          SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
+          FROM reservas rsv
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          WHERE ct.id = ? AND rsv.deleted_at IS NULL
+        `, campanaAnterior.cotizacion_id);
+        if (hasAps[0]?.has_aps === 1) {
+          res.status(400).json({ success: false, error: 'No se puede rechazar una campaña que ya tiene APS asignado.' });
+          return;
+        }
+      }
+
       const statusAnterior = campanaAnterior.status;
 
       const campana = await prisma.campania.update({
         where: { id: campanaId },
         data: { status },
       });
+
+      // Si se rechaza, liberar todas las reservas (soft delete) — misma lógica que propuestas
+      if (status === 'Rechazada' && campana.cotizacion_id) {
+        const cotizacionData = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        if (cotizacionData?.id_propuesta) {
+          const caras = await prisma.solicitudCaras.findMany({
+            where: { idquote: String(cotizacionData.id_propuesta) },
+          });
+          if (caras.length > 0) {
+            const carasIds = caras.map(c => c.id);
+            const liberadas = await prisma.reservas.updateMany({
+              where: {
+                solicitudCaras_id: { in: carasIds },
+                deleted_at: null,
+              },
+              data: { deleted_at: new Date() },
+            });
+            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas`);
+          }
+        }
+      }
 
       // Obtener datos relacionados
       const cotizacion = campana.cotizacion_id
