@@ -225,6 +225,12 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Emitir evento de socket para actualizar historial y rankings
+    try {
+      const io = getIO();
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, ticket);
+    } catch {}
+
     res.status(201).json(ticket);
   } catch (error) {
     console.error('Error creating ticket:', error);
@@ -793,9 +799,25 @@ export const getTicketRankings = async (req: AuthRequest, res: Response) => {
     const topAreas = [...areaMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
     const topRoles = [...roleMap.entries()].map(([nombre, count]) => ({ nombre, count })).sort((a, b) => b.count - a.count);
 
+    // Empleado del mes: tecnico con mas tickets cerrados, con foto de perfil
+    let empleadoDelMes: { nombre: string; count: number; foto_perfil: string | null } | null = null;
+    if (topTecnicos.length > 0) {
+      const topNombre = topTecnicos[0].nombre;
+      const topUsuario = await prisma.usuario.findFirst({
+        where: { nombre: { contains: topNombre }, deleted_at: null },
+        select: { nombre: true, foto_perfil: true },
+      });
+      empleadoDelMes = {
+        nombre: topTecnicos[0].nombre,
+        count: topTecnicos[0].count,
+        foto_perfil: topUsuario?.foto_perfil || null,
+      };
+    }
+
     res.json({
       success: true,
       data: {
+        empleadoDelMes,
         topCreadores,
         topTecnicos,
         topUrgentes,
