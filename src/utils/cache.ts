@@ -159,6 +159,9 @@ export const CACHE_KEYS = {
   CATORCENAS: 'dashboard:catorcenas',
   DASHBOARD_STATS: (filters: string) => `dashboard:stats:${filters}`,
   INVENTORY_DETAIL: (filters: string) => `dashboard:inventory:${filters}`,
+  CAMPANAS_LIST: (filters: string) => `campanas:list:${filters}`,
+  PROPUESTAS_LIST: (filters: string) => `propuestas:list:${filters}`,
+  SOLICITUDES_LIST: (filters: string) => `solicitudes:list:${filters}`,
 };
 
 export default cache;

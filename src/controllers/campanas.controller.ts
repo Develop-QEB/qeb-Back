@@ -14,6 +14,7 @@ import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENT
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
+import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -80,6 +81,17 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+
+      // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
+      const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
+        u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        console.log(`[Cache] HIT: ${cacheKey}`);
+        res.json(cached);
+        return;
+      }
 
       // Build WHERE conditions
       // Excluir campañas 'inactiva' (propuestas no aprobadas) a menos que se filtre explícitamente por ese status
@@ -340,7 +352,7 @@ export class CampanasController {
         typeof value === 'bigint' ? Number(value) : value
       ));
 
-      res.json({
+      const response = {
         success: true,
         data: campanasSerializable,
         pagination: {
@@ -349,7 +361,12 @@ export class CampanasController {
           total,
           totalPages: Math.ceil(total / limit),
         },
-      });
+      };
+
+      // Cachear 30 segundos — suficiente para absorber ráfagas de requests idénticos
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       console.error('Error en getAll campanas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener campanas';
@@ -759,6 +776,9 @@ export class CampanasController {
           }
         }
       }
+
+      // Invalidar caché de listados de campañas al cambiar status
+      cache.deletePattern('campanas:list:');
 
       // Obtener datos relacionados
       const cotizacion = campana.cotizacion_id

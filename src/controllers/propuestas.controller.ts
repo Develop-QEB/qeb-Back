@@ -10,6 +10,7 @@ import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_E
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
+import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -394,6 +395,17 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
 
+      // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
+      const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
+        u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        console.log(`[Cache] HIT: ${cacheKey}`);
+        res.json(cached);
+        return;
+      }
+
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
       const params: any[] = [];
@@ -575,7 +587,7 @@ export class PropuestasController {
         });
       }
 
-      res.json({
+      const response = {
         success: true,
         data: formattedPropuestas,
         pagination: {
@@ -584,7 +596,11 @@ export class PropuestasController {
           total,
           totalPages: Math.ceil(total / limit),
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       console.error('Error in getAll propuestas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener propuestas';
@@ -768,6 +784,10 @@ export class PropuestasController {
           updated_at: new Date(),
         },
       });
+
+      // Invalidar caché de listados
+      cache.deletePattern('propuestas:list:');
+      cache.deletePattern('campanas:list:');
 
       // Si se descarta o rechaza, liberar todas las reservas (soft delete)
       if (status === 'Descartada' || status === 'Rechazada') {
