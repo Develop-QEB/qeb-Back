@@ -5654,25 +5654,23 @@ export class CampanasController {
           cm.id AS campania_id,
           sc.id AS grupo_id,
           'bonificacion' AS tipo_fila,
-          MIN(inv.tradicional_digital) AS tradicional_digital,
-          rsv.estatus AS estatus_reserva
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
-          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
-          LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
-          LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
+          INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+          INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE sc.bonificacion > 0
           AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
-          AND rsv.estatus IN ('Vendido', 'Bonificado')
           ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.id_propuesta, rsv.estatus
+                 sol.nombre_usuario, ct.id_propuesta
 
         UNION ALL
 
@@ -5699,25 +5697,23 @@ export class CampanasController {
           cm.id AS campania_id,
           sc.id AS grupo_id,
           'renta' AS tipo_fila,
-          MIN(inv.tradicional_digital) AS tradicional_digital,
-          rsv.estatus AS estatus_reserva
+          MIN(inv.tradicional_digital) AS tradicional_digital
         FROM campania cm
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
-          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
-          LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
-          LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
+          INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+          INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE (sc.caras - sc.bonificacion) > 0
           AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
-          AND rsv.estatus IN ('Vendido', 'Bonificado')
           ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.descuento, ct.id_propuesta, rsv.estatus
+                 sol.nombre_usuario, ct.descuento, ct.id_propuesta
 
         ORDER BY campania_id, grupo_id, tipo_fila
       `;
