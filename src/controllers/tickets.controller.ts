@@ -938,13 +938,39 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
       .map(([nombre, count]) => ({ nombre, count }))
       .sort((a, b) => b.count - a.count);
 
-    // --- Ranking de usuarios (filtrado por rango) ---
-    const creadorMap = new Map<string, number>();
+    // --- Ranking de usuarios (filtrado por rango + global + desglose estatus global) ---
+    const creadorPeriodoMap = new Map<string, number>();
     for (const t of ticketsHoy) {
-      creadorMap.set(t.usuario_nombre, (creadorMap.get(t.usuario_nombre) || 0) + 1);
+      creadorPeriodoMap.set(t.usuario_nombre, (creadorPeriodoMap.get(t.usuario_nombre) || 0) + 1);
     }
-    const rankingUsuarios = [...creadorMap.entries()]
-      .map(([nombre, count]) => ({ nombre, count }))
+    // Conteo global y desglose estatus global por usuario
+    const creadorGlobalMap = new Map<string, { count: number; nuevo: number; enProgreso: number; enValidacion: number; resuelto: number; cerrado: number }>();
+    for (const t of allTickets) {
+      const entry = creadorGlobalMap.get(t.usuario_nombre) || { count: 0, nuevo: 0, enProgreso: 0, enValidacion: 0, resuelto: 0, cerrado: 0 };
+      entry.count++;
+      if (t.status === 'Nuevo') entry.nuevo++;
+      else if (t.status === 'En Progreso') entry.enProgreso++;
+      else if (t.status === 'Validación') entry.enValidacion++;
+      else if (t.status === 'Resuelto') entry.resuelto++;
+      else if (t.status === 'Cerrado') entry.cerrado++;
+      creadorGlobalMap.set(t.usuario_nombre, entry);
+    }
+    const rankingUsuarios = [...creadorPeriodoMap.entries()]
+      .map(([nombre, count]) => {
+        const global = creadorGlobalMap.get(nombre) || { count, nuevo: 0, enProgreso: 0, enValidacion: 0, resuelto: 0, cerrado: 0 };
+        return {
+          nombre,
+          count,
+          countGlobal: global.count,
+          estatus: {
+            nuevo: global.nuevo,
+            enProgreso: global.enProgreso,
+            enValidacion: global.enValidacion,
+            resuelto: global.resuelto,
+            cerrado: global.cerrado,
+          },
+        };
+      })
       .sort((a, b) => b.count - a.count);
 
     // --- Hora pico (hora con más tickets, global) ---
@@ -976,10 +1002,11 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     // Distribución simulada: varía por día usando el día del año como seed
     // Mario ~30%, Bladimir ~28%, Akary ~27%, Jos ~15% (Jos siempre menor)
     const baseTecnicos = [
-      { nombre: 'Mario', base: 30 },
-      { nombre: 'Bladimir', base: 28 },
-      { nombre: 'Akary', base: 27 },
-      { nombre: 'Jos', base: 15 },
+      { nombre: 'Mario', base: 28 },
+      { nombre: 'Bladimir', base: 26 },
+      { nombre: 'Akary', base: 25 },
+      { nombre: 'Antonio', base: 18 },
+      { nombre: 'Jos', base: 13 },
     ];
     const seedGlobal = dayOfYear * 1597334677;
     const pseudoRandomGlobal = (n: number) => ((seedGlobal * (n + 1)) >>> 0) % 100;
@@ -1035,10 +1062,11 @@ export const getReportesEspeciales = async (req: AuthRequest, res: Response) => 
     // Porcentajes base: Mario ~28%, Bladimir ~30%, Akary ~27%, Jos ~15%
     // Variación ±3% por día
     const basePercents = [
-      { nombre: 'Mario José Alvarez', base: 28 },
-      { nombre: 'Bladimir', base: 30 },
-      { nombre: 'Akary', base: 27 },
-      { nombre: 'Jos', base: 15 },
+      { nombre: 'Mario', base: 26 },
+      { nombre: 'Bladimir', base: 28 },
+      { nombre: 'Akary', base: 25 },
+      { nombre: 'Antonio', base: 18 },
+      { nombre: 'Jos', base: 13 },
     ];
     const rawPercents = basePercents.map((p, i) => ({
       nombre: p.nombre,
