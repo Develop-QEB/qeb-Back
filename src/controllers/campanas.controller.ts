@@ -5693,13 +5693,7 @@ export class CampanasController {
         }
       }
 
-      let statusFilter = '';
       const params: (string | number)[] = [];
-
-      if (status) {
-        statusFilter = 'AND cm.status = ?';
-        params.push(status);
-      }
 
       let dateFilter = '';
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
@@ -5711,7 +5705,7 @@ export class CampanasController {
       }
 
       const query = `
-        -- FILA PARA BONIFICACIONES
+        -- BONIFICACIONES (BF, CT, IM con bonificacion > 0)
         SELECT
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
@@ -5731,6 +5725,7 @@ export class CampanasController {
           CASE
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
+            WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
             ELSE 'BONIFICACION'
           END AS negociacion,
           sc.bonificacion AS caras,
@@ -5746,12 +5741,10 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE sc.bonificacion > 0
-          AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
-          ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
@@ -5759,7 +5752,7 @@ export class CampanasController {
 
         UNION ALL
 
-        -- FILA PARA RENTA
+        -- RENTA (RT, IN, CT, IM con caras > bonificacion)
         SELECT
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
@@ -5776,7 +5769,12 @@ export class CampanasController {
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
-          'RENTA' AS negociacion,
+          CASE
+            WHEN sc.cortesia = 1 THEN 'CORTESIA'
+            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
+            WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
+            ELSE 'RENTA'
+          END AS negociacion,
           (sc.caras - sc.bonificacion) AS caras,
           ROUND(AVG(sc.tarifa_publica), 2) AS tarifa,
           ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
@@ -5790,12 +5788,10 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.estatus IN ('Vendido', 'Bonificado')
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE (sc.caras - sc.bonificacion) > 0
-          AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
-          ${statusFilter}
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
