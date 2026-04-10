@@ -14,6 +14,7 @@ router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.b
 
 // Batch endpoints
 router.post('/batch-inversiones', campanasController.getBatchInversiones.bind(campanasController));
+router.get('/export-layout', campanasController.getExportLayout.bind(campanasController));
 
 // Rutas dinámicas con :id
 router.get('/', campanasController.getAll.bind(campanasController));

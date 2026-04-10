@@ -1919,6 +1919,362 @@ export class CampanasController {
     }
   }
 
+  async getExportLayout(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
+      const yearFin = req.query.yearFin ? parseInt(req.query.yearFin as string) : undefined;
+      const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
+      const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+
+      // Build WHERE conditions (same as getAll)
+      const conditions: string[] = ['cm.id IS NOT NULL'];
+      const params: (string | number)[] = [];
+
+      if (status) {
+        conditions.push('cm.status = ?');
+        params.push(status);
+      } else {
+        conditions.push("cm.status != 'inactiva'");
+      }
+
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        conditions.push("COALESCE(ct.tipo_periodo, 'catorcena') = ?");
+        params.push(tipoPeriodo);
+      }
+
+      if (search) {
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      }
+
+      if (yearInicio && yearFin) {
+        if (catorcenaInicio && catorcenaFin) {
+          conditions.push(`
+            cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+            AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
+          `);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+        } else {
+          conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
+          params.push(yearFin, yearInicio);
+        }
+      }
+
+      // Visibility filter
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          res.json({ success: true, data: [] });
+          return;
+        }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        conditions.push(`cm.id IN (${visiblePh})`);
+        params.push(...visibleIds);
+      }
+
+      const whereClause = conditions.join(' AND ');
+
+      // 1. Get all campaign IDs matching filters (no pagination)
+      const idsQuery = `
+        SELECT cm.id
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+      `;
+      const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(idsQuery, ...params);
+      const campaignIds = idsResult.map(r => Number(r.id));
+
+      if (campaignIds.length === 0) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
+      const cmIdPh = campaignIds.map(() => '?').join(',');
+
+      // 2. Single bulk query: campaigns + inventory (all in one)
+      const bulkQuery = `
+        SELECT
+          cm.id AS campana_id,
+          cm.nombre AS campana_nombre,
+          cm.status AS campana_status,
+          cm.fecha_inicio AS campana_fecha_inicio,
+          cm.fecha_fin AS campana_fecha_fin,
+          COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
+          cl.CUIC AS cuic,
+          COALESCE(pr.inversion, 0) AS inversion,
+          ct.id_propuesta AS aps_global,
+          s.nombre_usuario AS vendedor,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
+          pr.descripcion,
+
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.mueble) as mueble,
+          MIN(i.plaza) as plaza,
+          MIN(i.estado) as estado,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.APS) as aps,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
+        WHERE cm.id IN (${cmIdPh})
+          AND rsv.APS IS NOT NULL AND rsv.APS > 0
+        GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
+                 anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
+                 s.nombre_usuario, ct.tipo_periodo, pr.descripcion,
+                 COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+        ORDER BY cm.nombre, MIN(rsv.id) DESC
+      `;
+
+      // 3. IM articles query (inventario_id = 0)
+      const imQuery = `
+        SELECT
+          cm.id AS campana_id,
+          cm.nombre AS campana_nombre,
+          cm.status AS campana_status,
+          cm.fecha_inicio AS campana_fecha_inicio,
+          cm.fecha_fin AS campana_fecha_fin,
+          COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
+          cl.CUIC AS cuic,
+          COALESCE(pr.inversion, 0) AS inversion,
+          ct.id_propuesta AS aps_global,
+          s.nombre_usuario AS vendedor,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
+          pr.descripcion,
+
+          CONCAT('sc_', sc.id) as rsv_ids,
+          sc.articulo as codigo_unico,
+          'Impresión' as tipo_de_cara,
+          NULL as mueble,
+          sc.ciudad as plaza,
+          sc.estados as estado,
+          NULL as tradicional_digital,
+          NULL as tarifa_publica,
+          NULL as archivo,
+          'Impresión' as estatus_reserva,
+          MAX(rsv.APS) as aps,
+          CONCAT('sc_', sc.id) as grupo_completo_id,
+          sc.id AS solicitud_caras_id,
+          sc.articulo as articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo as inicio_periodo,
+          sc.fin_periodo as fin_periodo,
+          sc.caras AS caras_totales,
+          NULL as arte_aprobado,
+          0 as instalado,
+          sc.formato as formato,
+          COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
+          sc.cortesia as cortesia
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
+        WHERE cm.id IN (${cmIdPh})
+          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND rsv.APS IS NOT NULL AND rsv.APS > 0
+        GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
+                 anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
+                 s.nombre_usuario, ct.tipo_periodo, pr.descripcion, sc.id
+      `;
+
+      // 4. Tareas + catorcenas in parallel
+      const tareasQuery = `
+        SELECT id, tipo, estatus, ids_reservas, campania_id
+        FROM tareas
+        WHERE campania_id IN (${cmIdPh})
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción')
+      `;
+
+      const catorcenasQuery = `
+        SELECT numero_catorcena, año as anio_catorcena, fecha_inicio, fecha_fin
+        FROM catorcenas ORDER BY fecha_inicio
+      `;
+
+      // 5. Campaigns without inventory (for rows with no APS)
+      const campInfoQuery = `
+        SELECT
+          cm.id AS campana_id,
+          cm.nombre AS campana_nombre,
+          cm.status AS campana_status,
+          cm.fecha_inicio AS campana_fecha_inicio,
+          cm.fecha_fin AS campana_fecha_fin,
+          COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
+          cl.CUIC AS cuic,
+          COALESCE(pr.inversion, 0) AS inversion,
+          ct.id_propuesta AS aps_global,
+          s.nombre_usuario AS vendedor,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
+          pr.descripcion,
+          cat_ini.numero_catorcena AS catorcena_inicio_num,
+          cat_ini.año AS catorcena_inicio_anio,
+          cat_fin.numero_catorcena AS catorcena_fin_num,
+          cat_fin.año AS catorcena_fin_anio,
+          cat_content.catorcenas_con_contenido
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+          LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+          LEFT JOIN (
+            SELECT
+              ct_c.id AS cotizacion_id,
+              GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
+            FROM solicitudCaras sc_c
+            INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
+            INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+            WHERE ct_c.id IN (SELECT cotizacion_id FROM campania WHERE id IN (${cmIdPh}))
+            GROUP BY ct_c.id
+          ) cat_content ON cat_content.cotizacion_id = ct.id
+        WHERE cm.id IN (${cmIdPh})
+      `;
+
+      const QUERY_TIMEOUT = 60000;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Export query timeout: las consultas tardaron más de 60s')), QUERY_TIMEOUT)
+      );
+
+      const [inventario, imArticulos, tareas, catorcenas, campInfo] = await Promise.race([
+        Promise.all([
+          prisma.$queryRawUnsafe(bulkQuery, ...campaignIds),
+          prisma.$queryRawUnsafe(imQuery, ...campaignIds),
+          prisma.$queryRawUnsafe(tareasQuery, ...campaignIds),
+          prisma.$queryRawUnsafe(catorcenasQuery),
+          prisma.$queryRawUnsafe(campInfoQuery, ...campaignIds, ...campaignIds),
+        ]),
+        timeoutPromise as never,
+      ]);
+
+      const inventarioArr = inventario as any[];
+      const imArr = imArticulos as any[];
+      const tareasArr = tareas as any[];
+      const catorcenasArr = catorcenas as any[];
+      const campInfoArr = campInfo as any[];
+
+      // Index tareas by reserva_id
+      const impresionByReserva = new Map<number, any>();
+      const recepcionByReserva = new Map<number, any>();
+      for (const tarea of tareasArr) {
+        if (!tarea.ids_reservas) continue;
+        const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : recepcionByReserva;
+        for (const rsvId of ids) map.set(rsvId, tarea);
+      }
+
+      // Catorcena ranges for binary search
+      const catorcenaRanges = catorcenasArr.map((cat: any) => ({
+        inicio: new Date(cat.fecha_inicio).getTime(),
+        fin: new Date(cat.fecha_fin).getTime(),
+        numero_catorcena: cat.numero_catorcena,
+        anio_catorcena: cat.anio_catorcena,
+      }));
+
+      function findCatorcena(fecha: Date) {
+        const ts = fecha.getTime();
+        let lo = 0, hi = catorcenaRanges.length - 1, result = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (catorcenaRanges[mid].inicio <= ts) { result = mid; lo = mid + 1; } else { hi = mid - 1; }
+        }
+        if (result >= 0 && ts <= catorcenaRanges[result].fin) return catorcenaRanges[result];
+        return null;
+      }
+
+      // Process estatus_arte + catorcena for each inventory row
+      const combinedArr = [...inventarioArr, ...imArr];
+      const inventarioConEstatus = combinedArr.map((row: any) => {
+        const isIM = String(row.rsv_ids).startsWith('sc_');
+        const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
+        const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+
+        let estatus_arte: string;
+        if (isIM) estatus_arte = 'Impresión';
+        else if (Number(row.instalado) === 1) estatus_arte = 'Instalado';
+        else if (tRecepcion && tRecepcion.estatus === 'Completado') estatus_arte = 'Artes Recibidos';
+        else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) estatus_arte = 'En Impresion';
+        else if (row.arte_aprobado === 'aprobado') estatus_arte = 'Artes Aprobados';
+        else if (row.archivo != null && row.archivo !== '') estatus_arte = 'Revision Artes';
+        else estatus_arte = 'Carga Artes';
+
+        let numero_catorcena = null, anio_catorcena = null;
+        if (row.inicio_periodo) {
+          const cat = findCatorcena(new Date(row.inicio_periodo));
+          if (cat) { numero_catorcena = cat.numero_catorcena; anio_catorcena = cat.anio_catorcena; }
+        }
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, caras_totales: Number(row.caras_totales) };
+      });
+
+      // Build campaign info map (for campaigns without inventory)
+      const campInfoMap = new Map<number, any>();
+      campInfoArr.forEach((c: any) => campInfoMap.set(Number(c.campana_id), c));
+
+      // Campaigns that have inventory
+      const campaignsWithInv = new Set(inventarioConEstatus.map((r: any) => Number(r.campana_id)));
+
+      // Serialize
+      const result = JSON.parse(JSON.stringify({
+        inventarios: inventarioConEstatus,
+        campaignInfo: campInfoArr,
+        campaignsWithInventory: [...campaignsWithInv],
+      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error en getExportLayout:', error);
+      const message = error instanceof Error ? error.message : 'Error al exportar layout';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async addComment(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
