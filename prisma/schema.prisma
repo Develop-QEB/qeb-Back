@@ -243,7 +243,7 @@ model propuesta {
   precio_simulado          Int?
   asignado                 String    @db.Text
   id_asignado              String?   @db.Text
-  inversion                Int
+  inversion                Decimal  @default(0) @db.Decimal(12, 2)
   comentario_cambio_status String    @db.Text
   articulo                 String    @db.VarChar(255)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
@@ -331,8 +331,8 @@ model solicitudCaras {
   caras                Int
   nivel_socioeconomico String   @db.VarChar(500)
   formato              String   @db.VarChar(1000)
-  costo                Int
-  tarifa_publica       Int
+  costo                Decimal  @default(0) @db.Decimal(12, 2)
+  tarifa_publica       Decimal  @default(0) @db.Decimal(12, 2)
   inicio_periodo       DateTime @default(dbgenerated("(curdate())")) @db.Date
   fin_periodo          DateTime @default(dbgenerated("(curdate())")) @db.Date
   caras_flujo          Int?     @default(0)
