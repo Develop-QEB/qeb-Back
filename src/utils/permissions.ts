@@ -16,6 +16,7 @@ const FULL_VISIBILITY_ROLES = [
   'Coordinador de trafico',
   'Especialista de trafico',
   'Auxiliar de trafico',
+  'Especialista de BI',
   'DEV',
 ];
 
