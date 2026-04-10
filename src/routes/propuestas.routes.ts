@@ -10,6 +10,7 @@ router.use(authMiddleware);
 // GET routes - specific routes before generic /:id
 router.get('/', propuestasController.getAll.bind(propuestasController));
 router.get('/stats', propuestasController.getStats.bind(propuestasController));
+router.get('/versionario', propuestasController.getVersionarioData.bind(propuestasController));
 router.get('/:id/full', propuestasController.getFullDetails.bind(propuestasController));
 router.get('/:id/inventario', propuestasController.getInventarioReservado.bind(propuestasController));
 router.get('/:id/comments', propuestasController.getComments.bind(propuestasController));

@@ -2030,6 +2030,157 @@ export class PropuestasController {
   }
 
   // Get reserved inventory for propuesta
+  async getVersionarioData(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      const yearInicio = req.query.yearInicio as string;
+      const yearFin = req.query.yearFin as string;
+      const catorcenaInicio = req.query.catorcenaInicio as string;
+      const catorcenaFin = req.query.catorcenaFin as string;
+
+      // Build WHERE (same as getAll)
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
+      const params: any[] = [];
+
+      if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
+      if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
+      if (search) {
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
+        const sp = `%${search}%`;
+        params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp, sp);
+      }
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        whereConditions += ` AND cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)`;
+        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+      } else if (yearInicio && yearFin) {
+        whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
+        params.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
+      // Visibility
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+      if (userId && !hasFullVisibility(userRol)) {
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
+        whereConditions += ` AND pr.id IN (${visibleIds.map(() => '?').join(',')})`;
+        params.push(...visibleIds);
+      }
+
+      // 1. Get all matching propuesta IDs
+      const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+        SELECT DISTINCT pr.id FROM propuesta pr
+        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE ${whereConditions}
+      `, ...params);
+      const propIds = idsResult.map(r => Number(r.id));
+      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
+      const phIds = propIds.map(() => '?').join(',');
+
+      // 2. Propuesta info
+      const propInfoQuery = `
+        SELECT
+          pr.id AS propuesta_id, pr.status, pr.descripcion, pr.inversion, pr.asignado,
+          cm.nombre AS campana_nombre, cm.fecha_inicio, cm.fecha_fin, cm.status AS campana_status,
+          COALESCE(sl.marca_nombre, cl.T2_U_Marca, cl.T0_U_Cliente, '') AS anunciante,
+          cl.CUIC AS cuic, sl.nombre_usuario AS vendedor,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
+          cat_ini.numero_catorcena AS catorcena_inicio_num, cat_ini.año AS catorcena_inicio_anio,
+          cat_fin.numero_catorcena AS catorcena_fin_num, cat_fin.año AS catorcena_fin_anio
+        FROM propuesta pr
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+          LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+          LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+          LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        WHERE pr.id IN (${phIds})
+      `;
+
+      // 3. Bulk inventory query
+      const invQuery = `
+        SELECT
+          CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          CASE WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo' ELSE MIN(i.tipo_de_cara) END as tipo_de_cara,
+          MIN(i.mueble) as mueble, MIN(i.plaza) as plaza, MIN(i.estado) as estado,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo, MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo, MAX(sc.fin_periodo) as fin_periodo,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta, MAX(sc.cortesia) as cortesia,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          cat.numero_catorcena, cat.año as anio_catorcena
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE CAST(sc.idquote AS UNSIGNED) IN (${phIds})
+        GROUP BY CAST(sc.idquote AS UNSIGNED), COALESCE(rsv.grupo_completo_id, rsv.id), sc.id, cat.numero_catorcena, cat.año
+        ORDER BY CAST(sc.idquote AS UNSIGNED), cat.año, cat.numero_catorcena
+      `;
+
+      // 4. Caras info per propuesta (for counter: expected vs reserved)
+      const carasQuery = `
+        SELECT
+          CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+          sc.id AS sc_id, sc.articulo, sc.ciudad, sc.formato,
+          sc.caras AS caras_solicitadas, sc.bonificacion,
+          (sc.caras + sc.bonificacion) AS caras_esperadas,
+          (SELECT COUNT(*) FROM reservas r2 WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL) AS reservas_count,
+          cat.numero_catorcena, cat.año AS anio_catorcena
+        FROM solicitudCaras sc
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE CAST(sc.idquote AS UNSIGNED) IN (${phIds})
+        ORDER BY CAST(sc.idquote AS UNSIGNED), cat.año, cat.numero_catorcena
+      `;
+
+      const QUERY_TIMEOUT = 60000;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
+      );
+
+      const [propInfo, inventario, carasInfo] = await Promise.race([
+        Promise.all([
+          prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+          prisma.$queryRawUnsafe(invQuery, ...propIds),
+          prisma.$queryRawUnsafe(carasQuery, ...propIds),
+        ]),
+        timeoutPromise as never,
+      ]);
+
+      const result = JSON.parse(JSON.stringify({
+        inventarios: inventario,
+        propuestasInfo: propInfo,
+        carasInfo: carasInfo,
+      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error en getVersionarioData:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener datos del versionario';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async getInventarioReservado(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
