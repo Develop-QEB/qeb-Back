@@ -895,17 +895,19 @@ export class InventariosController {
           sc.inicio_periodo,
           sc.fin_periodo,
           sc.tipo as tipo_medio,
+          CAST(sc.idquote AS UNSIGNED) as propuesta_id,
           cm.id as campana_id,
           cm.nombre as campana_nombre,
-          cl.T0_U_Cliente as cliente_nombre,
+          COALESCE(cl2.T0_U_RazonSocial, cl2.T0_U_Cliente, cl.T0_U_RazonSocial, cl.T0_U_Cliente) as cliente_nombre,
           cat.numero_catorcena,
           cat.año as anio_catorcena
         FROM espacio_inventario epIn
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = CAST(sc.idquote AS UNSIGNED)
+          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN cliente cl2 ON cl2.CUIC = cl.CUIC AND cl2.T0_U_RazonSocial IS NOT NULL AND cl2.id != cl.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE epIn.inventario_id = ?
           AND rsv.estatus != 'eliminada'
