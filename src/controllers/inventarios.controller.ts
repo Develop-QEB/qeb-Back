@@ -934,6 +934,31 @@ export class InventariosController {
     }
   }
 
+  async getAcciones(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id);
+      const acciones = await prisma.historial.findMany({
+        where: { tipo: 'Inventario', ref_id: id },
+        orderBy: { fecha_hora: 'desc' },
+      });
+      res.json({
+        success: true,
+        data: acciones.map(a => ({
+          id: serializeBigInt(a.id),
+          inventario_id: a.ref_id,
+          accion: a.accion,
+          detalles: a.detalles,
+          usuario_nombre: a.detalles?.match(/^(.+?) (?:creó|actualizó|bloqueó|desbloqueó|reservó|quitó)/)?.[1] || null,
+          fecha: a.fecha_hora,
+        })),
+      });
+    } catch (error) {
+      console.error('Error fetching acciones:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener acciones';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   /**
    * Poblar/actualizar la tabla espacio_inventario basado en todos los inventarios
    * - Para digitales (total_espacios > 0): crear N registros (1 por espacio)
@@ -1256,6 +1281,17 @@ export class InventariosController {
           inventario_id: inventario.id,
           numero_espacio: i + 1,
         })),
+      });
+
+      const userName = req.user?.nombre || req.user?.email || 'Sistema';
+      await prisma.historial.create({
+        data: {
+          tipo: 'Inventario',
+          ref_id: inventario.id,
+          accion: 'Creado',
+          fecha_hora: new Date(),
+          detalles: `${userName} creó el inventario ${inventario.codigo_unico || inventario.id}`,
+        },
       });
 
       res.json({ success: true, data: inventario });
@@ -1633,6 +1669,19 @@ export class InventariosController {
         where: { id },
         data: updateData,
       });
+
+      const userName = req.user?.nombre || req.user?.email || 'Sistema';
+      const campos = Object.keys(updateData).join(', ');
+      await prisma.historial.create({
+        data: {
+          tipo: 'Inventario',
+          ref_id: id,
+          accion: 'Actualizado',
+          fecha_hora: new Date(),
+          detalles: `${userName} actualizó ${inventario.codigo_unico || id}: ${campos}`,
+        },
+      });
+
       res.json({ success: true, data: inventario });
     } catch (error) {
       console.error('Error updating inventario:', error);
@@ -1655,6 +1704,19 @@ export class InventariosController {
         where: { id },
         data: { estatus: newEstatus },
       });
+
+      const userName = req.user?.nombre || req.user?.email || 'Sistema';
+      const accion = newEstatus === 'Bloqueado' ? 'Bloqueado' : 'Desbloqueado';
+      await prisma.historial.create({
+        data: {
+          tipo: 'Inventario',
+          ref_id: id,
+          accion,
+          fecha_hora: new Date(),
+          detalles: `${userName} ${accion === 'Bloqueado' ? 'bloqueó' : 'desbloqueó'} el inventario ${inventario.codigo_unico || id}`,
+        },
+      });
+
       res.json({ success: true, data: updated });
     } catch (error) {
       console.error('Error toggling block:', error);

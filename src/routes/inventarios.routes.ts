@@ -35,6 +35,7 @@ router.put('/:id', inventariosController.update.bind(inventariosController));
 router.patch('/:id/toggle-block', inventariosController.toggleBlock.bind(inventariosController));
 
 router.get('/:id/historial', inventariosController.getHistorial.bind(inventariosController));
+router.get('/:id/acciones', inventariosController.getAcciones.bind(inventariosController));
 router.get('/:id', inventariosController.getById.bind(inventariosController));
 
 export default router;
