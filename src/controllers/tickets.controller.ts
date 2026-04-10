@@ -93,7 +93,7 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
     const result = tickets.map((t) => {
       const chatVista = t.chat_vistas[0];
       const ultimoChat = t.chat[0];
-      const hasChatUnread = ultimoChat ? ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0) : false;
+      const hasChatUnread = ultimoChat ? ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0) && ultimoChat.usuario_id !== userId : false;
       const { chat, chat_vistas, ...ticketData } = t;
       return { ...ticketData, has_chat_unread: hasChatUnread };
     });
@@ -382,7 +382,7 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const chatVista = Array.isArray(t.chat_vistas) ? t.chat_vistas[0] : null;
       const ultimoChat = t.chat[0] || null;
       const ultimoChatLeido = chatVista?.ultimo_mensaje_leido_id || 0;
-      const hasChatUnread = ultimoChat ? ultimoChat.id > ultimoChatLeido : false;
+      const hasChatUnread = ultimoChat ? ultimoChat.id > ultimoChatLeido && ultimoChat.usuario_id === t.usuario_id : false;
 
       const usuarioInfo = usuarioMap.get(t.usuario_id);
 
@@ -439,10 +439,10 @@ export const getTicketsUnreadCount = async (req: AuthRequest, res: Response) => 
       const ultimoMensaje = t.mensajes[0];
       const notasUnread = ultimoMensaje && ultimoMensaje.id > (vista?.ultimo_mensaje_leido_id || 0);
 
-      // Check chat de soporte unread
+      // Check chat de soporte unread (solo si el creador del ticket escribió, no técnicos)
       const chatVista = t.chat_vistas[0];
       const ultimoChat = t.chat[0];
-      const chatUnread = ultimoChat && ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0);
+      const chatUnread = ultimoChat && ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0) && ultimoChat.usuario_id === t.usuario_id;
 
       if (notasUnread || chatUnread) unreadCount++;
     }
@@ -673,7 +673,7 @@ export const getTicketChatUnreadCount = async (req: AuthRequest, res: Response) 
       const ultimoChat = t.chat[0];
       if (ultimoChat) {
         const ultimoLeido = vista?.ultimo_mensaje_leido_id || 0;
-        if (ultimoChat.id > ultimoLeido) unreadCount++;
+        if (ultimoChat.id > ultimoLeido && ultimoChat.usuario_id !== userId) unreadCount++;
       }
     }
 
