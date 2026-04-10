@@ -7,9 +7,10 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
+import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -394,6 +395,17 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
 
+      // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
+      const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
+        u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        console.log(`[Cache] HIT: ${cacheKey}`);
+        res.json(cached);
+        return;
+      }
+
       // Build WHERE conditions
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
       const params: any[] = [];
@@ -444,30 +456,22 @@ export class PropuestasController {
         params.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
-      // Visibility filter: non-leadership roles only see records where they participate
+      // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id IN (${placeholders})
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          params.push(String(userId), ...teamIds, String(userId));
-        } else {
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id = ?
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          params.push(String(userId), userId, String(userId));
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          res.json({ success: true, data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        whereConditions += ` AND pr.id IN (${visiblePh})`;
+        params.push(...visibleIds);
       }
 
-      // Get total count
+      // Count y main query en paralelo
       const countQuery = `
         SELECT COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
@@ -477,10 +481,7 @@ export class PropuestasController {
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
       `;
-      const countResult = await prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params);
-      const total = Number(countResult[0]?.total || 0);
 
-      // Main query inspired by Retool - get propuestas with related data
       const offset = (page - 1) * limit;
       const mainQuery = `
         SELECT
@@ -530,7 +531,11 @@ export class PropuestasController {
         LIMIT ? OFFSET ?
       `;
 
-      const propuestas = await prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset);
+      const [propuestas, countResult] = await Promise.all([
+        prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset),
+        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params),
+      ]);
+      const total = Number(countResult[0]?.total || 0);
 
       // Convert BigInt values and format dates
       const formattedPropuestas = propuestas.map(p => ({
@@ -574,7 +579,7 @@ export class PropuestasController {
         });
       }
 
-      res.json({
+      const response = {
         success: true,
         data: formattedPropuestas,
         pagination: {
@@ -583,7 +588,11 @@ export class PropuestasController {
           total,
           totalPages: Math.ceil(total / limit),
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       console.error('Error in getAll propuestas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener propuestas';
@@ -767,6 +776,10 @@ export class PropuestasController {
           updated_at: new Date(),
         },
       });
+
+      // Invalidar caché de listados
+      cache.deletePattern('propuestas:list:');
+      cache.deletePattern('campanas:list:');
 
       // Si se descarta o rechaza, liberar todas las reservas (soft delete)
       if (status === 'Descartada' || status === 'Rechazada') {

@@ -11,9 +11,10 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
+import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -81,6 +82,17 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
 
+      // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
+      const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
+        u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        console.log(`[Cache] HIT: ${cacheKey}`);
+        res.json(cached);
+        return;
+      }
+
       // Build WHERE conditions
       // Excluir campañas 'inactiva' (propuestas no aprobadas) a menos que se filtre explícitamente por ese status
       const conditions: string[] = ['cm.id IS NOT NULL'];
@@ -136,41 +148,65 @@ export class CampanasController {
         }
       }
 
-      // Visibility filter: non-leadership roles only see campañas where they have tareas
+      // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(...teamIds, String(userId), String(userId), userId);
-        } else {
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(userId, String(userId), String(userId), userId);
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          res.json({ success: true, data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        conditions.push(`cm.id IN (${visiblePh})`);
+        params.push(...visibleIds);
       }
 
       const whereClause = conditions.join(' AND ');
 
-      // Query with LEFT JOINs — subqueries pre-aggregated for performance
-      const query = `
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+      `;
+
+      // Paso 1: obtener IDs de la página (query liviano, sin subqueries pesadas)
+      const idsQuery = `
+        SELECT cm.id, cm.cotizacion_id
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+        ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      const offset = (page - 1) * limit;
+      const [idsResult, countResult] = await Promise.all([
+        prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number | null }[]>(idsQuery, ...params, limit, offset),
+        prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
+      ]);
+      const total = Number(countResult[0]?.total || 0);
+
+      if (idsResult.length === 0) {
+        res.json({ success: true, data: [], pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+        return;
+      }
+
+      const campaignIds = idsResult.map(r => Number(r.id));
+      const cotizacionIds = idsResult.map(r => Number(r.cotizacion_id)).filter(Boolean);
+      const cmIdPh = campaignIds.map(() => '?').join(',');
+      const ctIdPh = cotizacionIds.length > 0 ? cotizacionIds.map(() => '?').join(',') : '0';
+
+      // Paso 2: enriquecer solo las campañas de la página (subqueries filtradas por IDs)
+      const dataQuery = `
         SELECT
           cm.*,
           cl.T0_U_Cliente as cliente_nombre,
@@ -214,7 +250,7 @@ export class CampanasController {
           FROM reservas rsv_a
           INNER JOIN solicitudCaras sc_a ON sc_a.id = rsv_a.solicitudCaras_id
           INNER JOIN cotizacion ct_a ON ct_a.id_propuesta = sc_a.idquote
-          WHERE rsv_a.deleted_at IS NULL
+          WHERE rsv_a.deleted_at IS NULL AND ct_a.id IN (${ctIdPh})
           GROUP BY ct_a.id
         ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
         LEFT JOIN (
@@ -236,6 +272,7 @@ export class CampanasController {
                 AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%'
             ) AS caras_ultima_cat
           FROM campania cm_b
+          WHERE cm_b.id IN (${cmIdPh})
         ) uc_agg ON uc_agg.campania_id = cm.id
         LEFT JOIN (
           SELECT
@@ -244,33 +281,24 @@ export class CampanasController {
           FROM solicitudCaras sc_c
           INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
           INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+          WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
-        WHERE ${whereClause}
+        WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
-        LIMIT ? OFFSET ?
       `;
 
-      const countQuery = `
-        SELECT COUNT(*) as total
-        FROM campania cm
-        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
-        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
-        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        WHERE ${whereClause}
-      `;
+      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, campaignIds para WHERE
+      const dataParams = [
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
+        ...campaignIds,
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
+        ...campaignIds,
+      ];
 
-      const offset = (page - 1) * limit;
-      // Ejecutar ambas queries en paralelo en vez de secuencial
-      const [campanas, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<any[]>(query, ...params, limit, offset),
-        prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
-      ]);
-      const total = Number(countResult[0]?.total || 0);
+      const campanas = await prisma.$queryRawUnsafe<any[]>(dataQuery, ...dataParams);
 
       // Remap propuesta_inversion → inversion to avoid cm.* column name collision
-      // when campania table has its own inversion column (not in Prisma schema)
       campanas.forEach((campana: any) => {
         if ('propuesta_inversion' in campana) {
           campana.inversion = campana.propuesta_inversion ?? campana.inversion ?? null;
@@ -308,7 +336,7 @@ export class CampanasController {
         typeof value === 'bigint' ? Number(value) : value
       ));
 
-      res.json({
+      const response = {
         success: true,
         data: campanasSerializable,
         pagination: {
@@ -317,7 +345,12 @@ export class CampanasController {
           total,
           totalPages: Math.ceil(total / limit),
         },
-      });
+      };
+
+      // Cachear 30 segundos — suficiente para absorber ráfagas de requests idénticos
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       console.error('Error en getAll campanas:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener campanas';
@@ -682,12 +715,54 @@ export class CampanasController {
         }
       }
 
+      // Si tiene APS, no permitir rechazo
+      if (status === 'Rechazada' && campanaAnterior.cotizacion_id) {
+        const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
+          SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
+          FROM reservas rsv
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          WHERE ct.id = ? AND rsv.deleted_at IS NULL
+        `, campanaAnterior.cotizacion_id);
+        if (hasAps[0]?.has_aps === 1) {
+          res.status(400).json({ success: false, error: 'No se puede rechazar una campaña que ya tiene APS asignado.' });
+          return;
+        }
+      }
+
       const statusAnterior = campanaAnterior.status;
 
       const campana = await prisma.campania.update({
         where: { id: campanaId },
         data: { status },
       });
+
+      // Si se rechaza, liberar todas las reservas (soft delete) — misma lógica que propuestas
+      if (status === 'Rechazada' && campana.cotizacion_id) {
+        const cotizacionData = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        if (cotizacionData?.id_propuesta) {
+          const caras = await prisma.solicitudCaras.findMany({
+            where: { idquote: String(cotizacionData.id_propuesta) },
+          });
+          if (caras.length > 0) {
+            const carasIds = caras.map(c => c.id);
+            const liberadas = await prisma.reservas.updateMany({
+              where: {
+                solicitudCaras_id: { in: carasIds },
+                deleted_at: null,
+              },
+              data: { deleted_at: new Date() },
+            });
+            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas`);
+          }
+        }
+      }
+
+      // Invalidar caché de listados de campañas al cambiar status
+      cache.deletePattern('campanas:list:');
 
       // Obtener datos relacionados
       const cotizacion = campana.cotizacion_id

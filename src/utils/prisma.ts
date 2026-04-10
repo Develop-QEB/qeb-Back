@@ -19,14 +19,24 @@ const createPrismaClient = () => {
   const url = getDatasourceUrl();
   // Ensure connection pool has reasonable limits — override if too low
   let datasourceUrl = url;
+  // connection_limit: 30 — queries optimizados liberan conexiones rápido,
+  // no acaparar el max_connections del servidor MySQL
   if (!url.includes('connection_limit')) {
-    datasourceUrl += `${url.includes('?') ? '&' : '?'}connection_limit=5`;
+    datasourceUrl += `${url.includes('?') ? '&' : '?'}connection_limit=30`;
+  } else {
+    datasourceUrl = datasourceUrl.replace(/connection_limit=\d+/, 'connection_limit=30');
   }
+  // pool_timeout: 60s para esperar conexión disponible del pool
   if (!url.includes('pool_timeout')) {
     datasourceUrl += '&pool_timeout=60';
   } else {
-    // If pool_timeout is set but too low, bump it
     datasourceUrl = datasourceUrl.replace(/pool_timeout=\d+/, 'pool_timeout=60');
+  }
+  // socket_timeout: 120s para queries pesados contra BD remota
+  if (!url.includes('socket_timeout')) {
+    datasourceUrl += '&socket_timeout=120';
+  } else if (parseInt(url.match(/socket_timeout=(\d+)/)?.[1] || '0') < 120) {
+    datasourceUrl = datasourceUrl.replace(/socket_timeout=\d+/, 'socket_timeout=120');
   }
 
   const client = new PrismaClient({

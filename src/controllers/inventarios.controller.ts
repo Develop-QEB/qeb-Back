@@ -1386,6 +1386,7 @@ export class InventariosController {
         }
 
         const toInsert: any[] = [];
+        const toUpdate: { id: number; data: any }[] = [];
         for (const row of validRows) {
           const existingItem = row.codigo_unico ? existingMap.get(row.codigo_unico) : null;
 
@@ -1419,13 +1420,19 @@ export class InventariosController {
             continue;
           }
 
-          // Safe to overwrite - update
-          const { codigo_unico, ...updateData } = row;
-          await prisma.inventarios.update({
-            where: { id: existingItem.id },
-            data: updateData,
-          });
+          // Safe to overwrite - collect for batch update
+          toUpdate.push({ id: existingItem.id, data: row });
           actualizados++;
+        }
+
+        // Batch updates en una sola transacción en vez de 1 query por fila
+        if (toUpdate.length > 0) {
+          await prisma.$transaction(
+            toUpdate.map(({ id, data }) => {
+              const { codigo_unico, ...updateData } = data;
+              return prisma.inventarios.update({ where: { id }, data: updateData });
+            })
+          );
         }
 
         if (toInsert.length > 0) {

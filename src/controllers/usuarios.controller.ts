@@ -432,13 +432,33 @@ export class UsuariosController {
         return;
       }
 
-      const newUserCache = new Map<number, { id: number; nombre: string }>();
+      // Cargar todos los newUser de una sola vez en vez de 1 query por reasignación
+      const newUserIds: number[] = [...new Set(reassignments.map((r: any) => r.newUserId))] as number[];
+      const newUsers = await prisma.usuario.findMany({
+        where: { id: { in: newUserIds }, deleted_at: null },
+        select: { id: true, nombre: true },
+      });
+      const newUserCache = new Map(newUsers.map(u => [u.id, u]));
+
+      // Cargar todos los registros a reasignar de una sola vez
+      const solIds = reassignments.filter((r: any) => r.type === 'solicitud').map((r: any) => r.id);
+      const propIds = reassignments.filter((r: any) => r.type === 'propuesta').map((r: any) => r.id);
+      const tareaIds = reassignments.filter((r: any) => r.type === 'tarea').map((r: any) => r.id);
+
+      const [solicitudes, propuestas, tareas] = await Promise.all([
+        solIds.length > 0 ? prisma.solicitud.findMany({ where: { id: { in: solIds } } }) : Promise.resolve([]),
+        propIds.length > 0 ? prisma.propuesta.findMany({ where: { id: { in: propIds } } }) : Promise.resolve([]),
+        tareaIds.length > 0 ? prisma.tareas.findMany({ where: { id: { in: tareaIds } } }) : Promise.resolve([]),
+      ]);
+
+      const solMap = new Map(solicitudes.map(s => [s.id, s]));
+      const propMap = new Map(propuestas.map(p => [p.id, p]));
+      const tareaMap = new Map(tareas.map(t => [t.id, t]));
+
+      // Preparar todas las operaciones de update
+      const ops: any[] = [];
 
       for (const r of reassignments) {
-        if (!newUserCache.has(r.newUserId)) {
-          const u = await prisma.usuario.findFirst({ where: { id: r.newUserId, deleted_at: null } });
-          if (u) newUserCache.set(r.newUserId, { id: u.id, nombre: u.nombre });
-        }
         const newUser = newUserCache.get(r.newUserId);
         if (!newUser) continue;
 
@@ -459,48 +479,40 @@ export class UsuariosController {
         };
 
         if (r.type === 'solicitud') {
-          const sol = await prisma.solicitud.findFirst({ where: { id: r.id } });
+          const sol = solMap.get(r.id);
           if (!sol) continue;
-          await prisma.solicitud.update({
+          ops.push(prisma.solicitud.update({
             where: { id: r.id },
-            data: {
-              id_asignado: replaceId(sol.id_asignado),
-              asignado: replaceName(sol.asignado),
-            }
-          });
+            data: { id_asignado: replaceId(sol.id_asignado), asignado: replaceName(sol.asignado) },
+          }));
         } else if (r.type === 'propuesta') {
-          const prop = await prisma.propuesta.findFirst({ where: { id: r.id } });
+          const prop = propMap.get(r.id);
           if (!prop) continue;
-          await prisma.propuesta.update({
+          ops.push(prisma.propuesta.update({
             where: { id: r.id },
-            data: {
-              id_asignado: replaceId(prop.id_asignado),
-              asignado: replaceName(prop.asignado),
-            }
-          });
+            data: { id_asignado: replaceId(prop.id_asignado), asignado: replaceName(prop.asignado) },
+          }));
         } else if (r.type === 'tarea') {
-          const tarea = await prisma.tareas.findFirst({ where: { id: r.id } });
+          const tarea = tareaMap.get(r.id);
           if (!tarea) continue;
-
           const updateData: Record<string, unknown> = {};
-
           if (tarea.id_responsable === userId) {
             updateData.id_responsable = newUser.id;
             updateData.responsable = newUser.nombre;
           }
-
           if (tarea.id_asignado && tarea.id_asignado.split(',').map(s => s.trim()).includes(String(userId))) {
             updateData.id_asignado = replaceId(tarea.id_asignado);
             updateData.asignado = replaceName(tarea.asignado);
           }
-
           if (Object.keys(updateData).length > 0) {
-            await prisma.tareas.update({
-              where: { id: r.id },
-              data: updateData,
-            });
+            ops.push(prisma.tareas.update({ where: { id: r.id }, data: updateData }));
           }
         }
+      }
+
+      // Ejecutar todos los updates en una sola transacción
+      if (ops.length > 0) {
+        await prisma.$transaction(ops);
       }
 
       res.json({ success: true, message: 'Reasignaciones completadas' });

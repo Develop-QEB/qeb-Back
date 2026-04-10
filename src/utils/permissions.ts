@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { cache } from './cache';
 
 /**
  * Roles con visibilidad total: ven TODOS los registros en Solicitudes, Propuestas y Campañas.
@@ -51,5 +52,74 @@ export async function getTeamMemberIds(prisma: PrismaClient, userId: number): Pr
   if (!ids.includes(userId)) {
     ids.push(userId);
   }
+  return ids;
+}
+
+/**
+ * Pre-computa los IDs de campañas visibles para un usuario (cacheado 2 min).
+ * Reemplaza FIND_IN_SET en WHERE con IN(ids) que sí usa índices.
+ */
+export async function getVisibleCampanaIds(
+  prisma: PrismaClient,
+  userId: number,
+  teamIds?: number[]
+): Promise<number[]> {
+  const cacheKey = `visible_campanas:${userId}`;
+  const cached = cache.get<number[]>(cacheKey);
+  if (cached) return cached;
+
+  const userIdStr = String(userId);
+  const allUserIds = teamIds || [userId];
+  const placeholders = allUserIds.map(() => '?').join(',');
+
+  const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+    SELECT DISTINCT cm.id FROM campania cm
+    LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+    LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+    LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+    WHERE cm.id IS NOT NULL AND (
+      EXISTS (
+        SELECT 1 FROM tareas t
+        WHERE t.campania_id = cm.id
+          AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+      )
+      OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+      OR s.usuario_id IN (${placeholders})
+    )
+  `, ...allUserIds, userIdStr, userIdStr, ...allUserIds);
+
+  const ids = rows.map(r => Number(r.id));
+  cache.set(cacheKey, ids, 2 * 60 * 1000); // 2 min
+  return ids;
+}
+
+/**
+ * Pre-computa los IDs de propuestas visibles para un usuario (cacheado 2 min).
+ */
+export async function getVisiblePropuestaIds(
+  prisma: PrismaClient,
+  userId: number,
+  teamIds?: number[]
+): Promise<number[]> {
+  const cacheKey = `visible_propuestas:${userId}`;
+  const cached = cache.get<number[]>(cacheKey);
+  if (cached) return cached;
+
+  const userIdStr = String(userId);
+  const allUserIds = teamIds || [userId];
+  const placeholders = allUserIds.map(() => '?').join(',');
+
+  const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+    SELECT DISTINCT pr.id FROM propuesta pr
+    LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+    WHERE pr.deleted_at IS NULL AND (
+      FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
+      OR sl.usuario_id IN (${placeholders})
+      OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
+    )
+  `, userIdStr, ...allUserIds, userIdStr);
+
+  const ids = rows.map(r => Number(r.id));
+  cache.set(cacheKey, ids, 2 * 60 * 1000);
   return ids;
 }
