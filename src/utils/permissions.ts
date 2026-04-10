@@ -16,6 +16,7 @@ const FULL_VISIBILITY_ROLES = [
   'Coordinador de trafico',
   'Especialista de trafico',
   'Auxiliar de trafico',
+  'Especialista de BI',
   'DEV',
 ];
 
@@ -28,6 +29,7 @@ export function hasFullVisibility(rol: string): boolean {
  */
 const TEAM_VISIBILITY_ROLES = [
   'Asesor Analista',
+  'Analista de Servicio al Cliente',
 ];
 
 export function hasTeamVisibility(rol: string): boolean {
