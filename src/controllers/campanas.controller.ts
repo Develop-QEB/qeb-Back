@@ -5724,6 +5724,7 @@ export class CampanasController {
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          cliente.CUIC AS cuic,
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
@@ -5752,7 +5753,7 @@ export class CampanasController {
           AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  sol.nombre_usuario, ct.id_propuesta
 
@@ -5771,6 +5772,7 @@ export class CampanasController {
           (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
+          cliente.CUIC AS cuic,
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
@@ -5795,7 +5797,7 @@ export class CampanasController {
           AND UPPER(COALESCE(sc.formato, '')) NOT LIKE '%IOSCO%'
           ${statusFilter}
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, sol.unidad_negocio, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
                  sol.nombre_usuario, ct.descuento, ct.id_propuesta
 
