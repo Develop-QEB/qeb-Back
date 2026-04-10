@@ -29,6 +29,7 @@ export function hasFullVisibility(rol: string): boolean {
  */
 const TEAM_VISIBILITY_ROLES = [
   'Asesor Analista',
+  'Analista de Servicio al Cliente',
 ];
 
 export function hasTeamVisibility(rol: string): boolean {
