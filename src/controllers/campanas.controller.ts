@@ -2176,28 +2176,27 @@ export class CampanasController {
         WHERE cm.id IN (${cmIdPh})
       `;
 
-      // Queries livianas (tareas, catorcenas, campInfo) van directo
-      // Queries pesadas (inventario, IM) se procesan en batches
-      const BATCH_SIZE = 25;
-      const [tareasArr, catorcenasArr, campInfoArr] = await Promise.all([
-        prisma.$queryRawUnsafe<any[]>(tareasQuery, ...campaignIds),
-        prisma.$queryRawUnsafe<any[]>(catorcenasQuery),
-        prisma.$queryRawUnsafe<any[]>(campInfoQuery, ...campaignIds, ...campaignIds),
-      ]);
+      // Queries livianas primero (secuencial para no saturar conexiones)
+      const catorcenasArr = await prisma.$queryRawUnsafe<any[]>(catorcenasQuery);
+      const tareasArr = await prisma.$queryRawUnsafe<any[]>(tareasQuery, ...campaignIds);
+      const campInfoArr = await prisma.$queryRawUnsafe<any[]>(campInfoQuery, ...campaignIds, ...campaignIds);
 
-      // Procesar inventario en batches para no hacer timeout
+      // Inventario en batches secuenciales (1 query a la vez para no saturar conexiones)
+      const BATCH_SIZE = 30;
       const inventarioArr: any[] = [];
       const imArr: any[] = [];
       for (let i = 0; i < campaignIds.length; i += BATCH_SIZE) {
         const batch = campaignIds.slice(i, i + BATCH_SIZE);
         const batchPh = batch.map(() => '?').join(',');
         const batchBulkQuery = bulkQuery.replace(`cm.id IN (${cmIdPh})`, `cm.id IN (${batchPh})`);
-        const batchImQuery = imQuery.replace(new RegExp(`cm\\.id IN \\(${cmIdPh.replace(/\?/g, '\\?')}\\)`, 'g'), `cm.id IN (${batchPh})`);
-        const [batchInv, batchIm] = await Promise.all([
-          prisma.$queryRawUnsafe<any[]>(batchBulkQuery, ...batch),
-          prisma.$queryRawUnsafe<any[]>(batchImQuery, ...batch),
-        ]);
+        const batchInv = await prisma.$queryRawUnsafe<any[]>(batchBulkQuery, ...batch);
         inventarioArr.push(...batchInv);
+      }
+      for (let i = 0; i < campaignIds.length; i += BATCH_SIZE) {
+        const batch = campaignIds.slice(i, i + BATCH_SIZE);
+        const batchPh = batch.map(() => '?').join(',');
+        const batchImQuery = imQuery.replace(new RegExp(`cm\\.id IN \\(${cmIdPh.replace(/\?/g, '\\?')}\\)`, 'g'), `cm.id IN (${batchPh})`);
+        const batchIm = await prisma.$queryRawUnsafe<any[]>(batchImQuery, ...batch);
         imArr.push(...batchIm);
       }
 
