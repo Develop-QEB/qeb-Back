@@ -112,7 +112,7 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
@@ -1232,7 +1232,7 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
@@ -1946,7 +1946,7 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
