@@ -2176,27 +2176,30 @@ export class CampanasController {
         WHERE cm.id IN (${cmIdPh})
       `;
 
-      const QUERY_TIMEOUT = 60000;
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Export query timeout: las consultas tardaron más de 60s')), QUERY_TIMEOUT)
-      );
-
-      const [inventario, imArticulos, tareas, catorcenas, campInfo] = await Promise.race([
-        Promise.all([
-          prisma.$queryRawUnsafe(bulkQuery, ...campaignIds),
-          prisma.$queryRawUnsafe(imQuery, ...campaignIds),
-          prisma.$queryRawUnsafe(tareasQuery, ...campaignIds),
-          prisma.$queryRawUnsafe(catorcenasQuery),
-          prisma.$queryRawUnsafe(campInfoQuery, ...campaignIds, ...campaignIds),
-        ]),
-        timeoutPromise as never,
+      // Queries livianas (tareas, catorcenas, campInfo) van directo
+      // Queries pesadas (inventario, IM) se procesan en batches
+      const BATCH_SIZE = 25;
+      const [tareasArr, catorcenasArr, campInfoArr] = await Promise.all([
+        prisma.$queryRawUnsafe<any[]>(tareasQuery, ...campaignIds),
+        prisma.$queryRawUnsafe<any[]>(catorcenasQuery),
+        prisma.$queryRawUnsafe<any[]>(campInfoQuery, ...campaignIds, ...campaignIds),
       ]);
 
-      const inventarioArr = inventario as any[];
-      const imArr = imArticulos as any[];
-      const tareasArr = tareas as any[];
-      const catorcenasArr = catorcenas as any[];
-      const campInfoArr = campInfo as any[];
+      // Procesar inventario en batches para no hacer timeout
+      const inventarioArr: any[] = [];
+      const imArr: any[] = [];
+      for (let i = 0; i < campaignIds.length; i += BATCH_SIZE) {
+        const batch = campaignIds.slice(i, i + BATCH_SIZE);
+        const batchPh = batch.map(() => '?').join(',');
+        const batchBulkQuery = bulkQuery.replace(`cm.id IN (${cmIdPh})`, `cm.id IN (${batchPh})`);
+        const batchImQuery = imQuery.replace(new RegExp(`cm\\.id IN \\(${cmIdPh.replace(/\?/g, '\\?')}\\)`, 'g'), `cm.id IN (${batchPh})`);
+        const [batchInv, batchIm] = await Promise.all([
+          prisma.$queryRawUnsafe<any[]>(batchBulkQuery, ...batch),
+          prisma.$queryRawUnsafe<any[]>(batchImQuery, ...batch),
+        ]);
+        inventarioArr.push(...batchInv);
+        imArr.push(...batchIm);
+      }
 
       // Index tareas by reserva_id
       const impresionByReserva = new Map<number, any>();
