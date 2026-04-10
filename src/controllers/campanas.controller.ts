@@ -1932,6 +1932,8 @@ export class CampanasController {
       // Build WHERE conditions (same as getAll)
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
 
       if (status) {
         conditions.push('cm.status = ?');
@@ -1953,6 +1955,14 @@ export class CampanasController {
 
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
+          const [catIniExport, catFinExport] = await Promise.all([
+            prisma.catorcenas.findFirst({ where: { a_o: yearInicio, numero_catorcena: catorcenaInicio } }),
+            prisma.catorcenas.findFirst({ where: { a_o: yearFin, numero_catorcena: catorcenaFin } }),
+          ]);
+          if (catIniExport && catFinExport) {
+            filterFechaInicio = catIniExport.fecha_inicio;
+            filterFechaFin = catFinExport.fecha_fin;
+          }
           conditions.push(`
             cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
             AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
@@ -2254,6 +2264,33 @@ export class CampanasController {
 
         return { ...row, estatus_arte, numero_catorcena, anio_catorcena, caras_totales: Number(row.caras_totales) };
       });
+
+      // Recalcular inversión por catorcena filtrada (igual que getAll)
+      if (filterFechaInicio && filterFechaFin && campInfoArr.length > 0) {
+        const propuestaIds = campInfoArr.map((c: any) => Number(c.aps_global)).filter(Boolean);
+        if (propuestaIds.length > 0) {
+          const phInv = propuestaIds.map(() => '?').join(',');
+          const inversionData = await prisma.$queryRawUnsafe<any[]>(`
+            SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+            FROM propuesta pr
+            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+              AND sc.inicio_periodo <= ?
+              AND sc.fin_periodo >= ?
+            WHERE pr.id IN (${phInv})
+            GROUP BY pr.id
+          `, filterFechaFin, filterFechaInicio, ...propuestaIds);
+          const invMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
+          campInfoArr.forEach((c: any) => {
+            const filtered = invMap.get(Number(c.aps_global));
+            if (filtered !== undefined) c.inversion = filtered;
+          });
+          // También actualizar inversión en inventarioConEstatus
+          inventarioConEstatus.forEach((r: any) => {
+            const filtered = invMap.get(Number(r.aps_global));
+            if (filtered !== undefined) r.inversion = filtered;
+          });
+        }
+      }
 
       // Build campaign info map (for campaigns without inventory)
       const campInfoMap = new Map<number, any>();
