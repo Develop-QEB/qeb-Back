@@ -2103,10 +2103,10 @@ export class PropuestasController {
         WHERE pr.id IN (${phIds})
       `;
 
-      // 3. Bulk inventory query
+      // 3. Bulk inventory query (join through cotizacion to avoid CAST — enables index usage)
       const invQuery = `
         SELECT
-          CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+          ct.id_propuesta AS propuesta_id,
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
           MIN(i.id) as id,
           CASE WHEN rsv.grupo_completo_id IS NOT NULL
@@ -2129,28 +2129,33 @@ export class PropuestasController {
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena, cat.año as anio_catorcena
         FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-        WHERE CAST(sc.idquote AS UNSIGNED) IN (${phIds})
-        GROUP BY CAST(sc.idquote AS UNSIGNED), COALESCE(rsv.grupo_completo_id, rsv.id), sc.id, cat.numero_catorcena, cat.año
-        ORDER BY CAST(sc.idquote AS UNSIGNED), cat.año, cat.numero_catorcena
+        WHERE ct.id_propuesta IN (${phIds})
+        GROUP BY ct.id_propuesta, COALESCE(rsv.grupo_completo_id, rsv.id), sc.id, cat.numero_catorcena, cat.año
+        ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
-      // 4. Caras info per propuesta (for counter: expected vs reserved)
+      // 4. Caras info per propuesta (join through cotizacion + LEFT JOIN reservas to avoid correlated subquery)
       const carasQuery = `
         SELECT
-          CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+          ct.id_propuesta AS propuesta_id,
           sc.id AS sc_id, sc.articulo, sc.ciudad, sc.formato,
           sc.caras AS caras_solicitadas, sc.bonificacion,
           (sc.caras + sc.bonificacion) AS caras_esperadas,
-          (SELECT COUNT(*) FROM reservas r2 WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL) AS reservas_count,
+          COUNT(r2.id) AS reservas_count,
           cat.numero_catorcena, cat.año AS anio_catorcena
         FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          LEFT JOIN reservas r2 ON r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-        WHERE CAST(sc.idquote AS UNSIGNED) IN (${phIds})
-        ORDER BY CAST(sc.idquote AS UNSIGNED), cat.año, cat.numero_catorcena
+        WHERE ct.id_propuesta IN (${phIds})
+        GROUP BY ct.id_propuesta, sc.id, sc.articulo, sc.ciudad, sc.formato,
+                 sc.caras, sc.bonificacion, cat.numero_catorcena, cat.año
+        ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
       const QUERY_TIMEOUT = 60000;
