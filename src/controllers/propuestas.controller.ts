@@ -2210,6 +2210,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -2243,6 +2245,8 @@ export class PropuestasController {
       const serializedInventario = inventario.map(item => ({
         ...item,
         caras_totales: Number(item.caras_totales),
+        caras_bonificadas: Number(item.caras_bonificadas),
+        caras_renta: Number(item.caras_renta),
       }));
 
       res.json({
@@ -2348,6 +2352,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -2381,6 +2387,8 @@ export class PropuestasController {
       const serializedInventario = inventario.map(item => ({
         ...item,
         caras_totales: Number(item.caras_totales),
+        caras_bonificadas: Number(item.caras_bonificadas),
+        caras_renta: Number(item.caras_renta),
       }));
 
       res.json({

@@ -1452,7 +1452,9 @@ export class CampanasController {
           MAX(sc.cortesia) as cortesia,
           cat.numero_catorcena,
           cat.año as anio_catorcena,
-          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -1607,7 +1609,7 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+        return { ...row, estatus_arte, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales), caras_bonificadas: Number(row.caras_bonificadas || 0), caras_renta: Number(row.caras_renta || 0) };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
@@ -1979,6 +1981,8 @@ export class CampanasController {
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           0 as aps
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
@@ -2036,6 +2040,8 @@ export class CampanasController {
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MAX(rsv.arte_aprobado) as arte_aprobado,
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,
