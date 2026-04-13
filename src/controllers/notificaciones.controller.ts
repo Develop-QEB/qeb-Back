@@ -9,6 +9,17 @@ import {
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
 
+// Exact token match for comma-separated id_asignado field (avoids substring false positives)
+function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
+  const id = String(userId);
+  return [
+    { id_asignado: id },                        // exact: "123"
+    { id_asignado: { startsWith: `${id},` } },  // start: "123,..."
+    { id_asignado: { endsWith: `,${id}` } },    // end: "...,123"
+    { id_asignado: { contains: `,${id},` } },   // middle: "...,123,..."
+  ];
+}
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT || '587'),
@@ -39,7 +50,7 @@ export class NotificacionesController {
       if (userId) {
         const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
-          { id_asignado: { contains: String(userId) } },
+          ...idAsignadoMatch(userId),
         ];
 
         // Coordinador de Diseño también ve tareas de todos los Diseñadores
@@ -50,7 +61,7 @@ export class NotificacionesController {
           });
           for (const d of disenadores) {
             orConditions.push({ id_responsable: d.id });
-            orConditions.push({ id_asignado: { contains: String(d.id) } });
+            orConditions.push(...idAsignadoMatch(d.id));
           }
         }
 
@@ -62,7 +73,7 @@ export class NotificacionesController {
           });
           for (const j of jefesDigital) {
             orConditions.push({ id_responsable: j.id });
-            orConditions.push({ id_asignado: { contains: String(j.id) } });
+            orConditions.push(...idAsignadoMatch(j.id));
           }
         }
 
@@ -133,7 +144,7 @@ export class NotificacionesController {
             break;
 
           case 'asignadas_a_mi':
-            where.OR = [{ id_asignado: { contains: String(userId) } }];
+            where.OR = idAsignadoMatch(userId!);
             break;
 
           case 'creadas_por_mi':
@@ -736,7 +747,7 @@ export class NotificacionesController {
       if (userId) {
         where.OR = [
           { id_responsable: userId },
-          { id_asignado: { contains: String(userId) } },
+          ...idAsignadoMatch(userId),
         ];
       }
 
@@ -794,7 +805,7 @@ export class NotificacionesController {
       if (userId) {
         const orConditions: Record<string, unknown>[] = [
           { id_responsable: userId },
-          { id_asignado: { contains: String(userId) } },
+          ...idAsignadoMatch(userId),
         ];
 
         // Coordinador de Diseño también ve stats de Diseñadores
@@ -805,7 +816,7 @@ export class NotificacionesController {
           });
           for (const d of disenadores) {
             orConditions.push({ id_responsable: d.id });
-            orConditions.push({ id_asignado: { contains: String(d.id) } });
+            orConditions.push(...idAsignadoMatch(d.id));
           }
         }
 
@@ -817,7 +828,7 @@ export class NotificacionesController {
           });
           for (const j of jefesDigital) {
             orConditions.push({ id_responsable: j.id });
-            orConditions.push({ id_asignado: { contains: String(j.id) } });
+            orConditions.push(...idAsignadoMatch(j.id));
           }
         }
 
