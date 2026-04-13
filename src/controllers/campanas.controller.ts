@@ -1953,6 +1953,416 @@ export class CampanasController {
     }
   }
 
+  async getBatchInventarios(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idsParam = req.query.ids as string;
+      if (!idsParam) {
+        res.status(400).json({ success: false, error: 'ids parameter is required' });
+        return;
+      }
+
+      const ids = idsParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
+      if (!ids.length || ids.length > 50) {
+        res.status(400).json({ success: false, error: 'Provide 1-50 valid campaign IDs' });
+        return;
+      }
+
+      const placeholders = ids.map(() => '?').join(',');
+
+      // ── sinAPS query (same as getInventarioReservado, batched) ──
+      const sinAPSQuery = `
+        SELECT
+          cm.id as campana_id,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.estado) as estado,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.plaza) as plaza,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MIN(i.estatus) as estatus_inventario,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          0 as aps
+        FROM inventarios i
+          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id IN (${placeholders})
+          AND (rsv.APS IS NULL OR rsv.APS = 0)
+        GROUP BY cm.id, COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
+        ORDER BY cm.id, MIN(rsv.id) DESC
+      `;
+
+      // ── conAPS query (same as getInventarioConAPS, batched) ──
+      const conAPSQuery = `
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
+          cm.id as campana_id,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          MIN(i.cara) as cara,
+          MIN(i.mueble) as mueble,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza,
+          MIN(i.estado) as estado,
+          MIN(i.municipio) as municipio,
+          MIN(i.mueble) as tipo_de_mueble,
+          MIN(i.ancho) as ancho,
+          MIN(i.alto) as alto,
+          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
+          MIN(i.tarifa_publica) as tarifa_publica,
+          MIN(i.tradicional_digital) as tradicional_digital,
+          MIN(i.estatus) as estatus_inventario,
+          MAX(rsv.archivo) as archivo,
+          MAX(rsv.estatus) as estatus_reserva,
+          MAX(rsv.calendario_id) as calendario_id,
+          MAX(rsv.APS) as aps,
+          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
+          MIN(epIn.numero_espacio) as espacios,
+          MAX(sc.id) AS solicitud_caras_id,
+          MAX(sc.articulo) as articulo,
+          MAX(sc.tipo) as tipo_medio,
+          MAX(sc.inicio_periodo) as inicio_periodo,
+          MAX(sc.fin_periodo) as fin_periodo,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MAX(rsv.arte_aprobado) as arte_aprobado,
+          MIN(rsv.instalado) as instalado,
+          MAX(sc.formato) as formato,
+          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          MAX(sc.bonificacion) as bonificacion_sc,
+          MAX(sc.costo) as renta,
+          MAX(sc.cortesia) as cortesia
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE
+          cm.id IN (${placeholders})
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+        GROUP BY cm.id, COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+        ORDER BY cm.id, MIN(rsv.id) DESC
+      `;
+
+      // ── Tareas query (batched) ──
+      const tareasQuery = `
+        SELECT campania_id, id, tipo, estatus, ids_reservas, contenido, evidencia
+        FROM tareas
+        WHERE campania_id IN (${placeholders})
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
+      `;
+
+      // ── IM sin APS (batched) ──
+      const imSinAPSQuery = `
+        SELECT
+          cm.id as campana_id,
+          CONCAT('sc_', sc.id) as rsv_ids,
+          0 as id,
+          sc.articulo as codigo_unico,
+          NULL as mueble,
+          sc.estados as estado,
+          'Impresión' as tipo_de_cara,
+          NULL as latitud,
+          NULL as longitud,
+          NULL as ancho,
+          NULL as alto,
+          sc.ciudad as plaza,
+          NULL as tradicional_digital,
+          NULL as tarifa_publica,
+          'Impresión' as estatus_reserva,
+          NULL as archivo,
+          NULL as calendario_id,
+          NULL as arte_aprobado,
+          0 as instalado,
+          CONCAT('sc_', sc.id) as grupo_completo_id,
+          sc.id AS solicitud_caras_id,
+          sc.articulo as articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo as inicio_periodo,
+          sc.fin_periodo as fin_periodo,
+          sc.formato as formato,
+          COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
+          sc.cortesia as cortesia,
+          sc.ciudad as ciudad,
+          sc.estados as estados,
+          sc.nivel_socioeconomico as nivel_socioeconomico,
+          cat.numero_catorcena,
+          cat.año as anio_catorcena,
+          sc.caras AS caras_totales,
+          0 as aps
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id IN (${placeholders})
+          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND rsv.id IS NULL
+      `;
+
+      // ── IM con APS (batched) ──
+      const imConAPSQuery = `
+        SELECT
+          cm.id as campana_id,
+          CONCAT('sc_', sc.id) as rsv_ids,
+          0 as id,
+          sc.articulo as codigo_unico,
+          NULL as ubicacion,
+          'Impresión' as tipo_de_cara,
+          NULL as cara,
+          NULL as mueble,
+          NULL as latitud,
+          NULL as longitud,
+          sc.ciudad as plaza,
+          sc.estados as estado,
+          NULL as municipio,
+          NULL as tipo_de_mueble,
+          NULL as ancho,
+          NULL as alto,
+          sc.nivel_socioeconomico as nivel_socioeconomico,
+          NULL as tarifa_publica,
+          NULL as tradicional_digital,
+          NULL as archivo,
+          'Impresión' as estatus_reserva,
+          NULL as calendario_id,
+          MAX(rsv.APS) as aps,
+          CONCAT('sc_', sc.id) as grupo_completo_id,
+          NULL as espacios,
+          sc.id AS solicitud_caras_id,
+          sc.articulo as articulo,
+          sc.tipo as tipo_medio,
+          sc.inicio_periodo as inicio_periodo,
+          sc.fin_periodo as fin_periodo,
+          sc.caras AS caras_totales,
+          NULL as arte_aprobado,
+          0 as instalado,
+          sc.formato as formato,
+          COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          sc.bonificacion as bonificacion_sc,
+          sc.costo as renta,
+          sc.cortesia as cortesia,
+          sc.ciudad as ciudad,
+          sc.estados as estados
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
+        WHERE
+          cm.id IN (${placeholders})
+          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+        GROUP BY cm.id, sc.id
+      `;
+
+      // ── Catorcenas (global, para conAPS matching) ──
+      const catorcenasQuery = `
+        SELECT numero_catorcena, año as anio_catorcena, fecha_inicio, fecha_fin
+        FROM catorcenas
+        ORDER BY fecha_inicio
+      `;
+
+      // Execute all 6 queries in parallel (only 6 connections instead of N*4)
+      const [sinAPSRows, conAPSRows, tareasRows, imSinAPSRows, imConAPSRows, catorcenasRows] = await Promise.all([
+        prisma.$queryRawUnsafe(sinAPSQuery, ...ids),
+        prisma.$queryRawUnsafe(conAPSQuery, ...ids),
+        prisma.$queryRawUnsafe(tareasQuery, ...ids),
+        prisma.$queryRawUnsafe(imSinAPSQuery, ...ids),
+        prisma.$queryRawUnsafe(imConAPSQuery, ...ids),
+        prisma.$queryRawUnsafe(catorcenasQuery),
+      ]);
+
+      // ── Pre-compute catorcena ranges for binary search ──
+      const catorcenaRanges = (catorcenasRows as any[]).map((cat: any) => ({
+        inicio: new Date(cat.fecha_inicio).getTime(),
+        fin: new Date(cat.fecha_fin).getTime(),
+        numero_catorcena: cat.numero_catorcena,
+        anio_catorcena: cat.anio_catorcena,
+      }));
+
+      function findCatorcena(fecha: Date) {
+        const ts = fecha.getTime();
+        let lo = 0, hi = catorcenaRanges.length - 1;
+        let result = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (catorcenaRanges[mid].inicio <= ts) {
+            result = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (result >= 0 && ts <= catorcenaRanges[result].fin) {
+          return catorcenaRanges[result];
+        }
+        return null;
+      }
+
+      // ── Index tareas by campana_id → reserva_id ──
+      const tareasByCampana = new Map<number, { impresion: Map<number, any>; recepcion: Map<number, any>; programacion: Map<number, any>; instalacion: Map<number, any> }>();
+      for (const tarea of tareasRows as any[]) {
+        const cId = Number(tarea.campania_id);
+        if (!tareasByCampana.has(cId)) {
+          tareasByCampana.set(cId, {
+            impresion: new Map(), recepcion: new Map(), programacion: new Map(), instalacion: new Map(),
+          });
+        }
+        const maps = tareasByCampana.get(cId)!;
+        if (!tarea.ids_reservas) continue;
+        const rsvIds = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? maps.impresion
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? maps.programacion
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? maps.instalacion
+                  : maps.recepcion;
+        for (const rsvId of rsvIds) {
+          map.set(rsvId, tarea);
+        }
+      }
+
+      // ── Process rows and group by campana_id ──
+      function processRow(row: any, maps: { impresion: Map<number, any>; recepcion: Map<number, any>; programacion: Map<number, any>; instalacion: Map<number, any> } | undefined, needsCatorcena: boolean) {
+        const isIM = String(row.rsv_ids).startsWith('sc_');
+        const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+
+        const tImpresion = maps ? rsvIds.map(id => maps.impresion.get(id)).find(Boolean) : undefined;
+        const tRecepcion = maps ? rsvIds.map(id => maps.recepcion.get(id)).find(Boolean) : undefined;
+
+        let estatus_arte: string;
+        if (isIM) {
+          estatus_arte = 'Impresión';
+        } else if (Number(row.instalado) === 1) {
+          estatus_arte = 'Instalado';
+        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+          estatus_arte = 'Artes Recibidos';
+        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+          estatus_arte = 'En Impresion';
+        } else if (row.arte_aprobado === 'aprobado') {
+          estatus_arte = 'Artes Aprobados';
+        } else if (row.archivo != null && row.archivo !== '') {
+          estatus_arte = 'Revision Artes';
+        } else {
+          estatus_arte = 'Carga Artes';
+        }
+
+        // Catorcena matching for conAPS rows (sinAPS already has it from SQL JOIN)
+        let numero_catorcena = row.numero_catorcena ?? null;
+        let anio_catorcena = row.anio_catorcena ?? null;
+        if (needsCatorcena && row.inicio_periodo && numero_catorcena == null) {
+          const cat = findCatorcena(new Date(row.inicio_periodo));
+          if (cat) {
+            numero_catorcena = cat.numero_catorcena;
+            anio_catorcena = cat.anio_catorcena;
+          }
+        }
+
+        // Indicaciones de programación
+        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
+        let indicaciones_programacion: string | null = null;
+        if (tProgramacion && tProgramacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
+              ? JSON.parse(tProgramacion.evidencia) : tProgramacion.evidencia;
+            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+          } catch { /* ignore */ }
+        }
+
+        // Indicaciones de instalación
+        const tInstalacion = maps ? rsvIds.map(id => maps.instalacion.get(id)).find(Boolean) : undefined;
+        let indicaciones_instalacion: string | null = null;
+        if (tInstalacion && tInstalacion.evidencia) {
+          try {
+            const evidenciaJson = typeof tInstalacion.evidencia === 'string'
+              ? JSON.parse(tInstalacion.evidencia) : tInstalacion.evidencia;
+            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+          } catch { /* ignore */ }
+        }
+
+        const { campana_id, ...rest } = row;
+        return { ...rest, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+      }
+
+      // Initialize result map
+      const result: Record<number, any[]> = {};
+      for (const id of ids) result[id] = [];
+
+      // Process sinAPS + imSinAPS rows
+      for (const row of [...(sinAPSRows as any[]), ...(imSinAPSRows as any[])]) {
+        const cId = Number(row.campana_id);
+        const maps = tareasByCampana.get(cId);
+        result[cId]?.push(processRow(row, maps, false));
+      }
+
+      // Process conAPS + imConAPS rows
+      for (const row of [...(conAPSRows as any[]), ...(imConAPSRows as any[])]) {
+        const cId = Number(row.campana_id);
+        const maps = tareasByCampana.get(cId);
+        result[cId]?.push(processRow(row, maps, true));
+      }
+
+      // Serialize BigInt
+      const serializable = JSON.parse(JSON.stringify(result, (_, value) =>
+        typeof value === 'bigint' ? Number(value) : value
+      ));
+
+      res.json({ success: true, data: serializable });
+    } catch (error) {
+      console.error('Error en getBatchInventarios:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inventarios batch';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async getExportLayout(req: AuthRequest, res: Response): Promise<void> {
     try {
       const status = req.query.status as string;
