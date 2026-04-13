@@ -704,6 +704,26 @@ export async function aprobarCaras(
           estatus: 'Atendido'
         }
       });
+
+      // Si DG acaba de aprobar y quedan pendientes DCM, crear tarea DCM
+      if (tipoAutorizacion === 'dg' && pendientesDcm.length > 0) {
+        console.log('[aprobarCaras] DG aprobó, creando tarea DCM para', pendientesDcm.length, 'circuito(s)');
+        const prop = await prisma.propuesta.findFirst({
+          where: { id: parseInt(propuestaId) },
+          select: { solicitud_id: true }
+        });
+        if (prop) {
+          await crearTareasAutorizacion(
+            prop.solicitud_id,
+            parseInt(propuestaId),
+            aprobadorId,
+            aprobadorNombre,
+            [],
+            pendientesDcm,
+            'propuesta'
+          );
+        }
+      }
     }
   }
 
