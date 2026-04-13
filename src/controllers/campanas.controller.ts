@@ -112,9 +112,19 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM reservas rsv_s
+            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+              AND rsv_s.deleted_at IS NULL
+              AND inv_s.codigo_unico LIKE ?
+          )
+        )`);
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
@@ -233,7 +243,8 @@ export class CampanasController {
           COALESCE(rsv_agg.circuitos, 0) AS circuitos,
           COALESCE(uc_agg.reservas_count_ultima_cat, 0) AS reservas_count_ultima_cat,
           COALESCE(uc_agg.caras_ultima_cat, 0) AS caras_ultima_cat,
-          cat_content.catorcenas_con_contenido
+          cat_content.catorcenas_con_contenido,
+          inv_codes.codigos_inventario
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -284,14 +295,27 @@ export class CampanasController {
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
+        LEFT JOIN (
+          SELECT
+            ct_inv.id AS cotizacion_id,
+            GROUP_CONCAT(DISTINCT inv_i.codigo_unico ORDER BY inv_i.codigo_unico SEPARATOR ',') AS codigos_inventario
+          FROM reservas rsv_i
+          INNER JOIN espacio_inventario ei_i ON ei_i.id = rsv_i.inventario_id
+          INNER JOIN inventarios inv_i ON inv_i.id = ei_i.inventario_id
+          INNER JOIN solicitudCaras sc_i ON sc_i.id = rsv_i.solicitudCaras_id
+          INNER JOIN cotizacion ct_inv ON ct_inv.id_propuesta = sc_i.idquote
+          WHERE rsv_i.deleted_at IS NULL AND ct_inv.id IN (${ctIdPh})
+          GROUP BY ct_inv.id
+        ) inv_codes ON inv_codes.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, campaignIds para WHERE
       const dataParams = [
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,
       ];
@@ -1232,9 +1256,19 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM reservas rsv_s
+            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+              AND rsv_s.deleted_at IS NULL
+              AND inv_s.codigo_unico LIKE ?
+          )
+        )`);
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       if (yearInicio && yearFin) {
@@ -1948,9 +1982,19 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push('(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?)');
+        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM reservas rsv_s
+            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+              AND rsv_s.deleted_at IS NULL
+              AND inv_s.codigo_unico LIKE ?
+          )
+        )`);
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       if (yearInicio && yearFin) {
