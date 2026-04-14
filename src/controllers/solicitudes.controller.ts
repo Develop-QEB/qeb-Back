@@ -12,13 +12,7 @@ import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_E
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
-
-// Helper function to serialize BigInt values to numbers
-function serializeBigInt<T>(obj: T): T {
-  return JSON.parse(JSON.stringify(obj, (_, value) =>
-    typeof value === 'bigint' ? Number(value) : value
-  ));
-}
+import { serializeBigInt } from '../utils/serialization';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',

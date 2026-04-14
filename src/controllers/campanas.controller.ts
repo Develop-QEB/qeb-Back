@@ -356,9 +356,7 @@ export class CampanasController {
       }
 
       // Convert BigInt to Number for JSON serialization
-      const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const campanasSerializable = serializeBigInt(campanas);
 
       const response = {
         success: true,
@@ -1647,9 +1645,7 @@ export class CampanasController {
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventarioConEstatus);
 
       res.json({
         success: true,
@@ -1937,9 +1933,7 @@ export class CampanasController {
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventarioConEstatus);
 
       res.json({
         success: true,
@@ -2357,9 +2351,7 @@ export class CampanasController {
       }
 
       // Serialize BigInt
-      const serializable = JSON.parse(JSON.stringify(result, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const serializable = serializeBigInt(result);
 
       res.json({ success: true, data: serializable });
     } catch (error) {
@@ -2760,11 +2752,11 @@ export class CampanasController {
       const campaignsWithInv = new Set(inventarioConEstatus.map((r: any) => Number(r.campana_id)));
 
       // Serialize
-      const result = JSON.parse(JSON.stringify({
+      const result = serializeBigInt({
         inventarios: inventarioConEstatus,
         campaignInfo: campInfoArr,
         campaignsWithInventory: [...campaignsWithInv],
-      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+      });
 
       res.json({ success: true, data: result });
     } catch (error) {
@@ -6893,9 +6885,7 @@ export class CampanasController {
         };
       });
 
-      const dataSerializable = JSON.parse(JSON.stringify(enrichedData, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const dataSerializable = serializeBigInt(enrichedData);
 
       res.json({
         success: true,
