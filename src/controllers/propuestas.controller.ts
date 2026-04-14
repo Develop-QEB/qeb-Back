@@ -11,6 +11,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropu
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
+import { serializeBigInt } from '../utils/serialization';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -2039,6 +2040,8 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
 
       // Build WHERE (same as getAll)
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
@@ -2070,7 +2073,20 @@ export class PropuestasController {
         params.push(...visibleIds);
       }
 
-      // 1. Get all matching propuesta IDs
+      // 1. Get total count of matching propuestas
+      const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(`
+        SELECT COUNT(DISTINCT pr.id) as total FROM propuesta pr
+        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE ${whereConditions}
+      `, ...params);
+      const total = Number(countResult[0]?.total || 0);
+      if (total === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [], carasInfo: [], total: 0, page, limit } }); return; }
+
+      // 2. Get paginated propuesta IDs
+      const offset = (page - 1) * limit;
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT DISTINCT pr.id FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
@@ -2078,9 +2094,11 @@ export class PropuestasController {
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
-      `, ...params);
+        ORDER BY pr.id DESC
+        LIMIT ? OFFSET ?
+      `, ...params, limit, offset);
       const propIds = idsResult.map(r => Number(r.id));
-      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
+      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [], carasInfo: [], total, page, limit } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
       // 2. Propuesta info
@@ -2158,7 +2176,7 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
-      const QUERY_TIMEOUT = 60000;
+      const QUERY_TIMEOUT = 30000;
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
       );
@@ -2172,11 +2190,14 @@ export class PropuestasController {
         timeoutPromise as never,
       ]);
 
-      const result = JSON.parse(JSON.stringify({
+      const result = serializeBigInt({
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
-      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+        total,
+        page,
+        limit,
+      });
 
       res.json({ success: true, data: result });
     } catch (error) {
@@ -3540,64 +3561,12 @@ export class PropuestasController {
         },
       });
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
-      const todasCaras = await prisma.solicitudCaras.findMany({
-        where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
-      });
-      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (totalCarasGlobal % 2 !== 0) {
-        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
-        if (carasNoP.length > 0) {
-          await prisma.solicitudCaras.updateMany({
-            where: {
-              idquote: id,
-              autorizacion_dg: { not: 'pendiente' }
-            },
-            data: { autorizacion_dg: 'pendiente' }
-          });
-          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
-        }
-      }
-
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(id);
-      if (autorizacion.tienePendientes && userId) {
-        // Get solicitud_id from propuesta
-        const propuesta = await prisma.propuesta.findUnique({
-          where: { id: parseInt(id) },
-          select: { solicitud_id: true }
-        });
-
-        if (propuesta?.solicitud_id) {
-          await crearTareasAutorizacion(
-            propuesta.solicitud_id,
-            parseInt(id),
-            userId,
-            userName,
-            autorizacion.pendientesDg,
-            autorizacion.pendientesDcm,
-            'propuesta'
-          );
-        }
-      }
-
-      // Build response message
-      let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
-      }
+      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
 
       res.json({
         success: true,
         data: newCara,
-        message: mensaje,
-        autorizacion: {
-          tienePendientes: autorizacion.tienePendientes,
-          pendientesDg: autorizacion.pendientesDg.length,
-          pendientesDcm: autorizacion.pendientesDcm.length
-        }
+        message: 'Circuito creado exitosamente',
       });
     } catch (error) {
       console.error('Error creating cara:', error);

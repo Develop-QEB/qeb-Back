@@ -1067,7 +1067,9 @@ export class ChatbotController {
         SELECT id, user_id, user_nombre, user_email, rol, pantalla, modal,
                pregunta, respuesta, categoria, off_topic, created_at
         FROM chatbot_logs
+        WHERE created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
         ORDER BY created_at ASC
+        LIMIT 5000
       `);
 
       // Group into sessions: same user_id, gap <= 30 min between messages

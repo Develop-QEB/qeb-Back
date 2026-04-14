@@ -356,9 +356,7 @@ export class CampanasController {
       }
 
       // Convert BigInt to Number for JSON serialization
-      const campanasSerializable = JSON.parse(JSON.stringify(campanas, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const campanasSerializable = serializeBigInt(campanas);
 
       const response = {
         success: true,
@@ -1647,9 +1645,7 @@ export class CampanasController {
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventarioConEstatus);
 
       res.json({
         success: true,
@@ -1937,9 +1933,7 @@ export class CampanasController {
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
-      const inventarioSerializable = JSON.parse(JSON.stringify(inventarioConEstatus, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const inventarioSerializable = serializeBigInt(inventarioConEstatus);
 
       res.json({
         success: true,
@@ -2357,9 +2351,7 @@ export class CampanasController {
       }
 
       // Serialize BigInt
-      const serializable = JSON.parse(JSON.stringify(result, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const serializable = serializeBigInt(result);
 
       res.json({ success: true, data: serializable });
     } catch (error) {
@@ -2451,7 +2443,7 @@ export class CampanasController {
 
       const whereClause = conditions.join(' AND ');
 
-      // 1. Get all campaign IDs matching filters (no pagination)
+      // 1. Get campaign IDs matching filters (capped at 200 to prevent timeout)
       const idsQuery = `
         SELECT cm.id
         FROM campania cm
@@ -2460,6 +2452,8 @@ export class CampanasController {
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
         WHERE ${whereClause}
+        ORDER BY cm.id DESC
+        LIMIT 200
       `;
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(idsQuery, ...params);
       const campaignIds = idsResult.map(r => Number(r.id));
@@ -2760,11 +2754,11 @@ export class CampanasController {
       const campaignsWithInv = new Set(inventarioConEstatus.map((r: any) => Number(r.campana_id)));
 
       // Serialize
-      const result = JSON.parse(JSON.stringify({
+      const result = serializeBigInt({
         inventarios: inventarioConEstatus,
         campaignInfo: campInfoArr,
         campaignsWithInventory: [...campaignsWithInv],
-      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+      });
 
       res.json({ success: true, data: result });
     } catch (error) {
@@ -6893,9 +6887,7 @@ export class CampanasController {
         };
       });
 
-      const dataSerializable = JSON.parse(JSON.stringify(enrichedData, (_, value) =>
-        typeof value === 'bigint' ? Number(value) : value
-      ));
+      const dataSerializable = serializeBigInt(enrichedData);
 
       res.json({
         success: true,
@@ -7585,37 +7577,12 @@ export class CampanasController {
         data: createData,
       });
 
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
-      if (autorizacion.tienePendientes && userId && propuesta?.solicitud_id) {
-        await crearTareasAutorizacion(
-          propuesta.solicitud_id,
-          cotizacion.id_propuesta,
-          userId,
-          userName,
-          autorizacion.pendientesDg,
-          autorizacion.pendientesDcm,
-          'campana',
-          campanaId
-        );
-      }
-
-      // Build response message
-      let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
-      }
+      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
 
       res.json({
         success: true,
         data: cara,
-        message: mensaje,
-        autorizacion: {
-          tienePendientes: autorizacion.tienePendientes,
-          pendientesDg: autorizacion.pendientesDg.length,
-          pendientesDcm: autorizacion.pendientesDcm.length
-        }
+        message: 'Circuito creado exitosamente',
       });
     } catch (error) {
       console.error('Error en createCara:', error);

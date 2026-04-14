@@ -3,6 +3,7 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import bcrypt from 'bcryptjs';
 import { authService } from '../services/auth.service';
+import { serializeBigInt } from '../utils/serialization';
 
 export class UsuariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
@@ -400,14 +401,12 @@ export class UsuariosController {
         userId, userIdStr
       );
 
-      const serialize = (arr: any[]) => JSON.parse(JSON.stringify(arr, (_, v) => typeof v === 'bigint' ? Number(v) : v));
-
       res.json({
         success: true,
         data: {
-          solicitudes: serialize(solicitudes),
-          propuestas: serialize(propuestas),
-          tareas: serialize(tareas),
+          solicitudes: serializeBigInt(solicitudes),
+          propuestas: serializeBigInt(propuestas),
+          tareas: serializeBigInt(tareas),
         }
       });
     } catch (error) {
