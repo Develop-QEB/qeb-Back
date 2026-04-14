@@ -778,12 +778,6 @@ export class SolicitudesController {
 
       const statusAnterior = solicitudAnterior.status;
 
-      // Bloquear aprobación si no tiene CUIC
-      if (status === 'Aprobada' && (!solicitudAnterior.cuic || solicitudAnterior.cuic === '0' || solicitudAnterior.cuic === 'NULL')) {
-        res.status(400).json({ success: false, error: 'No se puede aprobar esta solicitud. No tiene un cliente con CUIC asignado.' });
-        return;
-      }
-
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
@@ -1667,23 +1661,6 @@ export class SolicitudesController {
 
       // Use salesperson_code from request (ASESOR_U_SAPCode_Original from frontend)
 
-      // Duplicate detection: reject if same user created a solicitud with same client + description in last 30s
-      const thirtySecondsAgo = new Date(Date.now() - 30_000);
-      const duplicate = await prisma.solicitud.findFirst({
-        where: {
-          usuario_id: userId,
-          cliente_id,
-          descripcion,
-          deleted_at: null,
-          fecha: { gte: thirtySecondsAgo },
-        },
-        select: { id: true },
-      });
-      if (duplicate) {
-        res.status(409).json({ error: 'Solicitud duplicada detectada. Si deseas crear otra, espera unos segundos.' });
-        return;
-      }
-
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
         // 1. Create solicitud
@@ -2218,12 +2195,6 @@ export class SolicitudesController {
 
       if (solicitud.status !== 'Aprobada') {
         res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
-        return;
-      }
-
-      // Verificar que la solicitud tenga un cliente con CUIC
-      if (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL') {
-        res.status(400).json({ success: false, error: 'No se puede atender esta solicitud. No tiene un cliente con CUIC asignado.' });
         return;
       }
 
