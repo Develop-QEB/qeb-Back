@@ -778,12 +778,6 @@ export class SolicitudesController {
 
       const statusAnterior = solicitudAnterior.status;
 
-      // Bloquear aprobación si no tiene CUIC
-      if (status === 'Aprobada' && (!solicitudAnterior.cuic || solicitudAnterior.cuic === '0' || solicitudAnterior.cuic === 'NULL')) {
-        res.status(400).json({ success: false, error: 'No se puede aprobar esta solicitud. No tiene un cliente con CUIC asignado.' });
-        return;
-      }
-
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
@@ -2201,12 +2195,6 @@ export class SolicitudesController {
 
       if (solicitud.status !== 'Aprobada') {
         res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
-        return;
-      }
-
-      // Verificar que la solicitud tenga un cliente con CUIC
-      if (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL') {
-        res.status(400).json({ success: false, error: 'No se puede atender esta solicitud. No tiene un cliente con CUIC asignado.' });
         return;
       }
 
