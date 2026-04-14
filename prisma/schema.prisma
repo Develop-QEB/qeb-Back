@@ -248,6 +248,10 @@ model propuesta {
   articulo                 String    @db.VarChar(255)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
   archivo                  String?   @db.VarChar(255)
+
+  @@index([deleted_at, status], map: "idx_propuesta_deleted_status")
+  @@index([solicitud_id], map: "idx_propuesta_solicitud")
+  @@index([cliente_id], map: "idx_propuesta_cliente")
 }
 
 model reservas {
