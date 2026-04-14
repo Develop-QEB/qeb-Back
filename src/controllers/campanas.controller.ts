@@ -2399,7 +2399,7 @@ export class CampanasController {
 
       const whereClause = conditions.join(' AND ');
 
-      // 1. Get all campaign IDs matching filters (no pagination)
+      // 1. Get campaign IDs matching filters (capped at 200 to prevent timeout)
       const idsQuery = `
         SELECT cm.id
         FROM campania cm
@@ -2408,6 +2408,8 @@ export class CampanasController {
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
         WHERE ${whereClause}
+        ORDER BY cm.id DESC
+        LIMIT 200
       `;
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(idsQuery, ...params);
       const campaignIds = idsResult.map(r => Number(r.id));
