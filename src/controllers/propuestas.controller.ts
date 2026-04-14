@@ -11,6 +11,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropu
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
+import { serializeBigInt } from '../utils/serialization';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -2189,14 +2190,14 @@ export class PropuestasController {
         timeoutPromise as never,
       ]);
 
-      const result = JSON.parse(JSON.stringify({
+      const result = serializeBigInt({
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
         total,
         page,
         limit,
-      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
+      });
 
       res.json({ success: true, data: result });
     } catch (error) {
