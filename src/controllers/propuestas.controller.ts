@@ -3540,64 +3540,12 @@ export class PropuestasController {
         },
       });
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
-      const todasCaras = await prisma.solicitudCaras.findMany({
-        where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
-      });
-      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (totalCarasGlobal % 2 !== 0) {
-        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
-        if (carasNoP.length > 0) {
-          await prisma.solicitudCaras.updateMany({
-            where: {
-              idquote: id,
-              autorizacion_dg: { not: 'pendiente' }
-            },
-            data: { autorizacion_dg: 'pendiente' }
-          });
-          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
-        }
-      }
-
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(id);
-      if (autorizacion.tienePendientes && userId) {
-        // Get solicitud_id from propuesta
-        const propuesta = await prisma.propuesta.findUnique({
-          where: { id: parseInt(id) },
-          select: { solicitud_id: true }
-        });
-
-        if (propuesta?.solicitud_id) {
-          await crearTareasAutorizacion(
-            propuesta.solicitud_id,
-            parseInt(id),
-            userId,
-            userName,
-            autorizacion.pendientesDg,
-            autorizacion.pendientesDcm,
-            'propuesta'
-          );
-        }
-      }
-
-      // Build response message
-      let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
-      }
+      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
 
       res.json({
         success: true,
         data: newCara,
-        message: mensaje,
-        autorizacion: {
-          tienePendientes: autorizacion.tienePendientes,
-          pendientesDg: autorizacion.pendientesDg.length,
-          pendientesDcm: autorizacion.pendientesDcm.length
-        }
+        message: 'Circuito creado exitosamente',
       });
     } catch (error) {
       console.error('Error creating cara:', error);

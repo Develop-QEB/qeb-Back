@@ -7541,37 +7541,12 @@ export class CampanasController {
         data: createData,
       });
 
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
-      if (autorizacion.tienePendientes && userId && propuesta?.solicitud_id) {
-        await crearTareasAutorizacion(
-          propuesta.solicitud_id,
-          cotizacion.id_propuesta,
-          userId,
-          userName,
-          autorizacion.pendientesDg,
-          autorizacion.pendientesDcm,
-          'campana',
-          campanaId
-        );
-      }
-
-      // Build response message
-      let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
-      }
+      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
 
       res.json({
         success: true,
         data: cara,
-        message: mensaje,
-        autorizacion: {
-          tienePendientes: autorizacion.tienePendientes,
-          pendientesDg: autorizacion.pendientesDg.length,
-          pendientesDcm: autorizacion.pendientesDcm.length
-        }
+        message: 'Circuito creado exitosamente',
       });
     } catch (error) {
       console.error('Error en createCara:', error);
