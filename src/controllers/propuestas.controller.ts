@@ -707,7 +707,7 @@ export class PropuestasController {
         if (solicitud && (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL')) {
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". La solicitud no tiene un cliente con CUIC asignado.`,
+            error: `No se puede cambiar a "${status}". El cliente actual es un Cliente Lead (CUIC 0). Edita la propuesta y asigna un cliente con CUIC antes de continuar.`,
           });
           return;
         }
