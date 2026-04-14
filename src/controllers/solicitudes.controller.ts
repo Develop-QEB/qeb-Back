@@ -1667,23 +1667,6 @@ export class SolicitudesController {
 
       // Use salesperson_code from request (ASESOR_U_SAPCode_Original from frontend)
 
-      // Duplicate detection: reject if same user created a solicitud with same client + description in last 30s
-      const thirtySecondsAgo = new Date(Date.now() - 30_000);
-      const duplicate = await prisma.solicitud.findFirst({
-        where: {
-          usuario_id: userId,
-          cliente_id,
-          descripcion,
-          deleted_at: null,
-          fecha: { gte: thirtySecondsAgo },
-        },
-        select: { id: true },
-      });
-      if (duplicate) {
-        res.status(409).json({ error: 'Solicitud duplicada detectada. Si deseas crear otra, espera unos segundos.' });
-        return;
-      }
-
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
         // 1. Create solicitud
