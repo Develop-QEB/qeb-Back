@@ -2523,7 +2523,6 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
         WHERE cm.id IN (${cmIdPh})
-          AND rsv.APS IS NOT NULL AND rsv.APS > 0
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
                  s.nombre_usuario, ct.tipo_periodo, pr.descripcion,
