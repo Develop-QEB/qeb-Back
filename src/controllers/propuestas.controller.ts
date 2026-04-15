@@ -700,7 +700,7 @@ export class PropuestasController {
       }
 
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
-      if (status === 'Aprobada' || status === 'Pase a ventas') {
+      if (status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
         const solicitud = await prisma.solicitud.findFirst({
           where: { id: propuestaAnterior.solicitud_id },
