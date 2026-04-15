@@ -412,7 +412,9 @@ export class PropuestasController {
       const params: any[] = [];
 
       // Filter by solicitudes that have been attended
-      // soloAtendidas removed - show all propuestas regardless of solicitud status
+      if (soloAtendidas) {
+        whereConditions += ` AND sl.status = 'Atendida'`;
+      }
 
       if (status) {
         whereConditions += ` AND pr.status = ?`;
