@@ -1599,7 +1599,7 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (isIM) {
@@ -1609,7 +1609,7 @@ export class CampanasController {
         } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
-                   (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1621,11 +1621,11 @@ export class CampanasController {
 
         // Indicaciones de programación
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
             indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
           } catch { /* ignore parse errors */ }
         }
@@ -1876,7 +1876,7 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         // estatus_arte
         let estatus_arte: string;
@@ -1887,7 +1887,7 @@ export class CampanasController {
         } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
-                   (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1910,11 +1910,11 @@ export class CampanasController {
 
         // Indicaciones de programación desde la tarea
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
             indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
           } catch { /* ignore parse errors */ }
         }
