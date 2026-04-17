@@ -1602,15 +1602,17 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (isIM) {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1621,13 +1623,12 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
             indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
           } catch { /* ignore parse errors */ }
         }
@@ -1878,6 +1879,7 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         // estatus_arte
         let estatus_arte: string;
@@ -1885,9 +1887,10 @@ export class CampanasController {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1909,13 +1912,12 @@ export class CampanasController {
         }
 
         // Indicaciones de programación desde la tarea
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
             indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
           } catch { /* ignore parse errors */ }
         }
@@ -2280,15 +2282,17 @@ export class CampanasController {
 
         const tImpresion = maps ? rsvIds.map(id => maps.impresion.get(id)).find(Boolean) : undefined;
         const tRecepcion = maps ? rsvIds.map(id => maps.recepcion.get(id)).find(Boolean) : undefined;
+        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
 
         let estatus_arte: string;
         if (isIM) {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -2310,7 +2314,6 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -2669,10 +2672,11 @@ export class CampanasController {
       // Index tareas by reserva_id
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : recepcionByReserva;
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : (tarea.tipo === 'Programación' ? programacionByReserva : recepcionByReserva);
         for (const rsvId of ids) map.set(rsvId, tarea);
       }
 
@@ -2702,12 +2706,16 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (isIM) estatus_arte = 'Impresión';
         else if (Number(row.instalado) === 1) estatus_arte = 'Instalado';
-        else if (tRecepcion && tRecepcion.estatus === 'Completado') estatus_arte = 'Artes Recibidos';
-        else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) estatus_arte = 'En Impresion';
+        else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) estatus_arte = 'Artes Recibidos';
+        else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                 (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
+          estatus_arte = 'En Impresion';
+        }
         else if (row.arte_aprobado === 'aprobado') estatus_arte = 'Artes Aprobados';
         else if (row.archivo != null && row.archivo !== '') estatus_arte = 'Revision Artes';
         else estatus_arte = 'Carga Artes';
