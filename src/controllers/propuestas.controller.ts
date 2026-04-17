@@ -2144,6 +2144,7 @@ export class PropuestasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta, MAX(sc.cortesia) as cortesia,
+          MAX(rsv.APS) as aps_especifico,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena, cat.año as anio_catorcena
         FROM solicitudCaras sc
