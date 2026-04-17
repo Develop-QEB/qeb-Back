@@ -7476,6 +7476,7 @@ export class CampanasController {
       };
       if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+      if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
       const cara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -7600,6 +7601,7 @@ export class CampanasController {
       };
       if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+      if (data.grupo_rt_bf) createData.grupo_rt_bf = data.grupo_rt_bf;
 
       const cara = await prisma.solicitudCaras.create({
         data: createData,
@@ -7693,6 +7695,7 @@ export class CampanasController {
           };
           if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
           if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+          if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },

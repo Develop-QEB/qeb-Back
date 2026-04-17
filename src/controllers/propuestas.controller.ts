@@ -665,6 +665,7 @@ export class PropuestasController {
           descuento: true,
           autorizacion_dg: true,
           autorizacion_dcm: true,
+          grupo_rt_bf: true,
         },
       });
 
@@ -3395,6 +3396,7 @@ export class PropuestasController {
         caras_contraflujo,
         articulo,
         descuento,
+        grupo_rt_bf,
       } = req.body;
 
       // Get current cara to compare auth-affecting fields
@@ -3457,6 +3459,7 @@ export class PropuestasController {
           autorizacion_dg,
           autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
         },
       });
 
@@ -3530,6 +3533,7 @@ export class PropuestasController {
         caras_contraflujo,
         articulo,
         descuento,
+        grupo_rt_bf,
       } = req.body;
 
       // Calculate authorization state
@@ -3564,6 +3568,7 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
+          grupo_rt_bf: grupo_rt_bf || null,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
@@ -3659,6 +3664,7 @@ export class PropuestasController {
               autorizacion_dg,
               autorizacion_dcm,
               cortesia: (data.articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+              grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,
             },
           });
 
