@@ -228,9 +228,9 @@ export class CampanasController {
           COALESCE(s.producto_nombre, cl.T2_U_Producto) as T2_U_Producto,
           COALESCE(s.categoria_nombre, cl.T2_U_Categoria) as T2_U_Categoria,
           s.nombre_usuario as creador_nombre,
-          s.sap_database as sap_database,
-          s.card_code as card_code,
-          s.salesperson_code as salesperson_code,
+          COALESCE(s.sap_database, cl.sap_database) as sap_database,
+          COALESCE(s.card_code, cl.card_code) as card_code,
+          COALESCE(s.salesperson_code, cl.salesperson_code) as salesperson_code,
           cat_ini.numero_catorcena as catorcena_inicio_num,
           cat_ini.año as catorcena_inicio_anio,
           cat_fin.numero_catorcena as catorcena_fin_num,
@@ -665,6 +665,7 @@ export class CampanasController {
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
+        IMU: solicitud?.IMU ?? 0,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
         posted_aps: postedAps,
         // Reservas count para detectar campañas incompletas
@@ -1037,6 +1038,7 @@ export class CampanasController {
         catorcenaFinAnio,
         asignados,
         id_asignado,
+        IMU,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1093,6 +1095,7 @@ export class CampanasController {
               data: {
                 ...(descripcion !== undefined && { descripcion }),
                 ...(notas !== undefined && { notas }),
+                ...(IMU !== undefined && { IMU: IMU ? 1 : 0 }),
               },
             });
           }
@@ -1599,15 +1602,17 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (isIM) {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1618,14 +1623,15 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1637,7 +1643,9 @@ export class CampanasController {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia)
               : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1875,6 +1883,7 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProg = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         // estatus_arte
         let estatus_arte: string;
@@ -1882,9 +1891,10 @@ export class CampanasController {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -1906,14 +1916,15 @@ export class CampanasController {
         }
 
         // Indicaciones de programación desde la tarea
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
-        if (tProgramacion && tProgramacion.evidencia) {
+        if (tProg && tProg.evidencia) {
           try {
-            const evidenciaJson = typeof tProgramacion.evidencia === 'string'
-              ? JSON.parse(tProgramacion.evidencia)
-              : tProgramacion.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const evidenciaJson = typeof tProg.evidencia === 'string'
+              ? JSON.parse(tProg.evidencia)
+              : tProg.evidencia;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1925,7 +1936,9 @@ export class CampanasController {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia)
               : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -2277,15 +2290,17 @@ export class CampanasController {
 
         const tImpresion = maps ? rsvIds.map(id => maps.impresion.get(id)).find(Boolean) : undefined;
         const tRecepcion = maps ? rsvIds.map(id => maps.recepcion.get(id)).find(Boolean) : undefined;
+        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
 
         let estatus_arte: string;
         if (isIM) {
           estatus_arte = 'Impresión';
         } else if (Number(row.instalado) === 1) {
           estatus_arte = 'Instalado';
-        } else if (tRecepcion && tRecepcion.estatus === 'Completado') {
+        } else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) {
           estatus_arte = 'Artes Recibidos';
-        } else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) {
+        } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                   (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         } else if (row.arte_aprobado === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
@@ -2307,13 +2322,14 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
             const evidenciaJson = typeof tProgramacion.evidencia === 'string'
               ? JSON.parse(tProgramacion.evidencia) : tProgramacion.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore */ }
         }
 
@@ -2324,7 +2340,9 @@ export class CampanasController {
           try {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia) : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore */ }
         }
 
@@ -2591,7 +2609,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, campania_id
         FROM tareas
         WHERE campania_id IN (${cmIdPh})
-          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -2666,10 +2684,15 @@ export class CampanasController {
       // Index tareas by reserva_id
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : recepcionByReserva;
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
         for (const rsvId of ids) map.set(rsvId, tarea);
       }
 
@@ -2699,12 +2722,16 @@ export class CampanasController {
         const rsvIds = isIM ? [] : String(row.rsv_ids).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
         const tImpresion = rsvIds.map(id => impresionByReserva.get(id)).find(Boolean);
         const tRecepcion = rsvIds.map(id => recepcionByReserva.get(id)).find(Boolean);
+        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
 
         let estatus_arte: string;
         if (isIM) estatus_arte = 'Impresión';
         else if (Number(row.instalado) === 1) estatus_arte = 'Instalado';
-        else if (tRecepcion && tRecepcion.estatus === 'Completado') estatus_arte = 'Artes Recibidos';
-        else if (tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido')) estatus_arte = 'En Impresion';
+        else if (tRecepcion && (tRecepcion.estatus === 'Completado' || tRecepcion.estatus === 'Atendido')) estatus_arte = 'Artes Recibidos';
+        else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
+                 (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
+          estatus_arte = 'En Impresion';
+        }
         else if (row.arte_aprobado === 'aprobado') estatus_arte = 'Artes Aprobados';
         else if (row.archivo != null && row.archivo !== '') estatus_arte = 'Revision Artes';
         else estatus_arte = 'Carga Artes';
@@ -7734,26 +7761,18 @@ export class CampanasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const id = parseInt(caraId);
 
-      // Verificar que no tenga reservas
-      const reservas = await prisma.reservas.count({
-        where: {
-          solicitudCaras_id: parseInt(caraId),
-          deleted_at: null,
-        },
-      });
-
-      if (reservas > 0) {
-        res.status(400).json({
-          success: false,
-          error: 'No se puede eliminar una cara que tiene reservas asociadas',
-        });
-        return;
-      }
-
-      await prisma.solicitudCaras.delete({
-        where: { id: parseInt(caraId) },
-      });
+      // Liberar reservas activas y luego eliminar la cara
+      await prisma.$transaction([
+        prisma.reservas.updateMany({
+          where: { solicitudCaras_id: id, deleted_at: null },
+          data: { deleted_at: new Date() },
+        }),
+        prisma.solicitudCaras.delete({
+          where: { id },
+        }),
+      ]);
 
       res.json({ success: true, message: 'Cara eliminada' });
     } catch (error) {

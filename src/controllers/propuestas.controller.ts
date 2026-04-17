@@ -3205,6 +3205,7 @@ export class PropuestasController {
         cliente_id, cuic, razon_social, unidad_negocio, marca_id, marca_nombre,
         asesor, producto_id, producto_nombre, agencia, categoria_id, categoria_nombre,
         card_code, salesperson_code, sap_database,
+        IMU,
       } = req.body;
 
       // Update propuesta fields
@@ -3245,6 +3246,14 @@ export class PropuestasController {
         await prisma.cotizacion.updateMany({
           where: { id_propuesta: parseInt(id) },
           data: { clientes_id: cliente_id },
+        });
+      }
+
+      // Update solicitud IMU flag if provided
+      if (IMU !== undefined && updatedPropuesta.solicitud_id) {
+        await prisma.solicitud.update({
+          where: { id: updatedPropuesta.solicitud_id },
+          data: { IMU: IMU ? 1 : 0 },
         });
       }
 
@@ -3710,24 +3719,18 @@ export class PropuestasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const id = parseInt(caraId);
 
-      // First check if the cara has any reservations
-      const reservations = await prisma.reservas.findMany({
-        where: { solicitudCaras_id: parseInt(caraId), deleted_at: null },
-      });
-
-      if (reservations.length > 0) {
-        res.status(400).json({
-          success: false,
-          error: 'No se puede eliminar una cara con reservas activas',
-        });
-        return;
-      }
-
-      // Delete the cara
-      await prisma.solicitudCaras.delete({
-        where: { id: parseInt(caraId) },
-      });
+      // Liberar reservas activas y luego eliminar la cara
+      await prisma.$transaction([
+        prisma.reservas.updateMany({
+          where: { solicitudCaras_id: id, deleted_at: null },
+          data: { deleted_at: new Date() },
+        }),
+        prisma.solicitudCaras.delete({
+          where: { id },
+        }),
+      ]);
 
       res.json({ success: true });
     } catch (error) {
