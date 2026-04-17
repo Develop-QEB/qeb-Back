@@ -7732,26 +7732,18 @@ export class CampanasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const id = parseInt(caraId);
 
-      // Verificar que no tenga reservas
-      const reservas = await prisma.reservas.count({
-        where: {
-          solicitudCaras_id: parseInt(caraId),
-          deleted_at: null,
-        },
-      });
-
-      if (reservas > 0) {
-        res.status(400).json({
-          success: false,
-          error: 'No se puede eliminar una cara que tiene reservas asociadas',
-        });
-        return;
-      }
-
-      await prisma.solicitudCaras.delete({
-        where: { id: parseInt(caraId) },
-      });
+      // Liberar reservas activas y luego eliminar la cara
+      await prisma.$transaction([
+        prisma.reservas.updateMany({
+          where: { solicitudCaras_id: id, deleted_at: null },
+          data: { deleted_at: new Date() },
+        }),
+        prisma.solicitudCaras.delete({
+          where: { id },
+        }),
+      ]);
 
       res.json({ success: true, message: 'Cara eliminada' });
     } catch (error) {
