@@ -518,7 +518,8 @@ export class PropuestasController {
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
-          ct.tipo_periodo AS tipo_periodo
+          ct.tipo_periodo AS tipo_periodo,
+          GROUP_CONCAT(DISTINCT NULLIF(sc_fmt.formato, '') ORDER BY sc_fmt.formato SEPARATOR ', ') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -526,6 +527,7 @@ export class PropuestasController {
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        LEFT JOIN solicitudCaras sc_fmt ON CAST(sc_fmt.idquote AS UNSIGNED) = pr.id
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC

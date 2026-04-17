@@ -244,7 +244,8 @@ export class CampanasController {
           COALESCE(uc_agg.reservas_count_ultima_cat, 0) AS reservas_count_ultima_cat,
           COALESCE(uc_agg.caras_ultima_cat, 0) AS caras_ultima_cat,
           cat_content.catorcenas_con_contenido,
-          inv_codes.codigos_inventario
+          inv_codes.codigos_inventario,
+          fmt_agg.formatos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -307,14 +308,24 @@ export class CampanasController {
           WHERE rsv_i.deleted_at IS NULL AND ct_inv.id IN (${ctIdPh})
           GROUP BY ct_inv.id
         ) inv_codes ON inv_codes.cotizacion_id = ct.id
+        LEFT JOIN (
+          SELECT
+            ct_f.id AS cotizacion_id,
+            GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ') AS formatos
+          FROM solicitudCaras sc_f
+          INNER JOIN cotizacion ct_f ON ct_f.id_propuesta = sc_f.idquote
+          WHERE ct_f.id IN (${ctIdPh})
+          GROUP BY ct_f.id
+        ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, cotizacionIds para fmt_agg, campaignIds para WHERE
       const dataParams = [
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,

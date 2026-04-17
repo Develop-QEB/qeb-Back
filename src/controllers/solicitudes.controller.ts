@@ -558,7 +558,8 @@ export class SolicitudesController {
             cat_ini.numero_catorcena as catorcena_inicio,
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
-            cat_fin.año as anio_fin
+            cat_fin.año as anio_fin,
+            GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') as formatos
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
@@ -583,6 +584,7 @@ export class SolicitudesController {
             anio_inicio: extra?.anio_inicio ? Number(extra.anio_inicio) : null,
             catorcena_fin: extra?.catorcena_fin ? Number(extra.catorcena_fin) : null,
             anio_fin: extra?.anio_fin ? Number(extra.anio_fin) : null,
+            formatos: extra?.formatos || null,
           };
         });
 

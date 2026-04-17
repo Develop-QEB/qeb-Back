@@ -100,17 +100,35 @@ export class NotificacionesController {
 }
 
       if (search) {
+        // IDs de tareas cuyos formatos (vía solicitud/propuesta/campaña) matchean el search
+        const formatoLike = `%${search}%`;
+        const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+          SELECT DISTINCT t.id FROM tareas t
+          LEFT JOIN solicitudCaras sc_p ON CAST(sc_p.idquote AS UNSIGNED) = CAST(NULLIF(t.id_propuesta, '') AS UNSIGNED)
+          LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+          LEFT JOIN solicitudCaras sc_s ON CAST(sc_s.idquote AS UNSIGNED) = pr_s.id
+          LEFT JOIN campania cm ON cm.id = t.campania_id
+          LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          LEFT JOIN solicitudCaras sc_c ON CAST(sc_c.idquote AS UNSIGNED) = ct.id_propuesta
+          WHERE sc_p.formato LIKE ${formatoLike}
+             OR sc_s.formato LIKE ${formatoLike}
+             OR sc_c.formato LIKE ${formatoLike}
+        `;
+        const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
+
+        const orConditions: Record<string, unknown>[] = [
+          { titulo: { contains: search } },
+          { descripcion: { contains: search } },
+          { contenido: { contains: search } },
+          { responsable: { contains: search } },
+          { asignado: { contains: search } },
+        ];
+        if (formatoMatchIds.length > 0) {
+          orConditions.push({ id: { in: formatoMatchIds } });
+        }
         where.AND = [
           ...(Array.isArray(where.AND) ? where.AND : []),
-          {
-            OR: [
-              { titulo: { contains: search } },
-              { descripcion: { contains: search } },
-              { contenido: { contains: search } },
-              { responsable: { contains: search } },
-              { asignado: { contains: search } },
-            ],
-          },
+          { OR: orConditions },
         ];
       }
 
@@ -198,6 +216,64 @@ export class NotificacionesController {
         }
       }
 
+      // Formatos por tarea: resolver a través de id_solicitud, id_propuesta o campania_id
+      const formatosByTareaId: Record<number, string> = {};
+      const propuestaIds = [...new Set(tareas
+        .map(t => t.id_propuesta ? parseInt(t.id_propuesta) : null)
+        .filter((id): id is number => id !== null && !isNaN(id))
+      )];
+      const campaniaIds = [...new Set(tareas
+        .map(t => t.campania_id)
+        .filter((id): id is number => id !== null && id !== undefined)
+      )];
+
+      const formatosBySolicitud: Record<number, string> = {};
+      const formatosByPropuesta: Record<number, string> = {};
+      const formatosByCampania: Record<number, string> = {};
+
+      if (solicitudIds.length > 0) {
+        const rows = await prisma.$queryRaw<{ solicitud_id: number; formatos: string | null }[]>`
+          SELECT pr.solicitud_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
+          FROM propuesta pr
+          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          WHERE pr.solicitud_id IN (${Prisma.join(solicitudIds)})
+          GROUP BY pr.solicitud_id
+        `;
+        for (const r of rows) if (r.formatos) formatosBySolicitud[Number(r.solicitud_id)] = r.formatos;
+      }
+
+      if (propuestaIds.length > 0) {
+        const rows = await prisma.$queryRaw<{ propuesta_id: number; formatos: string | null }[]>`
+          SELECT CAST(sc.idquote AS UNSIGNED) AS propuesta_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
+          FROM solicitudCaras sc
+          WHERE CAST(sc.idquote AS UNSIGNED) IN (${Prisma.join(propuestaIds)})
+          GROUP BY CAST(sc.idquote AS UNSIGNED)
+        `;
+        for (const r of rows) if (r.formatos) formatosByPropuesta[Number(r.propuesta_id)] = r.formatos;
+      }
+
+      if (campaniaIds.length > 0) {
+        const rows = await prisma.$queryRaw<{ campania_id: number; formatos: string | null }[]>`
+          SELECT cm.id AS campania_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
+          FROM campania cm
+          LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = ct.id_propuesta
+          WHERE cm.id IN (${Prisma.join(campaniaIds)})
+          GROUP BY cm.id
+        `;
+        for (const r of rows) if (r.formatos) formatosByCampania[Number(r.campania_id)] = r.formatos;
+      }
+
+      for (const tarea of tareas) {
+        const propId = tarea.id_propuesta ? parseInt(tarea.id_propuesta) : NaN;
+        const solId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : NaN;
+        const fmt = (!isNaN(propId) && formatosByPropuesta[propId])
+          || (!isNaN(solId) && formatosBySolicitud[solId])
+          || (tarea.campania_id && formatosByCampania[tarea.campania_id])
+          || null;
+        if (fmt) formatosByTareaId[tarea.id] = fmt as string;
+      }
+
       // Mapear tareas al formato de notificaciones con todos los campos
       const notificaciones = tareas.map(tarea => {
         const solId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : null;
@@ -236,6 +312,7 @@ export class NotificacionesController {
         ids_reservas: tarea.ids_reservas,
         asesor: solData?.asesor || null,
         creador: solData?.nombre_usuario || null,
+        formatos: formatosByTareaId[tarea.id] || null,
       };
       });
 
