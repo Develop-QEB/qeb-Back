@@ -179,6 +179,24 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     };
   }
 
+  // Artículos de ejecución especial (ESP/ES-): misma lógica que impresión
+  if (cara.articulo) {
+    const artUpper2 = cara.articulo.toUpperCase();
+    if (artUpper2.startsWith('ESP') || artUpper2.startsWith('ES-')) {
+      if ((cara.tarifa_publica || 0) <= 0) {
+        return {
+          autorizacion_dg: 'aprobado',
+          autorizacion_dcm: 'pendiente',
+          motivo_dcm: 'Artículo de Ejecución Especial con tarifa $0 requiere autorización DCM',
+        };
+      }
+      return {
+        autorizacion_dg: 'aprobado',
+        autorizacion_dcm: 'aprobado',
+      };
+    }
+  }
+
   // Cortesías (CT) e Intercambio (IN) siempre requieren autorización DCM
   console.log('[calcularEstadoAutorizacion] articulo recibido:', JSON.stringify(cara.articulo), 'userId:', userId);
   if (cara.articulo) {

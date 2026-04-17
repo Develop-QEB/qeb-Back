@@ -273,14 +273,14 @@ export class CampanasController {
               INNER JOIN catorcenas cat_b2 ON sc_b2.inicio_periodo >= cat_b2.fecha_inicio AND sc_b2.fin_periodo <= cat_b2.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b2.fecha_inicio AND cat_b2.fecha_fin
               WHERE ct_b2.id = cm_b.cotizacion_id AND rsv_b2.deleted_at IS NULL
-                AND COALESCE(sc_b2.articulo, '') NOT LIKE 'IM-%'
+                AND COALESCE(sc_b2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_b2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_b2.articulo, '') NOT LIKE 'ES-%'
             ) AS reservas_count_ultima_cat,
             (SELECT COALESCE(SUM(sc_b3.caras + sc_b3.bonificacion), 0) FROM solicitudCaras sc_b3
               INNER JOIN cotizacion ct_b3 ON ct_b3.id_propuesta = sc_b3.idquote
               INNER JOIN catorcenas cat_b3 ON sc_b3.inicio_periodo >= cat_b3.fecha_inicio AND sc_b3.fin_periodo <= cat_b3.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b3.fecha_inicio AND cat_b3.fecha_fin
               WHERE ct_b3.id = cm_b.cotizacion_id
-                AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%'
+                AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_b3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_b3.articulo, '') NOT LIKE 'ES-%'
             ) AS caras_ultima_cat
           FROM campania cm_b
           WHERE cm_b.id IN (${cmIdPh})
@@ -521,13 +521,13 @@ export class CampanasController {
                INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                  AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%'
+                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
               ) as cnt,
               (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                FROM solicitudCaras sc3
                INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%'
+                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
               ) as caras_esperadas`,
             propuesta.solicitud_id, campana.fecha_fin,
             propuesta.solicitud_id, campana.fecha_fin
@@ -558,7 +558,7 @@ export class CampanasController {
           FROM solicitudCaras sc
           INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
           WHERE sc.idquote = ?
-            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%'
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
           ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
           propuesta.solicitud_id
         );
@@ -6574,6 +6574,7 @@ export class CampanasController {
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
+            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'BONIFICACION'
           END AS negociacion,
           sc.bonificacion AS caras,
@@ -6622,6 +6623,7 @@ export class CampanasController {
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
+            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'RENTA'
           END AS negociacion,
           (sc.caras - sc.bonificacion) AS caras,
