@@ -1620,7 +1620,6 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -1910,7 +1909,6 @@ export class CampanasController {
         }
 
         // Indicaciones de programación desde la tarea
-        const tProgramacion = rsvIds.map(id => programacionByReserva.get(id)).find(Boolean);
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -2313,7 +2311,6 @@ export class CampanasController {
         }
 
         // Indicaciones de programación
-        const tProgramacion = maps ? rsvIds.map(id => maps.programacion.get(id)).find(Boolean) : undefined;
         let indicaciones_programacion: string | null = null;
         if (tProgramacion && tProgramacion.evidencia) {
           try {
@@ -2672,10 +2669,11 @@ export class CampanasController {
       // Index tareas by reserva_id
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
+      const programacionByReserva = new Map<number, any>();
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : recepcionByReserva;
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : (tarea.tipo === 'Programación' ? programacionByReserva : recepcionByReserva);
         for (const rsvId of ids) map.set(rsvId, tarea);
       }
 
