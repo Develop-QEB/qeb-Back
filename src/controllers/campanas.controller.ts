@@ -665,6 +665,7 @@ export class CampanasController {
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
+        IMU: solicitud?.IMU ?? 0,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
         posted_aps: postedAps,
         // Reservas count para detectar campañas incompletas
@@ -1037,6 +1038,7 @@ export class CampanasController {
         catorcenaFinAnio,
         asignados,
         id_asignado,
+        IMU,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1093,6 +1095,7 @@ export class CampanasController {
               data: {
                 ...(descripcion !== undefined && { descripcion }),
                 ...(notas !== undefined && { notas }),
+                ...(IMU !== undefined && { IMU: IMU ? 1 : 0 }),
               },
             });
           }
@@ -2594,7 +2597,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, campania_id
         FROM tareas
         WHERE campania_id IN (${cmIdPh})
-          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -2670,10 +2673,14 @@ export class CampanasController {
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
       const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : (tarea.tipo === 'Programación' ? programacionByReserva : recepcionByReserva);
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
         for (const rsvId of ids) map.set(rsvId, tarea);
       }
 
