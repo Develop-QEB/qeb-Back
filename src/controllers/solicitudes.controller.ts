@@ -924,6 +924,15 @@ export class SolicitudesController {
         data: { deleted_at: new Date() },
       });
 
+      // Cancelar tareas pendientes asociadas a esta solicitud
+      await prisma.tareas.updateMany({
+        where: {
+          id_solicitud: solicitud.id.toString(),
+          estatus: 'Pendiente',
+        },
+        data: { estatus: 'Atendido' },
+      });
+
       // Crear notificaciones para usuarios involucrados
       const involucrados = new Set<number>();
 
