@@ -617,9 +617,9 @@ export class SolicitudesController {
 
       // Group data if requested
       let groupedData = null;
-      if (groupBy && ['status', 'marca_nombre', 'asignado', 'razon_social'].includes(groupBy)) {
+      if (groupBy && ['status', 'marca_nombre', 'asignado', 'razon_social', 'asesor', 'nombre_usuario'].includes(groupBy)) {
         const grouped = await prisma.solicitud.groupBy({
-          by: [groupBy as 'status' | 'marca_nombre' | 'asignado' | 'razon_social'],
+          by: [groupBy as 'status' | 'marca_nombre' | 'asignado' | 'razon_social' | 'asesor' | 'nombre_usuario'],
           where,
           _count: true,
         });
@@ -1839,6 +1839,7 @@ export class SolicitudesController {
               autorizacion_dg: estadoResult.autorizacion_dg,
               autorizacion_dcm: estadoResult.autorizacion_dcm,
               cortesia: (cara.articulo || articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+              grupo_rt_bf: cara.grupo_rt_bf || null,
             },
           });
           createdCaras.push(solicitudCara);
@@ -2746,6 +2747,7 @@ export class SolicitudesController {
                 descuento: cara.descuento || 0,
                 autorizacion_dg,
                 autorizacion_dcm,
+                grupo_rt_bf: cara.grupo_rt_bf || null,
               },
             });
           }

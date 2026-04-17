@@ -495,6 +495,7 @@ export class InventariosController {
           orientacion: true,
           sentido: true,
           isla: true,
+          mueble_isla: true,
         },
       });
 

@@ -346,6 +346,7 @@ model solicitudCaras {
   autorizacion_dg      String?  @default("aprobado") @db.VarChar(255)
   autorizacion_dcm     String?  @default("aprobado") @db.VarChar(255)
   cortesia             Int?     @default(0)
+  grupo_rt_bf          Int?
 
   @@index([idquote])
   @@index([inicio_periodo, fin_periodo], map: "idx_periodos")

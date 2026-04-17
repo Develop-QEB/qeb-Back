@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
+import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
 import {
   aprobarCaras,
@@ -181,9 +182,27 @@ export class NotificacionesController {
         prisma.tareas.count({ where }),
       ]);
 
+      // Obtener asesor y creador de las solicitudes relacionadas
+      const solicitudIds = [...new Set(tareas
+        .map(t => t.id_solicitud ? parseInt(t.id_solicitud) : null)
+        .filter((id): id is number => id !== null && !isNaN(id))
+      )];
+
+      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null }> = {};
+      if (solicitudIds.length > 0) {
+        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null }[]>`
+          SELECT id, asesor, nombre_usuario FROM solicitud WHERE id IN (${Prisma.join(solicitudIds)})
+        `;
+        for (const s of solicitudes) {
+          solicitudMap[s.id] = { asesor: s.asesor, nombre_usuario: s.nombre_usuario };
+        }
+      }
 
       // Mapear tareas al formato de notificaciones con todos los campos
-      const notificaciones = tareas.map(tarea => ({
+      const notificaciones = tareas.map(tarea => {
+        const solId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : null;
+        const solData = solId ? solicitudMap[solId] : null;
+        return {
         id: tarea.id,
         usuario_id: tarea.id_responsable,
         titulo: tarea.titulo || 'Sin título',
@@ -215,7 +234,10 @@ export class NotificacionesController {
         listado_inventario: tarea.listado_inventario,
         id_asignado: tarea.id_asignado,
         ids_reservas: tarea.ids_reservas,
-      }));
+        asesor: solData?.asesor || null,
+        creador: solData?.nombre_usuario || null,
+      };
+      });
 
       res.json({
         success: true,
