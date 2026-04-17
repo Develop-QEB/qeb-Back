@@ -757,17 +757,7 @@ export class DashboardController {
         },
       });
 
-      // Obtener IDs unicos de clientes
-      const clienteIds = [...new Set(reservas.map((r) => r.cliente_id))];
-
-      // Obtener nombres de clientes
-      const clientes = clienteIds.length > 0 ? await prisma.cliente.findMany({
-        where: { id: { in: clienteIds } },
-        select: { id: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
-      }) : [];
-      const clienteMap = new Map(clientes.map((c) => [c.id, c.T0_U_Cliente || c.T0_U_RazonSocial || null]));
-
-      // Construir mapa solicitudCaras_id → campana_id
+      // Construir mapa solicitudCaras_id → campana_id y campana.cliente_id
       const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
       const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: solicitudCarasIds } },
@@ -783,22 +773,40 @@ export class DashboardController {
       const cotizacionIds = cotizaciones.map((c) => c.id);
       const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
         where: { cotizacion_id: { in: cotizacionIds } },
-        select: { id: true, cotizacion_id: true },
+        select: { id: true, cotizacion_id: true, cliente_id: true },
       }) : [];
       // idquote → cotizacion_id
       const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
-      // cotizacion_id → campana_id
-      const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c.id]));
-      // solicitudCaras_id → campana_id
+      // cotizacion_id → campana
+      const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
+      // solicitudCaras_id → campana_id y cliente_id de la campana
       const solicitudToCampana = new Map(
         solicitudCarasList
           .map((sc) => {
             const idquote = parseInt(sc.idquote || '');
             const cotizId = idquoteToCotizacion.get(idquote);
-            const campanaId = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
-            return [sc.id, campanaId ?? null] as [number, number | null];
+            const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+            return [sc.id, { campana_id: campana?.id ?? null, cliente_id: campana?.cliente_id ?? null }] as [number, { campana_id: number | null; cliente_id: number | null }];
           })
       );
+
+      // Obtener nombres de clientes via campana.cliente_id (igual que historial)
+      const campanaClienteIds = [...new Set(campanas.map((c) => c.cliente_id).filter(Boolean))] as number[];
+      const campanaClientes = campanaClienteIds.length > 0 ? await prisma.cliente.findMany({
+        where: { id: { in: campanaClienteIds } },
+        select: { id: true, CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      }) : [];
+      const cuics = [...new Set(campanaClientes.filter(c => c.CUIC != null).map(c => c.CUIC!))];
+      const cuicClientes = cuics.length > 0 ? await prisma.cliente.findMany({
+        where: { CUIC: { in: cuics }, T0_U_RazonSocial: { not: null } },
+        select: { CUIC: true, T0_U_RazonSocial: true, T0_U_Cliente: true },
+      }) : [];
+      const cuicNameMap = new Map<number, string>();
+      cuicClientes.forEach(c => { if (c.CUIC && !cuicNameMap.has(c.CUIC)) cuicNameMap.set(c.CUIC, c.T0_U_RazonSocial || c.T0_U_Cliente || ''); });
+      const clienteMap = new Map(campanaClientes.map((c) => {
+        const cuicName = c.CUIC ? cuicNameMap.get(c.CUIC) : null;
+        return [c.id, cuicName || c.T0_U_RazonSocial || c.T0_U_Cliente || null];
+      }));
 
       // Mapear info de reserva por inventario
       const inventarioInfo: Record<number, {
@@ -826,11 +834,12 @@ export class DashboardController {
         const newPrioridad = prioridad[r.estatus] || 0;
 
         if (newPrioridad > currentPrioridad) {
+          const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
           inventarioInfo[invId] = {
             estatus: r.estatus, // Guardar estatus original
-            cliente_nombre: clienteMap.get(r.cliente_id) || null,
+            cliente_nombre: solInfo?.cliente_id ? (clienteMap.get(solInfo.cliente_id) || null) : null,
             APS: r.APS,
-            campana_id: solicitudToCampana.get(r.solicitudCaras_id) ?? null,
+            campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
           };
         }
