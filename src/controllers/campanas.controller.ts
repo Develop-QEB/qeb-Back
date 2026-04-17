@@ -2597,7 +2597,7 @@ export class CampanasController {
         SELECT id, tipo, estatus, ids_reservas, campania_id
         FROM tareas
         WHERE campania_id IN (${cmIdPh})
-          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción')
+          AND tipo IN ('Impresión', 'Re-impresión', 'Recepción', 'Programación', 'Instalación', 'Orden de Instalación', 'Orden de Programación')
       `;
 
       const catorcenasQuery = `
@@ -2673,10 +2673,14 @@ export class CampanasController {
       const impresionByReserva = new Map<number, any>();
       const recepcionByReserva = new Map<number, any>();
       const programacionByReserva = new Map<number, any>();
+      const instalacionByReserva = new Map<number, any>();
       for (const tarea of tareasArr) {
         if (!tarea.ids_reservas) continue;
         const ids = String(tarea.ids_reservas).split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
-        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva : (tarea.tipo === 'Programación' ? programacionByReserva : recepcionByReserva);
+        const map = (tarea.tipo === 'Impresión' || tarea.tipo === 'Re-impresión') ? impresionByReserva
+                  : (tarea.tipo === 'Programación' || tarea.tipo === 'Orden de Programación') ? programacionByReserva
+                  : (tarea.tipo === 'Instalación' || tarea.tipo === 'Orden de Instalación') ? instalacionByReserva
+                  : recepcionByReserva;
         for (const rsvId of ids) map.set(rsvId, tarea);
       }
 
