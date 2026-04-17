@@ -3205,6 +3205,7 @@ export class PropuestasController {
         cliente_id, cuic, razon_social, unidad_negocio, marca_id, marca_nombre,
         asesor, producto_id, producto_nombre, agencia, categoria_id, categoria_nombre,
         card_code, salesperson_code, sap_database,
+        IMU,
       } = req.body;
 
       // Update propuesta fields
@@ -3245,6 +3246,14 @@ export class PropuestasController {
         await prisma.cotizacion.updateMany({
           where: { id_propuesta: parseInt(id) },
           data: { clientes_id: cliente_id },
+        });
+      }
+
+      // Update solicitud IMU flag if provided
+      if (IMU !== undefined && updatedPropuesta.solicitud_id) {
+        await prisma.solicitud.update({
+          where: { id: updatedPropuesta.solicitud_id },
+          data: { IMU: IMU ? 1 : 0 },
         });
       }
 

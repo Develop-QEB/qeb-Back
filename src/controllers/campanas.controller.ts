@@ -665,6 +665,7 @@ export class CampanasController {
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
         sap_database: solicitud?.sap_database || null,
+        IMU: solicitud?.IMU ?? 0,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
         posted_aps: postedAps,
         // Reservas count para detectar campañas incompletas
@@ -1037,6 +1038,7 @@ export class CampanasController {
         catorcenaFinAnio,
         asignados,
         id_asignado,
+        IMU,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1093,6 +1095,7 @@ export class CampanasController {
               data: {
                 ...(descripcion !== undefined && { descripcion }),
                 ...(notas !== undefined && { notas }),
+                ...(IMU !== undefined && { IMU: IMU ? 1 : 0 }),
               },
             });
           }
