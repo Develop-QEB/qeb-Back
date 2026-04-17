@@ -1629,7 +1629,9 @@ export class CampanasController {
             const evidenciaJson = typeof tProg.evidencia === 'string'
               ? JSON.parse(tProg.evidencia)
               : tProg.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1641,7 +1643,9 @@ export class CampanasController {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia)
               : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1918,7 +1922,9 @@ export class CampanasController {
             const evidenciaJson = typeof tProg.evidencia === 'string'
               ? JSON.parse(tProg.evidencia)
               : tProg.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -1930,7 +1936,9 @@ export class CampanasController {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia)
               : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore parse errors */ }
         }
 
@@ -2319,7 +2327,9 @@ export class CampanasController {
           try {
             const evidenciaJson = typeof tProgramacion.evidencia === 'string'
               ? JSON.parse(tProgramacion.evidencia) : tProgramacion.evidencia;
-            indicaciones_programacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_programacion || null;
+            if (typeof raw === 'string') indicaciones_programacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_programacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore */ }
         }
 
@@ -2330,7 +2340,9 @@ export class CampanasController {
           try {
             const evidenciaJson = typeof tInstalacion.evidencia === 'string'
               ? JSON.parse(tInstalacion.evidencia) : tInstalacion.evidencia;
-            indicaciones_instalacion = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            const raw = evidenciaJson.indicaciones || evidenciaJson.indicaciones_instalacion || null;
+            if (typeof raw === 'string') indicaciones_instalacion = raw;
+            else if (raw && typeof raw === 'object') indicaciones_instalacion = Object.values(raw).filter(Boolean).join(' | ');
           } catch { /* ignore */ }
         }
 
