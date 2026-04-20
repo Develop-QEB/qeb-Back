@@ -2474,7 +2474,7 @@ export class CampanasController {
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
         WHERE ${whereClause}
         ORDER BY cm.id DESC
-        LIMIT 200
+        LIMIT 1000
       `;
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(idsQuery, ...params);
       const campaignIds = idsResult.map(r => Number(r.id));
