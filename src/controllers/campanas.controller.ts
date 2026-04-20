@@ -246,7 +246,7 @@ export class CampanasController {
           cat_content.catorcenas_con_contenido,
           inv_codes.codigos_inventario,
           (SELECT GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ')
-           FROM solicitudCaras sc_f WHERE sc_f.idquote = ct.id_propuesta
+           FROM solicitudCaras sc_f WHERE sc_f.idquote = CAST(ct.id_propuesta AS CHAR)
           ) AS formatos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
