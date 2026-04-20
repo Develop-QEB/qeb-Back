@@ -313,7 +313,7 @@ export class CampanasController {
             ct_f.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ') AS formatos
           FROM solicitudCaras sc_f
-          INNER JOIN cotizacion ct_f ON ct_f.id_propuesta = sc_f.idquote
+          INNER JOIN cotizacion ct_f ON CAST(ct_f.id_propuesta AS CHAR) = sc_f.idquote
           WHERE ct_f.id IN (${ctIdPh})
           GROUP BY ct_f.id
         ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
