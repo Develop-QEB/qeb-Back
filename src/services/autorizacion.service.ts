@@ -164,6 +164,14 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     tarifa_publica: cara.tarifa_publica
   });
 
+  // Artículos de bonificación (BF/CF): siempre auto-aprobados, son la fila par de RT/CF
+  if (cara.articulo) {
+    const artUpperBf = cara.articulo.toUpperCase();
+    if (artUpperBf.startsWith('BF') || artUpperBf.startsWith('CF')) {
+      return { autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado' };
+    }
+  }
+
   // Artículos de impresión (IM): si tarifa es 0, requiere DCM; si no, aprobado
   if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
     if ((cara.tarifa_publica || 0) <= 0) {
@@ -177,6 +185,24 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
       autorizacion_dg: 'aprobado',
       autorizacion_dcm: 'aprobado',
     };
+  }
+
+  // Artículos de ejecución especial (ESP/ES-): misma lógica que impresión
+  if (cara.articulo) {
+    const artUpper2 = cara.articulo.toUpperCase();
+    if (artUpper2.startsWith('ESP') || artUpper2.startsWith('ES-')) {
+      if ((cara.tarifa_publica || 0) <= 0) {
+        return {
+          autorizacion_dg: 'aprobado',
+          autorizacion_dcm: 'pendiente',
+          motivo_dcm: 'Artículo de Ejecución Especial con tarifa $0 requiere autorización DCM',
+        };
+      }
+      return {
+        autorizacion_dg: 'aprobado',
+        autorizacion_dcm: 'aprobado',
+      };
+    }
   }
 
   // Cortesías (CT) e Intercambio (IN) siempre requieren autorización DCM
@@ -211,6 +237,10 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   // Calcular tarifa efectiva y total caras
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
+
+  // Caras impares requieren autorización DCM (excepto Kiosco)
+  const isKiosco = (cara.formato || '').toUpperCase().includes('KIOSK') || (cara.formato || '').toUpperCase().includes('KIOSCO');
+  const oddCarasNeedsDcm = !isKiosco && totalCaras > 0 && totalCaras % 2 !== 0;
 
   console.log('[calcularEstadoAutorizacion] Valores calculados:', {
     totalCaras,
@@ -314,12 +344,13 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
 
   console.log('[calcularEstadoAutorizacion] Criterio encontrado:', criterio);
 
-  // Si no hay criterio definido, aprobar automáticamente ambos
+  // Si no hay criterio definido, aprobar automáticamente (salvo caras impares)
   if (!criterio) {
     console.log('[calcularEstadoAutorizacion] No hay criterio, aprobando automáticamente');
     return {
       autorizacion_dg: 'aprobado',
-      autorizacion_dcm: 'aprobado',
+      autorizacion_dcm: oddCarasNeedsDcm ? 'pendiente' : 'aprobado',
+      motivo_dcm: oddCarasNeedsDcm ? 'Número impar de caras requiere autorización DCM' : undefined,
       tarifa_efectiva: tarifaEfectiva,
       total_caras: totalCaras
     };
@@ -383,6 +414,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     requiereDcm = true;
     if (motivoDcm) motivoDcm += '; ';
     motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
+  }
+
+  // Caras impares → OR en DCM
+  if (oddCarasNeedsDcm) {
+    requiereDcm = true;
+    motivoDcm = (motivoDcm ? motivoDcm + '; ' : '') + 'Número impar de caras requiere autorización DCM';
   }
 
   // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
@@ -577,19 +614,7 @@ export async function crearTareasAutorizacion(
       campaniaId: campaniaId || null
     });
 
-    // Enviar correo a usuarios DG
-    for (const usuario of usuariosDg) {
-      if (usuario.correo_electronico) {
-        enviarCorreoAutorizacion(
-          tareaDg.id,
-          `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-          `Se requiere autorización de Dirección General para ${pendientesDg.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
-          usuario.correo_electronico,
-          usuario.nombre,
-          responsableNombre
-        ).catch(err => console.error('Error enviando correo autorización DG:', err));
-      }
-    }
+    // Correos a directores se envían en resumen diario (9am y 4pm) vía enviarResumenAutorizacionesPendientes()
   }
 
   // Crear tarea para DCM si hay pendientes y no existe ya una tarea
@@ -630,19 +655,7 @@ export async function crearTareasAutorizacion(
       campaniaId: campaniaId || null
     });
 
-    // Enviar correo a usuarios DCM
-    for (const usuario of usuariosDcm) {
-      if (usuario.correo_electronico) {
-        enviarCorreoAutorizacion(
-          tareaDcm.id,
-          `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-          `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
-          usuario.correo_electronico,
-          usuario.nombre,
-          responsableNombre
-        ).catch(err => console.error('Error enviando correo autorización DCM:', err));
-      }
-    }
+    // Correos a directores se envían en resumen diario (9am y 4pm) vía enviarResumenAutorizacionesPendientes()
   }
 }
 
@@ -898,14 +911,92 @@ export async function obtenerResumenAutorizacion(idquote: string): Promise<{
   return conteo;
 }
 
-async function enviarCorreoAutorizacion(
-  tareaId: number,
-  titulo: string,
-  descripcion: string,
+/**
+ * Envía un resumen diario a los directores (DG y DCM) con las tareas de autorización pendientes.
+ * Se invoca desde un scheduler (9am y 4pm hora CDMX). Si no hay pendientes no envía nada.
+ * Cada director recibe únicamente el conteo correspondiente a su rol.
+ */
+export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
+  const [pendientesDg, pendientesDcm] = await Promise.all([
+    prisma.tareas.count({
+      where: { tipo: 'Autorización DG', estatus: 'Pendiente' }
+    }),
+    prisma.tareas.count({
+      where: { tipo: 'Autorización DCM', estatus: 'Pendiente' }
+    })
+  ]);
+
+  if (pendientesDg === 0 && pendientesDcm === 0) {
+    console.log('[ResumenAutorizaciones] Sin tareas pendientes, no se envía correo');
+    return;
+  }
+
+  const [usuariosDg, usuariosDcm] = await Promise.all([
+    prisma.usuario.findMany({
+      where: {
+        deleted_at: null,
+        OR: [
+          { puesto: { contains: 'DG' } },
+          { puesto: { contains: 'Director General' } },
+          { user_role: { contains: 'Director General' } },
+          { area: { contains: 'Dirección General' } },
+          { area: { contains: 'Direccion General' } },
+        ],
+      },
+      select: { id: true, nombre: true, correo_electronico: true }
+    }),
+    prisma.usuario.findMany({
+      where: {
+        deleted_at: null,
+        OR: [
+          { puesto: 'DCM' },
+          { puesto: 'Director Comercial' },
+          { puesto: 'Dirección Comercial' },
+          { puesto: 'Direccion Comercial' },
+          { user_role: 'Director Comercial' },
+          { user_role: 'Dirección Comercial' },
+          { area: 'Dirección Comercial' },
+          { area: 'Direccion Comercial' },
+        ],
+      },
+      select: { id: true, nombre: true, correo_electronico: true }
+    })
+  ]);
+
+  const envios: Promise<void>[] = [];
+
+  if (pendientesDg > 0) {
+    for (const u of usuariosDg) {
+      if (!u.correo_electronico) continue;
+      envios.push(
+        enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DG', pendientesDg)
+          .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))
+      );
+    }
+  }
+
+  if (pendientesDcm > 0) {
+    for (const u of usuariosDcm) {
+      if (!u.correo_electronico) continue;
+      envios.push(
+        enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DCM', pendientesDcm)
+          .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))
+      );
+    }
+  }
+
+  await Promise.all(envios);
+  console.log(`[ResumenAutorizaciones] Enviados ${envios.length} correos (DG=${pendientesDg}, DCM=${pendientesDcm})`);
+}
+
+async function enviarCorreoResumenAutorizacion(
   destinatarioEmail: string,
   destinatarioNombre: string,
-  solicitadoPor: string
+  rol: 'DG' | 'DCM',
+  cantidad: number
 ): Promise<void> {
+  const rolLabel = rol === 'DG' ? 'Dirección General' : 'Dirección Comercial';
+  const plural = cantidad === 1 ? 'tarea pendiente' : 'tareas pendientes';
   const htmlBody = `
   <!DOCTYPE html>
   <html>
@@ -926,35 +1017,18 @@ async function enviarCorreoAutorizacion(
             </tr>
             <tr>
               <td style="padding: 40px;">
-                <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Autorización Requerida</h2>
-                <p style="color: #6b7280; margin: 0 0 12px 0; font-size: 15px; line-height: 1.5;">
-                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, se requiere tu autorización.
+                <h2 style="color: #1f2937; margin: 0 0 8px 0; font-size: 22px; font-weight: 600;">Resumen de autorizaciones pendientes</h2>
+                <p style="color: #6b7280; margin: 0 0 20px 0; font-size: 15px; line-height: 1.5;">
+                  Hola <strong style="color: #374151;">${destinatarioNombre}</strong>, tienes autorizaciones pendientes de revisión.
                 </p>
-                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
-                  <p style="color: #6b7280; margin: 0 0 4px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Detalle</p>
-                  <p style="color: #1f2937; margin: 0; font-size: 16px; font-weight: 600;">${descripcion}</p>
+                <div style="background-color: #f5f3ff; border-left: 4px solid #8b5cf6; padding: 18px 20px; border-radius: 0 8px 8px 0; margin: 0 0 24px 0;">
+                  <p style="color: #6b7280; margin: 0 0 6px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">${rolLabel}</p>
+                  <p style="color: #1f2937; margin: 0; font-size: 28px; font-weight: 700;">${cantidad} <span style="font-size:15px; font-weight:500; color:#6b7280;">${plural}</span></p>
                 </div>
-                <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 28px;">
-                  <tr>
-                    <td style="padding: 12px 0;">
-                      <table width="100%" cellpadding="0" cellspacing="0">
-                        <tr>
-                          <td width="24" valign="top">
-                            <div style="width: 20px; height: 20px; background-color: #ede9fe; border-radius: 6px; text-align: center; line-height: 20px; font-size: 12px;">👤</div>
-                          </td>
-                          <td style="padding-left: 12px;">
-                            <p style="color: #9ca3af; margin: 0; font-size: 12px; font-weight: 500; text-transform: uppercase;">Solicitado por</p>
-                            <p style="color: #374151; margin: 2px 0 0 0; font-size: 14px; font-weight: 500;">${solicitadoPor}</p>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
-                  </tr>
-                </table>
                 <table width="100%" cellpadding="0" cellspacing="0">
                   <tr>
                     <td align="center">
-                      <a href="https://app.qeb.mx/tareas?viewId=${tareaId}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tarea</a>
+                      <a href="https://app.qeb.mx/tareas" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; padding: 14px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">Ver Tareas</a>
                     </td>
                   </tr>
                 </table>
@@ -976,7 +1050,7 @@ async function enviarCorreoAutorizacion(
   await transporter.sendMail({
     from: `"QEB Sistema" <${process.env.SMTP_USER}>`,
     to: destinatarioEmail,
-    subject: `🔔 ${titulo}`,
+    subject: `🔔 Resumen ${rol}: ${cantidad} ${plural} de autorización`,
     html: htmlBody,
   });
 }
@@ -987,5 +1061,6 @@ export default {
   crearTareasAutorizacion,
   aprobarCaras,
   rechazarSolicitud,
-  obtenerResumenAutorizacion
+  obtenerResumenAutorizacion,
+  enviarResumenAutorizacionesPendientes
 };

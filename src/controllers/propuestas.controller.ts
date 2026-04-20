@@ -518,7 +518,8 @@ export class PropuestasController {
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
-          ct.tipo_periodo AS tipo_periodo
+          ct.tipo_periodo AS tipo_periodo,
+          GROUP_CONCAT(DISTINCT NULLIF(sc_fmt.formato, '') ORDER BY sc_fmt.formato SEPARATOR ', ') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -526,6 +527,7 @@ export class PropuestasController {
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        LEFT JOIN solicitudCaras sc_fmt ON CAST(sc_fmt.idquote AS UNSIGNED) = pr.id
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -665,6 +667,7 @@ export class PropuestasController {
           descuento: true,
           autorizacion_dg: true,
           autorizacion_dcm: true,
+          grupo_rt_bf: true,
         },
       });
 
@@ -743,9 +746,9 @@ export class PropuestasController {
         const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
 
         const reservasIncompletas = caras.some(cara => {
-          // Artículos de impresión (IM) no requieren reservas — siempre completos
+          // Artículos de impresión (IM) o ejecución especial (ESP/ES-) no requieren reservas — siempre completos
           const articulo = (cara.articulo || '').toUpperCase();
-          if (articulo.startsWith('IM')) return false;
+          if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
 
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
@@ -3396,6 +3399,7 @@ export class PropuestasController {
         caras_contraflujo,
         articulo,
         descuento,
+        grupo_rt_bf,
       } = req.body;
 
       // Get current cara to compare auth-affecting fields
@@ -3458,6 +3462,7 @@ export class PropuestasController {
           autorizacion_dg,
           autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
         },
       });
 
@@ -3531,6 +3536,7 @@ export class PropuestasController {
         caras_contraflujo,
         articulo,
         descuento,
+        grupo_rt_bf,
       } = req.body;
 
       // Calculate authorization state
@@ -3565,6 +3571,7 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
+          grupo_rt_bf: grupo_rt_bf || null,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
@@ -3660,6 +3667,7 @@ export class PropuestasController {
               autorizacion_dg,
               autorizacion_dcm,
               cortesia: (data.articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+              grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,
             },
           });
 

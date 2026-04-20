@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
+import { enviarResumenAutorizacionesPendientes } from './services/autorizacion.service';
 
 if (process.env.NODE_ENV !== 'production') {
   console.warn(`[Config] NODE_ENV=${process.env.NODE_ENV || 'undefined'}; forcing production mode`);
@@ -46,6 +47,33 @@ async function limpiarReservasExpiradas(): Promise<void> {
 
 // Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
 const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Programa una ejecución diaria a una hora fija en zona horaria America/Mexico_City.
+ * Tras ejecutar, se reagenda para el día siguiente a la misma hora.
+ */
+function programarDiario(hora: number, etiqueta: string, callback: () => Promise<void>): void {
+  const scheduleNext = () => {
+    const ahora = new Date();
+    const ahoraMx = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const objetivoMx = new Date(ahoraMx);
+    objetivoMx.setHours(hora, 0, 0, 0);
+    if (objetivoMx.getTime() <= ahoraMx.getTime()) {
+      objetivoMx.setDate(objetivoMx.getDate() + 1);
+    }
+    const msRestantes = objetivoMx.getTime() - ahoraMx.getTime();
+    console.log(`[CRON] ${etiqueta} programado en ${Math.round(msRestantes / 60000)} min (próxima ejecución ${objetivoMx.toISOString()} CDMX)`);
+    setTimeout(async () => {
+      try {
+        await callback();
+      } catch (err) {
+        console.error(`[CRON] Error en ${etiqueta}:`, err);
+      }
+      scheduleNext();
+    }, msRestantes);
+  };
+  scheduleNext();
+}
 
 const MAX_RETRIES = 10;
 const BASE_DELAY_MS = 2000;
@@ -91,6 +119,10 @@ async function main() {
     // Programar limpieza periódica
     setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
+
+    // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
+    programarDiario(9, 'ResumenAutorizaciones 09:00', enviarResumenAutorizacionesPendientes);
+    programarDiario(16, 'ResumenAutorizaciones 16:00', enviarResumenAutorizacionesPendientes);
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
     console.log('[DB] Server running without DB — requests will retry on demand.');

@@ -244,7 +244,8 @@ export class CampanasController {
           COALESCE(uc_agg.reservas_count_ultima_cat, 0) AS reservas_count_ultima_cat,
           COALESCE(uc_agg.caras_ultima_cat, 0) AS caras_ultima_cat,
           cat_content.catorcenas_con_contenido,
-          inv_codes.codigos_inventario
+          inv_codes.codigos_inventario,
+          fmt_agg.formatos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -273,14 +274,14 @@ export class CampanasController {
               INNER JOIN catorcenas cat_b2 ON sc_b2.inicio_periodo >= cat_b2.fecha_inicio AND sc_b2.fin_periodo <= cat_b2.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b2.fecha_inicio AND cat_b2.fecha_fin
               WHERE ct_b2.id = cm_b.cotizacion_id AND rsv_b2.deleted_at IS NULL
-                AND COALESCE(sc_b2.articulo, '') NOT LIKE 'IM-%'
+                AND COALESCE(sc_b2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_b2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_b2.articulo, '') NOT LIKE 'ES-%'
             ) AS reservas_count_ultima_cat,
             (SELECT COALESCE(SUM(sc_b3.caras + sc_b3.bonificacion), 0) FROM solicitudCaras sc_b3
               INNER JOIN cotizacion ct_b3 ON ct_b3.id_propuesta = sc_b3.idquote
               INNER JOIN catorcenas cat_b3 ON sc_b3.inicio_periodo >= cat_b3.fecha_inicio AND sc_b3.fin_periodo <= cat_b3.fecha_fin
                 AND cm_b.fecha_fin BETWEEN cat_b3.fecha_inicio AND cat_b3.fecha_fin
               WHERE ct_b3.id = cm_b.cotizacion_id
-                AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%'
+                AND COALESCE(sc_b3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_b3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_b3.articulo, '') NOT LIKE 'ES-%'
             ) AS caras_ultima_cat
           FROM campania cm_b
           WHERE cm_b.id IN (${cmIdPh})
@@ -307,14 +308,24 @@ export class CampanasController {
           WHERE rsv_i.deleted_at IS NULL AND ct_inv.id IN (${ctIdPh})
           GROUP BY ct_inv.id
         ) inv_codes ON inv_codes.cotizacion_id = ct.id
+        LEFT JOIN (
+          SELECT
+            ct_f.id AS cotizacion_id,
+            GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ') AS formatos
+          FROM solicitudCaras sc_f
+          INNER JOIN cotizacion ct_f ON CAST(ct_f.id_propuesta AS CHAR) = sc_f.idquote
+          WHERE ct_f.id IN (${ctIdPh})
+          GROUP BY ct_f.id
+        ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, cotizacionIds para fmt_agg, campaignIds para WHERE
       const dataParams = [
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...campaignIds,
@@ -521,13 +532,13 @@ export class CampanasController {
                INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                  AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%'
+                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
               ) as cnt,
               (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                FROM solicitudCaras sc3
                INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%'
+                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
               ) as caras_esperadas`,
             propuesta.solicitud_id, campana.fecha_fin,
             propuesta.solicitud_id, campana.fecha_fin
@@ -558,7 +569,7 @@ export class CampanasController {
           FROM solicitudCaras sc
           INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
           WHERE sc.idquote = ?
-            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%'
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
           ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
           propuesta.solicitud_id
         );
@@ -6601,6 +6612,7 @@ export class CampanasController {
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
+            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'BONIFICACION'
           END AS negociacion,
           sc.bonificacion AS caras,
@@ -6649,6 +6661,7 @@ export class CampanasController {
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
             WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
+            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'RENTA'
           END AS negociacion,
           (sc.caras - sc.bonificacion) AS caras,
@@ -7474,6 +7487,7 @@ export class CampanasController {
       };
       if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+      if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
       const cara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -7598,6 +7612,7 @@ export class CampanasController {
       };
       if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
       if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+      if (data.grupo_rt_bf) createData.grupo_rt_bf = data.grupo_rt_bf;
 
       const cara = await prisma.solicitudCaras.create({
         data: createData,
@@ -7691,6 +7706,7 @@ export class CampanasController {
           };
           if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
           if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+          if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
