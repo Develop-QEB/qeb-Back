@@ -164,6 +164,14 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     tarifa_publica: cara.tarifa_publica
   });
 
+  // Artículos de bonificación (BF/CF): siempre auto-aprobados, son la fila par de RT/CF
+  if (cara.articulo) {
+    const artUpperBf = cara.articulo.toUpperCase();
+    if (artUpperBf.startsWith('BF') || artUpperBf.startsWith('CF')) {
+      return { autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado' };
+    }
+  }
+
   // Artículos de impresión (IM): si tarifa es 0, requiere DCM; si no, aprobado
   if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
     if ((cara.tarifa_publica || 0) <= 0) {
