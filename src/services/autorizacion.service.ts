@@ -238,6 +238,10 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
 
+  // Caras impares requieren autorización DCM (excepto Kiosco)
+  const isKiosco = (cara.formato || '').toUpperCase().includes('KIOSK') || (cara.formato || '').toUpperCase().includes('KIOSCO');
+  const oddCarasNeedsDcm = !isKiosco && totalCaras > 0 && totalCaras % 2 !== 0;
+
   console.log('[calcularEstadoAutorizacion] Valores calculados:', {
     totalCaras,
     tarifaEfectiva
@@ -340,12 +344,13 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
 
   console.log('[calcularEstadoAutorizacion] Criterio encontrado:', criterio);
 
-  // Si no hay criterio definido, aprobar automáticamente ambos
+  // Si no hay criterio definido, aprobar automáticamente (salvo caras impares)
   if (!criterio) {
     console.log('[calcularEstadoAutorizacion] No hay criterio, aprobando automáticamente');
     return {
       autorizacion_dg: 'aprobado',
-      autorizacion_dcm: 'aprobado',
+      autorizacion_dcm: oddCarasNeedsDcm ? 'pendiente' : 'aprobado',
+      motivo_dcm: oddCarasNeedsDcm ? 'Número impar de caras requiere autorización DCM' : undefined,
       tarifa_efectiva: tarifaEfectiva,
       total_caras: totalCaras
     };
@@ -409,6 +414,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     requiereDcm = true;
     if (motivoDcm) motivoDcm += '; ';
     motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
+  }
+
+  // Caras impares → OR en DCM
+  if (oddCarasNeedsDcm) {
+    requiereDcm = true;
+    motivoDcm = (motivoDcm ? motivoDcm + '; ' : '') + 'Número impar de caras requiere autorización DCM';
   }
 
   // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
