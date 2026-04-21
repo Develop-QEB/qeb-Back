@@ -745,19 +745,28 @@ export class DashboardController {
         reservasWhere.calendario_id = { in: calendarioIds };
       }
 
-      // Obtener reservas con sus clientes
-      const reservas = await prisma.reservas.findMany({
-        where: reservasWhere,
-        select: {
-          inventario_id: true, // este es espacio_inventario.id
-          estatus: true,
-          cliente_id: true,
-          APS: true,
-          solicitudCaras_id: true,
-        },
-      });
+      // Obtener reservas via raw query — sin IN masivo, filtrar en JS después
+      const calendarioFilter = (reservasWhere.calendario_id as { in: number[] } | undefined)?.in;
+      const calendarioClause = calendarioFilter && calendarioFilter.length > 0
+        ? `AND rsv.calendario_id IN (${calendarioFilter.join(',')})`
+        : '';
+      type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
+      const inventarioIdsSet = new Set(inventarioIds);
+      const allReservas: ReservaRaw[] = await prisma.$queryRawUnsafe(`
+        SELECT
+          ei.inventario_id as inventario_id,
+          rsv.estatus,
+          rsv.cliente_id,
+          rsv.APS,
+          rsv.solicitudCaras_id
+        FROM reservas rsv
+        INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+        WHERE rsv.deleted_at IS NULL
+        ${calendarioClause}
+      `);
+      const reservas = allReservas.filter(r => inventarioIdsSet.has(Number(r.inventario_id)));
 
-      // Construir mapa solicitudCaras_id → campana_id y campana.cliente_id
+      // Construir mapa solicitudCaras_id → propuesta_id y campana_id
       const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
       const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: solicitudCarasIds } },
@@ -766,6 +775,8 @@ export class DashboardController {
       const idquoteValues = solicitudCarasList
         .map((sc) => parseInt(sc.idquote || ''))
         .filter((v) => !isNaN(v));
+
+      // Obtener campana_id via cotizacion (para el link de APS)
       const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
         where: { id_propuesta: { in: idquoteValues } },
         select: { id: true, id_propuesta: true },
@@ -773,40 +784,34 @@ export class DashboardController {
       const cotizacionIds = cotizaciones.map((c) => c.id);
       const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
         where: { cotizacion_id: { in: cotizacionIds } },
-        select: { id: true, cotizacion_id: true, cliente_id: true },
+        select: { id: true, cotizacion_id: true },
       }) : [];
-      // idquote → cotizacion_id
       const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
-      // cotizacion_id → campana
       const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
-      // solicitudCaras_id → campana_id y cliente_id de la campana
-      const solicitudToCampana = new Map(
-        solicitudCarasList
-          .map((sc) => {
-            const idquote = parseInt(sc.idquote || '');
-            const cotizId = idquoteToCotizacion.get(idquote);
-            const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
-            return [sc.id, { campana_id: campana?.id ?? null, cliente_id: campana?.cliente_id ?? null }] as [number, { campana_id: number | null; cliente_id: number | null }];
-          })
-      );
 
-      // Obtener nombres de clientes via campana.cliente_id (igual que historial)
-      const campanaClienteIds = [...new Set(campanas.map((c) => c.cliente_id).filter(Boolean))] as number[];
-      const campanaClientes = campanaClienteIds.length > 0 ? await prisma.cliente.findMany({
-        where: { id: { in: campanaClienteIds } },
-        select: { id: true, CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      // Obtener razon_social via propuesta → solicitud (camino correcto para nombre del cliente)
+      const propuestas = idquoteValues.length > 0 ? await prisma.propuesta.findMany({
+        where: { id: { in: idquoteValues } },
+        select: { id: true, solicitud_id: true },
       }) : [];
-      const cuics = [...new Set(campanaClientes.filter(c => c.CUIC != null).map(c => c.CUIC!))];
-      const cuicClientes = cuics.length > 0 ? await prisma.cliente.findMany({
-        where: { CUIC: { in: cuics }, T0_U_RazonSocial: { not: null } },
-        select: { CUIC: true, T0_U_RazonSocial: true, T0_U_Cliente: true },
+      const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
+      const solicitudes = solicitudIds.length > 0 ? await prisma.solicitud.findMany({
+        where: { id: { in: solicitudIds } },
+        select: { id: true, razon_social: true },
       }) : [];
-      const cuicNameMap = new Map<number, string>();
-      cuicClientes.forEach(c => { if (c.CUIC && !cuicNameMap.has(c.CUIC)) cuicNameMap.set(c.CUIC, c.T0_U_RazonSocial || c.T0_U_Cliente || ''); });
-      const clienteMap = new Map(campanaClientes.map((c) => {
-        const cuicName = c.CUIC ? cuicNameMap.get(c.CUIC) : null;
-        return [c.id, cuicName || c.T0_U_RazonSocial || c.T0_U_Cliente || null];
-      }));
+      const solicitudNombreMap = new Map(solicitudes.map((s) => [s.id, s.razon_social || null]));
+      const propuestaToSolicitudNombre = new Map(propuestas.map((p) => [p.id, solicitudNombreMap.get(p.solicitud_id) || null]));
+
+      // solicitudCaras_id → { campana_id, cliente_nombre }
+      const solicitudToCampana = new Map(
+        solicitudCarasList.map((sc) => {
+          const idquote = parseInt(sc.idquote || '');
+          const cotizId = idquoteToCotizacion.get(idquote);
+          const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+          const clienteNombre = !isNaN(idquote) ? (propuestaToSolicitudNombre.get(idquote) || null) : null;
+          return [sc.id, { campana_id: campana?.id ?? null, cliente_nombre: clienteNombre }] as [number, { campana_id: number | null; cliente_nombre: string | null }];
+        })
+      );
 
       // Mapear info de reserva por inventario
       const inventarioInfo: Record<number, {
@@ -818,8 +823,8 @@ export class DashboardController {
       }> = {};
 
       reservas.forEach((r) => {
-        // r.inventario_id es espacio_inventario.id, convertir a inventarios.id
-        const invId = espacioToInventario.get(r.inventario_id);
+        // r.inventario_id ya es inventarios.id (viene del raw query con JOIN)
+        const invId = Number(r.inventario_id);
         if (!invId) return;
         const current = inventarioInfo[invId];
         // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
@@ -836,8 +841,8 @@ export class DashboardController {
         if (newPrioridad > currentPrioridad) {
           const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
           inventarioInfo[invId] = {
-            estatus: r.estatus, // Guardar estatus original
-            cliente_nombre: solInfo?.cliente_id ? (clienteMap.get(solInfo.cliente_id) || null) : null,
+            estatus: r.estatus,
+            cliente_nombre: solInfo?.cliente_nombre || null,
             APS: r.APS,
             campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
