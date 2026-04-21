@@ -1314,9 +1314,23 @@ export class NotificacionesController {
 
       const result = await aprobarCaras(idquote, tipo, userId || 0, userName);
 
-      // Emit socket event for real-time updates
+      // Guardar historial de aprobación
       const propuestaId = parseInt(idquote);
       if (!isNaN(propuestaId)) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'autorizacion_aprobacion',
+            ref_id: propuestaId,
+            accion: `Aprobación ${tipo.toUpperCase()} por ${userName}`,
+            detalles: JSON.stringify({
+              tipo: tipo.toUpperCase(),
+              carasAprobadas: result.carasAprobadas,
+              aprobadoPor: userName,
+              userId,
+            }),
+          },
+        });
+
         emitToAll(SOCKET_EVENTS.AUTORIZACION_APROBADA, { propuestaId, idquote });
       }
 
@@ -1418,6 +1432,21 @@ export class NotificacionesController {
       }
 
       await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
+
+      // Guardar historial de rechazo
+      await prisma.historial.create({
+        data: {
+          tipo: 'autorizacion_rechazo',
+          ref_id: propuestaId,
+          accion: `Rechazo ${tipoAutorizacion.toUpperCase()} por ${userName}`,
+          detalles: JSON.stringify({
+            tipo: tipoAutorizacion.toUpperCase(),
+            motivo: comentario,
+            rechazadoPor: userName,
+            userId,
+          }),
+        },
+      });
 
       // Emit socket event for real-time updates
       emitToAll(SOCKET_EVENTS.AUTORIZACION_RECHAZADA, { propuestaId, idquote });
@@ -1526,6 +1555,38 @@ export class NotificacionesController {
         success: false,
         error: message,
       });
+    }
+  }
+  async getHistorialAutorizacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { idquote } = req.params;
+      const refId = parseInt(idquote);
+
+      if (isNaN(refId)) {
+        res.status(400).json({ success: false, error: 'idquote inválido' });
+        return;
+      }
+
+      const historial = await prisma.historial.findMany({
+        where: {
+          ref_id: refId,
+          tipo: { startsWith: 'autorizacion_' },
+        },
+        orderBy: { fecha_hora: 'desc' },
+      });
+
+      const formatted = historial.map(h => ({
+        id: Number(h.id),
+        tipo: h.tipo,
+        accion: h.accion,
+        fecha: h.fecha_hora,
+        detalles: h.detalles ? JSON.parse(h.detalles) : null,
+      }));
+
+      res.json({ success: true, data: formatted });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }

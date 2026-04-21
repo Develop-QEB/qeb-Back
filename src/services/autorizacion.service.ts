@@ -576,6 +576,37 @@ export async function crearTareasAutorizacion(
     pendientesDcm.length = 0;
   }
 
+  // Guardar snapshot de caras para historial (antes/después en ediciones)
+  const allCaraIds = [...new Set([...pendientesDg, ...pendientesDcm])];
+  if (allCaraIds.length > 0) {
+    const carasSnapshot = await prisma.solicitudCaras.findMany({
+      where: { id: { in: allCaraIds.map(Number).filter(n => !isNaN(n)) } },
+      select: {
+        id: true, articulo: true, ciudad: true, formato: true, tipo: true,
+        caras: true, bonificacion: true, costo: true, tarifa_publica: true,
+        caras_flujo: true, caras_contraflujo: true,
+        autorizacion_dg: true, autorizacion_dcm: true,
+      },
+    });
+    const refId = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
+    await prisma.historial.create({
+      data: {
+        tipo: `autorizacion_${origen}`,
+        ref_id: refId,
+        accion: 'Solicitud de autorización',
+        detalles: JSON.stringify({
+          origen,
+          solicitudId,
+          propuestaId,
+          campaniaId: campaniaId || null,
+          pendientesDg: pendientesDg.length,
+          pendientesDcm: pendientesDcm.length,
+          caras: carasSnapshot,
+        }),
+      },
+    });
+  }
+
   // Crear tarea para DG si hay pendientes y no existe ya una tarea
   if (pendientesDg.length > 0 && usuariosDg.length > 0 && !existeTareaDg) {
     const tareaDg = await prisma.tareas.create({

@@ -15,6 +15,7 @@ router.get('/autorizacion/:idquote/resumen', notificacionesController.getResumen
 router.get('/autorizacion/:idquote/caras', notificacionesController.getCarasAutorizacion.bind(notificacionesController));
 router.post('/autorizacion/:idquote/aprobar/:tipo', notificacionesController.aprobarAutorizacion.bind(notificacionesController));
 router.post('/autorizacion/:idquote/rechazar', notificacionesController.rechazarAutorizacion.bind(notificacionesController));
+router.get('/autorizacion/:idquote/historial', notificacionesController.getHistorialAutorizacion.bind(notificacionesController));
 
 // CRUD
 router.get('/', notificacionesController.getAll.bind(notificacionesController));
