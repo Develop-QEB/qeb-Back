@@ -2237,8 +2237,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -2379,8 +2379,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
