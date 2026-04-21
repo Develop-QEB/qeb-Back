@@ -667,6 +667,16 @@ export class SolicitudesController {
         return;
       }
 
+      // Fallback SAP codes from cliente when solicitud has nulls
+      if (!solicitud.card_code || !solicitud.salesperson_code || !solicitud.sap_database) {
+        const cliente = await prisma.cliente.findUnique({ where: { id: solicitud.cliente_id } });
+        if (cliente) {
+          (solicitud as any).card_code = solicitud.card_code || cliente.card_code;
+          (solicitud as any).salesperson_code = solicitud.salesperson_code || cliente.salesperson_code;
+          (solicitud as any).sap_database = solicitud.sap_database || cliente.sap_database;
+        }
+      }
+
       // Get related propuesta
       const propuesta = await prisma.propuesta.findFirst({
         where: { solicitud_id: solicitud.id, deleted_at: null },
