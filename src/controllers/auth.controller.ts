@@ -291,8 +291,8 @@ async resetPassword(req: Request, res: Response): Promise<void> {
     try {
       const latest = await prisma.version.findFirst({ orderBy: { id: 'desc' } });
       res.json({ success: true, data: latest ? { numero: latest.numero, fecha: latest.fecha } : null });
-    } catch (error) {
-      res.status(500).json({ success: false, error: 'Error al obtener versión' });
+    } catch (_error) {
+      res.json({ success: true, data: null });
     }
   }
 

@@ -554,7 +554,7 @@ export class SolicitudesController {
             ct.tipo_periodo,
             ct.nombre_campania,
             COALESCE(MIN(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_inicio,
-            COALESCE(MAX(sc.fin_periodo), ct.fecha_fin) as periodo_fecha_fin,
+            COALESCE(MAX(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_fin,
             cat_ini.numero_catorcena as catorcena_inicio,
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
