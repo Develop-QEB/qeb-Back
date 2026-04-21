@@ -241,10 +241,10 @@ export class CampanasController {
           COALESCE(rsv_agg.has_aps, 0) AS has_aps,
           COALESCE(rsv_agg.reservas_count, 0) AS reservas_count,
           COALESCE(rsv_agg.circuitos, 0) AS circuitos,
-          COALESCE(uc_agg.reservas_count_ultima_cat, 0) AS reservas_count_ultima_cat,
-          COALESCE(uc_agg.caras_ultima_cat, 0) AS caras_ultima_cat,
+          0 AS reservas_count_ultima_cat,
+          0 AS caras_ultima_cat,
           cat_content.catorcenas_con_contenido,
-          inv_codes.codigos_inventario,
+          NULL AS codigos_inventario,
           fmt_agg.formatos
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
@@ -267,22 +267,6 @@ export class CampanasController {
         ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
         LEFT JOIN (
           SELECT
-            cm_b.id AS campania_id,
-            COUNT(rsv_b.id) AS reservas_count_ultima_cat,
-            COALESCE(SUM(sc_b.caras + sc_b.bonificacion), 0) AS caras_ultima_cat
-          FROM campania cm_b
-          INNER JOIN cotizacion ct_b ON ct_b.id = cm_b.cotizacion_id
-          INNER JOIN catorcenas cat_end ON cm_b.fecha_fin BETWEEN cat_end.fecha_inicio AND cat_end.fecha_fin
-          INNER JOIN solicitudCaras sc_b ON CAST(sc_b.idquote AS UNSIGNED) = ct_b.id_propuesta
-            AND sc_b.inicio_periodo >= cat_end.fecha_inicio AND sc_b.fin_periodo <= cat_end.fecha_fin
-            AND COALESCE(sc_b.articulo, '') NOT LIKE 'IM-%'
-            AND COALESCE(sc_b.articulo, '') NOT LIKE 'ESP%'
-            AND COALESCE(sc_b.articulo, '') NOT LIKE 'ES-%'
-          LEFT JOIN reservas rsv_b ON rsv_b.solicitudCaras_id = sc_b.id AND rsv_b.deleted_at IS NULL
-          WHERE cm_b.id IN (${cmIdPh})
-        ) uc_agg ON uc_agg.campania_id = cm.id
-        LEFT JOIN (
-          SELECT
             ct_c.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
           FROM solicitudCaras sc_c
@@ -291,18 +275,6 @@ export class CampanasController {
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
-        LEFT JOIN (
-          SELECT
-            ct_inv.id AS cotizacion_id,
-            GROUP_CONCAT(DISTINCT inv_i.codigo_unico ORDER BY inv_i.codigo_unico SEPARATOR ',') AS codigos_inventario
-          FROM reservas rsv_i
-          INNER JOIN espacio_inventario ei_i ON ei_i.id = rsv_i.inventario_id
-          INNER JOIN inventarios inv_i ON inv_i.id = ei_i.inventario_id
-          INNER JOIN solicitudCaras sc_i ON sc_i.id = rsv_i.solicitudCaras_id
-          INNER JOIN cotizacion ct_inv ON ct_inv.id_propuesta = sc_i.idquote
-          WHERE rsv_i.deleted_at IS NULL AND ct_inv.id IN (${ctIdPh})
-          GROUP BY ct_inv.id
-        ) inv_codes ON inv_codes.cotizacion_id = ct.id
         LEFT JOIN (
           SELECT
             ct_f.id AS cotizacion_id,
@@ -316,10 +288,8 @@ export class CampanasController {
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, campaignIds para uc_agg, cotizacionIds para cat_content, cotizacionIds para inv_codes, cotizacionIds para fmt_agg, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, cotizacionIds para cat_content, cotizacionIds para fmt_agg, campaignIds para WHERE
       const dataParams = [
-        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
-        ...campaignIds,
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
