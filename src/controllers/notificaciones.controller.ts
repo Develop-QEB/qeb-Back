@@ -6,14 +6,9 @@ import {
   aprobarCaras,
   rechazarSolicitud,
   obtenerResumenAutorizacion,
-  verificarCarasPendientes,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
-
-// Throttle auto-cleanup: max once per 5 minutes per user
-const lastCleanupByUser = new Map<number, number>();
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
@@ -205,60 +200,7 @@ export class NotificacionesController {
         prisma.tareas.count({ where }),
       ]);
 
-      // Auto-cleanup: fire-and-forget en background (throttled: max 1 vez cada 5 min por usuario)
-      if (userId) {
-        const now = Date.now();
-        const lastRun = lastCleanupByUser.get(userId) || 0;
-        if (now - lastRun >= CLEANUP_INTERVAL_MS) {
-          lastCleanupByUser.set(userId, now);
-          // No await — corre en background sin bloquear la respuesta
-          (async () => {
-            try {
-              const authTareas = await prisma.tareas.findMany({
-                where: {
-                  OR: [{ id_responsable: userId }, ...idAsignadoMatch(userId)],
-                  estatus: 'Pendiente',
-                  tipo: { in: ['Autorización DG', 'Autorización DCM'] },
-                },
-                select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true, campania_id: true },
-              });
-              if (authTareas.length === 0) return;
-
-              const tareasToFinalize: number[] = [];
-              const cacheAuth = new Map<string, { pendientesDg: number[]; pendientesDcm: number[] }>();
-
-              for (const t of authTareas) {
-                let idquote: string | null = t.id_propuesta || null;
-                if (!idquote && t.campania_id) {
-                  const camp = await prisma.campania.findFirst({ where: { id: t.campania_id }, select: { cotizacion_id: true } });
-                  if (camp?.cotizacion_id) {
-                    const cot = await prisma.cotizacion.findFirst({ where: { id: camp.cotizacion_id }, select: { id_propuesta: true } });
-                    if (cot?.id_propuesta) idquote = cot.id_propuesta.toString();
-                  }
-                }
-                if (!idquote && t.id_solicitud) {
-                  const prop = await prisma.propuesta.findFirst({ where: { solicitud_id: parseInt(t.id_solicitud) }, select: { id: true }, orderBy: { id: 'desc' } });
-                  if (prop) idquote = prop.id.toString();
-                }
-                if (!idquote) continue;
-                if (!cacheAuth.has(idquote)) {
-                  const auth = await verificarCarasPendientes(idquote);
-                  cacheAuth.set(idquote, { pendientesDg: auth.pendientesDg, pendientesDcm: auth.pendientesDcm });
-                }
-                const auth = cacheAuth.get(idquote)!;
-                const pendientes = t.tipo === 'Autorización DG' ? auth.pendientesDg : auth.pendientesDcm;
-                if (pendientes.length === 0) tareasToFinalize.push(t.id);
-              }
-
-              if (tareasToFinalize.length > 0) {
-                await prisma.tareas.updateMany({ where: { id: { in: tareasToFinalize } }, data: { estatus: 'Atendido' } });
-              }
-            } catch (err) {
-              console.error('[Auto-cleanup] Error (background):', err);
-            }
-          })();
-        }
-      }
+      // Auto-cleanup desactivado en getAll — se maneja solo desde el ApprovalModal del frontend
 
       // Obtener asesor y creador de las solicitudes relacionadas
       const solicitudIds = [...new Set(tareas
