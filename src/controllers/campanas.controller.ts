@@ -6017,6 +6017,33 @@ export class CampanasController {
     }
   }
 
+  async unmarkPostedAPS(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { aps } = req.body as { aps?: number[] };
+
+      const current = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT posted_aps FROM campania WHERE id = ?', campanaId
+      );
+      const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
+
+      // Si se pasan APS específicos, solo quitar esos; si no, limpiar todos
+      const remaining = aps && aps.length > 0
+        ? existing.filter(id => !aps.includes(id))
+        : [];
+
+      await prisma.$queryRawUnsafe(
+        'UPDATE campania SET posted_aps = ? WHERE id = ?',
+        JSON.stringify(remaining), campanaId
+      );
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: remaining });
+      res.json({ success: true, posted_aps: remaining });
+    } catch (error) {
+      console.error('Error en unmarkPostedAPS:', error);
+      res.status(500).json({ success: false, error: 'Error al cancelar POST de APS' });
+    }
+  }
+
   async assignAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { inventarioIds, campanaId, solicitudCarasIds, rsvIds } = req.body;

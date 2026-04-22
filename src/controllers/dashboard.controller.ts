@@ -702,15 +702,7 @@ export class DashboardController {
 
       const inventarioIds = inventarios.map((i) => i.id);
 
-      // Obtener espacio_inventario para mapear espacio.id -> inventario.id
-      const espacios = await prisma.espacio_inventario.findMany({
-        where: { inventario_id: { in: inventarioIds } },
-        select: { id: true, inventario_id: true },
-      });
-      const espacioIds = espacios.map((e) => e.id);
-      const espacioToInventario = new Map(espacios.map((e) => [e.id, e.inventario_id]));
-
-      // Filtro de fechas
+      // Filtro de fechas para calendario
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
 
@@ -727,11 +719,7 @@ export class DashboardController {
         fechaFin = new Date(fecha_fin as string);
       }
 
-      const reservasWhere: Record<string, unknown> = {
-        deleted_at: null,
-        inventario_id: { in: espacioIds },
-      };
-
+      let calendarioClause = '';
       if (fechaInicio && fechaFin) {
         const calendarios = await prisma.calendario.findMany({
           where: {
@@ -741,15 +729,12 @@ export class DashboardController {
           },
           select: { id: true },
         });
-        const calendarioIds = calendarios.map((c) => c.id);
-        reservasWhere.calendario_id = { in: calendarioIds };
+        if (calendarios.length > 0) {
+          calendarioClause = `AND rsv.calendario_id IN (${calendarios.map(c => c.id).join(',')})`;
+        }
       }
 
-      // Obtener reservas via raw query — sin IN masivo, filtrar en JS después
-      const calendarioFilter = (reservasWhere.calendario_id as { in: number[] } | undefined)?.in;
-      const calendarioClause = calendarioFilter && calendarioFilter.length > 0
-        ? `AND rsv.calendario_id IN (${calendarioFilter.join(',')})`
-        : '';
+      // Obtener reservas via raw query (JOIN directo evita IN masivo que MySQL trunca)
       type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
       const inventarioIdsSet = new Set(inventarioIds);
       const allReservas: ReservaRaw[] = await prisma.$queryRawUnsafe(`
