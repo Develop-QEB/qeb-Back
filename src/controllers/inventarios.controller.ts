@@ -701,7 +701,7 @@ export class InventariosController {
           JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
           JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
           JOIN solicitud s ON s.id = p.solicitud_id
-          JOIN cliente c ON c.id = s.cliente_id
+          JOIN cliente c ON c.CUIC = s.cliente_id
           WHERE c.T2_U_Categoria = ${excluir_categoria as string}
           AND r.deleted_at IS NULL
           AND cal.deleted_at IS NULL
@@ -907,7 +907,7 @@ export class InventariosController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = CAST(sc.idquote AS UNSIGNED)
           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           LEFT JOIN cliente cl2 ON cl2.CUIC = cl.CUIC AND cl2.T0_U_RazonSocial IS NOT NULL AND cl2.id != cl.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE epIn.inventario_id = ?

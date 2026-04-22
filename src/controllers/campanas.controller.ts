@@ -2510,7 +2510,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
@@ -2568,7 +2568,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
@@ -2616,7 +2616,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
+          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
           LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
