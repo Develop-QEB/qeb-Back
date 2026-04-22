@@ -201,58 +201,62 @@ export class NotificacionesController {
         prisma.tareas.count({ where }),
       ]);
 
-      // Auto-cleanup: query SEPARADA para buscar TODAS las tareas de auth pendientes del usuario (sin depender de paginación/filtros)
-      if (userId) {
-        const authTareasPendientes = await prisma.tareas.findMany({
-          where: {
-            OR: [
-              { id_responsable: userId },
-              ...idAsignadoMatch(userId),
-            ],
-            estatus: 'Pendiente',
-            tipo: { in: ['Autorización DG', 'Autorización DCM'] },
-          },
-          select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true, campania_id: true },
-        });
+      // Auto-cleanup: query SEPARADA para buscar TODAS las tareas de auth pendientes del usuario
+      try {
+        if (userId) {
+          const authTareasPendientes = await prisma.tareas.findMany({
+            where: {
+              OR: [
+                { id_responsable: userId },
+                ...idAsignadoMatch(userId),
+              ],
+              estatus: 'Pendiente',
+              tipo: { in: ['Autorización DG', 'Autorización DCM'] },
+            },
+            select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true, campania_id: true },
+          });
 
-        if (authTareasPendientes.length > 0) {
-          const tareasToFinalize: number[] = [];
-          const cacheAuth = new Map<string, { pendientesDg: number[]; pendientesDcm: number[] }>();
+          if (authTareasPendientes.length > 0) {
+            const tareasToFinalize: number[] = [];
+            const cacheAuth = new Map<string, { pendientesDg: number[]; pendientesDcm: number[] }>();
 
-          for (const t of authTareasPendientes) {
-            let idquote: string | null = t.id_propuesta || null;
+            for (const t of authTareasPendientes) {
+              let idquote: string | null = t.id_propuesta || null;
 
-            if (!idquote && t.campania_id) {
-              const camp = await prisma.campania.findFirst({ where: { id: t.campania_id }, select: { cotizacion_id: true } });
-              if (camp?.cotizacion_id) {
-                const cot = await prisma.cotizacion.findFirst({ where: { id: camp.cotizacion_id }, select: { id_propuesta: true } });
-                if (cot?.id_propuesta) idquote = cot.id_propuesta.toString();
+              if (!idquote && t.campania_id) {
+                const camp = await prisma.campania.findFirst({ where: { id: t.campania_id }, select: { cotizacion_id: true } });
+                if (camp?.cotizacion_id) {
+                  const cot = await prisma.cotizacion.findFirst({ where: { id: camp.cotizacion_id }, select: { id_propuesta: true } });
+                  if (cot?.id_propuesta) idquote = cot.id_propuesta.toString();
+                }
               }
+
+              if (!idquote && t.id_solicitud) {
+                const prop = await prisma.propuesta.findFirst({ where: { solicitud_id: parseInt(t.id_solicitud) }, select: { id: true }, orderBy: { id: 'desc' } });
+                if (prop) idquote = prop.id.toString();
+              }
+
+              if (!idquote) continue;
+
+              if (!cacheAuth.has(idquote)) {
+                const auth = await verificarCarasPendientes(idquote);
+                cacheAuth.set(idquote, { pendientesDg: auth.pendientesDg, pendientesDcm: auth.pendientesDcm });
+              }
+              const auth = cacheAuth.get(idquote)!;
+              const pendientes = t.tipo === 'Autorización DG' ? auth.pendientesDg : auth.pendientesDcm;
+              if (pendientes.length === 0) tareasToFinalize.push(t.id);
             }
 
-            if (!idquote && t.id_solicitud) {
-              const prop = await prisma.propuesta.findFirst({ where: { solicitud_id: parseInt(t.id_solicitud) }, select: { id: true }, orderBy: { id: 'desc' } });
-              if (prop) idquote = prop.id.toString();
-            }
-
-            if (!idquote) continue;
-
-            if (!cacheAuth.has(idquote)) {
-              const auth = await verificarCarasPendientes(idquote);
-              cacheAuth.set(idquote, { pendientesDg: auth.pendientesDg, pendientesDcm: auth.pendientesDcm });
-            }
-            const auth = cacheAuth.get(idquote)!;
-            const pendientes = t.tipo === 'Autorización DG' ? auth.pendientesDg : auth.pendientesDcm;
-            if (pendientes.length === 0) tareasToFinalize.push(t.id);
-          }
-
-          if (tareasToFinalize.length > 0) {
-            await prisma.tareas.updateMany({ where: { id: { in: tareasToFinalize } }, data: { estatus: 'Atendido' } });
-            for (const t of tareas) {
-              if (tareasToFinalize.includes(t.id)) t.estatus = 'Atendido';
+            if (tareasToFinalize.length > 0) {
+              await prisma.tareas.updateMany({ where: { id: { in: tareasToFinalize } }, data: { estatus: 'Atendido' } });
+              for (const t of tareas) {
+                if (tareasToFinalize.includes(t.id)) t.estatus = 'Atendido';
+              }
             }
           }
         }
+      } catch (cleanupErr) {
+        console.error('[Auto-cleanup] Error (non-blocking):', cleanupErr);
       }
 
       // Obtener asesor y creador de las solicitudes relacionadas
