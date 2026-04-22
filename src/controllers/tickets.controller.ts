@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import { AuthRequest } from '../types';
 import { getIO, SOCKET_EVENTS } from '../config/socket';
 import Anthropic from '@anthropic-ai/sdk';
+import { chatbotController } from './chatbot.controller';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
@@ -231,6 +232,11 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       const io = getIO();
       io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, ticket);
     } catch {}
+
+    // Auto-respuesta de soporte (async, no bloquea la creación del ticket)
+    chatbotController.autoRespondTicket(ticket.id).catch(err => {
+      console.error('[AutoTicket] Error en auto-respuesta:', err);
+    });
 
     res.status(201).json(ticket);
   } catch (error) {

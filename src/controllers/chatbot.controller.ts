@@ -2,7 +2,7 @@ import { Response } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
-import { emitToChatbotAdmin } from '../config/socket';
+import { emitToChatbotAdmin, getIO, SOCKET_EVENTS } from '../config/socket';
 
 const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
@@ -853,6 +853,71 @@ ${permisos ? `- Restricciones de su rol: ${permisos}` : '- Sin restricciones esp
 REGLA DE PERMISOS: Si el usuario pregunta como realizar una accion para la cual su rol no tiene permiso (segun las restricciones listadas arriba), responde amablemente que su rol de "${rol}" no tiene acceso a esa funcionalidad y que debe contactar a su administrador del sistema para obtenerlo. No inventes ni asumas permisos que no esten listados.`;
 }
 
+const TICKET_SYSTEM_PROMPT = `Eres parte del equipo de soporte tecnico de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
+
+REGLAS CRITICAS:
+- NUNCA te identifiques como bot, chatbot, asistente virtual, IA ni "QEBooh"
+- Responde como si fueras un miembro humano del equipo de soporte tecnico
+- Tono profesional y SIEMPRE amable, en espanol
+- Se empatico con el usuario, entiende su frustracion si la expresa
+- Responde en texto plano, NUNCA uses markdown (no **, ##, *, backticks)
+- Se conciso y directo
+- Usa la ortografia correcta: "campaña" (con ñ), nunca "campana"
+- Si el usuario adjunta una imagen, analizala para extraer informacion relevante (numeros de campaña, errores, status, etc.)
+
+TONO DE RESPUESTA - EJEMPLOS DE COMO RESPONDEMOS:
+- "Hola [nombre], gracias por reportarlo. Estamos revisando tu caso y en breve te damos una solucion."
+- "Hola [nombre], para poder orientarte mejor, ¿podrias compartirnos una captura de pantalla del error?"
+- "Hola [nombre], esto se resuelve desde el modulo de [X]. Ve a [ruta] y desde ahi puedes [accion]."
+- "Hola [nombre], ya estamos revisando el detalle de tu campaña. Te mantenemos informado."
+- Usa el nombre del usuario para personalizar. Se directo pero amable.
+
+ANTES DE RESPONDER, revisa el ROL del usuario para:
+1. Saber que permisos tiene y que modulos puede ver
+2. Ofrecer soluciones acordes a lo que SU ROL puede hacer
+3. Si el problema es que no tiene acceso a algo, indicarle a quien contactar
+
+MANEJO DE ERRORES Y BUGS:
+- NUNCA admitas que es un error o bug del sistema. NUNCA digas "es un bug", "hay un error en el sistema" ni "el sistema tiene un problema"
+- Si sospechas que es un error tecnico, responde: "Estamos revisando el detalle de tu caso" o "Ya lo estamos verificando con el equipo"
+- NUNCA culpes al sistema ni al equipo de desarrollo
+- Si no puedes resolver, di que el equipo lo esta revisando y que le daran seguimiento
+
+` + BASE_SYSTEM_PROMPT.substring(BASE_SYSTEM_PROMPT.indexOf('=== GLOSARIO')) + `
+
+REGLA IMPORTANTE - CANCELAR PROPUESTAS Y CAMPAÑAS:
+- Las propuestas y campañas NO se eliminan del sistema. Para cancelarlas, el usuario debe cambiar el estatus a "Rechazada" y guardar
+- Al cambiar a "Rechazada", todo el inventario y ubicaciones reservadas se liberan automaticamente
+- Esta accion es IRREVERSIBLE, el usuario debe tener cuidado al utilizarla
+- NUNCA indiques que deben contactar a Trafico para cancelar. El propio usuario puede hacerlo desde el cambio de estatus
+- Si preguntan como cancelar, explica: "Puedes cambiar el estatus de la propuesta/campaña a Rechazada. Al guardar, se liberaran todas las ubicaciones reservadas. Ten en cuenta que esta accion es irreversible."
+
+CONTEXTO ADICIONAL - CARGAS MASIVAS Y MIGRACION SAP:
+- Muchas campañas fueron migradas masivamente de SAP a QEB. Esto puede causar datos incompletos (faltan catorcenas, plazas, tarifas redondeadas, codigos de cliente incorrectos)
+- Si el usuario reporta datos incorrectos en una campaña migrada, no es un error del usuario. Responde que el equipo esta revisando la sincronizacion de datos
+- Los APS (numeros de seguimiento) se generan desde SAP. Si un APS no aparece o tiene datos incorrectos, es tema de sincronizacion
+- Las bonificaciones (BF) y cortesias (CT) a veces no se separan correctamente en la migracion
+
+LIMITACIONES - LO QUE NO PUEDES HACER:
+- NO puedes modificar datos en la base de datos
+- NO puedes corregir campañas, solicitudes, propuestas ni inventario
+- Si el usuario necesita un cambio de datos (corregir tarifa, CUIC, caras, etc.), indicale a quien debe contactar segun la tabla de escalamiento
+- Si es un bug del sistema, NO lo menciones como bug. Di que lo estan revisando
+
+INSTRUCCIONES DE CLASIFICACION Y NOTA INTERNA:
+Tu respuesta debe tener EXACTAMENTE este formato (3 secciones separadas por los tags):
+
+1. Primero tu respuesta al usuario (texto amable y profesional)
+2. Luego la clasificacion
+3. Luego una nota interna tecnica para el equipo de desarrollo
+
+Formato exacto:
+[tu respuesta al usuario aqui]
+[CLASIFICACION:RESUELTO o ESCALADO]
+[NOTA_INTERNA:tu analisis tecnico aqui - que crees que puede estar pasando, que revisar en la DB, posible causa raiz, etc.]
+
+La NOTA_INTERNA debe ser tecnica y honesta (aqui SI puedes decir si crees que es un bug, error de datos, problema de migracion, etc.). Esta nota SOLO la ve el equipo de desarrollo, NO el usuario.`;
+
 export class ChatbotController {
   private client: Anthropic | null = null;
   private tableChecked = false;
@@ -1127,6 +1192,228 @@ export class ChatbotController {
     } catch (error) {
       console.error('Error obteniendo logs del chatbot:', error);
       res.status(500).json({ success: false, error: 'Error al obtener historial' });
+    }
+  }
+  async autoRespondTicket(ticketId: number): Promise<void> {
+    try {
+      const client = this.getClient();
+
+      const ticket = await prisma.tickets.findUnique({ where: { id: ticketId } });
+      if (!ticket) return;
+
+      // Solo responder si no hay respuesta previa de soporte (usuario_id = 0)
+      const existingSupportChat = await prisma.ticket_chat.count({
+        where: { ticket_id: ticketId, usuario_id: 0 },
+      });
+      if (existingSupportChat > 0) return;
+
+      // Obtener rol del usuario
+      const usuario = await prisma.$queryRaw<any[]>`
+        SELECT user_role, area, puesto FROM usuario WHERE correo_electronico = ${ticket.usuario_email} LIMIT 1
+      `;
+      const userRol = usuario[0]?.user_role || 'Desconocido';
+      const userArea = usuario[0]?.area || '';
+      const userPuesto = usuario[0]?.puesto || '';
+
+      // Buscar tickets similares resueltos como referencia
+      const titleWords = (ticket.titulo || '')
+        .split(/\s+/)
+        .filter((w: string) => w.length > 3)
+        .map((w: string) => w.replace(/[%_]/g, ''))
+        .filter((w: string) => w.length > 0)
+        .slice(0, 3);
+      let similarTickets: any[] = [];
+      if (titleWords.length > 0) {
+        const searchPattern = `%${titleWords.join('%')}%`;
+        try {
+          similarTickets = await prisma.$queryRaw<any[]>`
+            SELECT t.id, t.titulo, t.respuesta, t.status
+            FROM tickets t
+            WHERE t.status IN ('Resuelto', 'Cerrado')
+              AND (t.titulo LIKE ${searchPattern} OR t.descripcion LIKE ${searchPattern})
+            ORDER BY t.created_at DESC
+            LIMIT 8
+          `;
+        } catch {
+          similarTickets = [];
+        }
+      }
+
+      // Si no hay suficientes, obtener los mas recientes resueltos como contexto general
+      if (similarTickets.length < 3) {
+        try {
+          const fallback = await prisma.$queryRaw<any[]>`
+            SELECT t.id, t.titulo, t.respuesta, t.status
+            FROM tickets t
+            WHERE t.status IN ('Resuelto', 'Cerrado')
+            ORDER BY t.created_at DESC
+            LIMIT 15
+          `;
+          const existingIds = new Set(similarTickets.map(t => t.id));
+          for (const t of fallback) {
+            if (!existingIds.has(t.id)) similarTickets.push(t);
+          }
+        } catch {}
+      }
+
+      // Buscar chats de tecnicos en tickets resueltos para aprender el tono
+      let toneExamples: any[] = [];
+      try {
+        toneExamples = await prisma.$queryRaw<any[]>`
+          SELECT tc.mensaje, t.titulo
+          FROM ticket_chat tc
+          INNER JOIN tickets t ON t.id = tc.ticket_id
+          WHERE t.status IN ('Resuelto', 'Cerrado')
+            AND tc.usuario_id != t.usuario_id
+            AND tc.mensaje IS NOT NULL
+            AND LENGTH(tc.mensaje) > 20
+          ORDER BY tc.created_at DESC
+          LIMIT 10
+        `;
+      } catch {}
+
+      const resolvedExamples = similarTickets
+        .slice(0, 10)
+        .map(t => `- Ticket #${t.id}: "${t.titulo}" -> Respuesta: ${(t.respuesta || 'Sin respuesta formal').substring(0, 300)}`)
+        .join('\n');
+
+      const toneSection = toneExamples.length > 0
+        ? '\n\n=== EJEMPLOS REALES DE COMO RESPONDE EL EQUIPO TECNICO (imita este tono) ===\n' +
+          toneExamples
+            .filter(e => e.mensaje && e.titulo)
+            .map(e => `- (sobre "${(e.titulo || '').substring(0, 80)}"): "${(e.mensaje || '').substring(0, 200)}"`)
+            .join('\n')
+        : '';
+
+      const descripcion = ticket.descripcion || 'Sin descripcion proporcionada';
+
+      const systemPrompt = TICKET_SYSTEM_PROMPT + `
+
+=== TICKETS SIMILARES YA RESUELTOS (usa como referencia) ===
+${resolvedExamples || 'No hay tickets similares resueltos aun.'}${toneSection}
+
+=== TICKET A RESPONDER ===
+Usuario: ${ticket.usuario_nombre}
+Rol: ${userRol}
+Area: ${userArea}
+Puesto: ${userPuesto}
+
+Titulo: ${ticket.titulo}
+Descripcion: ${descripcion}
+Prioridad: ${ticket.prioridad}
+${ticket.imagen ? 'El usuario adjunto una imagen de referencia.' : ''}`;
+
+      // Construir mensaje con imagen si existe
+      const userContent: any[] = [
+        { type: 'text', text: `${ticket.titulo}\n\n${descripcion}` },
+      ];
+
+      if (ticket.imagen) {
+        try {
+          const imgUrl = ticket.imagen.startsWith('http') ? ticket.imagen : `${process.env.SPACES_PUBLIC_BASE_URL}/${ticket.imagen}`;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const imgResponse = await fetch(imgUrl, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (imgResponse.ok) {
+            const contentType = imgResponse.headers.get('content-type') || 'image/png';
+            const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            if (validTypes.includes(contentType)) {
+              const buffer = Buffer.from(await imgResponse.arrayBuffer());
+              if (buffer.length < 5 * 1024 * 1024) {
+                userContent.push({
+                  type: 'image',
+                  source: { type: 'base64', media_type: contentType, data: buffer.toString('base64') },
+                });
+              }
+            }
+          }
+        } catch (imgErr) {
+          console.error('[AutoTicket] Error cargando imagen:', imgErr);
+        }
+      }
+
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
+      });
+
+      const textBlock = response.content.find((b: { type: string }) => b.type === 'text') as { type: 'text'; text: string } | undefined;
+      let fullReply = textBlock?.text || '';
+      if (!fullReply) return;
+
+      // Parsear clasificacion y nota interna
+      const isResolved = fullReply.includes('[CLASIFICACION:RESUELTO]');
+      const notaMatch = fullReply.match(/\[NOTA_INTERNA:([\s\S]*?)\]\s*$/);
+      const notaInterna = notaMatch ? notaMatch[1].trim() : null;
+
+      // Limpiar la respuesta al usuario (quitar tags)
+      let reply = fullReply
+        .replace(/\[CLASIFICACION:(RESUELTO|ESCALADO)\]/g, '')
+        .replace(/\[NOTA_INTERNA:[\s\S]*?\]/g, '')
+        .trim();
+
+      if (!reply) return;
+
+      const newStatus = isResolved ? 'Validación' : 'En Progreso';
+
+      // Guardar respuesta en chat del ticket
+      await prisma.ticket_chat.create({
+        data: {
+          ticket_id: ticketId,
+          usuario_id: 0,
+          usuario_nombre: 'Soporte QEB',
+          mensaje: reply,
+        },
+      });
+
+      // Si hay nota interna, guardarla en ticket_mensajes (notas internas)
+      if (notaInterna) {
+        await prisma.ticket_mensajes.create({
+          data: {
+            ticket_id: ticketId,
+            usuario_id: 0,
+            usuario_nombre: 'Soporte QEB (Auto)',
+            mensaje: notaInterna,
+          },
+        });
+      }
+
+      // Actualizar status del ticket
+      await prisma.tickets.update({
+        where: { id: ticketId },
+        data: {
+          status: newStatus,
+          status_cambiado_por: 'Soporte QEB',
+          ...(isResolved ? {
+            respuesta: reply,
+            respondido_por: 'Soporte QEB',
+            respondido_at: new Date(),
+          } : {}),
+        },
+      });
+
+      // Notificar al equipo DEV
+      const devUsers = await prisma.$queryRaw<any[]>`
+        SELECT id FROM usuario
+        WHERE user_role = 'DEV' AND correo_electronico NOT LIKE 'test_%'
+      `;
+
+      try {
+        const io = getIO();
+        io.to(`ticket-chat-${ticketId}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticket_id: ticketId, usuario_nombre: 'Soporte QEB', mensaje: reply });
+        io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, { id: ticketId, status: newStatus });
+        io.to(`user-notifications-${ticket.usuario_id}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId });
+        for (const dev of devUsers) {
+          io.to(`user-notifications-${dev.id}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId });
+        }
+      } catch {}
+
+      console.log(`[AutoTicket] Ticket #${ticketId} -> ${newStatus} (${isResolved ? 'resuelto' : 'escalado'})${notaInterna ? ' [con nota interna]' : ''}`);
+    } catch (error) {
+      console.error(`[AutoTicket] Error respondiendo ticket #${ticketId}:`, error);
     }
   }
 }
