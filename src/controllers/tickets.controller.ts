@@ -647,6 +647,21 @@ export const createTicketChatMessage = async (req: AuthRequest, res: Response) =
   }
 };
 
+// Eliminar mensaje del chat de soporte (solo DEV)
+export const deleteTicketChatMessage = async (req: AuthRequest, res: Response) => {
+  try {
+    const messageId = Number(req.params.messageId);
+    const userRole = req.user?.rol;
+    if (userRole !== 'DEV') return res.status(403).json({ success: false, error: 'Solo DEV puede eliminar mensajes' });
+
+    await prisma.ticket_chat.delete({ where: { id: messageId } });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting chat message:', error);
+    res.status(500).json({ success: false, error: 'Error al eliminar mensaje' });
+  }
+};
+
 // Marcar mensajes del chat como leidos
 export const markTicketChatRead = async (req: AuthRequest, res: Response) => {
   try {

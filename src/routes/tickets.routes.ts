@@ -17,6 +17,7 @@ import {
   createTicketChatMessage,
   markTicketChatRead,
   getTicketChatUnreadCount,
+  deleteTicketChatMessage,
   getTicketRankings,
   getReportesEspeciales,
   getReportesDetalle,
@@ -51,6 +52,7 @@ router.get('/chat/unread-count', getTicketChatUnreadCount);
 router.get('/:id/chat', getTicketChat);
 router.post('/:id/chat', createTicketChatMessage);
 router.post('/:id/chat/read', markTicketChatRead);
+router.delete('/chat/:messageId', deleteTicketChatMessage);
 
 // Rutas para ver tickets (accesibles por todos para ver su propio ticket)
 router.get('/stats', getTicketStats);
