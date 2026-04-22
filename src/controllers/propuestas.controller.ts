@@ -11,7 +11,6 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropu
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
-import { serializeBigInt } from '../utils/serialization';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -518,9 +517,7 @@ export class PropuestasController {
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
-          ct.tipo_periodo AS tipo_periodo,
-          MAX(sc_fmt.inicio_periodo) AS max_inicio_periodo,
-          GROUP_CONCAT(DISTINCT NULLIF(sc_fmt.formato, '') ORDER BY sc_fmt.formato SEPARATOR ', ') AS formatos
+          ct.tipo_periodo AS tipo_periodo
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -528,7 +525,6 @@ export class PropuestasController {
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
-        LEFT JOIN solicitudCaras sc_fmt ON CAST(sc_fmt.idquote AS UNSIGNED) = pr.id
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -558,7 +554,6 @@ export class PropuestasController {
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
         tipo_periodo: p.tipo_periodo || 'catorcena',
-        max_inicio_periodo: p.max_inicio_periodo || null,
       }));
 
       // Recalculate inversion based on catorcena filter (sum only overlapping caras)
@@ -669,7 +664,6 @@ export class PropuestasController {
           descuento: true,
           autorizacion_dg: true,
           autorizacion_dcm: true,
-          grupo_rt_bf: true,
         },
       });
 
@@ -705,7 +699,7 @@ export class PropuestasController {
       }
 
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
-      if (status === 'Pase a ventas') {
+      if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
         const solicitud = await prisma.solicitud.findFirst({
           where: { id: propuestaAnterior.solicitud_id },
@@ -713,7 +707,7 @@ export class PropuestasController {
         if (solicitud && (!solicitud.cuic || solicitud.cuic === '0' || solicitud.cuic === 'NULL')) {
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". El cliente actual es un Cliente Lead (CUIC 0). Edita la propuesta y asigna un cliente con CUIC antes de continuar.`,
+            error: `No se puede cambiar a "${status}". La solicitud no tiene un cliente con CUIC asignado.`,
           });
           return;
         }
@@ -748,9 +742,9 @@ export class PropuestasController {
         const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
 
         const reservasIncompletas = caras.some(cara => {
-          // Artículos de impresión (IM) o ejecución especial (ESP/ES-) no requieren reservas — siempre completos
+          // Artículos de impresión (IM) no requieren reservas — siempre completos
           const articulo = (cara.articulo || '').toUpperCase();
-          if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
+          if (articulo.startsWith('IM')) return false;
 
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
@@ -2045,8 +2039,6 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
-      const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
 
       // Build WHERE (same as getAll)
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
@@ -2078,20 +2070,7 @@ export class PropuestasController {
         params.push(...visibleIds);
       }
 
-      // 1. Get total count of matching propuestas
-      const countResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(`
-        SELECT COUNT(DISTINCT pr.id) as total FROM propuesta pr
-        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
-        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
-        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-        WHERE ${whereConditions}
-      `, ...params);
-      const total = Number(countResult[0]?.total || 0);
-      if (total === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [], carasInfo: [], total: 0, page, limit } }); return; }
-
-      // 2. Get paginated propuesta IDs
-      const offset = (page - 1) * limit;
+      // 1. Get all matching propuesta IDs
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT DISTINCT pr.id FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
@@ -2099,11 +2078,9 @@ export class PropuestasController {
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
-        ORDER BY pr.id DESC
-        LIMIT ? OFFSET ?
-      `, ...params, limit, offset);
+      `, ...params);
       const propIds = idsResult.map(r => Number(r.id));
-      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [], carasInfo: [], total, page, limit } }); return; }
+      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
       // 2. Propuesta info
@@ -2149,7 +2126,6 @@ export class PropuestasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta, MAX(sc.cortesia) as cortesia,
-          MAX(rsv.APS) as aps_especifico,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena, cat.año as anio_catorcena
         FROM solicitudCaras sc
@@ -2182,7 +2158,7 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
-      const QUERY_TIMEOUT = 30000;
+      const QUERY_TIMEOUT = 60000;
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
       );
@@ -2196,14 +2172,11 @@ export class PropuestasController {
         timeoutPromise as never,
       ]);
 
-      const result = serializeBigInt({
+      const result = JSON.parse(JSON.stringify({
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
-        total,
-        page,
-        limit,
-      });
+      }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
 
       res.json({ success: true, data: result });
     } catch (error) {
@@ -2237,8 +2210,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -2379,8 +2352,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -3211,7 +3184,6 @@ export class PropuestasController {
         cliente_id, cuic, razon_social, unidad_negocio, marca_id, marca_nombre,
         asesor, producto_id, producto_nombre, agencia, categoria_id, categoria_nombre,
         card_code, salesperson_code, sap_database,
-        IMU,
       } = req.body;
 
       // Update propuesta fields
@@ -3252,14 +3224,6 @@ export class PropuestasController {
         await prisma.cotizacion.updateMany({
           where: { id_propuesta: parseInt(id) },
           data: { clientes_id: cliente_id },
-        });
-      }
-
-      // Update solicitud IMU flag if provided
-      if (IMU !== undefined && updatedPropuesta.solicitud_id) {
-        await prisma.solicitud.update({
-          where: { id: updatedPropuesta.solicitud_id },
-          data: { IMU: IMU ? 1 : 0 },
         });
       }
 
@@ -3430,13 +3394,23 @@ export class PropuestasController {
       let autorizacion_dcm = currentCara.autorizacion_dcm || 'aprobado';
 
       if (authFieldsChanged) {
+        const artUpperUpd = ((articulo || currentCara.articulo) || '').toUpperCase();
+        const isRtRowUpd = !!(currentCara.grupo_rt_bf) && !artUpperUpd.startsWith('BF') && !artUpperUpd.startsWith('CF');
+        let bonificacionForAuth = bonificacion ? parseFloat(bonificacion) : 0;
+        if (isRtRowUpd) {
+          const bfPair = await prisma.solicitudCaras.findFirst({
+            where: { grupo_rt_bf: currentCara.grupo_rt_bf!, id: { not: parseInt(caraId) } },
+            select: { bonificacion: true }
+          });
+          if (bfPair) bonificacionForAuth = Number(bfPair.bonificacion) || 0;
+        }
         const estadoResult = await calcularEstadoAutorizacion({
           ciudad: ciudad || undefined,
           estado: estados || undefined,
           formato: formato || '',
           tipo: tipo || undefined,
           caras: caras ? parseInt(caras) : 0,
-          bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+          bonificacion: bonificacionForAuth,
           costo: costo ? parseInt(costo) : 0,
           tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
           articulo: articulo || null
@@ -3464,10 +3438,10 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined,
           articulo,
           descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
+          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
           autorizacion_dg,
           autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
-          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
         },
       });
 
@@ -3545,17 +3519,27 @@ export class PropuestasController {
         caras_contraflujo,
         articulo,
         descuento,
-        grupo_rt_bf,
+        grupo_rt_bf: grupoRtBfCreate,
       } = req.body;
 
-      // Calculate authorization state
+      // Calculate authorization state — use BF pair's bonificacion for RT rows
+      const artUpperCrP = (articulo || '').toUpperCase();
+      const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
+      let bonificacionForAuthCrP = bonificacion ? parseFloat(bonificacion) : 0;
+      if (isRtRowCrP) {
+        const bfPairCrP = await prisma.solicitudCaras.findFirst({
+          where: { grupo_rt_bf: parseInt(grupoRtBfCreate) },
+          select: { bonificacion: true }
+        });
+        if (bfPairCrP) bonificacionForAuthCrP = Number(bfPairCrP.bonificacion) || 0;
+      }
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad,
         estado: estados,
         formato: formato || '',
         tipo,
         caras: caras ? parseInt(caras) : 0,
-        bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
+        bonificacion: bonificacionForAuthCrP,
         costo: costo ? parseInt(costo) : 0,
         tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
         articulo: articulo || null
@@ -3580,7 +3564,7 @@ export class PropuestasController {
           caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
-          grupo_rt_bf: grupo_rt_bf || null,
+          grupo_rt_bf: grupoRtBfCreate ? parseInt(grupoRtBfCreate) : null,
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
@@ -3591,10 +3575,64 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+      const todasCaras = await prisma.solicitudCaras.findMany({
+        where: { idquote: id },
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
+      });
+      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      if (totalCarasGlobal % 2 !== 0) {
+        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
+        if (carasNoP.length > 0) {
+          await prisma.solicitudCaras.updateMany({
+            where: {
+              idquote: id,
+              autorizacion_dg: { not: 'pendiente' }
+            },
+            data: { autorizacion_dg: 'pendiente' }
+          });
+          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+        }
+      }
+
+      // Check for pending authorizations and create tasks if needed
+      const autorizacion = await verificarCarasPendientes(id);
+      if (autorizacion.tienePendientes && userId) {
+        // Get solicitud_id from propuesta
+        const propuesta = await prisma.propuesta.findUnique({
+          where: { id: parseInt(id) },
+          select: { solicitud_id: true }
+        });
+
+        if (propuesta?.solicitud_id) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            parseInt(id),
+            userId,
+            userName,
+            autorizacion.pendientesDg,
+            autorizacion.pendientesDcm,
+            'propuesta'
+          );
+        }
+      }
+
+      // Build response message
+      let mensaje = 'Circuito creado exitosamente';
+      if (autorizacion.tienePendientes) {
+        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
+      }
+
       res.json({
         success: true,
         data: newCara,
-        message: 'Circuito creado exitosamente',
+        message: mensaje,
+        autorizacion: {
+          tienePendientes: autorizacion.tienePendientes,
+          pendientesDg: autorizacion.pendientesDg.length,
+          pendientesDcm: autorizacion.pendientesDcm.length
+        }
       });
     } catch (error) {
       console.error('Error creating cara:', error);
@@ -3623,6 +3661,15 @@ export class PropuestasController {
       const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
       const beforeSnap = await snapshotCaras(allCaraIds);
 
+      // Pre-compute BF bonif map from batch for RT auth evaluation
+      const bfBonifByGrupoP: Record<number, number> = {};
+      for (const item of carasToUpdate) {
+        const art = (item.data.articulo || '').toUpperCase();
+        if ((art.startsWith('BF') || art.startsWith('CF')) && item.data.grupo_rt_bf) {
+          bfBonifByGrupoP[parseInt(item.data.grupo_rt_bf)] = parseFloat(item.data.bonificacion || '0') || 0;
+        }
+      }
+
       // Run all updates in a single transaction
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
@@ -3646,13 +3693,28 @@ export class PropuestasController {
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
           if (authFieldsChanged) {
+            const artUpperP = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
+            const isRtRowP = !!(currentCara?.grupo_rt_bf) && !artUpperP.startsWith('BF') && !artUpperP.startsWith('CF');
+            let bonificacionForAuthP = data.bonificacion ? parseFloat(data.bonificacion) : 0;
+            if (isRtRowP) {
+              const grupoId = currentCara!.grupo_rt_bf!;
+              if (bfBonifByGrupoP[grupoId] !== undefined) {
+                bonificacionForAuthP = bfBonifByGrupoP[grupoId];
+              } else {
+                const bfPairP = await tx.solicitudCaras.findFirst({
+                  where: { grupo_rt_bf: grupoId, id: { not: parseInt(caraId) } },
+                  select: { bonificacion: true }
+                });
+                if (bfPairP) bonificacionForAuthP = Number(bfPairP.bonificacion) || 0;
+              }
+            }
             const estadoResult = await calcularEstadoAutorizacion({
               ciudad: data.ciudad || undefined,
               estado: data.estados || undefined,
               formato: data.formato || '',
               tipo: data.tipo || undefined,
               caras: data.caras ? parseInt(data.caras) : 0,
-              bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+              bonificacion: bonificacionForAuthP,
               costo: data.costo ? parseInt(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
               articulo: data.articulo || null
@@ -3680,10 +3742,10 @@ export class PropuestasController {
               caras_contraflujo: data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined,
               articulo: data.articulo,
               descuento: data.descuento !== undefined && data.descuento !== null ? parseFloat(data.descuento) : undefined,
+              grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,
               autorizacion_dg,
               autorizacion_dcm,
               cortesia: (data.articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
-              grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,
             },
           });
 
@@ -3747,18 +3809,24 @@ export class PropuestasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
-      const id = parseInt(caraId);
 
-      // Liberar reservas activas y luego eliminar la cara
-      await prisma.$transaction([
-        prisma.reservas.updateMany({
-          where: { solicitudCaras_id: id, deleted_at: null },
-          data: { deleted_at: new Date() },
-        }),
-        prisma.solicitudCaras.delete({
-          where: { id },
-        }),
-      ]);
+      // First check if the cara has any reservations
+      const reservations = await prisma.reservas.findMany({
+        where: { solicitudCaras_id: parseInt(caraId), deleted_at: null },
+      });
+
+      if (reservations.length > 0) {
+        res.status(400).json({
+          success: false,
+          error: 'No se puede eliminar una cara con reservas activas',
+        });
+        return;
+      }
+
+      // Delete the cara
+      await prisma.solicitudCaras.delete({
+        where: { id: parseInt(caraId) },
+      });
 
       res.json({ success: true });
     } catch (error) {

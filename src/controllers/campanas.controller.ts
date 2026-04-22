@@ -7455,13 +7455,23 @@ export class CampanasController {
       let autorizacion_dcm = currentCaraFull?.autorizacion_dcm || 'aprobado';
 
       if (authFieldsChanged) {
+        const artUpperUpd = ((data.articulo || currentCaraFull?.articulo) || '').toUpperCase();
+        const isRtRowUpd = !!(currentCaraFull?.grupo_rt_bf) && !artUpperUpd.startsWith('BF') && !artUpperUpd.startsWith('CF');
+        let bonificacionForAuth = data.bonificacion ? parseFloat(data.bonificacion) : 0;
+        if (isRtRowUpd) {
+          const bfPair = await prisma.solicitudCaras.findFirst({
+            where: { grupo_rt_bf: currentCaraFull!.grupo_rt_bf!, id: { not: parseInt(caraId) } },
+            select: { bonificacion: true }
+          });
+          if (bfPair) bonificacionForAuth = Number(bfPair.bonificacion) || 0;
+        }
         const estadoResult = await calcularEstadoAutorizacion({
           ciudad: data.ciudad || undefined,
           estado: data.estados || undefined,
           formato: data.formato || '',
           tipo: data.tipo || undefined,
           caras: data.caras ? parseInt(data.caras) : 0,
-          bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+          bonificacion: bonificacionForAuth,
           costo: data.costo ? parseInt(data.costo) : 0,
           tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
           articulo: data.articulo || null
@@ -7585,14 +7595,24 @@ export class CampanasController {
         select: { solicitud_id: true }
       });
 
-      // Calculate authorization state
+      // Calculate authorization state — use BF pair's bonificacion for RT rows
+      const artUpperCr = (data.articulo || '').toUpperCase();
+      const isRtRowCr = !!data.grupo_rt_bf && !artUpperCr.startsWith('BF') && !artUpperCr.startsWith('CF');
+      let bonificacionForAuthCr = data.bonificacion ? parseFloat(data.bonificacion) : 0;
+      if (isRtRowCr) {
+        const bfPairCr = await prisma.solicitudCaras.findFirst({
+          where: { grupo_rt_bf: parseInt(data.grupo_rt_bf) },
+          select: { bonificacion: true }
+        });
+        if (bfPairCr) bonificacionForAuthCr = Number(bfPairCr.bonificacion) || 0;
+      }
       const estadoResult = await calcularEstadoAutorizacion({
         ciudad: data.ciudad,
         estado: data.estados,
         formato: data.formato || '',
         tipo: data.tipo,
         caras: data.caras ? parseInt(data.caras) : 0,
-        bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+        bonificacion: bonificacionForAuthCr,
         costo: data.costo ? parseInt(data.costo) : 0,
         tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
         articulo: data.articulo || null
@@ -7662,6 +7682,15 @@ export class CampanasController {
       const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
       const beforeSnap = await snapshotCaras(allCaraIds);
 
+      // Pre-compute BF bonif map from batch for RT auth evaluation
+      const bfBonifByGrupoBulk: Record<number, number> = {};
+      for (const item of carasToUpdate) {
+        const art = (item.data.articulo || '').toUpperCase();
+        if ((art.startsWith('BF') || art.startsWith('CF')) && item.data.grupo_rt_bf) {
+          bfBonifByGrupoBulk[parseInt(item.data.grupo_rt_bf)] = parseFloat(item.data.bonificacion || '0') || 0;
+        }
+      }
+
       // Run all updates in a single transaction
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
@@ -7685,13 +7714,28 @@ export class CampanasController {
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
           if (authFieldsChanged) {
+            const artUpperBulk = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
+            const isRtRowBulk = !!(currentCara?.grupo_rt_bf) && !artUpperBulk.startsWith('BF') && !artUpperBulk.startsWith('CF');
+            let bonificacionForAuthBulk = data.bonificacion ? parseFloat(data.bonificacion) : 0;
+            if (isRtRowBulk) {
+              const grupoId = currentCara!.grupo_rt_bf!;
+              if (bfBonifByGrupoBulk[grupoId] !== undefined) {
+                bonificacionForAuthBulk = bfBonifByGrupoBulk[grupoId];
+              } else {
+                const bfPairBulk = await tx.solicitudCaras.findFirst({
+                  where: { grupo_rt_bf: grupoId, id: { not: parseInt(caraId) } },
+                  select: { bonificacion: true }
+                });
+                if (bfPairBulk) bonificacionForAuthBulk = Number(bfPairBulk.bonificacion) || 0;
+              }
+            }
             const estadoResult = await calcularEstadoAutorizacion({
               ciudad: data.ciudad || undefined,
               estado: data.estados || undefined,
               formato: data.formato || '',
               tipo: data.tipo || undefined,
               caras: data.caras ? parseInt(data.caras) : 0,
-              bonificacion: data.bonificacion ? parseFloat(data.bonificacion) : 0,
+              bonificacion: bonificacionForAuthBulk,
               costo: data.costo ? parseInt(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
               articulo: data.articulo || null

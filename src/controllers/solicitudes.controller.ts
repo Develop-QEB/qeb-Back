@@ -1823,8 +1823,23 @@ export class SolicitudesController {
         });
 
         // 8. Create solicitudCaras for each cara entry with authorization status
+        // Pre-compute BF bonificacion per grupo_rt_bf so RT rows use total caras for auth
+        const bfBonifByGrupo: Record<number, number> = {};
+        for (const c of caras) {
+          const art = (c.articulo || '').toUpperCase();
+          if ((art.startsWith('BF') || art.startsWith('CF')) && c.grupo_rt_bf) {
+            bfBonifByGrupo[c.grupo_rt_bf] = (c.bonificacion || c.caras || 0);
+          }
+        }
+
         const createdCaras = [];
         for (const cara of caras) {
+          const artUpper = (cara.articulo || '').toUpperCase();
+          const isRtOfPair = !!cara.grupo_rt_bf && !artUpper.startsWith('BF') && !artUpper.startsWith('CF');
+          const bonificacionForAuth = isRtOfPair
+            ? (bfBonifByGrupo[cara.grupo_rt_bf] || cara.bonificacion || 0)
+            : (cara.bonificacion || 0);
+
           // Calcular estado de autorización
           const estadoResult = await calcularEstadoAutorizacion({
             ciudad: cara.ciudad,
@@ -1832,7 +1847,7 @@ export class SolicitudesController {
             formato: cara.formato,
             tipo: cara.tipo,
             caras: cara.caras,
-            bonificacion: cara.bonificacion || 0,
+            bonificacion: bonificacionForAuth,
             costo: cara.costo,
             tarifa_publica: cara.tarifa_publica || 0,
             articulo: cara.articulo || null
@@ -2725,6 +2740,15 @@ export class SolicitudesController {
             where: { idquote: propuesta.id.toString() },
           });
 
+          // Pre-compute BF bonificacion per grupo_rt_bf for RT auth evaluation
+          const bfBonifByGrupoUpd: Record<number, number> = {};
+          for (const c of caras) {
+            const art = (c.articulo || '').toUpperCase();
+            if ((art.startsWith('BF') || art.startsWith('CF')) && c.grupo_rt_bf) {
+              bfBonifByGrupoUpd[c.grupo_rt_bf] = (c.bonificacion || c.caras || 0);
+            }
+          }
+
           // Create new caras - use frontend authorization if provided, otherwise recalculate
           for (const cara of caras) {
             let autorizacion_dg = cara.autorizacion_dg || '';
@@ -2732,13 +2756,19 @@ export class SolicitudesController {
 
             // If frontend didn't send authorization, recalculate
             if (!autorizacion_dg && !autorizacion_dcm) {
+              const artUpdUpper = (cara.articulo || '').toUpperCase();
+              const isRtUpd = !!cara.grupo_rt_bf && !artUpdUpper.startsWith('BF') && !artUpdUpper.startsWith('CF');
+              const bonifForAuthUpd = isRtUpd
+                ? (bfBonifByGrupoUpd[cara.grupo_rt_bf] || cara.bonificacion || 0)
+                : (cara.bonificacion || 0);
+
               const estadoResult = await calcularEstadoAutorizacion({
                 ciudad: cara.ciudad,
                 estado: cara.estado,
                 formato: cara.formato,
                 tipo: cara.tipo,
                 caras: cara.caras,
-                bonificacion: cara.bonificacion || 0,
+                bonificacion: bonifForAuthUpd,
                 costo: cara.costo,
                 tarifa_publica: cara.tarifa_publica || 0,
                 articulo: cara.articulo || null
