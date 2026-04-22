@@ -772,32 +772,54 @@ export async function aprobarCaras(
     }
   }
 
-  // Crear notificación de aprobación para el creador de la solicitud
+  // Crear notificación de aprobación para quien solicitó la autorización
   const propuesta = await prisma.propuesta.findFirst({
     where: { id: parseInt(propuestaId) },
     select: { solicitud_id: true }
   });
 
   if (propuesta) {
+    // Buscar la tarea de autorización original para saber quién la solicitó y el origen
+    const tipoTareaAuth = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
+    const tareaOriginal = await prisma.tareas.findFirst({
+      where: {
+        id_propuesta: propuestaId,
+        tipo: tipoTareaAuth,
+      },
+      orderBy: { created_at: 'desc' },
+      select: { id_responsable: true, responsable: true, contenido: true, campania_id: true }
+    });
+
+    // Fallback al creador de la solicitud
     const solicitud = await prisma.solicitud.findUnique({
       where: { id: propuesta.solicitud_id },
       select: { usuario_id: true, nombre_usuario: true }
     });
 
-    if (solicitud?.usuario_id) {
+    const destinatarioId = tareaOriginal?.id_responsable || solicitud?.usuario_id;
+    const destinatarioNombre = tareaOriginal?.responsable || solicitud?.nombre_usuario || '';
+    const origen = tareaOriginal?.contenido || 'solicitud';
+    const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
+    const idOrigen = origen === 'campana' ? (tareaOriginal?.campania_id || propuesta.solicitud_id)
+      : origen === 'propuesta' ? propuestaId
+      : propuesta.solicitud_id;
+
+    if (destinatarioId) {
       const tipoLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
       const notifAprobacion = await prisma.tareas.create({
         data: {
           tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
-          titulo: `Solicitud #${propuesta.solicitud_id} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
-          descripcion: `${result.count} circuito(s) de tu solicitud han sido aprobados por ${tipoLabel} (${aprobadorNombre}).`,
+          titulo: `${etiquetaOrigen} #${idOrigen} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
+          descripcion: `${result.count} circuito(s) de tu ${etiquetaOrigen.toLowerCase()} han sido aprobados por ${tipoLabel} (${aprobadorNombre}).`,
           estatus: 'Pendiente',
-          id_responsable: solicitud.usuario_id,
-          responsable: solicitud.nombre_usuario || '',
+          id_responsable: destinatarioId,
+          responsable: destinatarioNombre,
           id_solicitud: propuesta.solicitud_id.toString(),
           id_propuesta: propuestaId,
-          id_asignado: solicitud.usuario_id.toString(),
-          asignado: solicitud.nombre_usuario || '',
+          campania_id: tareaOriginal?.campania_id || null,
+          contenido: origen,
+          id_asignado: destinatarioId.toString(),
+          asignado: destinatarioNombre,
           fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
           fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
         }
@@ -862,14 +884,14 @@ export async function rechazarSolicitud(
   // Crear notificación para quien solicitó la autorización (no necesariamente el creador de la solicitud)
   const tipoLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
 
-  // Buscar la tarea de autorización original para saber quién la solicitó
+  // Buscar la tarea de autorización original para saber quién la solicitó y el origen
   const tareaOriginal = await prisma.tareas.findFirst({
     where: {
       id_solicitud: solicitudId.toString(),
       tipo: tipoTarea,
     },
     orderBy: { created_at: 'desc' },
-    select: { id_responsable: true, responsable: true }
+    select: { id_responsable: true, responsable: true, contenido: true, id_propuesta: true, campania_id: true }
   });
 
   // Fallback al creador de la solicitud si no se encuentra la tarea original
@@ -882,16 +904,25 @@ export async function rechazarSolicitud(
   const destinatarioNombre = tareaOriginal?.responsable || solicitud?.nombre_usuario || '';
 
   if (destinatarioId) {
+    // Determinar etiqueta del origen (Propuesta, Campaña o Solicitud)
+    const origen = tareaOriginal?.contenido || 'solicitud';
+    const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
+    const idOrigen = origen === 'campana' ? (tareaOriginal?.campania_id || solicitudId)
+      : origen === 'propuesta' ? (tareaOriginal?.id_propuesta || idquote)
+      : solicitudId;
+
     const notifRechazo = await prisma.tareas.create({
       data: {
         tipo: `Rechazo ${tipoAutorizacion.toUpperCase()}`,
-        titulo: `Solicitud #${solicitudId} - Rechazo ${tipoAutorizacion.toUpperCase()}`,
-        descripcion: `Tu solicitud ha sido rechazada por ${tipoLabel} (${rechazadorNombre}). Motivo: ${comentario}. Haz clic para editar la solicitud y corregir las caras.`,
+        titulo: `${etiquetaOrigen} #${idOrigen} - Rechazo ${tipoAutorizacion.toUpperCase()}`,
+        descripcion: `Tu ${etiquetaOrigen.toLowerCase()} ha sido rechazada por ${tipoLabel} (${rechazadorNombre}). Motivo: ${comentario}. Haz clic para editar y corregir las caras.`,
         estatus: 'Pendiente',
         id_responsable: destinatarioId,
         responsable: destinatarioNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: idquote,
+        campania_id: tareaOriginal?.campania_id || null,
+        contenido: origen,
         id_asignado: destinatarioId.toString(),
         asignado: destinatarioNombre,
         fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),

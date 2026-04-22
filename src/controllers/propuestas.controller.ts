@@ -476,7 +476,7 @@ export class PropuestasController {
         SELECT COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -521,7 +521,7 @@ export class PropuestasController {
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
@@ -1339,7 +1339,7 @@ export class PropuestasController {
         SELECT pr.status, COUNT(DISTINCT pr.id) as count
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -2074,7 +2074,7 @@ export class PropuestasController {
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT DISTINCT pr.id FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -2096,7 +2096,7 @@ export class PropuestasController {
         FROM propuesta pr
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN cliente cl ON cl.id = pr.cliente_id
+          LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
           LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
           LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
