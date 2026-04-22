@@ -416,29 +416,37 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
   }
 
-  // Caras impares → OR en DCM
-  if (oddCarasNeedsDcm) {
-    requiereDcm = true;
-    motivoDcm = (motivoDcm ? motivoDcm + '; ' : '') + 'Número impar de caras requiere autorización DCM';
+  // Filtro 1: si el criterio determinó DG o DCM, eso manda (par/impar no importa)
+  if (requiereDg || requiereDcm) {
+    // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
+    if (requiereDg && requiereDcm) {
+      console.log('[calcularEstadoAutorizacion] Mixta DG+DCM detectada → preferencia DG, DCM auto-aprobado');
+      requiereDcm = false;
+      motivoDcm = '';
+    }
+
+    const resultado = {
+      autorizacion_dg: requiereDg ? 'pendiente' : 'aprobado',
+      autorizacion_dcm: requiereDcm ? 'pendiente' : 'aprobado',
+      motivo_dg: motivoDg || undefined,
+      motivo_dcm: motivoDcm || undefined,
+      tarifa_efectiva: tarifaEfectiva,
+      total_caras: totalCaras
+    };
+    console.log('[calcularEstadoAutorizacion] Resultado final (Filtro 1 - criterio):', resultado);
+    return resultado as EstadoAutorizacionResult;
   }
 
-  // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
-  if (requiereDg && requiereDcm) {
-    console.log('[calcularEstadoAutorizacion] Mixta DG+DCM detectada → preferencia DG, DCM auto-aprobado');
-    requiereDcm = false;
-    motivoDcm = '';
-  }
-
+  // Filtro 2: criterio existe pero no matcheó rangos → revisar par/impar
   const resultado = {
-    autorizacion_dg: requiereDg ? 'pendiente' : 'aprobado',
-    autorizacion_dcm: requiereDcm ? 'pendiente' : 'aprobado',
-    motivo_dg: motivoDg || undefined,
-    motivo_dcm: motivoDcm || undefined,
+    autorizacion_dg: 'aprobado',
+    autorizacion_dcm: oddCarasNeedsDcm ? 'pendiente' : 'aprobado',
+    motivo_dcm: oddCarasNeedsDcm ? 'Número impar de caras requiere autorización DCM' : undefined,
     tarifa_efectiva: tarifaEfectiva,
     total_caras: totalCaras
   };
 
-  console.log('[calcularEstadoAutorizacion] Resultado final:', resultado);
+  console.log('[calcularEstadoAutorizacion] Resultado final (Filtro 2 - par/impar):', resultado);
 
   return resultado as EstadoAutorizacionResult;
 }
