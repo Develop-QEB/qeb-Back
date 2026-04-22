@@ -356,30 +356,33 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     };
   }
 
-  // Evaluar si requiere DG
+  // Evaluar si requiere DG (AND: TODOS los campos configurados deben estar en rango DG)
   let requiereDg = false;
   let motivoDg = '';
 
   const tarifaMaxDg = criterio.tarifa_max_dg ? Number(criterio.tarifa_max_dg) : null;
   const carasMaxDg = criterio.caras_max_dg;
 
+  const dgTarifaOk = tarifaMaxDg === null || tarifaEfectiva <= tarifaMaxDg;
+  const dgCarasOk = carasMaxDg === null || totalCaras <= carasMaxDg;
+  const dgHasAnyCriteria = tarifaMaxDg !== null || carasMaxDg !== null;
+
   console.log('[calcularEstadoAutorizacion] Evaluando DG:', {
     tarifaMaxDg,
     carasMaxDg,
     tarifaEfectiva,
     totalCaras,
-    tarifaCheck: tarifaMaxDg !== null ? `${tarifaEfectiva} <= ${tarifaMaxDg} = ${tarifaEfectiva <= tarifaMaxDg}` : 'N/A',
-    carasCheck: carasMaxDg !== null ? `${totalCaras} <= ${carasMaxDg} = ${totalCaras <= carasMaxDg}` : 'N/A'
+    dgTarifaOk,
+    dgCarasOk,
+    dgHasAnyCriteria
   });
 
-  if (tarifaMaxDg !== null && tarifaEfectiva <= tarifaMaxDg) {
+  if (dgHasAnyCriteria && dgTarifaOk && dgCarasOk) {
     requiereDg = true;
-    motivoDg = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg} (límite DG)`;
-  }
-  if (carasMaxDg !== null && totalCaras <= carasMaxDg) {
-    requiereDg = true;
-    if (motivoDg) motivoDg += '; ';
-    motivoDg += `Total caras ${totalCaras} <= ${carasMaxDg} (límite DG)`;
+    const parts: string[] = [];
+    if (tarifaMaxDg !== null) parts.push(`Tarifa efectiva $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg} (límite DG)`);
+    if (carasMaxDg !== null) parts.push(`Total caras ${totalCaras} <= ${carasMaxDg} (límite DG)`);
+    motivoDg = parts.join('; ');
   }
 
   // Evaluar si requiere DCM
