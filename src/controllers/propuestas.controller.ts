@@ -426,9 +426,9 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ? OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?))`;
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
       // Period filter — filter by cotizacion/campania dates
@@ -517,7 +517,8 @@ export class PropuestasController {
           cat_inicio.año AS anio_inicio,
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
-          ct.tipo_periodo AS tipo_periodo
+          ct.tipo_periodo AS tipo_periodo,
+          GROUP_CONCAT(DISTINCT sc.formato ORDER BY sc.formato SEPARATOR ',') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
@@ -525,6 +526,7 @@ export class PropuestasController {
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+        LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -554,6 +556,7 @@ export class PropuestasController {
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
         tipo_periodo: p.tipo_periodo || 'catorcena',
+        formatos: p.formatos || null,
       }));
 
       // Recalculate inversion based on catorcena filter (sum only overlapping caras)
@@ -2231,7 +2234,8 @@ export class PropuestasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena,
-          cat.año as anio_catorcena
+          cat.año as anio_catorcena,
+          MAX(sc.formato) as formato
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -2373,7 +2377,8 @@ export class PropuestasController {
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena,
-          cat.año as anio_catorcena
+          cat.año as anio_catorcena,
+          MAX(sc.formato) as formato
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
