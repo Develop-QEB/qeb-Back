@@ -1563,6 +1563,7 @@ export class NotificacionesController {
           articulo: true,
           inicio_periodo: true,
           fin_periodo: true,
+          grupo_rt_bf: true,
         },
       });
 
@@ -1583,14 +1584,25 @@ export class NotificacionesController {
       }
 
       // Calcular tarifa efectiva para cada cara e incluir cliente/campaña/catorcena
+      // Build grupo_rt_bf map to find BF pair caras for effective tarifa calculation
+      const grupoCarasMap = new Map<number, number>();
+      for (const c of caras) {
+        if (c.grupo_rt_bf) {
+          grupoCarasMap.set(c.grupo_rt_bf, (grupoCarasMap.get(c.grupo_rt_bf) || 0) + (c.caras || 0) + (Number(c.bonificacion) || 0));
+        }
+      }
+
       const carasConTarifa = caras.map(cara => {
-        const totalCaras = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
-        const tarifaEfectiva = totalCaras > 0 ? (Number(cara.costo) || 0) / totalCaras : 0;
+        const totalCarasLocal = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
+        const totalCarasGrupo = cara.grupo_rt_bf ? (grupoCarasMap.get(cara.grupo_rt_bf) || totalCarasLocal) : totalCarasLocal;
+        const tarifaEfectiva = totalCarasGrupo > 0 ? (Number(cara.costo) || 0) / totalCarasGrupo : 0;
+        const tarifaPublicaReal = (cara.caras || 0) > 0 ? (Number(cara.costo) || 0) / (cara.caras || 1) : Number(cara.tarifa_publica) || 0;
         const catorcenaInfo = cara.inicio_periodo ? catorcenaMap.get(cara.inicio_periodo.toISOString()) || null : null;
         return {
           ...cara,
-          total_caras: totalCaras,
+          total_caras: totalCarasLocal,
           tarifa_efectiva: tarifaEfectiva,
+          tarifa_publica: tarifaPublicaReal,
           catorcena: catorcenaInfo,
           cliente: clienteNombre,
           campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
