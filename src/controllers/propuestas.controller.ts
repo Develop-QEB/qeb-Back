@@ -1600,7 +1600,7 @@ export class PropuestasController {
         await tx.propuesta.update({
           where: { id: propuestaId },
           data: {
-            status: 'Aprobada',
+            status: 'Atendido',
             precio_simulado: precio_simulado || propuesta.precio_simulado,
             asignado: asignados || propuesta.asignado,
             id_asignado: id_asignados || propuesta.id_asignado,
@@ -1958,6 +1958,9 @@ export class PropuestasController {
           }
         }
       }
+
+      cache.deletePattern('propuestas:list:');
+      cache.deletePattern('campanas:list:');
 
       res.json({
         success: true,
