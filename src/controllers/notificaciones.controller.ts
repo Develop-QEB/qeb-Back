@@ -314,7 +314,9 @@ export class NotificacionesController {
         id_asignado: tarea.id_asignado,
         ids_reservas: tarea.ids_reservas,
         asesor: solData?.asesor || null,
-        creador: solData?.nombre_usuario || null,
+        creador: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo'))
+          ? (tarea.responsable || solData?.nombre_usuario || null)
+          : (solData?.nombre_usuario || null),
         cliente: solData?.cliente_nombre || null,
         notas_direccion: solData?.notas_direccion || null,
         descripcion_trafico: solData?.descripcion_trafico || null,
@@ -469,7 +471,9 @@ export class NotificacionesController {
             notificacion.notas_direccion = solRows[0].notas || null;
             notificacion.descripcion_trafico = solRows[0].descripcion || null;
             notificacion.cliente = solRows[0].cliente_nombre || null;
-            notificacion.creador = solRows[0].nombre_usuario || null;
+            notificacion.creador = (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo'))
+              ? (tarea.responsable || solRows[0].nombre_usuario || null)
+              : (solRows[0].nombre_usuario || null);
             notificacion.asesor = solRows[0].asesor || null;
           }
         }
