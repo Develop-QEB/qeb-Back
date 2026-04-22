@@ -11,6 +11,10 @@ import {
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
 
+// Throttle auto-cleanup: max once per 5 minutes per user
+const lastCleanupByUser = new Map<number, number>();
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
   const id = String(userId);
@@ -201,9 +205,12 @@ export class NotificacionesController {
         prisma.tareas.count({ where }),
       ]);
 
-      // Auto-cleanup: query SEPARADA para buscar TODAS las tareas de auth pendientes del usuario
+      // Auto-cleanup: query SEPARADA (throttled: max 1 vez cada 5 min por usuario)
       try {
-        if (userId) {
+        const now = Date.now();
+        const lastRun = userId ? (lastCleanupByUser.get(userId) || 0) : now;
+        if (userId && now - lastRun >= CLEANUP_INTERVAL_MS) {
+          lastCleanupByUser.set(userId, now);
           const authTareasPendientes = await prisma.tareas.findMany({
             where: {
               OR: [
