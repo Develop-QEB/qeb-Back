@@ -536,6 +536,17 @@ export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
       io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId, mensaje: nuevoMensaje });
     } catch {}
 
+    // Si el ticket esta en "Duda del Bot" y un DEV escribe, QEBooh procesa la explicacion
+    const ticket = await prisma.tickets.findUnique({ where: { id: ticketId }, select: { status: true } });
+    if (ticket?.status === 'Duda del Bot' && mensaje) {
+      const userRole = req.user?.rol;
+      if (userRole === 'DEV') {
+        chatbotController.handleDudaBotReply(ticketId, mensaje, userName).catch(err => {
+          console.error('[AutoTicket] Error en handleDudaBotReply:', err);
+        });
+      }
+    }
+
     res.status(201).json({ success: true, data: nuevoMensaje });
   } catch (error) {
     console.error('Error creating mensaje:', error);

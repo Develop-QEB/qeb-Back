@@ -933,8 +933,13 @@ Tu respuesta debe tener EXACTAMENTE este formato (3 secciones separadas por los 
 
 Formato exacto:
 [tu respuesta al usuario aqui]
-[CLASIFICACION:RESUELTO o ESCALADO]
+[CLASIFICACION:RESUELTO o ESCALADO o DUDA]
 [NOTA_INTERNA:tu analisis tecnico aqui - que crees que puede estar pasando, que revisar en la DB, posible causa raiz, etc.]
+
+Clasificaciones:
+- RESUELTO: Si pudiste resolver la duda del usuario con la informacion que tienes (ej: como crear una solicitud, como cambiar un estatus)
+- ESCALADO: Si es un problema tecnico, error, o algo que requiere intervencion humana, pero sabes orientar al usuario
+- DUDA: Si NO entiendes bien que pide el usuario, o no tienes suficiente contexto/conocimiento para dar una respuesta util. Cuando uses DUDA, NO escribas respuesta al usuario (deja vacio antes del tag). En la NOTA_INTERNA explica QUE es lo que no entiendes y QUE necesitas saber para poder responder
 
 La NOTA_INTERNA debe ser tecnica y honesta (aqui SI puedes decir si crees que es un bug, error de datos, problema de migracion, etc.). Esta nota SOLO la ve el equipo de desarrollo, NO el usuario.
 IMPORTANTE en la NOTA_INTERNA: Usa SIEMPRE el nombre real del usuario (ej: "Jos reporta que..."), NUNCA uses "Usuario DEV", "el usuario" ni referencias genericas.`;
@@ -1367,18 +1372,56 @@ ${ticket.imagen ? 'El usuario adjunto una imagen de referencia.' : ''}`;
 
       // Parsear clasificacion y nota interna
       const isResolved = fullReply.includes('[CLASIFICACION:RESUELTO]');
+      const isDuda = fullReply.includes('[CLASIFICACION:DUDA]');
       const notaMatch = fullReply.match(/\[NOTA_INTERNA:([\s\S]*?)\]\s*$/);
       const notaInterna = notaMatch ? notaMatch[1].trim() : null;
 
       // Limpiar la respuesta al usuario (quitar tags)
       let reply = fullReply
-        .replace(/\[CLASIFICACION:(RESUELTO|ESCALADO)\]/g, '')
+        .replace(/\[CLASIFICACION:(RESUELTO|ESCALADO|DUDA)\]/g, '')
         .replace(/\[NOTA_INTERNA:[\s\S]*?\]/g, '')
         .trim();
 
-      if (!reply) return;
+      // Determinar status
+      const newStatus = isDuda ? 'Duda del Bot' : isResolved ? 'Validación' : 'En Progreso';
 
-      const newStatus = isResolved ? 'Validación' : 'En Progreso';
+      // Si es DUDA, no responder al usuario, solo dejar nota interna
+      if (isDuda) {
+        if (notaInterna) {
+          await prisma.ticket_mensajes.create({
+            data: {
+              ticket_id: ticketId,
+              usuario_id: 0,
+              usuario_nombre: 'QEBooh (Auto)',
+              mensaje: `🤔 No sé cómo responder este ticket.\n\n${notaInterna}\n\nExplíquenme cómo debo responder y lo intentaré de nuevo.`,
+            },
+          });
+        }
+
+        await prisma.tickets.update({
+          where: { id: ticketId },
+          data: { status: 'Duda del Bot', status_cambiado_por: 'QEBooh' },
+        });
+
+        const devUsers = await prisma.$queryRaw<any[]>`
+          SELECT id FROM usuario
+          WHERE user_role = 'DEV' AND correo_electronico NOT LIKE 'test_%'
+        `;
+
+        try {
+          const io = getIO();
+          io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, { id: ticketId, status: 'Duda del Bot' });
+          io.to(`ticket-${ticketId}`).emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId });
+          for (const dev of devUsers) {
+            io.to(`user-notifications-${dev.id}`).emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId });
+          }
+        } catch {}
+
+        console.log(`[AutoTicket] Ticket #${ticketId} -> Duda del Bot${notaInterna ? ' [con nota interna]' : ''}`);
+        return;
+      }
+
+      if (!reply) return;
 
       // Guardar respuesta en chat del ticket
       await prisma.ticket_chat.create({
@@ -1430,6 +1473,134 @@ ${ticket.imagen ? 'El usuario adjunto una imagen de referencia.' : ''}`;
       console.log(`[AutoTicket] Ticket #${ticketId} -> ${newStatus} (${isResolved ? 'resuelto' : 'escalado'})${notaInterna ? ' [con nota interna]' : ''}`);
     } catch (error) {
       console.error(`[AutoTicket] Error respondiendo ticket #${ticketId}:`, error);
+    }
+  }
+
+  async handleDudaBotReply(ticketId: number, devMensaje: string, devNombre: string): Promise<void> {
+    try {
+      const client = this.getClient();
+      const ticket = await prisma.tickets.findUnique({ where: { id: ticketId } });
+      if (!ticket || ticket.status !== 'Duda del Bot') return;
+
+      const existingSupportChat = await prisma.ticket_chat.count({
+        where: { ticket_id: ticketId, usuario_id: 0 },
+      });
+      if (existingSupportChat > 0) return;
+
+      const allNotas = await prisma.ticket_mensajes.findMany({
+        where: { ticket_id: ticketId },
+        orderBy: { created_at: 'asc' },
+      });
+
+      const isAuthorization = /^(ok|dale|autorizado|si|sí|envía|envia|envialo|envíalo|hazlo|responde|aprobado)\b/i.test(devMensaje.trim());
+
+      if (isAuthorization) {
+        const lastBotNota = [...allNotas].reverse().find(n => n.usuario_id === 0 && n.mensaje?.includes('[RESPUESTA_PROPUESTA:'));
+        if (!lastBotNota || !lastBotNota.mensaje) {
+          await prisma.ticket_mensajes.create({
+            data: {
+              ticket_id: ticketId,
+              usuario_id: 0,
+              usuario_nombre: 'QEBooh (Auto)',
+              mensaje: 'No tengo una respuesta propuesta pendiente. Explíquenme cómo responder y les propongo una respuesta.',
+            },
+          });
+          try {
+            const io = getIO();
+            io.to(`ticket-${ticketId}`).emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId });
+          } catch {}
+          return;
+        }
+
+        const propuestaMatch = lastBotNota.mensaje.match(/\[RESPUESTA_PROPUESTA:([\s\S]*?)\]/);
+        if (!propuestaMatch) return;
+        const respuestaFinal = propuestaMatch[1].trim();
+
+        await prisma.ticket_chat.create({
+          data: {
+            ticket_id: ticketId,
+            usuario_id: 0,
+            usuario_nombre: 'Soporte QEB',
+            mensaje: respuestaFinal,
+          },
+        });
+
+        await prisma.ticket_mensajes.create({
+          data: {
+            ticket_id: ticketId,
+            usuario_id: 0,
+            usuario_nombre: 'QEBooh (Auto)',
+            mensaje: `✅ Respuesta enviada al cliente. Autorizado por ${devNombre}.`,
+          },
+        });
+
+        await prisma.tickets.update({
+          where: { id: ticketId },
+          data: { status: 'En Progreso', status_cambiado_por: 'Soporte QEB' },
+        });
+
+        try {
+          const io = getIO();
+          io.to(`ticket-chat-${ticketId}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticket_id: ticketId, usuario_nombre: 'Soporte QEB', mensaje: respuestaFinal });
+          io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, { id: ticketId, status: 'En Progreso' });
+          io.to(`user-notifications-${ticket.usuario_id}`).emit(SOCKET_EVENTS.TICKET_CHAT_NUEVO, { ticketId });
+        } catch {}
+
+        console.log(`[AutoTicket] Ticket #${ticketId} -> Respuesta enviada (autorizado por ${devNombre})`);
+        return;
+      }
+
+      const conversacionInterna = allNotas
+        .filter(n => n.mensaje)
+        .map(n => `${n.usuario_nombre}: ${n.mensaje}`)
+        .join('\n');
+
+      const descripcion = ticket.descripcion || 'Sin descripcion proporcionada';
+
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: `Eres QEBooh, el bot de soporte de QEB. Estas en una conversacion INTERNA con el equipo de desarrollo sobre un ticket que no supiste responder.
+
+El equipo te esta explicando como responder al usuario "${ticket.usuario_nombre}".
+
+Tu tarea:
+1. Lee la explicacion del equipo
+2. Si ya entiendes como responder, propone tu respuesta usando el tag [RESPUESTA_PROPUESTA:tu respuesta aqui]
+3. Si aun tienes dudas, pregunta lo que necesites (sin el tag)
+
+REGLAS PARA LA RESPUESTA PROPUESTA:
+- Maximo 2-3 lineas, como mensaje de WhatsApp
+- Tono profesional y amable
+- NUNCA te identifiques como bot
+- NUNCA uses markdown ni [NAV:]
+- Usa el nombre del usuario: ${ticket.usuario_nombre}
+
+Cuando propongas una respuesta, di algo como: "Entendido. Mi respuesta seria:" seguido del tag [RESPUESTA_PROPUESTA:...] y luego "¿Autorizado para enviar?"`,
+        messages: [{ role: 'user', content: `TICKET #${ticketId}: ${ticket.titulo}\nDescripcion: ${descripcion}\n\nCONVERSACION INTERNA:\n${conversacionInterna}\n\nULTIMO MENSAJE DE ${devNombre}: ${devMensaje}` }],
+      });
+
+      const textBlock = response.content.find((b: { type: string }) => b.type === 'text') as { type: 'text'; text: string } | undefined;
+      const botReply = textBlock?.text || '';
+      if (!botReply) return;
+
+      await prisma.ticket_mensajes.create({
+        data: {
+          ticket_id: ticketId,
+          usuario_id: 0,
+          usuario_nombre: 'QEBooh (Auto)',
+          mensaje: botReply,
+        },
+      });
+
+      try {
+        const io = getIO();
+        io.to(`ticket-${ticketId}`).emit(SOCKET_EVENTS.TICKET_MENSAJE_NUEVO, { ticketId });
+      } catch {}
+
+      console.log(`[AutoTicket] Ticket #${ticketId} -> QEBooh respondio en notas internas`);
+    } catch (error) {
+      console.error(`[AutoTicket] Error en handleDudaBotReply ticket #${ticketId}:`, error);
     }
   }
 
