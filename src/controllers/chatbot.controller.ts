@@ -1416,6 +1416,31 @@ ${ticket.imagen ? 'El usuario adjunto una imagen de referencia.' : ''}`;
       console.error(`[AutoTicket] Error respondiendo ticket #${ticketId}:`, error);
     }
   }
+
+  async processarTicketsPendientes(): Promise<void> {
+    try {
+      const ticketsPendientes = await prisma.tickets.findMany({
+        where: { status: 'Nuevo' },
+        select: { id: true },
+      });
+
+      if (ticketsPendientes.length === 0) {
+        console.log('[AutoTicket] No hay tickets pendientes sin respuesta');
+        return;
+      }
+
+      console.log(`[AutoTicket] Procesando ${ticketsPendientes.length} tickets pendientes...`);
+
+      for (const ticket of ticketsPendientes) {
+        await this.autoRespondTicket(ticket.id);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      console.log('[AutoTicket] Procesamiento de tickets pendientes completado');
+    } catch (error) {
+      console.error('[AutoTicket] Error procesando tickets pendientes:', error);
+    }
+  }
 }
 
 export const chatbotController = new ChatbotController();

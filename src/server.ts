@@ -4,6 +4,7 @@ import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 import { enviarResumenAutorizacionesPendientes } from './services/autorizacion.service';
+import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
   console.warn(`[Config] NODE_ENV=${process.env.NODE_ENV || 'undefined'}; forcing production mode`);
@@ -119,6 +120,11 @@ async function main() {
     // Programar limpieza periódica
     setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
     console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
+
+    // Procesar tickets pendientes sin respuesta de soporte
+    chatbotController.processarTicketsPendientes().catch(err => {
+      console.error('[AutoTicket] Error en procesamiento inicial:', err);
+    });
 
     // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
     programarDiario(9, 'ResumenAutorizaciones 09:00', enviarResumenAutorizacionesPendientes);
