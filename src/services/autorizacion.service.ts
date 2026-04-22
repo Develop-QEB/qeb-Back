@@ -721,17 +721,27 @@ export async function aprobarCaras(
   // El idquote es el ID de propuesta, usarlo para buscar tareas
   const propuestaId = idquote;
 
+  // Buscar solicitud_id para limpiar tareas tanto por propuesta como por solicitud
+  const propParaSolicitud = await prisma.propuesta.findFirst({
+    where: { id: parseInt(propuestaId) },
+    select: { solicitud_id: true }
+  });
+  const solicitudIdStr = propParaSolicitud?.solicitud_id?.toString();
+
+  // Condición OR: tareas de esta propuesta O tareas de la solicitud origen
+  const tareaWhereBase = {
+    OR: [
+      { id_propuesta: propuestaId },
+      ...(solicitudIdStr ? [{ id_solicitud: solicitudIdStr, id_propuesta: null }] : []),
+    ],
+    estatus: 'Pendiente' as const,
+  };
+
   // Si ya no hay pendientes de ningún tipo, marcar TODAS las tareas de autorización como atendidas
   if (!tienePendientes) {
     await prisma.tareas.updateMany({
-      where: {
-        id_propuesta: propuestaId,
-        tipo: { contains: 'Autorización' },
-        estatus: 'Pendiente'
-      },
-      data: {
-        estatus: 'Atendido'
-      }
+      where: { ...tareaWhereBase, tipo: { contains: 'Autorización' } },
+      data: { estatus: 'Atendido' }
     });
   } else {
     // Marcar solo la tarea del tipo específico como atendida SI ya no hay pendientes de ese tipo
@@ -741,14 +751,8 @@ export async function aprobarCaras(
     // Solo marcar como atendida si ya no hay más pendientes de este tipo
     if (pendientesDelTipo.length === 0) {
       await prisma.tareas.updateMany({
-        where: {
-          id_propuesta: propuestaId,
-          tipo: tipoTarea,
-          estatus: 'Pendiente'
-        },
-        data: {
-          estatus: 'Atendido'
-        }
+        where: { ...tareaWhereBase, tipo: tipoTarea },
+        data: { estatus: 'Atendido' }
       });
 
       // Si DG acaba de aprobar y quedan pendientes DCM, crear tarea DCM
@@ -877,7 +881,10 @@ export async function rechazarSolicitud(
   const tipoTarea = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
   await prisma.tareas.updateMany({
     where: {
-      id_solicitud: solicitudId.toString(),
+      OR: [
+        { id_propuesta: idquote },
+        { id_solicitud: solicitudId.toString() },
+      ],
       tipo: tipoTarea,
       estatus: 'Pendiente'
     },
