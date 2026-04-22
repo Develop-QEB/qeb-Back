@@ -859,26 +859,41 @@ export async function rechazarSolicitud(
     }
   });
 
-  // Crear notificación para el creador de la solicitud
+  // Crear notificación para quien solicitó la autorización (no necesariamente el creador de la solicitud)
   const tipoLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
+
+  // Buscar la tarea de autorización original para saber quién la solicitó
+  const tareaOriginal = await prisma.tareas.findFirst({
+    where: {
+      id_solicitud: solicitudId.toString(),
+      tipo: tipoTarea,
+    },
+    orderBy: { created_at: 'desc' },
+    select: { id_responsable: true, responsable: true }
+  });
+
+  // Fallback al creador de la solicitud si no se encuentra la tarea original
   const solicitud = await prisma.solicitud.findUnique({
     where: { id: solicitudId },
     select: { usuario_id: true, nombre_usuario: true }
   });
 
-  if (solicitud?.usuario_id) {
+  const destinatarioId = tareaOriginal?.id_responsable || solicitud?.usuario_id;
+  const destinatarioNombre = tareaOriginal?.responsable || solicitud?.nombre_usuario || '';
+
+  if (destinatarioId) {
     const notifRechazo = await prisma.tareas.create({
       data: {
         tipo: `Rechazo ${tipoAutorizacion.toUpperCase()}`,
         titulo: `Solicitud #${solicitudId} - Rechazo ${tipoAutorizacion.toUpperCase()}`,
         descripcion: `Tu solicitud ha sido rechazada por ${tipoLabel} (${rechazadorNombre}). Motivo: ${comentario}. Haz clic para editar la solicitud y corregir las caras.`,
         estatus: 'Pendiente',
-        id_responsable: solicitud.usuario_id,
-        responsable: solicitud.nombre_usuario || '',
+        id_responsable: destinatarioId,
+        responsable: destinatarioNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: idquote,
-        id_asignado: solicitud.usuario_id.toString(),
-        asignado: solicitud.nombre_usuario || '',
+        id_asignado: destinatarioId.toString(),
+        asignado: destinatarioNombre,
         fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
         fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
       }
