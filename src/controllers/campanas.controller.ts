@@ -1464,8 +1464,8 @@ export class CampanasController {
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
@@ -1998,8 +1998,8 @@ export class CampanasController {
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           0 as aps
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
@@ -2057,8 +2057,8 @@ export class CampanasController {
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MAX(rsv.arte_aprobado) as arte_aprobado,
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,

@@ -747,8 +747,8 @@ export class PropuestasController {
           if (articulo.startsWith('IM')) return false;
 
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
-          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado').length;
-          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado');
+          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
+          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
           const flujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
           const contraflujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
           const flujoRequerido = Number(cara.caras_flujo) || 0;
@@ -2210,8 +2210,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
@@ -2352,8 +2352,8 @@ export class PropuestasController {
             ELSE MIN(i.tipo_de_cara)
           END as tipo_de_cara,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus = 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus != 'Bonificado' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MIN(i.latitud) as latitud,
           MIN(i.longitud) as longitud,
           MIN(i.plaza) as plaza,
