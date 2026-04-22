@@ -936,7 +936,8 @@ Formato exacto:
 [CLASIFICACION:RESUELTO o ESCALADO]
 [NOTA_INTERNA:tu analisis tecnico aqui - que crees que puede estar pasando, que revisar en la DB, posible causa raiz, etc.]
 
-La NOTA_INTERNA debe ser tecnica y honesta (aqui SI puedes decir si crees que es un bug, error de datos, problema de migracion, etc.). Esta nota SOLO la ve el equipo de desarrollo, NO el usuario.`;
+La NOTA_INTERNA debe ser tecnica y honesta (aqui SI puedes decir si crees que es un bug, error de datos, problema de migracion, etc.). Esta nota SOLO la ve el equipo de desarrollo, NO el usuario.
+IMPORTANTE en la NOTA_INTERNA: Usa SIEMPRE el nombre real del usuario (ej: "Jos reporta que..."), NUNCA uses "Usuario DEV", "el usuario" ni referencias genericas.`;
 
 export class ChatbotController {
   private client: Anthropic | null = null;
