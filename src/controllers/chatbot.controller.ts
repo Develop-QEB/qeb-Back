@@ -1408,11 +1408,6 @@ ${ticket.imagen ? 'El usuario adjunto una imagen de referencia.' : ''}`;
         data: {
           status: newStatus,
           status_cambiado_por: 'Soporte QEB',
-          ...(isResolved ? {
-            respuesta: reply,
-            respondido_por: 'Soporte QEB',
-            respondido_at: new Date(),
-          } : {}),
         },
       });
 
