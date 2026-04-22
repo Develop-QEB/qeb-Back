@@ -6,7 +6,6 @@ import {
   aprobarCaras,
   rechazarSolicitud,
   obtenerResumenAutorizacion,
-  verificarCarasPendientes
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
@@ -200,70 +199,6 @@ export class NotificacionesController {
         }),
         prisma.tareas.count({ where }),
       ]);
-
-      // Auto-cleanup: marcar tareas de autorización como Atendido si ya no hay caras pendientes del tipo específico
-      const tareasAuthPendientes = tareas.filter(t =>
-        t.estatus === 'Pendiente' &&
-        (t.tipo === 'Autorización DG' || t.tipo === 'Autorización DCM')
-      );
-      if (tareasAuthPendientes.length > 0) {
-        const tareasToFinalize: number[] = [];
-        const cacheAuth = new Map<string, { pendientesDg: number[]; pendientesDcm: number[] }>();
-
-        for (const t of tareasAuthPendientes) {
-          // Resolver idquote según contexto: propuesta > campaña > solicitud
-          let idquote: string | null = t.id_propuesta || null;
-
-          if (!idquote && t.campania_id) {
-            const camp = await prisma.campania.findFirst({
-              where: { id: t.campania_id },
-              select: { cotizacion_id: true },
-            });
-            if (camp?.cotizacion_id) {
-              const cot = await prisma.cotizacion.findFirst({
-                where: { id: camp.cotizacion_id },
-                select: { id_propuesta: true },
-              });
-              if (cot?.id_propuesta) idquote = cot.id_propuesta.toString();
-            }
-          }
-
-          if (!idquote && t.id_solicitud) {
-            const prop = await prisma.propuesta.findFirst({
-              where: { solicitud_id: parseInt(t.id_solicitud) },
-              select: { id: true },
-              orderBy: { id: 'desc' },
-            });
-            if (prop) idquote = prop.id.toString();
-          }
-
-          if (!idquote) continue;
-
-          // Cache para no repetir queries del mismo idquote
-          if (!cacheAuth.has(idquote)) {
-            const auth = await verificarCarasPendientes(idquote);
-            cacheAuth.set(idquote, { pendientesDg: auth.pendientesDg, pendientesDcm: auth.pendientesDcm });
-          }
-          const auth = cacheAuth.get(idquote)!;
-
-          // Solo finalizar si el tipo específico de esta tarea ya no tiene pendientes
-          const esDg = t.tipo === 'Autorización DG';
-          const pendientesDelTipo = esDg ? auth.pendientesDg : auth.pendientesDcm;
-          if (pendientesDelTipo.length === 0) {
-            tareasToFinalize.push(t.id);
-          }
-        }
-
-        if (tareasToFinalize.length > 0) {
-          await prisma.tareas.updateMany({
-            where: { id: { in: tareasToFinalize } },
-            data: { estatus: 'Atendido' },
-          });
-          for (const t of tareas) {
-            if (tareasToFinalize.includes(t.id)) t.estatus = 'Atendido';
-          }
-        }
-      }
 
       // Obtener asesor y creador de las solicitudes relacionadas
       const solicitudIds = [...new Set(tareas
