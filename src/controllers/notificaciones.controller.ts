@@ -5,7 +5,8 @@ import { AuthRequest } from '../types';
 import {
   aprobarCaras,
   rechazarSolicitud,
-  obtenerResumenAutorizacion
+  obtenerResumenAutorizacion,
+  verificarCarasPendientes
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
@@ -199,6 +200,54 @@ export class NotificacionesController {
         }),
         prisma.tareas.count({ where }),
       ]);
+
+      // Auto-cleanup: marcar tareas de autorización como Atendido si ya no hay caras pendientes
+      const tareasAuthPendientes = tareas.filter(t =>
+        t.estatus === 'Pendiente' &&
+        t.tipo?.includes('Autorización') &&
+        (t.id_propuesta || t.id_solicitud)
+      );
+      if (tareasAuthPendientes.length > 0) {
+        const idquotesChecked = new Set<string>();
+        const tareasToFinalize: number[] = [];
+        for (const t of tareasAuthPendientes) {
+          const idquote = t.id_propuesta || null;
+          if (!idquote || idquotesChecked.has(idquote)) {
+            if (!idquote && t.id_solicitud) {
+              const prop = await prisma.propuesta.findFirst({
+                where: { solicitud_id: parseInt(t.id_solicitud) },
+                select: { id: true },
+                orderBy: { id: 'desc' },
+              });
+              if (prop) {
+                const key = prop.id.toString();
+                if (!idquotesChecked.has(key)) {
+                  idquotesChecked.add(key);
+                  const auth = await verificarCarasPendientes(key);
+                  if (!auth.tienePendientes) tareasToFinalize.push(t.id);
+                }
+              }
+            }
+            continue;
+          }
+          idquotesChecked.add(idquote);
+          const auth = await verificarCarasPendientes(idquote);
+          if (!auth.tienePendientes) {
+            tareasAuthPendientes
+              .filter(tt => tt.id_propuesta === idquote)
+              .forEach(tt => tareasToFinalize.push(tt.id));
+          }
+        }
+        if (tareasToFinalize.length > 0) {
+          await prisma.tareas.updateMany({
+            where: { id: { in: tareasToFinalize } },
+            data: { estatus: 'Atendido' },
+          });
+          for (const t of tareas) {
+            if (tareasToFinalize.includes(t.id)) t.estatus = 'Atendido';
+          }
+        }
+      }
 
       // Obtener asesor y creador de las solicitudes relacionadas
       const solicitudIds = [...new Set(tareas
