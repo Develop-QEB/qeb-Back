@@ -548,6 +548,7 @@ export async function crearTareasAutorizacion(
   const tareasExistentes = await prisma.tareas.findMany({
     where: {
       id_solicitud: solicitudId.toString(),
+      ...(propuestaId ? { id_propuesta: propuestaId.toString() } : {}),
       tipo: { contains: 'Autorización' },
       estatus: 'Pendiente'
     },
@@ -772,7 +773,11 @@ export async function aprobarCaras(
     }
   }
 
-  // Crear notificación de aprobación para quien solicitó la autorización
+  // Crear notificación de aprobación solo si se aprobaron caras
+  if (result.count === 0) {
+    return { carasAprobadas: 0 };
+  }
+
   const propuesta = await prisma.propuesta.findFirst({
     where: { id: parseInt(propuestaId) },
     select: { solicitud_id: true }
