@@ -1881,6 +1881,26 @@ export class SolicitudesController {
           createdCaras.push(solicitudCara);
         }
 
+        // Propagate RT auth state to BF pairs within each grupo_rt_bf
+        const gruposProcessed = new Set<number>();
+        for (const created of createdCaras) {
+          if (!created.grupo_rt_bf || gruposProcessed.has(created.grupo_rt_bf)) continue;
+          gruposProcessed.add(created.grupo_rt_bf);
+          const artUp = (created.articulo || '').toUpperCase();
+          if (!artUp.startsWith('BF') && !artUp.startsWith('CF')) {
+            // This is the RT row — propagate its auth to the BF pair
+            const bfPair = createdCaras.find(c => c.grupo_rt_bf === created.grupo_rt_bf && c.id !== created.id);
+            if (bfPair && (bfPair.autorizacion_dg !== created.autorizacion_dg || bfPair.autorizacion_dcm !== created.autorizacion_dcm)) {
+              await tx.solicitudCaras.update({
+                where: { id: bfPair.id },
+                data: { autorizacion_dg: created.autorizacion_dg, autorizacion_dcm: created.autorizacion_dcm },
+              });
+              bfPair.autorizacion_dg = created.autorizacion_dg;
+              bfPair.autorizacion_dcm = created.autorizacion_dcm;
+            }
+          }
+        }
+
         // Regla: si el total global de caras es impar, TODAS requieren autorización DG
         const totalCarasGlobal = caras.reduce((acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0), 0);
         if (totalCarasGlobal % 2 !== 0) {
@@ -2750,6 +2770,7 @@ export class SolicitudesController {
           }
 
           // Create new caras - use frontend authorization if provided, otherwise recalculate
+          const recreatedCaras = [];
           for (const cara of caras) {
             let autorizacion_dg = cara.autorizacion_dg || '';
             let autorizacion_dcm = cara.autorizacion_dcm || '';
@@ -2777,7 +2798,7 @@ export class SolicitudesController {
               autorizacion_dcm = estadoResult.autorizacion_dcm;
             }
 
-            await tx.solicitudCaras.create({
+            const createdCara = await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
@@ -2801,6 +2822,24 @@ export class SolicitudesController {
                 grupo_rt_bf: cara.grupo_rt_bf || null,
               },
             });
+            recreatedCaras.push(createdCara);
+          }
+
+          // Propagate RT auth state to BF pairs within each grupo_rt_bf
+          const gruposUpdProcessed = new Set<number>();
+          for (const rc of recreatedCaras) {
+            if (!rc.grupo_rt_bf || gruposUpdProcessed.has(rc.grupo_rt_bf)) continue;
+            gruposUpdProcessed.add(rc.grupo_rt_bf);
+            const artUp = (rc.articulo || '').toUpperCase();
+            if (!artUp.startsWith('BF') && !artUp.startsWith('CF')) {
+              const bfPair = recreatedCaras.find(c => c.grupo_rt_bf === rc.grupo_rt_bf && c.id !== rc.id);
+              if (bfPair && (bfPair.autorizacion_dg !== rc.autorizacion_dg || bfPair.autorizacion_dcm !== rc.autorizacion_dcm)) {
+                await tx.solicitudCaras.update({
+                  where: { id: bfPair.id },
+                  data: { autorizacion_dg: rc.autorizacion_dg, autorizacion_dcm: rc.autorizacion_dcm },
+                });
+              }
+            }
           }
           // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }

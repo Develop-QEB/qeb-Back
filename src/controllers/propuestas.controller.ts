@@ -3445,6 +3445,14 @@ export class PropuestasController {
         },
       });
 
+      // Propagate auth state to BF/RT pair in same grupo_rt_bf
+      if (authFieldsChanged && currentCara.grupo_rt_bf) {
+        await prisma.solicitudCaras.updateMany({
+          where: { grupo_rt_bf: currentCara.grupo_rt_bf, id: { not: parseInt(caraId) } },
+          data: { autorizacion_dg, autorizacion_dcm },
+        });
+      }
+
       // Registrar cambios en historial
       const refIdHistorial = parseInt(currentCara.idquote || caraId);
       await registrarCambiosCaras(refIdHistorial, 'propuesta', userName, beforeSnap, [parseInt(caraId)]);
@@ -3750,6 +3758,20 @@ export class PropuestasController {
           });
 
           results.push(updatedCara);
+        }
+
+        // Post-pass: propagate RT auth state to BF pairs within each grupo_rt_bf
+        const gruposProcessed = new Set<number>();
+        for (const result of results) {
+          if (!result.grupo_rt_bf || gruposProcessed.has(result.grupo_rt_bf)) continue;
+          gruposProcessed.add(result.grupo_rt_bf);
+          const artUp = (result.articulo || '').toUpperCase();
+          if (!artUp.startsWith('BF') && !artUp.startsWith('CF')) {
+            await tx.solicitudCaras.updateMany({
+              where: { grupo_rt_bf: result.grupo_rt_bf, id: { not: result.id } },
+              data: { autorizacion_dg: result.autorizacion_dg || 'aprobado', autorizacion_dcm: result.autorizacion_dcm || 'aprobado' },
+            });
+          }
         }
 
         return results;
