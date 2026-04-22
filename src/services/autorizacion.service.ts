@@ -899,6 +899,7 @@ export async function rechazarSolicitud(
         responsable: destinatarioNombre,
         id_solicitud: solicitudId.toString(),
         id_propuesta: idquote,
+        campania_id: tareaOriginal?.campania_id || null,
         contenido: origen,
         id_asignado: destinatarioId.toString(),
         asignado: destinatarioNombre,
