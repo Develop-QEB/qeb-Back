@@ -896,7 +896,13 @@ MANEJO DE ERRORES Y BUGS:
 - NUNCA culpes al sistema ni al equipo de desarrollo
 - Si no puedes resolver, di que el equipo lo esta revisando y que le daran seguimiento
 
-` + BASE_SYSTEM_PROMPT.substring(BASE_SYSTEM_PROMPT.indexOf('=== GLOSARIO')) + `
+` + BASE_SYSTEM_PROMPT.substring(
+  BASE_SYSTEM_PROMPT.indexOf('=== GLOSARIO'),
+  BASE_SYSTEM_PROMPT.indexOf('=== SISTEMA DE TICKETS')
+) + BASE_SYSTEM_PROMPT.substring(
+  BASE_SYSTEM_PROMPT.indexOf('=== TABLA DE CONTACTOS'),
+  BASE_SYSTEM_PROMPT.indexOf('=== NAVEGACION PASO A PASO')
+) + `
 
 REGLA IMPORTANTE - CANCELAR PROPUESTAS Y CAMPAÑAS:
 - Las propuestas y campañas NO se eliminan del sistema. Para cancelarlas, el usuario debe cambiar el estatus a "Rechazada" y guardar
