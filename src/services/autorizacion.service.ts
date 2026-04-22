@@ -356,76 +356,65 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     };
   }
 
-  // Evaluar si requiere DG (AND: TODOS los campos configurados deben estar en rango DG)
-  let requiereDg = false;
-  let motivoDg = '';
-
+  // Evaluar tarifa y caras POR SEPARADO contra rangos DG/DCM
   const tarifaMaxDg = criterio.tarifa_max_dg ? Number(criterio.tarifa_max_dg) : null;
   const carasMaxDg = criterio.caras_max_dg;
-
-  const dgTarifaOk = tarifaMaxDg === null || tarifaEfectiva <= tarifaMaxDg;
-  const dgCarasOk = carasMaxDg === null || totalCaras <= carasMaxDg;
-  const dgHasAnyCriteria = tarifaMaxDg !== null || carasMaxDg !== null;
-
-  console.log('[calcularEstadoAutorizacion] Evaluando DG:', {
-    tarifaMaxDg,
-    carasMaxDg,
-    tarifaEfectiva,
-    totalCaras,
-    dgTarifaOk,
-    dgCarasOk,
-    dgHasAnyCriteria
-  });
-
-  if (dgHasAnyCriteria && dgTarifaOk && dgCarasOk) {
-    requiereDg = true;
-    const parts: string[] = [];
-    if (tarifaMaxDg !== null) parts.push(`Tarifa efectiva $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg} (límite DG)`);
-    if (carasMaxDg !== null) parts.push(`Total caras ${totalCaras} <= ${carasMaxDg} (límite DG)`);
-    motivoDg = parts.join('; ');
-  }
-
-  // Evaluar si requiere DCM
-  let requiereDcm = false;
-  let motivoDcm = '';
-
   const tarifaMinDcm = criterio.tarifa_min_dcm ? Number(criterio.tarifa_min_dcm) : null;
   const tarifaMaxDcm = criterio.tarifa_max_dcm ? Number(criterio.tarifa_max_dcm) : null;
   const carasMinDcm = criterio.caras_min_dcm;
   const carasMaxDcm = criterio.caras_max_dcm;
 
-  console.log('[calcularEstadoAutorizacion] Evaluando DCM:', {
-    tarifaMinDcm,
-    tarifaMaxDcm,
-    carasMinDcm,
-    carasMaxDcm,
-    tarifaCheck: tarifaMinDcm !== null && tarifaMaxDcm !== null
-      ? `${tarifaEfectiva} >= ${tarifaMinDcm} && ${tarifaEfectiva} <= ${tarifaMaxDcm} = ${tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm}`
-      : 'N/A',
-    carasCheck: carasMinDcm !== null && carasMaxDcm !== null
-      ? `${totalCaras} >= ${carasMinDcm} && ${totalCaras} <= ${carasMaxDcm} = ${totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm}`
-      : 'N/A'
+  // Resultado por campo: 'dg', 'dcm', o null (no matchea ningún rango)
+  let tarifaResult: 'dg' | 'dcm' | null = null;
+  if (tarifaMaxDg !== null && tarifaEfectiva <= tarifaMaxDg) {
+    tarifaResult = 'dg';
+  } else if (tarifaMinDcm !== null && tarifaMaxDcm !== null &&
+      tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm) {
+    tarifaResult = 'dcm';
+  }
+
+  let carasResult: 'dg' | 'dcm' | null = null;
+  if (carasMaxDg !== null && totalCaras <= carasMaxDg) {
+    carasResult = 'dg';
+  } else if (carasMinDcm !== null && carasMaxDcm !== null &&
+      totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm) {
+    carasResult = 'dcm';
+  }
+
+  console.log('[calcularEstadoAutorizacion] Evaluación independiente:', {
+    tarifaEfectiva, totalCaras,
+    tarifaMaxDg, tarifaMinDcm, tarifaMaxDcm,
+    carasMaxDg, carasMinDcm, carasMaxDcm,
+    tarifaResult, carasResult
   });
 
-  if (tarifaMinDcm !== null && tarifaMaxDcm !== null &&
-      tarifaEfectiva >= tarifaMinDcm && tarifaEfectiva <= tarifaMaxDcm) {
-    requiereDcm = true;
-    motivoDcm = `Tarifa efectiva $${tarifaEfectiva.toFixed(2)} en rango DCM ($${tarifaMinDcm}-$${tarifaMaxDcm})`;
-  }
-  if (carasMinDcm !== null && carasMaxDcm !== null &&
-      totalCaras >= carasMinDcm && totalCaras <= carasMaxDcm) {
-    requiereDcm = true;
-    if (motivoDcm) motivoDcm += '; ';
-    motivoDcm += `Total caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`;
-  }
+  // Combinar resultados:
+  // - Ambos coinciden → ese resultado
+  // - No coinciden (uno DG, otro DCM) → DG
+  // - Solo uno matchea → ese resultado
+  // - Ninguno matchea → Filtro 2 (par/impar)
+  let requiereDg = false;
+  let requiereDcm = false;
+  let motivoDg = '';
+  let motivoDcm = '';
 
-  // Filtro 1: si el criterio determinó DG o DCM, eso manda (par/impar no importa)
-  if (requiereDg || requiereDcm) {
-    // Si ambos requieren autorización, DG tiene preferencia y DCM se auto-aprueba
-    if (requiereDg && requiereDcm) {
-      console.log('[calcularEstadoAutorizacion] Mixta DG+DCM detectada → preferencia DG, DCM auto-aprobado');
-      requiereDcm = false;
-      motivoDcm = '';
+  if (tarifaResult || carasResult) {
+    if (tarifaResult === 'dg' && carasResult === 'dg') {
+      requiereDg = true;
+      motivoDg = `Tarifa $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg}; Caras ${totalCaras} <= ${carasMaxDg}`;
+    } else if (tarifaResult === 'dcm' && carasResult === 'dcm') {
+      requiereDcm = true;
+      motivoDcm = `Tarifa $${tarifaEfectiva.toFixed(2)} en rango DCM; Caras ${totalCaras} en rango DCM`;
+    } else if ((tarifaResult === 'dg' && carasResult === 'dcm') || (tarifaResult === 'dcm' && carasResult === 'dg')) {
+      // No coinciden → DG por default
+      requiereDg = true;
+      motivoDg = `Tarifa→${tarifaResult}, Caras→${carasResult} (no coinciden → DG)`;
+    } else if (tarifaResult && !carasResult) {
+      if (tarifaResult === 'dg') { requiereDg = true; motivoDg = `Tarifa $${tarifaEfectiva.toFixed(2)} <= $${tarifaMaxDg}`; }
+      else { requiereDcm = true; motivoDcm = `Tarifa $${tarifaEfectiva.toFixed(2)} en rango DCM ($${tarifaMinDcm}-$${tarifaMaxDcm})`; }
+    } else if (carasResult && !tarifaResult) {
+      if (carasResult === 'dg') { requiereDg = true; motivoDg = `Caras ${totalCaras} <= ${carasMaxDg}`; }
+      else { requiereDcm = true; motivoDcm = `Caras ${totalCaras} en rango DCM (${carasMinDcm}-${carasMaxDcm})`; }
     }
 
     const resultado = {
@@ -436,7 +425,7 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
       tarifa_efectiva: tarifaEfectiva,
       total_caras: totalCaras
     };
-    console.log('[calcularEstadoAutorizacion] Resultado final (Filtro 1 - criterio):', resultado);
+    console.log('[calcularEstadoAutorizacion] Resultado final (Filtro 1):', resultado);
     return resultado as EstadoAutorizacionResult;
   }
 
