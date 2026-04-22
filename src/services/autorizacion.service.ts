@@ -591,10 +591,11 @@ export async function crearTareasAutorizacion(
     const refId = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
     await prisma.historial.create({
       data: {
-        tipo: `autorizacion_${origen}`,
+        tipo: `autorizacion_solicitud_${origen}`,
         ref_id: refId,
-        accion: 'Solicitud de autorización',
+        accion: `${responsableNombre} solicitó autorización DG — ${pendientesDg.length + pendientesDcm.length} circuito(s)`,
         detalles: JSON.stringify({
+          usuario: responsableNombre,
           origen,
           solicitudId,
           propuestaId,
@@ -845,7 +846,7 @@ export async function rechazarSolicitud(
     }
   });
 
-  // Marcar solo la tarea del tipo específico como atendida
+  // Marcar solo la tarea del tipo específico como rechazada
   const tipoTarea = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
   await prisma.tareas.updateMany({
     where: {
@@ -854,7 +855,7 @@ export async function rechazarSolicitud(
       estatus: 'Pendiente'
     },
     data: {
-      estatus: 'Atendido'
+      estatus: 'Rechazado'
     }
   });
 

@@ -7432,6 +7432,10 @@ export class CampanasController {
         return;
       }
 
+      // Snapshot para historial
+      const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
+      const beforeSnap = await snapshotCaras([parseInt(caraId)]);
+
       // Get current cara to compare auth-affecting fields
       const currentCaraFull = await prisma.solicitudCaras.findUnique({
         where: { id: parseInt(caraId) },
@@ -7492,6 +7496,10 @@ export class CampanasController {
         where: { id: parseInt(caraId) },
         data: updateData,
       });
+
+      // Registrar cambios en historial
+      const refIdHistorial = parseInt(currentCara.idquote || caraId);
+      await registrarCambiosCaras(refIdHistorial, 'campana', userName, beforeSnap, [parseInt(caraId)]);
 
       // Check for pending authorizations and create tasks if needed
       const idquote = currentCara.idquote || '';
@@ -7617,7 +7625,9 @@ export class CampanasController {
         data: createData,
       });
 
-      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
+      // Registrar nueva cara en historial
+      const { registrarCaraNueva } = await import('../utils/historialCaras');
+      await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
       res.json({
         success: true,
@@ -7646,6 +7656,11 @@ export class CampanasController {
       }
 
       console.log(`[campanas.bulkUpdateCaras] Updating ${carasToUpdate.length} caras for campana ${id}`);
+
+      // Snapshot antes de modificar para historial
+      const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
+      const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
+      const beforeSnap = await snapshotCaras(allCaraIds);
 
       // Run all updates in a single transaction
       const updatedCaras = await prisma.$transaction(async (tx) => {
@@ -7717,6 +7732,11 @@ export class CampanasController {
 
         return results;
       });
+
+      // Registrar cambios en historial
+      const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });
+      const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
+      if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
 
       // After ALL updates: get idquote from first cara to check pending authorizations ONCE
       const firstCara = await prisma.solicitudCaras.findUnique({

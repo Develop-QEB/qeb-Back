@@ -3414,6 +3414,9 @@ export class PropuestasController {
         return;
       }
 
+      const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
+      const beforeSnap = await snapshotCaras([parseInt(caraId)]);
+
       // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE)
       const authFieldsChanged =
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
@@ -3467,6 +3470,10 @@ export class PropuestasController {
           grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
         },
       });
+
+      // Registrar cambios en historial
+      const refIdHistorial = parseInt(currentCara.idquote || caraId);
+      await registrarCambiosCaras(refIdHistorial, 'propuesta', userName, beforeSnap, [parseInt(caraId)]);
 
       // Check for pending authorizations and create tasks if needed
       const idquote = currentCara.idquote || '';
@@ -3580,7 +3587,9 @@ export class PropuestasController {
         },
       });
 
-      // No crear tareas de autorización aquí - se procesan al dar "Guardar" (bulkUpdateCaras)
+      // Registrar nueva cara en historial
+      const { registrarCaraNueva } = await import('../utils/historialCaras');
+      await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
       res.json({
         success: true,
@@ -3608,6 +3617,11 @@ export class PropuestasController {
       }
 
       console.log(`[bulkUpdateCaras] Updating ${carasToUpdate.length} caras for propuesta ${id}`);
+
+      // Snapshot antes de modificar para historial
+      const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
+      const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
+      const beforeSnap = await snapshotCaras(allCaraIds);
 
       // Run all updates in a single transaction
       const updatedCaras = await prisma.$transaction(async (tx) => {
@@ -3678,6 +3692,9 @@ export class PropuestasController {
 
         return results;
       });
+
+      // Registrar cambios en historial
+      await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
 
       // After ALL updates: check for pending authorizations ONCE and create ONE task
       const autorizacion = await verificarCarasPendientes(String(id));

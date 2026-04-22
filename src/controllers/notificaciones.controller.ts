@@ -206,13 +206,16 @@ export class NotificacionesController {
         .filter((id): id is number => id !== null && !isNaN(id))
       )];
 
-      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null }> = {};
+      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }> = {};
       if (solicitudIds.length > 0) {
-        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null }[]>`
-          SELECT id, asesor, nombre_usuario FROM solicitud WHERE id IN (${Prisma.join(solicitudIds)})
+        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }[]>`
+          SELECT s.id, s.asesor, s.nombre_usuario, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre, s.notas AS notas_direccion, s.descripcion AS descripcion_trafico
+          FROM solicitud s
+          LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
+          WHERE s.id IN (${Prisma.join(solicitudIds)})
         `;
         for (const s of solicitudes) {
-          solicitudMap[s.id] = { asesor: s.asesor, nombre_usuario: s.nombre_usuario };
+          solicitudMap[s.id] = { asesor: s.asesor, nombre_usuario: s.nombre_usuario, cliente_nombre: s.cliente_nombre, notas_direccion: s.notas_direccion, descripcion_trafico: s.descripcion_trafico };
         }
       }
 
@@ -312,6 +315,9 @@ export class NotificacionesController {
         ids_reservas: tarea.ids_reservas,
         asesor: solData?.asesor || null,
         creador: solData?.nombre_usuario || null,
+        cliente: solData?.cliente_nombre || null,
+        notas_direccion: solData?.notas_direccion || null,
+        descripcion_trafico: solData?.descripcion_trafico || null,
         formatos: formatosByTareaId[tarea.id] || null,
       };
       });
@@ -441,7 +447,33 @@ export class NotificacionesController {
         id_asignado: tarea.id_asignado,
         ids_reservas: tarea.ids_reservas,
         comentarios,
+        notas_direccion: null as string | null,
+        descripcion_trafico: null as string | null,
+        cliente: null as string | null,
+        creador: null as string | null,
+        asesor: null as string | null,
       };
+
+      // Obtener datos de la solicitud relacionada
+      if (tarea.id_solicitud) {
+        const solId = parseInt(tarea.id_solicitud);
+        if (!isNaN(solId)) {
+          const solRows = await prisma.$queryRaw<{ notas: string | null; descripcion: string | null; cliente_nombre: string | null; nombre_usuario: string | null; asesor: string | null }[]>`
+            SELECT s.notas, s.descripcion, s.nombre_usuario, s.asesor, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
+            FROM solicitud s
+            LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
+            WHERE s.id = ${solId}
+            LIMIT 1
+          `;
+          if (solRows.length > 0) {
+            notificacion.notas_direccion = solRows[0].notas || null;
+            notificacion.descripcion_trafico = solRows[0].descripcion || null;
+            notificacion.cliente = solRows[0].cliente_nombre || null;
+            notificacion.creador = solRows[0].nombre_usuario || null;
+            notificacion.asesor = solRows[0].asesor || null;
+          }
+        }
+      }
 
       res.json({
         success: true,
@@ -1491,11 +1523,23 @@ export class NotificacionesController {
           deleted_at: null
         },
         select: {
+          cliente_id: true,
           razon_social: true,
           descripcion: true,
           producto_nombre: true,
         },
       });
+
+      let clienteNombre: string | null = solicitud?.razon_social || null;
+      if (solicitud?.cliente_id) {
+        const clienteRecord = await prisma.cliente.findFirst({
+          where: { CUIC: solicitud.cliente_id },
+          select: { T0_U_Cliente: true },
+        });
+        if (clienteRecord?.T0_U_Cliente) {
+          clienteNombre = clienteRecord.T0_U_Cliente;
+        }
+      }
 
       const caras = await prisma.solicitudCaras.findMany({
         where: { idquote },
@@ -1503,6 +1547,7 @@ export class NotificacionesController {
           id: true,
           idquote: true,
           ciudad: true,
+          estados: true,
           formato: true,
           tipo: true,
           caras: true,
@@ -1513,13 +1558,15 @@ export class NotificacionesController {
           autorizacion_dcm: true,
           articulo: true,
           inicio_periodo: true,
+          fin_periodo: true,
         },
       });
 
-      // Get catorcena info based on the first cara's periodo
-      let catorcenaInfo: string | null = null;
-      if (caras.length > 0 && caras[0].inicio_periodo) {
-        const fecha = new Date(caras[0].inicio_periodo);
+      // Get unique inicio_periodo dates and resolve catorcena for each
+      const uniquePeriodos = [...new Set(caras.map(c => c.inicio_periodo?.toISOString()).filter(Boolean))] as string[];
+      const catorcenaMap = new Map<string, string>();
+      for (const periodoStr of uniquePeriodos) {
+        const fecha = new Date(periodoStr);
         const catorcena = await prisma.catorcenas.findFirst({
           where: {
             fecha_inicio: { lte: fecha },
@@ -1527,7 +1574,7 @@ export class NotificacionesController {
           },
         });
         if (catorcena) {
-          catorcenaInfo = `Cat ${catorcena.numero_catorcena} - ${catorcena.a_o}`;
+          catorcenaMap.set(periodoStr, `Cat ${catorcena.numero_catorcena} - ${catorcena.a_o}`);
         }
       }
 
@@ -1535,12 +1582,13 @@ export class NotificacionesController {
       const carasConTarifa = caras.map(cara => {
         const totalCaras = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
         const tarifaEfectiva = totalCaras > 0 ? (Number(cara.costo) || 0) / totalCaras : 0;
+        const catorcenaInfo = cara.inicio_periodo ? catorcenaMap.get(cara.inicio_periodo.toISOString()) || null : null;
         return {
           ...cara,
           total_caras: totalCaras,
           tarifa_efectiva: tarifaEfectiva,
           catorcena: catorcenaInfo,
-          cliente: solicitud?.razon_social || null,
+          cliente: clienteNombre,
           campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
         };
       });
@@ -1570,9 +1618,23 @@ export class NotificacionesController {
       const historial = await prisma.historial.findMany({
         where: {
           ref_id: refId,
-          tipo: { startsWith: 'autorizacion_' },
+          tipo: {
+            in: [
+              'autorizacion_aprobacion',
+              'autorizacion_rechazo',
+              'autorizacion_cambio_solicitud',
+              'autorizacion_cambio_propuesta',
+              'autorizacion_cambio_campana',
+              'autorizacion_nueva_cara_solicitud',
+              'autorizacion_nueva_cara_propuesta',
+              'autorizacion_nueva_cara_campana',
+              'autorizacion_solicitud_solicitud',
+              'autorizacion_solicitud_propuesta',
+              'autorizacion_solicitud_campana',
+            ],
+          },
         },
-        orderBy: { fecha_hora: 'desc' },
+        orderBy: { fecha_hora: 'asc' },
       });
 
       const formatted = historial.map(h => ({
