@@ -798,6 +798,19 @@ export class DashboardController {
         })
       );
 
+      // Fallback: resolver cliente_nombre via cliente_id de la reserva cuando la cadena propuesta→solicitud falla
+      const clienteIdsForFallback = [...new Set(reservas.map(r => r.cliente_id).filter(id => id && id > 0))];
+      const clienteNombreMap = new Map<number, string>();
+      if (clienteIdsForFallback.length > 0) {
+        const clientes = await prisma.cliente.findMany({
+          where: { CUIC: { in: clienteIdsForFallback } },
+          select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+        });
+        for (const cl of clientes) {
+          if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
+        }
+      }
+
       // Mapear info de reserva por inventario
       const inventarioInfo: Record<number, {
         estatus: string;
@@ -808,11 +821,9 @@ export class DashboardController {
       }> = {};
 
       reservas.forEach((r) => {
-        // r.inventario_id ya es inventarios.id (viene del raw query con JOIN)
         const invId = Number(r.inventario_id);
         if (!invId) return;
         const current = inventarioInfo[invId];
-        // Prioridad: Vendido > Vendido bonificado > Con Arte > Reservado > Bloqueado
         const prioridad: Record<string, number> = {
           'Vendido': 5,
           'Vendido bonificado': 4,
@@ -825,9 +836,10 @@ export class DashboardController {
 
         if (newPrioridad > currentPrioridad) {
           const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
+          const clienteNombre = solInfo?.cliente_nombre || (r.cliente_id ? clienteNombreMap.get(r.cliente_id) || null : null);
           inventarioInfo[invId] = {
             estatus: r.estatus,
-            cliente_nombre: solInfo?.cliente_nombre || null,
+            cliente_nombre: clienteNombre,
             APS: r.APS,
             campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
