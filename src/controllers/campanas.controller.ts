@@ -7659,10 +7659,33 @@ export class CampanasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
+      // Create authorization tasks if the new cara needs approval
+      if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
+        const pendientesDg = estadoResult.autorizacion_dg === 'pendiente' ? [cara.id] : [];
+        const pendientesDcm = estadoResult.autorizacion_dcm === 'pendiente' ? [cara.id] : [];
+        if (propuesta?.solicitud_id && userId) {
+          await crearTareasAutorizacion(
+            propuesta.solicitud_id,
+            cotizacion.id_propuesta,
+            userId,
+            userName,
+            pendientesDg,
+            pendientesDcm,
+            'campana',
+            campanaId
+          );
+        }
+      }
+
+      let mensaje = 'Circuito creado exitosamente';
+      if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
+        mensaje = 'Circuito creado. Requiere autorización antes de asignar inventario.';
+      }
+
       res.json({
         success: true,
         data: cara,
-        message: 'Circuito creado exitosamente',
+        message: mensaje,
       });
     } catch (error) {
       console.error('Error en createCara:', error);
