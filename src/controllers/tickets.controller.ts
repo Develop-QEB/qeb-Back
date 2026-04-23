@@ -382,7 +382,7 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
       const ultimoMensaje = t.mensajes[0] || null;
       const ultimoMensajeLeido = vista?.ultimo_mensaje_leido_id || 0;
-      const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido : false;
+      const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido && ultimoMensaje.usuario_id !== 0 : false;
       const isOpened = !!vista;
 
       const chatVista = Array.isArray(t.chat_vistas) ? t.chat_vistas[0] : null;
@@ -440,17 +440,12 @@ export const getTicketsUnreadCount = async (req: AuthRequest, res: Response) => 
 
     let unreadCount = 0;
     for (const t of tickets) {
-      // Check notas internas unread
-      const vista = t.vistas[0];
-      const ultimoMensaje = t.mensajes[0];
-      const notasUnread = ultimoMensaje && ultimoMensaje.id > (vista?.ultimo_mensaje_leido_id || 0);
-
-      // Check chat de soporte unread (solo si el creador del ticket escribió, no técnicos)
+      // Check chat de soporte unread (solo si el creador del ticket escribió, no técnicos ni bot)
       const chatVista = t.chat_vistas[0];
       const ultimoChat = t.chat[0];
       const chatUnread = ultimoChat && ultimoChat.id > (chatVista?.ultimo_mensaje_leido_id || 0) && ultimoChat.usuario_id === t.usuario_id;
 
-      if (notasUnread || chatUnread) unreadCount++;
+      if (chatUnread) unreadCount++;
     }
 
     res.json({ success: true, data: { unreadCount } });
