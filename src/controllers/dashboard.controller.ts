@@ -795,9 +795,9 @@ export class DashboardController {
       const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
       const solicitudes = solicitudIds.length > 0 ? await prisma.solicitud.findMany({
         where: { id: { in: solicitudIds } },
-        select: { id: true, razon_social: true, cliente_id: true },
+        select: { id: true, razon_social: true, cuic: true },
       }) : [];
-      const cuicValues = [...new Set(solicitudes.map(s => s.cliente_id).filter((id): id is number => !!id && id > 0))];
+      const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
       const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
         where: { CUIC: { in: cuicValues } },
         select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
@@ -808,10 +808,11 @@ export class DashboardController {
         cliente: c.T0_U_Cliente || '',
       }]));
       const solicitudInfoMap = new Map(solicitudes.map((s) => {
-        const cuicInfo = s.cliente_id ? cuicToInfo.get(s.cliente_id) || null : null;
+        const cuicNum = parseInt(s.cuic || '');
+        const cuicInfo = !isNaN(cuicNum) ? cuicToInfo.get(cuicNum) || null : null;
         return [s.id, {
           cliente_nombre: cuicInfo?.nombre || s.razon_social || null,
-          cuic: s.cliente_id || null,
+          cuic: !isNaN(cuicNum) ? cuicNum : null,
           marca: cuicInfo?.marca || null,
           cliente: cuicInfo?.cliente || null,
         }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
