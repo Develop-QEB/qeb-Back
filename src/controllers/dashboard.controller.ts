@@ -827,11 +827,12 @@ export class DashboardController {
           const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
           return [sc.id, {
             campana_id: campana?.id ?? null,
+            propuesta_id: !isNaN(idquote) ? idquote : null,
             cliente_nombre: solInfo?.cliente_nombre || null,
             cuic: solInfo?.cuic || null,
             marca: solInfo?.marca || null,
             cliente: solInfo?.cliente || null,
-          }] as [number, { campana_id: number | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+          }] as [number, { campana_id: number | null; propuesta_id: number | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
         })
       );
 
@@ -855,6 +856,7 @@ export class DashboardController {
         cuic: number | null;
         marca: string | null;
         cliente: string | null;
+        propuesta_id: number | null;
         APS: number | null;
         campana_id: number | null;
         solicitudCaras_id: number;
@@ -883,6 +885,7 @@ export class DashboardController {
             cuic: solInfo?.cuic || null,
             marca: solInfo?.marca || null,
             cliente: solInfo?.cliente || null,
+            propuesta_id: solInfo?.propuesta_id ?? null,
             APS: r.APS,
             campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
@@ -912,6 +915,7 @@ export class DashboardController {
             cuic: info?.cuic || null,
             marca: info?.marca || null,
             cliente: info?.cliente || null,
+            propuesta_id: info?.propuesta_id || null,
             APS: info?.APS || null,
             campana_id: info?.campana_id ?? null,
           };
