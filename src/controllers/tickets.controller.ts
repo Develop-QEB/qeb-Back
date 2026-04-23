@@ -382,7 +382,7 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
       const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
       const ultimoMensaje = t.mensajes[0] || null;
       const ultimoMensajeLeido = vista?.ultimo_mensaje_leido_id || 0;
-      const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido && ultimoMensaje.usuario_id !== 0 : false;
+      const hasUnread = ultimoMensaje ? ultimoMensaje.id > ultimoMensajeLeido && (ultimoMensaje.usuario_id !== 0 || t.status === 'Duda del Bot') : false;
       const isOpened = !!vista;
 
       const chatVista = Array.isArray(t.chat_vistas) ? t.chat_vistas[0] : null;
