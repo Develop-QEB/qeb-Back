@@ -306,30 +306,27 @@ export class CampanasController {
         }
       });
 
-      // Always recalculate inversion from solicitudCaras (source of truth).
-      // When a catorcena filter is active, only sum caras that overlap that period.
-      if (campanas.length > 0) {
+      // Recalculate inversion based on catorcena filter (sum only overlapping caras)
+      if (filterFechaInicio && filterFechaFin && campanas.length > 0) {
         const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
         if (propuestaIds.length > 0) {
           const placeholders = propuestaIds.map(() => '?').join(',');
-          const hasPeriodFilter = filterFechaInicio && filterFechaFin;
-          const fechaCondition = hasPeriodFilter
-            ? 'AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?'
-            : '';
-          const fechaParams = hasPeriodFilter ? [filterFechaFin, filterFechaInicio] : [];
-
           const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
             SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id ${fechaCondition}
+            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+              AND sc.inicio_periodo <= ?
+              AND sc.fin_periodo >= ?
             WHERE pr.id IN (${placeholders})
             GROUP BY pr.id
-          `, ...fechaParams, ...propuestaIds);
+          `, filterFechaFin, filterFechaInicio, ...propuestaIds);
 
           const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
           campanas.forEach((c: any) => {
-            const val = inversionMap.get(Number(c.propuesta_id));
-            if (val !== undefined) c.inversion = val;
+            const filtered = inversionMap.get(Number(c.propuesta_id));
+            if (filtered !== undefined) {
+              c.inversion = filtered;
+            }
           });
         }
       }
