@@ -777,7 +777,7 @@ export class DashboardController {
       // Obtener campana_id via cotizacion (para el link de APS)
       const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
         where: { id_propuesta: { in: idquoteValues } },
-        select: { id: true, id_propuesta: true },
+        select: { id: true, id_propuesta: true, nombre_campania: true },
       }) : [];
       const cotizacionIds = cotizaciones.map((c) => c.id);
       const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
@@ -785,6 +785,7 @@ export class DashboardController {
         select: { id: true, cotizacion_id: true },
       }) : [];
       const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
+      const idquoteToNombreCampania = new Map(cotizaciones.map((c) => [c.id_propuesta, c.nombre_campania || '']));
       const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
 
       // Obtener nombre del cliente via propuesta → solicitud → CUIC → cliente.T2_U_Marca
@@ -826,14 +827,16 @@ export class DashboardController {
           const cotizId = idquoteToCotizacion.get(idquote);
           const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
           const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
+          const nombreCampania = !isNaN(idquote) ? idquoteToNombreCampania.get(idquote) || null : null;
           return [sc.id, {
             campana_id: campana?.id ?? null,
             propuesta_id: !isNaN(idquote) ? idquote : null,
+            nombre_campania: nombreCampania,
             cliente_nombre: solInfo?.cliente_nombre || null,
             cuic: solInfo?.cuic || null,
             marca: solInfo?.marca || null,
             cliente: solInfo?.cliente || null,
-          }] as [number, { campana_id: number | null; propuesta_id: number | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+          }] as [number, { campana_id: number | null; propuesta_id: number | null; nombre_campania: string | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
         })
       );
 
@@ -858,6 +861,7 @@ export class DashboardController {
         marca: string | null;
         cliente: string | null;
         propuesta_id: number | null;
+        nombre_campania: string | null;
         APS: number | null;
         campana_id: number | null;
         solicitudCaras_id: number;
@@ -887,6 +891,7 @@ export class DashboardController {
             marca: solInfo?.marca || null,
             cliente: solInfo?.cliente || null,
             propuesta_id: solInfo?.propuesta_id ?? null,
+            nombre_campania: solInfo?.nombre_campania || null,
             APS: r.APS,
             campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
@@ -917,6 +922,7 @@ export class DashboardController {
             marca: info?.marca || null,
             cliente: info?.cliente || null,
             propuesta_id: info?.propuesta_id || null,
+            nombre_campania: info?.nombre_campania || null,
             APS: info?.APS || null,
             campana_id: info?.campana_id ?? null,
           };
