@@ -849,7 +849,7 @@ export class DashboardController {
 
         if (newPrioridad > currentPrioridad) {
           const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
-          const clienteNombre = solInfo?.cliente_nombre || (r.cliente_id ? clienteNombreMap.get(r.cliente_id) || null : null);
+          const clienteNombre = (r.cliente_id ? clienteNombreMap.get(r.cliente_id) || null : null) || solInfo?.cliente_nombre;
           inventarioInfo[invId] = {
             estatus: r.estatus,
             cliente_nombre: clienteNombre,
