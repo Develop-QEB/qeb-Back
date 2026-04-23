@@ -721,16 +721,29 @@ export class DashboardController {
 
       let calendarioClause = '';
       if (fechaInicio && fechaFin) {
-        const calendarios = await prisma.calendario.findMany({
-          where: {
-            deleted_at: null,
-            fecha_inicio: { lte: fechaFin },
-            fecha_fin: { gte: fechaInicio },
-          },
-          select: { id: true },
-        });
-        if (calendarios.length > 0) {
-          calendarioClause = `AND rsv.calendario_id IN (${calendarios.map(c => c.id).join(',')})`;
+        const [calendarios, catorcenasMatch] = await Promise.all([
+          prisma.calendario.findMany({
+            where: {
+              deleted_at: null,
+              fecha_inicio: { lte: fechaFin },
+              fecha_fin: { gte: fechaInicio },
+            },
+            select: { id: true },
+          }),
+          prisma.catorcenas.findMany({
+            where: {
+              fecha_inicio: { lte: fechaFin },
+              fecha_fin: { gte: fechaInicio },
+            },
+            select: { id: true },
+          }),
+        ]);
+        const allIds = [
+          ...calendarios.map(c => c.id),
+          ...catorcenasMatch.map(c => c.id),
+        ];
+        if (allIds.length > 0) {
+          calendarioClause = `AND rsv.calendario_id IN (${allIds.join(',')})`;
         }
       }
 
