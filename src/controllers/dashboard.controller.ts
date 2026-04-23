@@ -802,21 +802,36 @@ export class DashboardController {
         where: { CUIC: { in: cuicValues } },
         select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
       }) : [];
-      const cuicToNombre = new Map(cuicClientes.map(c => [c.CUIC!, c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '']));
-      const solicitudNombreMap = new Map(solicitudes.map((s) => {
-        const cuicNombre = s.cliente_id ? cuicToNombre.get(s.cliente_id) || null : null;
-        return [s.id, cuicNombre || s.razon_social || null] as [number, string | null];
+      const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
+        nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
+        marca: c.T2_U_Marca || '',
+        cliente: c.T0_U_Cliente || '',
+      }]));
+      const solicitudInfoMap = new Map(solicitudes.map((s) => {
+        const cuicInfo = s.cliente_id ? cuicToInfo.get(s.cliente_id) || null : null;
+        return [s.id, {
+          cliente_nombre: cuicInfo?.nombre || s.razon_social || null,
+          cuic: s.cliente_id || null,
+          marca: cuicInfo?.marca || null,
+          cliente: cuicInfo?.cliente || null,
+        }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
       }));
-      const propuestaToSolicitudNombre = new Map(propuestas.map((p) => [p.id, solicitudNombreMap.get(p.solicitud_id) || null]));
+      const propuestaToSolicitudInfo = new Map(propuestas.map((p) => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
 
-      // solicitudCaras_id → { campana_id, cliente_nombre }
+      // solicitudCaras_id → { campana_id, cliente_nombre, cuic, marca, cliente }
       const solicitudToCampana = new Map(
         solicitudCarasList.map((sc) => {
           const idquote = parseInt(sc.idquote || '');
           const cotizId = idquoteToCotizacion.get(idquote);
           const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
-          const clienteNombre = !isNaN(idquote) ? (propuestaToSolicitudNombre.get(idquote) || null) : null;
-          return [sc.id, { campana_id: campana?.id ?? null, cliente_nombre: clienteNombre }] as [number, { campana_id: number | null; cliente_nombre: string | null }];
+          const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
+          return [sc.id, {
+            campana_id: campana?.id ?? null,
+            cliente_nombre: solInfo?.cliente_nombre || null,
+            cuic: solInfo?.cuic || null,
+            marca: solInfo?.marca || null,
+            cliente: solInfo?.cliente || null,
+          }] as [number, { campana_id: number | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
         })
       );
 
@@ -837,6 +852,9 @@ export class DashboardController {
       const inventarioInfo: Record<number, {
         estatus: string;
         cliente_nombre: string | null;
+        cuic: number | null;
+        marca: string | null;
+        cliente: string | null;
         APS: number | null;
         campana_id: number | null;
         solicitudCaras_id: number;
@@ -862,6 +880,9 @@ export class DashboardController {
           inventarioInfo[invId] = {
             estatus: r.estatus,
             cliente_nombre: clienteNombre,
+            cuic: solInfo?.cuic || null,
+            marca: solInfo?.marca || null,
+            cliente: solInfo?.cliente || null,
             APS: r.APS,
             campana_id: solInfo?.campana_id ?? null,
             solicitudCaras_id: r.solicitudCaras_id,
@@ -888,6 +909,9 @@ export class DashboardController {
             longitud: inv.longitud,
             estatus: estatusActual,
             cliente_nombre: info?.cliente_nombre || null,
+            cuic: info?.cuic || null,
+            marca: info?.marca || null,
+            cliente: info?.cliente || null,
             APS: info?.APS || null,
             campana_id: info?.campana_id ?? null,
           };
