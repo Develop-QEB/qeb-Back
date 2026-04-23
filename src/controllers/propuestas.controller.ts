@@ -518,6 +518,8 @@ export class PropuestasController {
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
           ct.tipo_periodo AS tipo_periodo,
+          MIN(sc.inicio_periodo) AS min_inicio_periodo,
+          MAX(sc.inicio_periodo) AS max_inicio_periodo,
           GROUP_CONCAT(DISTINCT sc.formato ORDER BY sc.formato SEPARATOR ',') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
@@ -556,6 +558,8 @@ export class PropuestasController {
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
         tipo_periodo: p.tipo_periodo || 'catorcena',
+        min_inicio_periodo: p.min_inicio_periodo ? (p.min_inicio_periodo instanceof Date ? p.min_inicio_periodo.toISOString().split('T')[0] : String(p.min_inicio_periodo).split('T')[0]) : null,
+        max_inicio_periodo: p.max_inicio_periodo ? (p.max_inicio_periodo instanceof Date ? p.max_inicio_periodo.toISOString().split('T')[0] : String(p.max_inicio_periodo).split('T')[0]) : null,
         formatos: p.formatos || null,
       }));
 
