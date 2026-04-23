@@ -21,6 +21,7 @@ import {
   getTicketRankings,
   getReportesEspeciales,
   getReportesDetalle,
+  getDevUsers,
 } from '../controllers/tickets.controller';
 
 const router = Router();
@@ -42,6 +43,7 @@ router.get('/reportes-especiales/detalle', getReportesDetalle);
 // Historial de tickets (usuarios autorizados)
 router.get('/historial', getTicketsHistorial);
 router.get('/unread-count', getTicketsUnreadCount);
+router.get('/dev-users', getDevUsers);
 router.post('/:id/opened', markTicketOpened);
 router.get('/:id/mensajes', getTicketMensajes);
 router.post('/:id/mensajes', createTicketMensaje);

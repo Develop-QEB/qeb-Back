@@ -2,7 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
 import { AuthRequest } from '../types';
-import { getIO, SOCKET_EVENTS } from '../config/socket';
+import { getIO, SOCKET_EVENTS, emitToAll } from '../config/socket';
 import Anthropic from '@anthropic-ai/sdk';
 import { chatbotController } from './chatbot.controller';
 
@@ -378,6 +378,19 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
     });
     const usuarioMap = new Map(usuarios.map((u) => [u.id, u]));
 
+    // Obtener menciones pendientes para el usuario actual
+    const ticketIds = tickets.map(t => t.id);
+    const mencionesPendientes = userId ? await prisma.tareas.findMany({
+      where: {
+        tipo: 'Mención en Ticket',
+        id_solicitud: { in: ticketIds.map(String) },
+        id_asignado: { contains: String(userId) },
+        estatus: 'Pendiente',
+      },
+      select: { id_solicitud: true },
+    }) : [];
+    const ticketsConMencion = new Set(mencionesPendientes.map(m => Number(m.id_solicitud)));
+
     const result = tickets.map((t) => {
       const vista = Array.isArray(t.vistas) ? t.vistas[0] : null;
       const ultimoMensaje = t.mensajes[0] || null;
@@ -409,6 +422,7 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
         total_chat: t._count.chat,
         has_unread: hasUnread,
         has_chat_unread: hasChatUnread,
+        has_mention: ticketsConMencion.has(t.id),
         is_opened: isOpened,
         created_at: t.created_at,
         updated_at: t.updated_at,
@@ -492,13 +506,28 @@ export const getTicketMensajes = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// Obtener usuarios DEV para autocomplete de @menciones
+export const getDevUsers = async (req: AuthRequest, res: Response) => {
+  try {
+    const usuarios = await prisma.usuario.findMany({
+      where: { user_role: 'DEV', deleted_at: null },
+      select: { id: true, nombre: true, foto_perfil: true },
+      orderBy: { nombre: 'asc' },
+    });
+    res.json({ success: true, data: usuarios });
+  } catch (error) {
+    console.error('Error fetching dev users:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener usuarios' });
+  }
+};
+
 // Crear mensaje en un ticket
 export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
   try {
     const ticketId = Number(req.params.id);
     const userId = req.user?.userId;
     const userName = req.user?.nombre || 'Usuario';
-    const { mensaje, archivo_url, archivo_nombre, archivo_tipo } = req.body;
+    const { mensaje, archivo_url, archivo_nombre, archivo_tipo, menciones } = req.body;
 
     if (!userId) return res.status(401).json({ success: false, error: 'No autenticado' });
     if (!mensaje && !archivo_url) {
@@ -524,6 +553,39 @@ export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
       update: { ultimo_mensaje_leido_id: nuevoMensaje.id },
     });
 
+    // Crear notificaciones para usuarios mencionados
+    if (menciones && Array.isArray(menciones) && menciones.length > 0) {
+      const ticket = await prisma.tickets.findUnique({ where: { id: ticketId }, select: { titulo: true, status: true } });
+      const mencionadosUnicos = [...new Set(menciones as number[])].filter(id => id !== userId);
+
+      for (const mencionadoId of mencionadosUnicos) {
+        const mencionado = await prisma.usuario.findUnique({ where: { id: mencionadoId }, select: { nombre: true } });
+        if (!mencionado) continue;
+
+        await prisma.tareas.create({
+          data: {
+            tipo: 'Mención en Ticket',
+            titulo: `${userName} te mencionó en Ticket #${ticketId}`,
+            descripcion: mensaje ? (mensaje.length > 150 ? mensaje.substring(0, 150) + '...' : mensaje) : 'Archivo adjunto',
+            estatus: 'Pendiente',
+            id_responsable: userId,
+            responsable: userName,
+            id_solicitud: ticketId.toString(),
+            contenido: JSON.stringify({ ticket_id: ticketId, mensaje_id: nuevoMensaje.id, ticket_titulo: ticket?.titulo }),
+            id_asignado: mencionadoId.toString(),
+            asignado: mencionado.nombre,
+            fecha_fin: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          },
+        });
+      }
+
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tipo: 'Mención en Ticket',
+        ticketId,
+        mencionados: mencionadosUnicos,
+      });
+    }
+
     // Emitir por socket
     try {
       const io = getIO();
@@ -532,8 +594,8 @@ export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
     } catch {}
 
     // Si el ticket esta en "Duda del Bot" y un DEV escribe, QEBooh procesa la explicacion
-    const ticket = await prisma.tickets.findUnique({ where: { id: ticketId }, select: { status: true } });
-    if (ticket?.status === 'Duda del Bot' && mensaje) {
+    const ticketForBot = await prisma.tickets.findUnique({ where: { id: ticketId }, select: { status: true } });
+    if (ticketForBot?.status === 'Duda del Bot' && mensaje) {
       const userRole = req.user?.rol;
       if (userRole === 'DEV') {
         chatbotController.handleDudaBotReply(ticketId, mensaje, userName).catch(err => {
