@@ -787,7 +787,7 @@ export class DashboardController {
       const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
       const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
 
-      // Obtener razon_social via propuesta → solicitud (camino correcto para nombre del cliente)
+      // Obtener nombre del cliente via propuesta → solicitud → CUIC → cliente.T2_U_Marca
       const propuestas = idquoteValues.length > 0 ? await prisma.propuesta.findMany({
         where: { id: { in: idquoteValues } },
         select: { id: true, solicitud_id: true },
@@ -795,9 +795,18 @@ export class DashboardController {
       const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
       const solicitudes = solicitudIds.length > 0 ? await prisma.solicitud.findMany({
         where: { id: { in: solicitudIds } },
-        select: { id: true, razon_social: true },
+        select: { id: true, razon_social: true, cliente_id: true },
       }) : [];
-      const solicitudNombreMap = new Map(solicitudes.map((s) => [s.id, s.razon_social || null]));
+      const cuicValues = [...new Set(solicitudes.map(s => s.cliente_id).filter((id): id is number => !!id && id > 0))];
+      const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
+        where: { CUIC: { in: cuicValues } },
+        select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      }) : [];
+      const cuicToNombre = new Map(cuicClientes.map(c => [c.CUIC!, c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '']));
+      const solicitudNombreMap = new Map(solicitudes.map((s) => {
+        const cuicNombre = s.cliente_id ? cuicToNombre.get(s.cliente_id) || null : null;
+        return [s.id, cuicNombre || s.razon_social || null] as [number, string | null];
+      }));
       const propuestaToSolicitudNombre = new Map(propuestas.map((p) => [p.id, solicitudNombreMap.get(p.solicitud_id) || null]));
 
       // solicitudCaras_id → { campana_id, cliente_nombre }
