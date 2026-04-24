@@ -1236,11 +1236,10 @@ export class ChatbotController {
       const ticket = await prisma.tickets.findUnique({ where: { id: ticketId } });
       if (!ticket) return;
 
-      // Solo responder si no hay respuesta previa de soporte (usuario_id = 0)
-      const existingSupportChat = await prisma.ticket_chat.count({
+      const existingBotNote = await prisma.ticket_mensajes.count({
         where: { ticket_id: ticketId, usuario_id: 0 },
       });
-      if (existingSupportChat > 0) return;
+      if (existingBotNote > 0) return;
 
       // Obtener rol del usuario
       const usuario = await prisma.$queryRaw<any[]>`
