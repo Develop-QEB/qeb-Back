@@ -766,6 +766,21 @@ export class CampanasController {
         }
       }
 
+      // Si se rechaza, finalizar tareas de autorización pendientes
+      if (status === 'Rechazada') {
+        const tareasAuth = await prisma.tareas.updateMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { contains: 'Autorización' },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          data: { estatus: 'Atendido' },
+        });
+        if (tareasAuth.count > 0) {
+          console.log(`[Rechazada] Campaña #${campanaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
+        }
+      }
+
       // Invalidar caché de listados de campañas al cambiar status
       cache.deletePattern('campanas:list:');
 
@@ -1506,7 +1521,7 @@ export class CampanasController {
           NULL as longitud,
           NULL as ancho,
           NULL as alto,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
           'Impresión' as estatus_reserva,
@@ -1749,7 +1764,7 @@ export class CampanasController {
           NULL as mueble,
           NULL as latitud,
           NULL as longitud,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as municipio,
           NULL as tipo_de_mueble,
@@ -2108,7 +2123,7 @@ export class CampanasController {
           NULL as longitud,
           NULL as ancho,
           NULL as alto,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
           'Impresión' as estatus_reserva,
@@ -2158,7 +2173,7 @@ export class CampanasController {
           NULL as mueble,
           NULL as latitud,
           NULL as longitud,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as municipio,
           NULL as tipo_de_mueble,
@@ -2550,7 +2565,7 @@ export class CampanasController {
           sc.articulo as codigo_unico,
           'Impresión' as tipo_de_cara,
           NULL as mueble,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
@@ -6591,7 +6606,7 @@ export class CampanasController {
       const query = `
         -- BONIFICACIONES (BF, CT, IM con bonificacion > 0)
         SELECT
-          COALESCE(MIN(inv.plaza), sc.ciudad) AS plaza,
+          COALESCE(MIN(inv.plaza), MIN(inv.municipio), sc.ciudad) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -6641,7 +6656,7 @@ export class CampanasController {
 
         -- RENTA (RT, IN, CT, IM con caras > bonificacion)
         SELECT
-          COALESCE(MIN(inv.plaza), sc.ciudad) AS plaza,
+          COALESCE(MIN(inv.plaza), MIN(inv.municipio), sc.ciudad) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,

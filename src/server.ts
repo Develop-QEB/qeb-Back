@@ -3,7 +3,7 @@ import { createServer } from 'http';
 import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
-import { enviarResumenAutorizacionesPendientes } from './services/autorizacion.service';
+import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -124,6 +124,11 @@ async function main() {
     // Procesar tickets pendientes sin respuesta de soporte
     chatbotController.processarTicketsPendientes().catch(err => {
       console.error('[AutoTicket] Error en procesamiento inicial:', err);
+    });
+
+    // Depurar tareas de autorización resueltas al arrancar
+    depurarTareasAutorizacionResueltas().catch((err: unknown) => {
+      console.error('[DepurarAutorizaciones] Error en depuración inicial:', err);
     });
 
     // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
