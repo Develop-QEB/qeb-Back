@@ -1171,5 +1171,64 @@ export default {
   aprobarCaras,
   rechazarSolicitud,
   obtenerResumenAutorizacion,
-  enviarResumenAutorizacionesPendientes
+  enviarResumenAutorizacionesPendientes,
+  depurarTareasAutorizacionResueltas
 };
+
+/**
+ * Depura tareas de autorización que siguen como Pendiente/Activo
+ * pero cuyas caras ya fueron todas resueltas (aprobadas o rechazadas).
+ */
+export async function depurarTareasAutorizacionResueltas(): Promise<number> {
+  const tareasAbiertas = await prisma.tareas.findMany({
+    where: {
+      tipo: { contains: 'Autorización' },
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+    },
+    select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true },
+  });
+
+  let finalizadas = 0;
+
+  for (const tarea of tareasAbiertas) {
+    let idquote = tarea.id_propuesta;
+
+    if (!idquote && tarea.id_solicitud) {
+      const prop = await prisma.propuesta.findFirst({
+        where: { solicitud_id: parseInt(tarea.id_solicitud) },
+        select: { id: true },
+        orderBy: { id: 'desc' },
+      });
+      if (prop) idquote = String(prop.id);
+    }
+
+    if (!idquote) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+      continue;
+    }
+
+    const caras = await prisma.solicitudCaras.findMany({
+      where: { idquote },
+      select: { autorizacion_dg: true, autorizacion_dcm: true },
+    });
+
+    if (caras.length === 0) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+      continue;
+    }
+
+    const esDG = tarea.tipo?.includes('DG');
+    const campo = esDG ? 'autorizacion_dg' : 'autorizacion_dcm';
+    const tienePendientes = caras.some(c => (c as any)[campo] === 'pendiente');
+
+    if (!tienePendientes) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+    }
+  }
+
+  console.log(`[DepurarAutorizaciones] ${finalizadas} de ${tareasAbiertas.length} tareas finalizadas`);
+  return finalizadas;
+}

@@ -6,6 +6,7 @@ import {
   aprobarCaras,
   rechazarSolicitud,
   obtenerResumenAutorizacion,
+  depurarTareasAutorizacionResueltas,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
@@ -116,6 +117,17 @@ export class NotificacionesController {
         `;
         const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
 
+        // IDs de tareas que matchean por cliente o asesor (via solicitud + cliente)
+        const clienteLike = `%${search}%`;
+        const clienteMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+          SELECT DISTINCT t.id FROM tareas t
+          LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+          LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
+          WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
+             OR sol.asesor LIKE ${clienteLike}
+        `;
+        const clienteMatchIds = clienteMatchRows.map(r => Number(r.id));
+
         const orConditions: Record<string, unknown>[] = [
           { titulo: { contains: search } },
           { descripcion: { contains: search } },
@@ -125,6 +137,9 @@ export class NotificacionesController {
         ];
         if (formatoMatchIds.length > 0) {
           orConditions.push({ id: { in: formatoMatchIds } });
+        }
+        if (clienteMatchIds.length > 0) {
+          orConditions.push({ id: { in: clienteMatchIds } });
         }
         where.AND = [
           ...(Array.isArray(where.AND) ? where.AND : []),
@@ -1666,6 +1681,15 @@ export class NotificacionesController {
       res.json({ success: true, data: formatted });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+  async depurarAutorizaciones(req: AuthRequest, res: Response) {
+    try {
+      const finalizadas = await depurarTareasAutorizacionResueltas();
+      res.json({ success: true, data: { finalizadas } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al depurar autorizaciones';
       res.status(500).json({ success: false, error: message });
     }
   }
