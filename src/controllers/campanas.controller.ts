@@ -271,7 +271,7 @@ export class CampanasController {
             GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
           FROM solicitudCaras sc_c
           INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
-          INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+          INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
@@ -306,30 +306,33 @@ export class CampanasController {
         }
       });
 
-      // Always recalculate inversion from solicitudCaras (source of truth).
-      // When a catorcena filter is active, only sum caras that overlap that period.
-      if (campanas.length > 0) {
+      // Recalculate inversion PRORRATEADA por días dentro del rango del filtro de catorcena.
+      // Solo cuenta la porción de días de cada cara que cae dentro de [filterFechaInicio, filterFechaFin].
+      if (filterFechaInicio && filterFechaFin && campanas.length > 0) {
         const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
         if (propuestaIds.length > 0) {
           const placeholders = propuestaIds.map(() => '?').join(',');
-          const hasPeriodFilter = filterFechaInicio && filterFechaFin;
-          const fechaCondition = hasPeriodFilter
-            ? 'AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?'
-            : '';
-          const fechaParams = hasPeriodFilter ? [filterFechaFin, filterFechaInicio] : [];
-
           const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
-            SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+            SELECT pr.id as propuesta_id,
+                   COALESCE(SUM(
+                     sc.costo
+                     * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                     / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                   ), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id ${fechaCondition}
+            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+              AND sc.inicio_periodo <= ?
+              AND sc.fin_periodo >= ?
             WHERE pr.id IN (${placeholders})
             GROUP BY pr.id
-          `, ...fechaParams, ...propuestaIds);
+          `, filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds);
 
           const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
           campanas.forEach((c: any) => {
-            const val = inversionMap.get(Number(c.propuesta_id));
-            if (val !== undefined) c.inversion = val;
+            const filtered = inversionMap.get(Number(c.propuesta_id));
+            if (filtered !== undefined) {
+              c.inversion = filtered;
+            }
           });
         }
       }
@@ -2629,7 +2632,7 @@ export class CampanasController {
               GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
             FROM solicitudCaras sc_c
             INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
-            INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+            INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
             WHERE ct_c.id IN (SELECT cotizacion_id FROM campania WHERE id IN (${cmIdPh}))
             GROUP BY ct_c.id
           ) cat_content ON cat_content.cotizacion_id = ct.id
@@ -8281,6 +8284,104 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getBatchInversiones:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener inversiones batch';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Batch de inversión (costo) por catorcena, basado en solicitudCaras.costo.
+   * Mismo criterio que el filtro de catorcena en GET /campanas, pero agrupado por catorcena.
+   * Body: { ids: number[] } (ids de campania)
+   * Response: { campaniaId: { "numCat:anio": { inversion }, total: { inversion } } }
+   */
+  async getBatchInversionesCostoPorCatorcena(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const campanaIds = ids.map(Number).filter(id => Number.isFinite(id));
+      if (campanaIds.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const placeholders = campanaIds.map(() => '?').join(', ');
+
+      // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
+      //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
+      const perCatorcenaQuery = `
+        SELECT
+          cm.id AS campania_id,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COALESCE(SUM(
+            sc.costo
+            * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
+            / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+          ), 0) AS inversion
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          INNER JOIN catorcenas cat
+            ON sc.inicio_periodo <= cat.fecha_fin
+           AND sc.fin_periodo    >= cat.fecha_inicio
+        WHERE cm.id IN (${placeholders})
+        GROUP BY cm.id, cat.numero_catorcena, cat.año
+      `;
+
+      // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
+      const totalQuery = `
+        SELECT
+          cm.id AS campania_id,
+          COALESCE(SUM(sc.costo), 0) AS inversion
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+        WHERE cm.id IN (${placeholders})
+        GROUP BY cm.id
+      `;
+
+      const [perCatorcenaRows, totalRows] = await Promise.all([
+        prisma.$queryRawUnsafe<Array<{
+          campania_id: number;
+          numero_catorcena: number | null;
+          anio_catorcena: number | null;
+          inversion: bigint | number;
+        }>>(perCatorcenaQuery, ...campanaIds),
+        prisma.$queryRawUnsafe<Array<{
+          campania_id: number;
+          inversion: bigint | number;
+        }>>(totalQuery, ...campanaIds),
+      ]);
+
+      const result: Record<number, Record<string, { inversion: number }>> = {};
+
+      for (const row of perCatorcenaRows) {
+        const cid = Number(row.campania_id);
+        if (!result[cid]) result[cid] = {};
+        const inv = Number(row.inversion || 0);
+        if (row.numero_catorcena != null && row.anio_catorcena != null) {
+          const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
+          if (!result[cid][catKey]) result[cid][catKey] = { inversion: 0 };
+          result[cid][catKey].inversion += inv;
+        }
+      }
+
+      for (const row of totalRows) {
+        const cid = Number(row.campania_id);
+        if (!result[cid]) result[cid] = {};
+        result[cid]['total'] = { inversion: Number(row.inversion || 0) };
+      }
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error en getBatchInversionesCostoPorCatorcena:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inversiones por catorcena';
       res.status(500).json({ success: false, error: message });
     }
   }
