@@ -1447,9 +1447,9 @@ export class SolicitudesController {
         orderBy: { estado: 'asc' },
       });
 
-      // Get distinct municipios (ciudades)
+      // Get distinct municipios (ciudades) con su plaza y estado
       const ciudades = await prisma.inventarios.findMany({
-        select: { municipio: true, estado: true },
+        select: { municipio: true, estado: true, plaza: true },
         distinct: ['municipio'],
         where: { municipio: { not: null } },
         orderBy: { municipio: 'asc' },
@@ -1471,13 +1471,34 @@ export class SolicitudesController {
         orderBy: { nivel_socioeconomico: 'asc' },
       });
 
+      // Get distinct plazas con sus ciudades y estados
+      const plazasRaw = await prisma.inventarios.findMany({
+        select: { plaza: true, municipio: true, estado: true },
+        where: { plaza: { not: null } },
+        orderBy: { plaza: 'asc' },
+      });
+      const plazaMap = new Map<string, { plaza: string; estados: Set<string>; ciudades: Set<string> }>();
+      for (const r of plazasRaw) {
+        if (!r.plaza) continue;
+        if (!plazaMap.has(r.plaza)) plazaMap.set(r.plaza, { plaza: r.plaza, estados: new Set(), ciudades: new Set() });
+        const e = plazaMap.get(r.plaza)!;
+        if (r.estado) e.estados.add(r.estado);
+        if (r.municipio) e.ciudades.add(r.municipio);
+      }
+      const plazas = Array.from(plazaMap.values()).map(p => ({
+        plaza: p.plaza,
+        estados: Array.from(p.estados).sort(),
+        ciudades: Array.from(p.ciudades).sort(),
+      }));
+
       res.json({
         success: true,
         data: {
           estados: estados.map(e => e.estado).filter(Boolean),
-          ciudades: ciudades.map(c => ({ ciudad: c.municipio, estado: c.estado })),
+          ciudades: ciudades.map(c => ({ ciudad: c.municipio, estado: c.estado, plaza: c.plaza })),
           formatos: formatos.map(f => f.mueble).filter(Boolean),
           nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
+          plazas,
         },
       });
     } catch (error) {
