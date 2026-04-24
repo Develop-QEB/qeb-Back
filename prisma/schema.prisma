@@ -59,6 +59,7 @@ model inventarios {
   tarifa_piso          Decimal? @db.Decimal(12, 2)
   tarifa_publica       Decimal? @db.Decimal(12, 2)
   mundialista          String?  @db.VarChar(10)
+  cto                  String?  @db.VarChar(20)
 
   @@index([archivos_id], map: "idx_archivos_id")
   @@map("inventarios")
