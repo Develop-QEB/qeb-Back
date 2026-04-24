@@ -804,6 +804,22 @@ export class PropuestasController {
           });
           console.log(`[${status}] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
         }
+
+        // Finalizar tareas de autorización pendientes asociadas a esta propuesta
+        const tareasAuth = await prisma.tareas.updateMany({
+          where: {
+            OR: [
+              { id_propuesta: String(propuestaId) },
+              ...(propuesta.solicitud_id ? [{ id_solicitud: String(propuesta.solicitud_id) }] : []),
+            ],
+            tipo: { contains: 'Autorización' },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          data: { estatus: 'Atendido' },
+        });
+        if (tareasAuth.count > 0) {
+          console.log(`[${status}] Propuesta #${propuestaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
+        }
       }
 
       // Obtener datos relacionados para la notificación

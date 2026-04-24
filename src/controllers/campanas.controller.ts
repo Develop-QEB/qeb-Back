@@ -763,6 +763,21 @@ export class CampanasController {
         }
       }
 
+      // Si se rechaza, finalizar tareas de autorización pendientes
+      if (status === 'Rechazada') {
+        const tareasAuth = await prisma.tareas.updateMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { contains: 'Autorización' },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          data: { estatus: 'Atendido' },
+        });
+        if (tareasAuth.count > 0) {
+          console.log(`[Rechazada] Campaña #${campanaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
+        }
+      }
+
       // Invalidar caché de listados de campañas al cambiar status
       cache.deletePattern('campanas:list:');
 
