@@ -544,13 +544,13 @@ export async function crearTareasAutorizacion(
   const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
-  // Verificar si ya existen tareas pendientes para evitar duplicados
+  // Verificar si ya existen tareas abiertas para evitar duplicados
   const tareasExistentes = await prisma.tareas.findMany({
     where: {
       id_solicitud: solicitudId.toString(),
       ...(propuestaId ? { id_propuesta: propuestaId.toString() } : {}),
       tipo: { contains: 'Autorización' },
-      estatus: 'Pendiente'
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
     },
     select: { tipo: true }
   });
@@ -1190,7 +1190,32 @@ export async function depurarTareasAutorizacionResueltas(): Promise<number> {
 
   let finalizadas = 0;
 
+  // Deduplicar: agrupar por (id_propuesta + tipo) y quedarse solo con la más reciente
+  const gruposPorPropuesta = new Map<string, typeof tareasAbiertas>();
   for (const tarea of tareasAbiertas) {
+    const key = `${tarea.id_propuesta || tarea.id_solicitud}::${tarea.tipo}`;
+    if (!gruposPorPropuesta.has(key)) gruposPorPropuesta.set(key, []);
+    gruposPorPropuesta.get(key)!.push(tarea);
+  }
+  const duplicadasIds: number[] = [];
+  for (const grupo of gruposPorPropuesta.values()) {
+    if (grupo.length <= 1) continue;
+    grupo.sort((a, b) => b.id - a.id);
+    for (let i = 1; i < grupo.length; i++) duplicadasIds.push(grupo[i].id);
+  }
+  if (duplicadasIds.length > 0) {
+    await prisma.tareas.updateMany({
+      where: { id: { in: duplicadasIds } },
+      data: { estatus: 'Atendido' },
+    });
+    finalizadas += duplicadasIds.length;
+    console.log(`[DepurarAutorizaciones] ${duplicadasIds.length} tareas duplicadas finalizadas`);
+  }
+
+  // Ahora revisar las restantes (no duplicadas) por caras resueltas
+  const tareasRestantes = tareasAbiertas.filter(t => !duplicadasIds.includes(t.id));
+
+  for (const tarea of tareasRestantes) {
     let idquote = tarea.id_propuesta;
 
     if (!idquote && tarea.id_solicitud) {

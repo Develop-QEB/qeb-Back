@@ -810,7 +810,7 @@ export class PropuestasController {
           where: {
             OR: [
               { id_propuesta: String(propuestaId) },
-              ...(propuesta.solicitud_id ? [{ id_solicitud: String(propuesta.solicitud_id) }] : []),
+              ...(propuesta.solicitud_id ? [{ id_solicitud: String(propuesta.solicitud_id), id_propuesta: null }] : []),
             ],
             tipo: { contains: 'Autorización' },
             estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
