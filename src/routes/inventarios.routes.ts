@@ -17,6 +17,7 @@ router.get('/categorias-cliente', inventariosController.getCategoriasCliente.bin
 router.get('/stats', inventariosController.getStats.bind(inventariosController));
 router.get('/tipos', inventariosController.getTipos.bind(inventariosController));
 router.get('/plazas', inventariosController.getPlazas.bind(inventariosController));
+router.get('/ctos', inventariosController.getCtos.bind(inventariosController));
 router.get('/estatus', inventariosController.getEstatus.bind(inventariosController));
 router.get('/estados', inventariosController.getEstados.bind(inventariosController));
 router.get('/ciudades', inventariosController.getCiudadesByEstado.bind(inventariosController));

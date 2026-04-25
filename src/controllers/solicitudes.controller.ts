@@ -8,6 +8,7 @@ import {
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
+import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
@@ -1900,6 +1901,20 @@ export class SolicitudesController {
             },
           });
           createdCaras.push(solicitudCara);
+
+          // Auto-reserva circuito digital (todo o nada)
+          const autoRes = await autoReservarCircuitoSiAplica(tx, {
+            solicitudCaraId: solicitudCara.id,
+            itemCode: cara.articulo || articulo,
+            clienteId: cliente_id,
+            calendarioId: null,
+            fechaInicio: new Date(cara.inicio_periodo),
+            fechaFin: new Date(cara.fin_periodo),
+            esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
+          });
+          if (autoRes) {
+            console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
+          }
         }
 
         // Propagate RT auth state to BF pairs within each grupo_rt_bf
@@ -2844,6 +2859,20 @@ export class SolicitudesController {
               },
             });
             recreatedCaras.push(createdCara);
+
+            // Auto-reserva circuito digital (en update se borraron reservas al deleteMany caras, por eso hay que reservar de nuevo)
+            const autoRes = await autoReservarCircuitoSiAplica(tx, {
+              solicitudCaraId: createdCara.id,
+              itemCode: cara.articulo || articulo,
+              clienteId: cliente_id,
+              calendarioId: null,
+              fechaInicio: new Date(cara.inicio_periodo),
+              fechaFin: new Date(cara.fin_periodo),
+              esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
+            });
+            if (autoRes) {
+              console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
+            }
           }
 
           // Propagate RT auth state to BF pairs within each grupo_rt_bf

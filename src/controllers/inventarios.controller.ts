@@ -22,6 +22,7 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const cto = req.query.cto as string;
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
@@ -52,6 +53,10 @@ export class InventariosController {
 
       if (plaza) {
         where.plaza = plaza;
+      }
+
+      if (cto) {
+        where.cto = cto;
       }
 
       // Filter by campaign: get inventario IDs linked to this campaign
@@ -371,6 +376,25 @@ export class InventariosController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  async getCtos(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const ctos = await prisma.inventarios.findMany({
+        select: { cto: true },
+        where: { cto: { not: null } },
+        distinct: ['cto'],
+        orderBy: { cto: 'asc' },
+      });
+
+      res.json({
+        success: true,
+        data: ctos.map(c => c.cto).filter(Boolean),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener CTOs';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
