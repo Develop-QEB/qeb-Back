@@ -2792,6 +2792,17 @@ export class SolicitudesController {
 
         // Delete existing caras and recreate with authorization status
         if (propuesta) {
+          // Eliminar reservas asociadas antes del deleteMany de caras
+          // (evita reservas huérfanas y conflictos fantasma al re-auto-reservar circuitos)
+          const oldCaras = await tx.solicitudCaras.findMany({
+            where: { idquote: propuesta.id.toString() },
+            select: { id: true },
+          });
+          if (oldCaras.length > 0) {
+            await tx.reservas.deleteMany({
+              where: { solicitudCaras_id: { in: oldCaras.map(c => c.id) } },
+            });
+          }
           await tx.solicitudCaras.deleteMany({
             where: { idquote: propuesta.id.toString() },
           });
