@@ -6,6 +6,8 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
+import { autoReservarCircuito } from '../services/circuitos.service';
+import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -3473,6 +3475,35 @@ export class PropuestasController {
         },
       });
 
+      // Auto-reserva circuito digital: si cambió el itemCode o las fechas, re-reservar
+      if (isCircuitoDigital(articulo)) {
+        const fechasIguales = inicio_periodo && fin_periodo && currentCara.inicio_periodo && currentCara.fin_periodo
+          && new Date(inicio_periodo).getTime() === new Date(currentCara.inicio_periodo).getTime()
+          && new Date(fin_periodo).getTime() === new Date(currentCara.fin_periodo).getTime();
+        const articuloIgual = (articulo || '') === (currentCara.articulo || '');
+        if (!fechasIguales || !articuloIgual) {
+          // Borrar reservas viejas y crear nuevas
+          await prisma.reservas.deleteMany({ where: { solicitudCaras_id: parseInt(caraId) } });
+          try {
+            const propuestaDB = await prisma.propuesta.findFirst({
+              where: { id: parseInt(currentCara.idquote || '0') },
+              select: { cliente_id: true },
+            });
+            await autoReservarCircuito({
+              solicitudCaraId: parseInt(caraId),
+              itemCode: articulo,
+              clienteId: propuestaDB?.cliente_id || 0,
+              calendarioId: null,
+              fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
+              fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+            });
+          } catch (e: any) {
+            res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
+            return;
+          }
+        }
+      }
+
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCara.grupo_rt_bf) {
         await prisma.solicitudCaras.updateMany({
@@ -3606,6 +3637,29 @@ export class PropuestasController {
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
         },
       });
+
+      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      if (isCircuitoDigital(articulo)) {
+        try {
+          const propuestaDB = await prisma.propuesta.findUnique({
+            where: { id: parseInt(id) },
+            select: { cliente_id: true },
+          });
+          await autoReservarCircuito({
+            solicitudCaraId: newCara.id,
+            itemCode: articulo,
+            clienteId: propuestaDB?.cliente_id || 0,
+            calendarioId: null,
+            fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
+            fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+          });
+        } catch (e: any) {
+          // Rollback manual
+          await prisma.solicitudCaras.delete({ where: { id: newCara.id } }).catch(() => {});
+          res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });
+          return;
+        }
+      }
 
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
