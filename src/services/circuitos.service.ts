@@ -142,8 +142,7 @@ export async function autoReservarCircuitoSiAplica(
   // 7. Determinar estatus según prefijo del artículo
   const prefijo = info.tipo;
   let estatus: string;
-  if (prefijo === 'CT') estatus = 'Cortesia';
-  else if (prefijo === 'BF' || prefijo === 'CF' || params.esBf) estatus = 'Bonificado';
+  if (prefijo === 'BF' || prefijo === 'CF' || prefijo === 'CT' || params.esBf) estatus = 'Bonificado';
   else estatus = 'Vendido';
 
   // 8. Crear las reservas en batch

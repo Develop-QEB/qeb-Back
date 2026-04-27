@@ -2510,12 +2510,14 @@ export class PropuestasController {
       }
 
       // Check authorization only for the specific cara being reserved (not all caras in propuesta)
+      let esCortesia = false;
       if (solicitudCaraId) {
         const caraToReserve = await prisma.solicitudCaras.findUnique({
           where: { id: parseInt(solicitudCaraId) },
-          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
+          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true, cortesia: true }
         });
         if (caraToReserve) {
+          esCortesia = caraToReserve.cortesia === 1;
           const pendingDg = caraToReserve.autorizacion_dg === 'pendiente';
           const pendingDcm = caraToReserve.autorizacion_dcm === 'pendiente';
           if (pendingDg || pendingDcm) {
@@ -2672,7 +2674,7 @@ export class PropuestasController {
             continue;
           }
 
-          const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+          const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
           // Verificar duplicados en la misma propuesta Y mismo período
           const exists = await prisma.reservas.findFirst({
@@ -2741,7 +2743,7 @@ export class PropuestasController {
           continue;
         }
 
-        const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+        const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
         // Verificar duplicados en la misma cara (mismo período)
         const exists = await prisma.reservas.findFirst({
@@ -3138,7 +3140,13 @@ export class PropuestasController {
         return;
       }
 
-      const estatus = tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+      const caraInfo = await prisma.solicitudCaras.findUnique({
+        where: { id: parseInt(solicitudCaraId) },
+        select: { cortesia: true }
+      });
+      const esCortesia = caraInfo?.cortesia === 1;
+
+      const estatus = (tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
       const newReserva = await prisma.reservas.create({
         data: {
