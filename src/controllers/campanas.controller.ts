@@ -6608,7 +6608,7 @@ export class CampanasController {
       const query = `
         -- BONIFICACIONES (BF, CT, IM con bonificacion > 0)
         SELECT
-          COALESCE(MIN(inv.plaza), MIN(inv.municipio), sc.ciudad) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -6658,7 +6658,7 @@ export class CampanasController {
 
         -- RENTA (RT, IN, CT, IM con caras > bonificacion)
         SELECT
-          COALESCE(MIN(inv.plaza), MIN(inv.municipio), sc.ciudad) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -6809,7 +6809,7 @@ export class CampanasController {
           inv.tradicional_digital AS tradicional_digital,
           CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
-          CAST(inv.municipio AS CHAR(255)) AS Ciudad,
+          CAST(inv.plaza AS CHAR(255)) AS Ciudad,
           CASE
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'

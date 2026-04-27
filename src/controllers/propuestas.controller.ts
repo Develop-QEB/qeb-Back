@@ -3665,23 +3665,29 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DG.
+      // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
       const todasCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true, tipo: true, articulo: true }
       });
-      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      const noDigitales = todasCaras.filter(c => {
+        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+        return !isDigital;
+      });
+      const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
       if (totalCarasGlobal % 2 !== 0) {
-        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
+        const idsNoDigitales = noDigitales.map(c => c.id);
+        const carasNoP = noDigitales.filter(c => c.autorizacion_dg !== 'pendiente');
         if (carasNoP.length > 0) {
           await prisma.solicitudCaras.updateMany({
             where: {
-              idquote: id,
+              id: { in: idsNoDigitales },
               autorizacion_dg: { not: 'pendiente' }
             },
             data: { autorizacion_dg: 'pendiente' }
           });
-          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
         }
       }
 

@@ -9,6 +9,7 @@ import {
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
+import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
@@ -1937,18 +1938,31 @@ export class SolicitudesController {
           }
         }
 
-        // Regla: si el total global de caras es impar, TODAS requieren autorización DG
-        const totalCarasGlobal = caras.reduce((acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0), 0);
+        // Regla: si el total global de caras NO-digitales es impar, todas las
+        // NO-digitales requieren autorización DG. Los digitales/circuitos quedan exentos.
+        const noDigitalesPayload = caras.filter((c: any) => {
+          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+          return !isDigital;
+        });
+        const totalCarasGlobal = noDigitalesPayload.reduce(
+          (acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0),
+          0
+        );
         if (totalCarasGlobal % 2 !== 0) {
+          // Identificar las caras creadas que son NO-digitales
+          const isCaraNoDigital = (cara: any) => {
+            const tipo = (cara.tipo || '').toLowerCase();
+            return tipo !== 'digital' && !isCircuitoDigital(cara.articulo);
+          };
           for (const createdCara of createdCaras) {
-            if (createdCara.autorizacion_dg !== 'pendiente') {
+            if (createdCara.autorizacion_dg !== 'pendiente' && isCaraNoDigital(createdCara)) {
               await tx.solicitudCaras.update({
                 where: { id: createdCara.id },
                 data: { autorizacion_dg: 'pendiente' },
               });
             }
           }
-          console.log(`[create] Total caras impar (${totalCarasGlobal}), todas las caras requieren autorización DG`);
+          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DG`);
         }
 
         return {

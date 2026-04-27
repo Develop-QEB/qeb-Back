@@ -107,6 +107,30 @@ class CircuitosController {
         like
       );
 
+      // Agrupar por mueble para obtener el dominante
+      const porMueble: Record<string, number> = {};
+      for (const inv of inventarios) {
+        if (inv.mueble) porMueble[inv.mueble] = (porMueble[inv.mueble] || 0) + 1;
+      }
+      const muebleDominante = Object.entries(porMueble).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+      // Conteo real de Flujo / Contraflujo (incluye variantes Flujo2, Contraflujo2)
+      const tiposCara = await prisma.$queryRawUnsafe<{ tipo_de_cara: string | null; c: bigint }[]>(
+        `SELECT tipo_de_cara, COUNT(*) as c FROM inventarios
+         WHERE cto = ? AND UPPER(plaza) LIKE UPPER(?)
+         GROUP BY tipo_de_cara`,
+        ctoLabel,
+        like
+      );
+      let flujoCount = 0;
+      let contraflujoCount = 0;
+      for (const r of tiposCara) {
+        const tc = (r.tipo_de_cara || '').toLowerCase();
+        const cnt = Number(r.c);
+        if (tc.startsWith('contraflujo')) contraflujoCount += cnt;
+        else if (tc.startsWith('flujo')) flujoCount += cnt;
+      }
+
       res.json({
         success: true,
         data: {
@@ -114,6 +138,10 @@ class CircuitosController {
           ctoLabel,
           plazaCode,
           total: inventarios.length,
+          muebles: porMueble,
+          muebleDominante,
+          flujo: flujoCount,
+          contraflujo: contraflujoCount,
           inventarios,
         },
       });

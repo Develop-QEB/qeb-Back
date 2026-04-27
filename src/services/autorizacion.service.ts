@@ -238,9 +238,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
 
-  // Caras impares requieren autorización DCM (excepto Kiosco)
+  // Caras impares requieren autorización DCM (excepto Kiosco y Digital/Circuitos)
   const isKiosco = (cara.formato || '').toUpperCase().includes('KIOSK') || (cara.formato || '').toUpperCase().includes('KIOSCO');
-  const oddCarasNeedsDcm = !isKiosco && totalCaras > 0 && totalCaras % 2 !== 0;
+  const isDigital = (cara.tipo || '').toLowerCase() === 'digital'
+    || (cara.formato || '').toUpperCase() === 'MIXTO'
+    || /^(RT|BF|CT|CF)-DIG-\d+-[A-Z]+$/i.test(cara.articulo || '');
+  const oddCarasNeedsDcm = !isKiosco && !isDigital && totalCaras > 0 && totalCaras % 2 !== 0;
 
   console.log('[calcularEstadoAutorizacion] Valores calculados:', {
     totalCaras,
