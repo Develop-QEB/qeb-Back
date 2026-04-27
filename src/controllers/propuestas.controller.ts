@@ -707,6 +707,30 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD: si la propuesta ya tiene una campaña activa ligada, NO permitir
+      // ningun cambio de status sobre la propuesta. La invariante es: una propuesta
+      // con campaña activa esta congelada en 'Aprobada'. Si se quiere cancelar el
+      // flujo se debe rechazar la campaña (en su propia pantalla), lo cual a su vez
+      // libera reservas y elimina circuitos. No se permite tocar la propuesta directamente.
+      if (status !== propuestaAnterior.status) {
+        const campActiva: any[] = await prisma.$queryRawUnsafe(`
+          SELECT cm.id, cm.status, cm.nombre
+          FROM cotizacion ct
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE ct.id_propuesta = ?
+            AND cm.status NOT IN ('Rechazada', 'Cancelada', 'inactiva', 'finalizada', 'Finalizada')
+          LIMIT 1
+        `, propuestaId);
+        if (campActiva.length > 0) {
+          const camp = campActiva[0];
+          res.status(400).json({
+            success: false,
+            error: `No se puede modificar el estatus de la propuesta porque ya existe la campaña #${camp.id} (${camp.status}). Si necesitas cancelar el flujo, rechaza la campaña desde su detalle.`,
+          });
+          return;
+        }
+      }
+
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC

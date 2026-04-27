@@ -5,7 +5,8 @@ const APPLY = process.argv.includes('--apply');
 
 (async () => {
   console.log(`MODO: ${APPLY ? 'APLICAR' : 'DRY RUN (use --apply para guardar)'}`);
-  console.log('Filtro: propuestas con status=Atendido que tengan campaña ligada');
+  console.log('Filtro: propuestas en estado previo (Atendido/Abierto/Pase a ventas/Ajuste Cto-Cliente)');
+  console.log('         que ya tienen una campaña ACTIVA ligada (no Rechazada/Cancelada/inactiva/finalizada).');
 
   // Listar las propuestas afectadas
   const afectadas: any[] = await prisma.$queryRawUnsafe(`
@@ -14,7 +15,8 @@ const APPLY = process.argv.includes('--apply');
     FROM propuesta p
     INNER JOIN cotizacion ct ON ct.id_propuesta = p.id
     INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-    WHERE p.status = 'Atendido'
+    WHERE p.status IN ('Atendido', 'Abierto', 'Pase a ventas', 'Ajuste Cto-Cliente')
+      AND cm.status NOT IN ('Rechazada', 'Cancelada', 'inactiva', 'finalizada', 'Finalizada')
     ORDER BY p.id ASC
   `);
 
@@ -38,7 +40,7 @@ const APPLY = process.argv.includes('--apply');
   const ids = afectadas.map(p => Number(p.id));
   const placeholders = ids.map(() => '?').join(',');
   const result: any = await prisma.$executeRawUnsafe(
-    `UPDATE propuesta SET status = 'Aprobada', updated_at = NOW() WHERE id IN (${placeholders}) AND status = 'Atendido'`,
+    `UPDATE propuesta SET status = 'Aprobada', updated_at = NOW() WHERE id IN (${placeholders}) AND status IN ('Atendido', 'Abierto', 'Pase a ventas', 'Ajuste Cto-Cliente')`,
     ...ids
   );
 
