@@ -1636,7 +1636,7 @@ export class PropuestasController {
         await tx.propuesta.update({
           where: { id: propuestaId },
           data: {
-            status: 'Atendido',
+            status: 'Aprobada',
             precio_simulado: precio_simulado || propuesta.precio_simulado,
             asignado: asignados || propuesta.asignado,
             id_asignado: id_asignados || propuesta.id_asignado,
