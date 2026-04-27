@@ -744,7 +744,9 @@ export class CampanasController {
         data: { status },
       });
 
-      // Si se rechaza, liberar todas las reservas (soft delete) — misma lógica que propuestas
+      // Si se rechaza, liberar reservas + eliminar grupos/circuitos (caras).
+      // Misma lógica que propuestas: el bloqueo por APS arriba garantiza que solo
+      // se ejecuta antes de comprometer inventario.
       if (status === 'Rechazada' && campana.cotizacion_id) {
         const cotizacionData = await prisma.cotizacion.findUnique({
           where: { id: campana.cotizacion_id },
@@ -756,14 +758,16 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
-            const liberadas = await prisma.reservas.updateMany({
-              where: {
-                solicitudCaras_id: { in: carasIds },
-                deleted_at: null,
-              },
-              data: { deleted_at: new Date() },
-            });
-            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas`);
+            const [liberadas, eliminadas] = await prisma.$transaction([
+              prisma.reservas.updateMany({
+                where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
+                data: { deleted_at: new Date() },
+              }),
+              prisma.solicitudCaras.deleteMany({
+                where: { id: { in: carasIds } },
+              }),
+            ]);
+            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
           }
         }
       }
