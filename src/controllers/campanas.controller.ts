@@ -145,6 +145,9 @@ export class CampanasController {
             filterFechaFin = catFinData.fecha_fin;
           }
 
+          // 1) Rango de la campania debe traslapar con la catorcena filtrada (filtro rapido)
+          // 2) Y debe existir AL MENOS UNA cara (solicitudCaras) con periodo dentro del rango filtrado.
+          //    Esto excluye campanias cuyo rango anotado cubre la catorcena pero no tienen circuitos en ella.
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -152,8 +155,23 @@ export class CampanasController {
             AND cm.fecha_fin >= (
               SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
+            AND EXISTS (
+              SELECT 1 FROM solicitudCaras sc_filt
+              WHERE CAST(sc_filt.idquote AS UNSIGNED) = pr.id
+                AND sc_filt.inicio_periodo <= (
+                  SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+                AND sc_filt.fin_periodo >= (
+                  SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+            )
           `);
-          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+          params.push(
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+          );
         } else {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
