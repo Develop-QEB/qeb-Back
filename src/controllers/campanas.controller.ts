@@ -1613,7 +1613,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -1895,7 +1895,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -2301,7 +2301,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -2731,7 +2731,7 @@ export class CampanasController {
                  (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         }
-        else if (row.arte_aprobado === 'aprobado') estatus_arte = 'Artes Aprobados';
+        else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') estatus_arte = 'Artes Aprobados';
         else if (row.archivo != null && row.archivo !== '') estatus_arte = 'Revision Artes';
         else estatus_arte = 'Carga Artes';
 
