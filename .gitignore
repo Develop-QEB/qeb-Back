@@ -36,3 +36,8 @@ prisma/dev.db-journal
 coverage/
 uploads/
 upload_inventario.js
+
+# Scripts locales con credenciales de prod hardcoded (no subir)
+scripts/add_grupo_masivo_id.cjs
+scripts/fix_apartado_prod.cjs
+scripts/inspect_prod.cjs

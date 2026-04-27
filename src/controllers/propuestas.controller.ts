@@ -520,8 +520,8 @@ export class PropuestasController {
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
           ct.tipo_periodo AS tipo_periodo,
-          MIN(sc.inicio_periodo) AS min_inicio_periodo,
-          MAX(sc.inicio_periodo) AS max_inicio_periodo,
+          cm.fecha_inicio AS min_inicio_periodo,
+          cm.fecha_fin AS max_inicio_periodo,
           GROUP_CONCAT(DISTINCT sc.formato ORDER BY sc.formato SEPARATOR ',') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
@@ -2076,6 +2076,19 @@ export class PropuestasController {
         clienteNombre = solicitud?.marca_nombre || solicitud?.razon_social || '';
       }
 
+      // Enriquecer caras con grupo_masivo_id (campo no presente en Prisma client cacheado)
+      let carasEnriched: any[] = caras;
+      if (caras.length > 0) {
+        const ids = caras.map(c => c.id);
+        const ph = ids.map(() => '?').join(',');
+        const masivoRows = await prisma.$queryRawUnsafe<{ id: number; grupo_masivo_id: number | null }[]>(
+          `SELECT id, grupo_masivo_id FROM solicitudCaras WHERE id IN (${ph})`,
+          ...ids
+        );
+        const map = new Map(masivoRows.map(r => [Number(r.id), r.grupo_masivo_id]));
+        carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
+      }
+
       res.json({
         success: true,
         data: {
@@ -2083,7 +2096,7 @@ export class PropuestasController {
           solicitud: solicitud ? { ...solicitud, cliente: clienteNombre } : null,
           cotizacion,
           campania,
-          caras,
+          caras: carasEnriched,
         },
       });
     } catch (error) {
@@ -2488,6 +2501,7 @@ export class PropuestasController {
             numero_caras: cotizacion.numero_caras,
             bonificacion: cotizacion.bonificacion,
             precio: cotizacion.precio,
+            tipo_periodo: cotizacion.tipo_periodo,
           } : null,
           campania: campania ? {
             id: campania.id,
@@ -2584,7 +2598,7 @@ export class PropuestasController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
             solicitudCaras_id: { notIn: proposalCaraIds }, // Excluir reservas de esta propuesta
           },
           select: { inventario_id: true },
@@ -3431,6 +3445,7 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf,
+        aplicarAGrupo, // si true, propaga campos no-temporales a las demás caras con el mismo grupo_masivo_id
       } = req.body;
 
       // Get current cara to compare auth-affecting fields
@@ -3524,6 +3539,8 @@ export class PropuestasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const tieneGrupoBfUpd = !!currentCara.grupo_rt_bf;
+            const cantidadActual = caras !== undefined && caras !== null ? parseInt(caras) : (currentCara.caras || undefined);
             await autoReservarCircuito({
               solicitudCaraId: parseInt(caraId),
               itemCode: articulo,
@@ -3531,6 +3548,7 @@ export class PropuestasController {
               calendarioId: null,
               fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
               fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+              cantidad: tieneGrupoBfUpd ? cantidadActual : undefined,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -3545,6 +3563,42 @@ export class PropuestasController {
           where: { grupo_rt_bf: currentCara.grupo_rt_bf, id: { not: parseInt(caraId) } },
           data: { autorizacion_dg, autorizacion_dcm },
         });
+      }
+
+      // Propagar a grupo masivo: copiar campos NO temporales a las demás caras del grupo
+      // (deja inicio_periodo / fin_periodo intactos en cada cara — cada periodo es propio)
+      if (aplicarAGrupo) {
+        const grupoRow = await prisma.$queryRawUnsafe<{ grupo_masivo_id: number | null }[]>(
+          `SELECT grupo_masivo_id FROM solicitudCaras WHERE id = ? LIMIT 1`,
+          parseInt(caraId)
+        );
+        const grupoMasivoId = grupoRow[0]?.grupo_masivo_id;
+        if (grupoMasivoId) {
+          // Construir SET clause solo con campos definidos
+          const setParts: string[] = [];
+          const values: any[] = [];
+          const addField = (col: string, val: any) => {
+            if (val !== undefined && val !== null) { setParts.push(`${col} = ?`); values.push(val); }
+          };
+          addField('ciudad', ciudad);
+          addField('estados', estados);
+          addField('tipo', tipo);
+          addField('flujo', flujo);
+          addField('bonificacion', bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined);
+          addField('caras', caras !== undefined && caras !== null ? parseInt(caras) : undefined);
+          addField('nivel_socioeconomico', nivel_socioeconomico);
+          addField('formato', formato);
+          addField('costo', costo !== undefined && costo !== null ? parseInt(costo) : undefined);
+          addField('tarifa_publica', tarifa_publica !== undefined && tarifa_publica !== null ? parseInt(tarifa_publica) : undefined);
+          addField('caras_flujo', caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined);
+          addField('caras_contraflujo', caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined);
+          addField('articulo', articulo);
+          addField('descuento', descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined);
+          if (setParts.length > 0) {
+            const sql = `UPDATE solicitudCaras SET ${setParts.join(', ')} WHERE grupo_masivo_id = ? AND id <> ?`;
+            await prisma.$executeRawUnsafe(sql, ...values, grupoMasivoId, parseInt(caraId));
+          }
+        }
       }
 
       // Registrar cambios en historial
@@ -3680,6 +3734,8 @@ export class PropuestasController {
             where: { id: parseInt(id) },
             select: { cliente_id: true },
           });
+          const tieneGrupoBfNew = !!grupoRtBfCreate;
+          const cantidadNew = caras !== undefined && caras !== null ? parseInt(caras) : undefined;
           await autoReservarCircuito({
             solicitudCaraId: newCara.id,
             itemCode: articulo,
@@ -3687,6 +3743,7 @@ export class PropuestasController {
             calendarioId: null,
             fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
             fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+            cantidad: tieneGrupoBfNew ? cantidadNew : undefined,
           });
         } catch (e: any) {
           // Rollback manual
@@ -3955,19 +4012,31 @@ export class PropuestasController {
     try {
       const { caraId } = req.params;
       const id = parseInt(caraId);
+      const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
-      // Liberar reservas activas y luego eliminar la cara
+      // Si eliminarGrupo: borra todas las caras con el mismo grupo_masivo_id (RT y BF)
+      let idsToDelete: number[] = [id];
+      if (eliminarGrupo) {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT s2.id FROM solicitudCaras s1
+             INNER JOIN solicitudCaras s2 ON s2.grupo_masivo_id = s1.grupo_masivo_id
+            WHERE s1.id = ? AND s1.grupo_masivo_id IS NOT NULL`,
+          id
+        );
+        if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
+      }
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
-          where: { solicitudCaras_id: id, deleted_at: null },
+          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
           data: { deleted_at: new Date() },
         }),
-        prisma.solicitudCaras.delete({
-          where: { id },
+        prisma.solicitudCaras.deleteMany({
+          where: { id: { in: idsToDelete } },
         }),
       ]);
 
-      res.json({ success: true });
+      res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {
       console.error('Error deleting cara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';

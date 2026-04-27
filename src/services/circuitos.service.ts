@@ -22,6 +22,9 @@ export interface AutoReservarParams {
   fechaInicio: Date | string;
   fechaFin: Date | string;
   esBf?: boolean; // si es BF pair (no usado en circuitos pero mantiene compat)
+  // Cantidad de inventarios a reservar. Si se omite, reserva todos los del circuito (comportamiento legacy).
+  // Si se especifica (típico para RT con BF separado): reserva solo N libres.
+  cantidad?: number;
 }
 
 export interface AutoReservarResult {
@@ -112,7 +115,7 @@ export async function autoReservarCircuitoSiAplica(
   }
 
   // 5. Para cada inventario del circuito, seleccionar un espacio libre
-  const aReservar: Array<{ inventario_id: number; codigo_unico: string; espacio_id: number }> = [];
+  const libres: Array<{ inventario_id: number; codigo_unico: string; espacio_id: number }> = [];
   const conflictos: AutoReservarResult['conflictos'] = [];
 
   for (const inv of invs) {
@@ -126,17 +129,35 @@ export async function autoReservarCircuitoSiAplica(
         reason: espacios.length === 0 ? 'sin espacios creados' : 'todos los espacios ocupados en el rango',
       });
     } else {
-      aReservar.push({ inventario_id: inv.id, codigo_unico: inv.codigo_unico, espacio_id: libre });
+      libres.push({ inventario_id: inv.id, codigo_unico: inv.codigo_unico, espacio_id: libre });
     }
   }
 
-  // 6. Regla "todo o nada": si hay conflictos → error
-  if (conflictos.length > 0) {
-    const detalle = conflictos.slice(0, 3).map(c => `${c.codigo_unico} (${c.reason})`).join(', ');
-    const suffix = conflictos.length > 3 ? ` y ${conflictos.length - 3} más` : '';
-    throw new Error(
-      `Circuito ${info.ctoLabel} no disponible: ${conflictos.length} inventario(s) con conflicto → ${detalle}${suffix}`
-    );
+  // 6. Regla de cantidad:
+  //    - Si `cantidad` está definida (típico cuando hay BF separado): tomar solo N libres,
+  //      y solo fallar si no hay suficientes libres para cubrir N.
+  //    - Si `cantidad` NO está definida: comportamiento legacy "todo o nada"
+  //      (todos los inventarios del circuito deben estar libres).
+  const cantidadPedida = typeof params.cantidad === 'number' && params.cantidad > 0 ? params.cantidad : undefined;
+  let aReservar: typeof libres;
+
+  if (cantidadPedida !== undefined) {
+    if (libres.length < cantidadPedida) {
+      throw new Error(
+        `Circuito ${info.ctoLabel}: solo hay ${libres.length} inventario(s) libre(s) pero se piden ${cantidadPedida}`
+      );
+    }
+    aReservar = libres.slice(0, cantidadPedida);
+  } else {
+    // Legacy: todo o nada
+    if (conflictos.length > 0) {
+      const detalle = conflictos.slice(0, 3).map(c => `${c.codigo_unico} (${c.reason})`).join(', ');
+      const suffix = conflictos.length > 3 ? ` y ${conflictos.length - 3} más` : '';
+      throw new Error(
+        `Circuito ${info.ctoLabel} no disponible: ${conflictos.length} inventario(s) con conflicto → ${detalle}${suffix}`
+      );
+    }
+    aReservar = libres;
   }
 
   // 7. Determinar estatus según prefijo del artículo
