@@ -145,6 +145,9 @@ export class CampanasController {
             filterFechaFin = catFinData.fecha_fin;
           }
 
+          // 1) Rango de la campania debe traslapar con la catorcena filtrada (filtro rapido)
+          // 2) Y debe existir AL MENOS UNA cara (solicitudCaras) con periodo dentro del rango filtrado.
+          //    Esto excluye campanias cuyo rango anotado cubre la catorcena pero no tienen circuitos en ella.
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -152,8 +155,23 @@ export class CampanasController {
             AND cm.fecha_fin >= (
               SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
+            AND EXISTS (
+              SELECT 1 FROM solicitudCaras sc_filt
+              WHERE CAST(sc_filt.idquote AS UNSIGNED) = pr.id
+                AND sc_filt.inicio_periodo <= (
+                  SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+                AND sc_filt.fin_periodo >= (
+                  SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+            )
           `);
-          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+          params.push(
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+          );
         } else {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
@@ -744,7 +762,9 @@ export class CampanasController {
         data: { status },
       });
 
-      // Si se rechaza, liberar todas las reservas (soft delete) — misma lógica que propuestas
+      // Si se rechaza, liberar reservas + eliminar grupos/circuitos (caras).
+      // Misma lógica que propuestas: el bloqueo por APS arriba garantiza que solo
+      // se ejecuta antes de comprometer inventario.
       if (status === 'Rechazada' && campana.cotizacion_id) {
         const cotizacionData = await prisma.cotizacion.findUnique({
           where: { id: campana.cotizacion_id },
@@ -756,14 +776,16 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
-            const liberadas = await prisma.reservas.updateMany({
-              where: {
-                solicitudCaras_id: { in: carasIds },
-                deleted_at: null,
-              },
-              data: { deleted_at: new Date() },
-            });
-            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas`);
+            const [liberadas, eliminadas] = await prisma.$transaction([
+              prisma.reservas.updateMany({
+                where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
+                data: { deleted_at: new Date() },
+              }),
+              prisma.solicitudCaras.deleteMany({
+                where: { id: { in: carasIds } },
+              }),
+            ]);
+            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
           }
         }
       }
@@ -1422,7 +1444,20 @@ export class CampanasController {
 
       console.log('[getCaras Campaña] Encontradas', caras.length, 'caras para idquote:', String(cotizacion.id_propuesta));
 
-      const carasSerializable = serializeBigInt(caras);
+      // Enriquecer con grupo_masivo_id (campo no presente en Prisma client cacheado)
+      let carasEnriched: any[] = caras;
+      if (caras.length > 0) {
+        const ids = caras.map(c => c.id);
+        const ph = ids.map(() => '?').join(',');
+        const masivoRows = await prisma.$queryRawUnsafe<{ id: number; grupo_masivo_id: number | null }[]>(
+          `SELECT id, grupo_masivo_id FROM solicitudCaras WHERE id IN (${ph})`,
+          ...ids
+        );
+        const map = new Map(masivoRows.map(r => [Number(r.id), r.grupo_masivo_id]));
+        carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
+      }
+
+      const carasSerializable = serializeBigInt(carasEnriched);
 
       res.json({
         success: true,
@@ -7294,7 +7329,7 @@ export class CampanasController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
           },
           select: { inventario_id: true },
         });
@@ -7376,7 +7411,7 @@ export class CampanasController {
             inventario_id: espacioId,
             calendario_id: calendario.id,
             cliente_id: clienteId || 0,
-            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Apartado',
+            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
             arte_aprobado: '',
             comentario_rechazo: '',
             estatus_original: '',
@@ -7545,6 +7580,8 @@ export class CampanasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const tieneGrupoBfUpd = !!currentCaraFull?.grupo_rt_bf;
+            const cantidadUpd = data.caras ?? currentCaraFull?.caras ?? undefined;
             await autoReservarCircuito({
               solicitudCaraId: parseInt(caraId),
               itemCode: data.articulo,
@@ -7552,6 +7589,7 @@ export class CampanasController {
               calendarioId: null,
               fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
               fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
+              cantidad: tieneGrupoBfUpd ? cantidadUpd : undefined,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -7566,6 +7604,40 @@ export class CampanasController {
           where: { grupo_rt_bf: currentCaraFull.grupo_rt_bf, id: { not: parseInt(caraId) } },
           data: { autorizacion_dg, autorizacion_dcm },
         });
+      }
+
+      // Propagar a grupo masivo (campos no-temporales)
+      if (data.aplicarAGrupo) {
+        const grupoRow = await prisma.$queryRawUnsafe<{ grupo_masivo_id: number | null }[]>(
+          `SELECT grupo_masivo_id FROM solicitudCaras WHERE id = ? LIMIT 1`,
+          parseInt(caraId)
+        );
+        const grupoMasivoId = grupoRow[0]?.grupo_masivo_id;
+        if (grupoMasivoId) {
+          const setParts: string[] = [];
+          const values: any[] = [];
+          const addField = (col: string, val: any) => {
+            if (val !== undefined && val !== null) { setParts.push(`${col} = ?`); values.push(val); }
+          };
+          addField('ciudad', data.ciudad);
+          addField('estados', data.estados);
+          addField('tipo', data.tipo);
+          addField('flujo', data.flujo);
+          addField('bonificacion', data.bonificacion);
+          addField('caras', data.caras);
+          addField('nivel_socioeconomico', data.nivel_socioeconomico);
+          addField('formato', data.formato);
+          addField('costo', data.costo);
+          addField('tarifa_publica', data.tarifa_publica);
+          addField('caras_flujo', data.caras_flujo);
+          addField('caras_contraflujo', data.caras_contraflujo);
+          addField('articulo', data.articulo);
+          addField('descuento', data.descuento);
+          if (setParts.length > 0) {
+            const sql = `UPDATE solicitudCaras SET ${setParts.join(', ')} WHERE grupo_masivo_id = ? AND id <> ?`;
+            await prisma.$executeRawUnsafe(sql, ...values, grupoMasivoId, parseInt(caraId));
+          }
+        }
       }
 
       // Registrar cambios en historial
@@ -7713,6 +7785,8 @@ export class CampanasController {
             where: { id: cotizacion.id_propuesta },
             select: { cliente_id: true },
           });
+          const tieneGrupoBfNew = !!data.grupo_rt_bf;
+          const cantidadNew = data.caras !== undefined && data.caras !== null ? data.caras : undefined;
           await autoReservarCircuito({
             solicitudCaraId: cara.id,
             itemCode: data.articulo,
@@ -7720,6 +7794,7 @@ export class CampanasController {
             calendarioId: null,
             fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
             fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
+            cantidad: tieneGrupoBfNew ? cantidadNew : undefined,
           });
         } catch (e: any) {
           await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});
@@ -7960,19 +8035,30 @@ export class CampanasController {
     try {
       const { caraId } = req.params;
       const id = parseInt(caraId);
+      const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
-      // Liberar reservas activas y luego eliminar la cara
+      let idsToDelete: number[] = [id];
+      if (eliminarGrupo) {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT s2.id FROM solicitudCaras s1
+             INNER JOIN solicitudCaras s2 ON s2.grupo_masivo_id = s1.grupo_masivo_id
+            WHERE s1.id = ? AND s1.grupo_masivo_id IS NOT NULL`,
+          id
+        );
+        if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
+      }
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
-          where: { solicitudCaras_id: id, deleted_at: null },
+          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
           data: { deleted_at: new Date() },
         }),
-        prisma.solicitudCaras.delete({
-          where: { id },
+        prisma.solicitudCaras.deleteMany({
+          where: { id: { in: idsToDelete } },
         }),
       ]);
 
-      res.json({ success: true, message: 'Cara eliminada' });
+      res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';

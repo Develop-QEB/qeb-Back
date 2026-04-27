@@ -555,8 +555,8 @@ export class SolicitudesController {
             s.id as solicitud_id,
             ct.tipo_periodo,
             ct.nombre_campania,
-            COALESCE(MIN(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_inicio,
-            COALESCE(MAX(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_fin,
+            ct.fecha_inicio as periodo_fecha_inicio,
+            ct.fecha_fin as periodo_fecha_fin,
             cat_ini.numero_catorcena as catorcena_inicio,
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
@@ -1901,9 +1901,20 @@ export class SolicitudesController {
               grupo_rt_bf: cara.grupo_rt_bf || null,
             },
           });
+          // grupo_masivo_id (campo nuevo, escrito por SQL crudo hasta regenerar Prisma client)
+          if (cara.grupo_masivo_id) {
+            await tx.$executeRawUnsafe(
+              `UPDATE solicitudCaras SET grupo_masivo_id = ? WHERE id = ?`,
+              cara.grupo_masivo_id, solicitudCara.id
+            );
+          }
           createdCaras.push(solicitudCara);
 
-          // Auto-reserva circuito digital (todo o nada)
+          // Auto-reserva circuito digital
+          // Si la cara es parte de un grupo BF (grupo_rt_bf no null) → respetar cantidad pedida
+          // (RT toma N libres, BF toma los restantes para no doblar reservas).
+          // Sin grupo BF → comportamiento legacy (reservar todos los inventarios del circuito).
+          const tieneGrupoBf = !!cara.grupo_rt_bf;
           const autoRes = await autoReservarCircuitoSiAplica(tx, {
             solicitudCaraId: solicitudCara.id,
             itemCode: cara.articulo || articulo,
@@ -1912,6 +1923,7 @@ export class SolicitudesController {
             fechaInicio: new Date(cara.inicio_periodo),
             fechaFin: new Date(cara.fin_periodo),
             esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
+            cantidad: tieneGrupoBf ? (cara.caras || undefined) : undefined,
           });
           if (autoRes) {
             console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
@@ -2883,9 +2895,17 @@ export class SolicitudesController {
                 grupo_rt_bf: cara.grupo_rt_bf || null,
               },
             });
+            // grupo_masivo_id (SQL crudo hasta regenerar Prisma client)
+            if (cara.grupo_masivo_id) {
+              await tx.$executeRawUnsafe(
+                `UPDATE solicitudCaras SET grupo_masivo_id = ? WHERE id = ?`,
+                cara.grupo_masivo_id, createdCara.id
+              );
+            }
             recreatedCaras.push(createdCara);
 
             // Auto-reserva circuito digital (en update se borraron reservas al deleteMany caras, por eso hay que reservar de nuevo)
+            const tieneGrupoBfUpd = !!cara.grupo_rt_bf;
             const autoRes = await autoReservarCircuitoSiAplica(tx, {
               solicitudCaraId: createdCara.id,
               itemCode: cara.articulo || articulo,
@@ -2894,6 +2914,7 @@ export class SolicitudesController {
               fechaInicio: new Date(cara.inicio_periodo),
               fechaFin: new Date(cara.fin_periodo),
               esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
+              cantidad: tieneGrupoBfUpd ? (cara.caras || undefined) : undefined,
             });
             if (autoRes) {
               console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);

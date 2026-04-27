@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { isSpacesConfigured, uploadBufferToSpaces } from '../config/spaces';
+import { isSpacesConfigured, uploadBufferToSpaces, getPublicBaseUrl } from '../config/spaces';
 
 const router = Router();
 
@@ -213,6 +213,37 @@ router.post('/general', authMiddleware, uploadArte.single('file'), async (req: R
     console.error('Error al subir archivo general:', error);
     const message = error instanceof Error ? error.message : 'Error al subir archivo';
     res.status(500).json({ success: false, error: message });
+  }
+});
+
+// Proxy de imágenes desde Spaces — bypass CORS para clientes que necesitan
+// fetchear el binario de un arte (p.ej. para embeberlo en un Excel).
+// Solo permite URLs del bucket público configurado.
+router.get('/proxy-image', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const url = String(req.query.url || '');
+    if (!url) {
+      res.status(400).json({ success: false, error: 'Falta parametro url' });
+      return;
+    }
+    const allowedBase = getPublicBaseUrl();
+    if (!allowedBase || !url.startsWith(allowedBase)) {
+      res.status(400).json({ success: false, error: 'URL no permitida' });
+      return;
+    }
+    const upstream = await fetch(url);
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ success: false, error: `Upstream ${upstream.status}` });
+      return;
+    }
+    const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(buf);
+  } catch (error) {
+    console.error('Error proxy-image:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener imagen' });
   }
 });
 
