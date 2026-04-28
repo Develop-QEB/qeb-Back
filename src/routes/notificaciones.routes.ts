@@ -10,6 +10,9 @@ router.use(authMiddleware);
 router.get('/stats', notificacionesController.getStats.bind(notificacionesController));
 router.patch('/leer-todas', notificacionesController.marcarTodasLeidas.bind(notificacionesController));
 
+// Depuración de tareas de autorización resueltas
+router.post('/autorizacion/depurar', notificacionesController.depurarAutorizaciones.bind(notificacionesController));
+
 // Autorización (ANTES de rutas con :id para evitar conflictos)
 router.get('/autorizacion/:idquote/resumen', notificacionesController.getResumenAutorizacion.bind(notificacionesController));
 router.get('/autorizacion/:idquote/caras', notificacionesController.getCarasAutorizacion.bind(notificacionesController));

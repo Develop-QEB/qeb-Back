@@ -6,6 +6,8 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
+import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -503,6 +505,8 @@ export class PropuestasController {
           cm.fecha_inicio,
           cm.fecha_fin,
           cm.nombre AS campana_nombre,
+          cm.id AS campania_id,
+          cm.status AS campania_status,
           cl.T1_U_Cliente AS nombre_comercial,
           cl.T0_U_Asesor AS asesor,
           cl.T0_U_Agencia AS agencia,
@@ -518,6 +522,8 @@ export class PropuestasController {
           cat_fin.numero_catorcena AS catorcena_fin,
           cat_fin.año AS anio_fin,
           ct.tipo_periodo AS tipo_periodo,
+          cm.fecha_inicio AS min_inicio_periodo,
+          cm.fecha_fin AS max_inicio_periodo,
           GROUP_CONCAT(DISTINCT sc.formato ORDER BY sc.formato SEPARATOR ',') AS formatos
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
@@ -549,6 +555,8 @@ export class PropuestasController {
         precio_simulado: p.precio_simulado ? Number(p.precio_simulado) : null,
         inversion: p.inversion ? Number(p.inversion) : null,
         cuic: p.cuic ? Number(p.cuic) : null,
+        campania_id: p.campania_id ? Number(p.campania_id) : null,
+        campania_status: p.campania_status || null,
         marca_nombre: p.marca_nombre || p.marca || p.articulo,
         creador_nombre: p.creador_nombre || 'Sistema',
         catorcena_inicio: p.catorcena_inicio ? Number(p.catorcena_inicio) : null,
@@ -556,6 +564,8 @@ export class PropuestasController {
         catorcena_fin: p.catorcena_fin ? Number(p.catorcena_fin) : null,
         anio_fin: p.anio_fin ? Number(p.anio_fin) : null,
         tipo_periodo: p.tipo_periodo || 'catorcena',
+        min_inicio_periodo: p.min_inicio_periodo ? (p.min_inicio_periodo instanceof Date ? p.min_inicio_periodo.toISOString().split('T')[0] : String(p.min_inicio_periodo).split('T')[0]) : null,
+        max_inicio_periodo: p.max_inicio_periodo ? (p.max_inicio_periodo instanceof Date ? p.max_inicio_periodo.toISOString().split('T')[0] : String(p.max_inicio_periodo).split('T')[0]) : null,
         formatos: p.formatos || null,
       }));
 
@@ -701,6 +711,30 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD: si la propuesta ya tiene una campaña activa ligada, NO permitir
+      // ningun cambio de status sobre la propuesta. La invariante es: una propuesta
+      // con campaña activa esta congelada en 'Aprobada'. Si se quiere cancelar el
+      // flujo se debe rechazar la campaña (en su propia pantalla), lo cual a su vez
+      // libera reservas y elimina circuitos. No se permite tocar la propuesta directamente.
+      if (status !== propuestaAnterior.status) {
+        const campActiva: any[] = await prisma.$queryRawUnsafe(`
+          SELECT cm.id, cm.status, cm.nombre
+          FROM cotizacion ct
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE ct.id_propuesta = ?
+            AND cm.status NOT IN ('Rechazada', 'Cancelada', 'inactiva', 'finalizada', 'Finalizada')
+          LIMIT 1
+        `, propuestaId);
+        if (campActiva.length > 0) {
+          const camp = campActiva[0];
+          res.status(400).json({
+            success: false,
+            error: `No se puede modificar el estatus de la propuesta porque ya existe la campaña #${camp.id} (${camp.status}). Si necesitas cancelar el flujo, rechaza la campaña desde su detalle.`,
+          });
+          return;
+        }
+      }
+
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
@@ -784,21 +818,48 @@ export class PropuestasController {
       cache.deletePattern('propuestas:list:');
       cache.deletePattern('campanas:list:');
 
-      // Si se descarta o rechaza, liberar todas las reservas (soft delete)
+      // Si se descarta o rechaza, liberar todas las reservas (soft delete).
+      // Si se rechaza, además eliminar todos los grupos/circuitos (caras) de la propuesta.
       if (status === 'Descartada' || status === 'Rechazada') {
         const caras = await prisma.solicitudCaras.findMany({
           where: { idquote: String(propuestaId) },
         });
         const caraIds = caras.map(c => c.id);
         if (caraIds.length > 0) {
-          const liberadas = await prisma.reservas.updateMany({
-            where: {
-              solicitudCaras_id: { in: caraIds },
-              deleted_at: null,
-            },
-            data: { deleted_at: new Date() },
-          });
-          console.log(`[${status}] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
+          if (status === 'Rechazada') {
+            const [liberadas, eliminadas] = await prisma.$transaction([
+              prisma.reservas.updateMany({
+                where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+                data: { deleted_at: new Date() },
+              }),
+              prisma.solicitudCaras.deleteMany({
+                where: { id: { in: caraIds } },
+              }),
+            ]);
+            console.log(`[Rechazada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
+          } else {
+            const liberadas = await prisma.reservas.updateMany({
+              where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+              data: { deleted_at: new Date() },
+            });
+            console.log(`[Descartada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
+          }
+        }
+
+        // Finalizar tareas de autorización pendientes asociadas a esta propuesta
+        const tareasAuth = await prisma.tareas.updateMany({
+          where: {
+            OR: [
+              { id_propuesta: String(propuestaId) },
+              ...(propuesta.solicitud_id ? [{ id_solicitud: String(propuesta.solicitud_id), id_propuesta: null }] : []),
+            ],
+            tipo: { contains: 'Autorización' },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          data: { estatus: 'Atendido' },
+        });
+        if (tareasAuth.count > 0) {
+          console.log(`[${status}] Propuesta #${propuestaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
         }
       }
 
@@ -1603,7 +1664,7 @@ export class PropuestasController {
         await tx.propuesta.update({
           where: { id: propuestaId },
           data: {
-            status: 'Atendido',
+            status: 'Aprobada',
             precio_simulado: precio_simulado || propuesta.precio_simulado,
             asignado: asignados || propuesta.asignado,
             id_asignado: id_asignados || propuesta.id_asignado,
@@ -2019,6 +2080,19 @@ export class PropuestasController {
         clienteNombre = solicitud?.marca_nombre || solicitud?.razon_social || '';
       }
 
+      // Enriquecer caras con grupo_masivo_id (campo no presente en Prisma client cacheado)
+      let carasEnriched: any[] = caras;
+      if (caras.length > 0) {
+        const ids = caras.map(c => c.id);
+        const ph = ids.map(() => '?').join(',');
+        const masivoRows = await prisma.$queryRawUnsafe<{ id: number; grupo_masivo_id: number | null }[]>(
+          `SELECT id, grupo_masivo_id FROM solicitudCaras WHERE id IN (${ph})`,
+          ...ids
+        );
+        const map = new Map(masivoRows.map(r => [Number(r.id), r.grupo_masivo_id]));
+        carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
+      }
+
       res.json({
         success: true,
         data: {
@@ -2026,7 +2100,7 @@ export class PropuestasController {
           solicitud: solicitud ? { ...solicitud, cliente: clienteNombre } : null,
           cotizacion,
           campania,
-          caras,
+          caras: carasEnriched,
         },
       });
     } catch (error) {
@@ -2431,6 +2505,7 @@ export class PropuestasController {
             numero_caras: cotizacion.numero_caras,
             bonificacion: cotizacion.bonificacion,
             precio: cotizacion.precio,
+            tipo_periodo: cotizacion.tipo_periodo,
           } : null,
           campania: campania ? {
             id: campania.id,
@@ -2477,12 +2552,14 @@ export class PropuestasController {
       }
 
       // Check authorization only for the specific cara being reserved (not all caras in propuesta)
+      let esCortesia = false;
       if (solicitudCaraId) {
         const caraToReserve = await prisma.solicitudCaras.findUnique({
           where: { id: parseInt(solicitudCaraId) },
-          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
+          select: { id: true, autorizacion_dg: true, autorizacion_dcm: true, cortesia: true }
         });
         if (caraToReserve) {
+          esCortesia = caraToReserve.cortesia === 1;
           const pendingDg = caraToReserve.autorizacion_dg === 'pendiente';
           const pendingDcm = caraToReserve.autorizacion_dcm === 'pendiente';
           if (pendingDg || pendingDcm) {
@@ -2527,7 +2604,7 @@ export class PropuestasController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
             solicitudCaras_id: { notIn: proposalCaraIds }, // Excluir reservas de esta propuesta
           },
           select: { inventario_id: true },
@@ -2639,7 +2716,7 @@ export class PropuestasController {
             continue;
           }
 
-          const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+          const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
           // Verificar duplicados en la misma propuesta Y mismo período
           const exists = await prisma.reservas.findFirst({
@@ -2708,7 +2785,7 @@ export class PropuestasController {
           continue;
         }
 
-        const estatus = reserva.tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+        const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
         // Verificar duplicados en la misma cara (mismo período)
         const exists = await prisma.reservas.findFirst({
@@ -3105,7 +3182,13 @@ export class PropuestasController {
         return;
       }
 
-      const estatus = tipo === 'Bonificacion' ? 'Bonificado' : 'Reservado';
+      const caraInfo = await prisma.solicitudCaras.findUnique({
+        where: { id: parseInt(solicitudCaraId) },
+        select: { cortesia: true }
+      });
+      const esCortesia = caraInfo?.cortesia === 1;
+
+      const estatus = (tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
       const newReserva = await prisma.reservas.create({
         data: {
@@ -3374,6 +3457,7 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf,
+        aplicarAGrupo, // si true, propaga campos no-temporales a las demás caras con el mismo grupo_masivo_id
       } = req.body;
 
       // Get current cara to compare auth-affecting fields
@@ -3453,12 +3537,94 @@ export class PropuestasController {
         },
       });
 
+      // Auto-reserva circuito digital: si cambió el itemCode o las fechas, re-reservar
+      if (isCircuitoDigital(articulo)) {
+        const fechasIguales = inicio_periodo && fin_periodo && currentCara.inicio_periodo && currentCara.fin_periodo
+          && new Date(inicio_periodo).getTime() === new Date(currentCara.inicio_periodo).getTime()
+          && new Date(fin_periodo).getTime() === new Date(currentCara.fin_periodo).getTime();
+        const articuloIgual = (articulo || '') === (currentCara.articulo || '');
+        if (!fechasIguales || !articuloIgual) {
+          // Borrar reservas viejas y crear nuevas
+          await prisma.reservas.deleteMany({ where: { solicitudCaras_id: parseInt(caraId) } });
+          try {
+            const propuestaDB = await prisma.propuesta.findFirst({
+              where: { id: parseInt(currentCara.idquote || '0') },
+              select: { cliente_id: true },
+            });
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
+            const tieneGrupoBfUpd = !!currentCara.grupo_rt_bf;
+            const esBfArt = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
+            const cantidadReal = esBfArt
+              ? (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : Number(currentCara.bonificacion || 0))
+              : (caras !== undefined && caras !== null ? parseInt(caras) : Number(currentCara.caras || 0));
+            await autoReservarCircuito({
+              solicitudCaraId: parseInt(caraId),
+              itemCode: articulo,
+              clienteId: propuestaDB?.cliente_id || 0,
+              calendarioId: null,
+              fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
+              fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+              cantidad: tieneGrupoBfUpd && cantidadReal > 0 ? cantidadReal : undefined,
+            });
+          } catch (e: any) {
+            res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
+            return;
+          }
+        } else if (currentCara.grupo_rt_bf) {
+          // Mismas fechas + mismo articulo: solo cambió cantidad → redistribuir entre RT/BF
+          // del mismo grupo, moviendo reservas en lugar de borrar y recrear.
+          try {
+            await prisma.$transaction(async (tx) => {
+              await redistribuirReservasCircuito(tx, parseInt(caraId));
+            });
+          } catch (e: any) {
+            console.error('Error redistribuyendo reservas circuito:', e);
+          }
+        }
+      }
+
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCara.grupo_rt_bf) {
         await prisma.solicitudCaras.updateMany({
           where: { grupo_rt_bf: currentCara.grupo_rt_bf, id: { not: parseInt(caraId) } },
           data: { autorizacion_dg, autorizacion_dcm },
         });
+      }
+
+      // Propagar a grupo masivo: copiar campos NO temporales a las demás caras del grupo
+      // (deja inicio_periodo / fin_periodo intactos en cada cara — cada periodo es propio)
+      if (aplicarAGrupo) {
+        const grupoRow = await prisma.$queryRawUnsafe<{ grupo_masivo_id: number | null }[]>(
+          `SELECT grupo_masivo_id FROM solicitudCaras WHERE id = ? LIMIT 1`,
+          parseInt(caraId)
+        );
+        const grupoMasivoId = grupoRow[0]?.grupo_masivo_id;
+        if (grupoMasivoId) {
+          // Construir SET clause solo con campos definidos
+          const setParts: string[] = [];
+          const values: any[] = [];
+          const addField = (col: string, val: any) => {
+            if (val !== undefined && val !== null) { setParts.push(`${col} = ?`); values.push(val); }
+          };
+          addField('ciudad', ciudad);
+          addField('estados', estados);
+          addField('tipo', tipo);
+          addField('flujo', flujo);
+          addField('bonificacion', bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined);
+          addField('caras', caras !== undefined && caras !== null ? parseInt(caras) : undefined);
+          addField('nivel_socioeconomico', nivel_socioeconomico);
+          addField('formato', formato);
+          addField('costo', costo !== undefined && costo !== null ? parseInt(costo) : undefined);
+          addField('tarifa_publica', tarifa_publica !== undefined && tarifa_publica !== null ? parseInt(tarifa_publica) : undefined);
+          addField('caras_flujo', caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined);
+          addField('caras_contraflujo', caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined);
+          addField('articulo', articulo);
+          addField('descuento', descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined);
+          if (setParts.length > 0) {
+            const sql = `UPDATE solicitudCaras SET ${setParts.join(', ')} WHERE grupo_masivo_id = ? AND id <> ?`;
+            await prisma.$executeRawUnsafe(sql, ...values, grupoMasivoId, parseInt(caraId));
+          }
+        }
       }
 
       // Registrar cambios en historial
@@ -3587,27 +3753,63 @@ export class PropuestasController {
         },
       });
 
+      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      if (isCircuitoDigital(articulo)) {
+        try {
+          const propuestaDB = await prisma.propuesta.findUnique({
+            where: { id: parseInt(id) },
+            select: { cliente_id: true },
+          });
+          // Para BF: la cantidad real está en bonificacion (caras es 0)
+          const tieneGrupoBfNew = !!grupoRtBfCreate;
+          const esBfArtNew = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
+          const cantidadNew = esBfArtNew
+            ? (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : 0)
+            : (caras !== undefined && caras !== null ? parseInt(caras) : 0);
+          await autoReservarCircuito({
+            solicitudCaraId: newCara.id,
+            itemCode: articulo,
+            clienteId: propuestaDB?.cliente_id || 0,
+            calendarioId: null,
+            fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
+            fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
+            cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+          });
+        } catch (e: any) {
+          // Rollback manual
+          await prisma.solicitudCaras.delete({ where: { id: newCara.id } }).catch(() => {});
+          res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });
+          return;
+        }
+      }
+
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DG
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DG.
+      // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
       const todasCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true }
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true, tipo: true, articulo: true }
       });
-      const totalCarasGlobal = todasCaras.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      const noDigitales = todasCaras.filter(c => {
+        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+        return !isDigital;
+      });
+      const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
       if (totalCarasGlobal % 2 !== 0) {
-        const carasNoP = todasCaras.filter(c => c.autorizacion_dg !== 'pendiente');
+        const idsNoDigitales = noDigitales.map(c => c.id);
+        const carasNoP = noDigitales.filter(c => c.autorizacion_dg !== 'pendiente');
         if (carasNoP.length > 0) {
           await prisma.solicitudCaras.updateMany({
             where: {
-              idquote: id,
+              id: { in: idsNoDigitales },
               autorizacion_dg: { not: 'pendiente' }
             },
             data: { autorizacion_dg: 'pendiente' }
           });
-          console.log(`[createCara] Total caras impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
         }
       }
 
@@ -3686,7 +3888,9 @@ export class PropuestasController {
         }
       }
 
-      // Run all updates in a single transaction
+      // Run all updates in a single transaction.
+      // Timeout extendido: con grupos masivos puede iterar 10+ caras,
+      // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
 
@@ -3782,8 +3986,21 @@ export class PropuestasController {
           }
         }
 
+        // Post-pass: redistribuir reservas RT/BF para circuitos digitales con cambio de cantidad
+        const gruposRedistribuidos = new Set<number>();
+        for (const result of results) {
+          if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (!isCircuitoDigital(result.articulo || '')) continue;
+          gruposRedistribuidos.add(result.grupo_rt_bf);
+          try {
+            await redistribuirReservasCircuito(tx, result.id);
+          } catch (e) {
+            console.error('[bulkUpdateCaras] Error redistribuyendo reservas circuito:', e);
+          }
+        }
+
         return results;
-      });
+      }, { maxWait: 15000, timeout: 60000 });
 
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
@@ -3840,19 +4057,31 @@ export class PropuestasController {
     try {
       const { caraId } = req.params;
       const id = parseInt(caraId);
+      const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
-      // Liberar reservas activas y luego eliminar la cara
+      // Si eliminarGrupo: borra todas las caras con el mismo grupo_masivo_id (RT y BF)
+      let idsToDelete: number[] = [id];
+      if (eliminarGrupo) {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT s2.id FROM solicitudCaras s1
+             INNER JOIN solicitudCaras s2 ON s2.grupo_masivo_id = s1.grupo_masivo_id
+            WHERE s1.id = ? AND s1.grupo_masivo_id IS NOT NULL`,
+          id
+        );
+        if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
+      }
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
-          where: { solicitudCaras_id: id, deleted_at: null },
+          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
           data: { deleted_at: new Date() },
         }),
-        prisma.solicitudCaras.delete({
-          where: { id },
+        prisma.solicitudCaras.deleteMany({
+          where: { id: { in: idsToDelete } },
         }),
       ]);
 
-      res.json({ success: true });
+      res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {
       console.error('Error deleting cara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';

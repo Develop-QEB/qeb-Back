@@ -8,6 +8,8 @@ import {
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
+import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
+import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
@@ -553,8 +555,8 @@ export class SolicitudesController {
             s.id as solicitud_id,
             ct.tipo_periodo,
             ct.nombre_campania,
-            COALESCE(MIN(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_inicio,
-            COALESCE(MAX(sc.inicio_periodo), ct.fecha_inicio) as periodo_fecha_fin,
+            ct.fecha_inicio as periodo_fecha_inicio,
+            ct.fecha_fin as periodo_fecha_fin,
             cat_ini.numero_catorcena as catorcena_inicio,
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
@@ -1447,9 +1449,9 @@ export class SolicitudesController {
         orderBy: { estado: 'asc' },
       });
 
-      // Get distinct municipios (ciudades)
+      // Get distinct municipios (ciudades) con su plaza y estado
       const ciudades = await prisma.inventarios.findMany({
-        select: { municipio: true, estado: true },
+        select: { municipio: true, estado: true, plaza: true },
         distinct: ['municipio'],
         where: { municipio: { not: null } },
         orderBy: { municipio: 'asc' },
@@ -1471,13 +1473,34 @@ export class SolicitudesController {
         orderBy: { nivel_socioeconomico: 'asc' },
       });
 
+      // Get distinct plazas con sus ciudades y estados
+      const plazasRaw = await prisma.inventarios.findMany({
+        select: { plaza: true, municipio: true, estado: true },
+        where: { plaza: { not: null } },
+        orderBy: { plaza: 'asc' },
+      });
+      const plazaMap = new Map<string, { plaza: string; estados: Set<string>; ciudades: Set<string> }>();
+      for (const r of plazasRaw) {
+        if (!r.plaza) continue;
+        if (!plazaMap.has(r.plaza)) plazaMap.set(r.plaza, { plaza: r.plaza, estados: new Set(), ciudades: new Set() });
+        const e = plazaMap.get(r.plaza)!;
+        if (r.estado) e.estados.add(r.estado);
+        if (r.municipio) e.ciudades.add(r.municipio);
+      }
+      const plazas = Array.from(plazaMap.values()).map(p => ({
+        plaza: p.plaza,
+        estados: Array.from(p.estados).sort(),
+        ciudades: Array.from(p.ciudades).sort(),
+      }));
+
       res.json({
         success: true,
         data: {
           estados: estados.map(e => e.estado).filter(Boolean),
-          ciudades: ciudades.map(c => ({ ciudad: c.municipio, estado: c.estado })),
+          ciudades: ciudades.map(c => ({ ciudad: c.municipio, estado: c.estado, plaza: c.plaza })),
           formatos: formatos.map(f => f.mueble).filter(Boolean),
           nse: nse.map(n => n.nivel_socioeconomico).filter(Boolean),
+          plazas,
         },
       });
     } catch (error) {
@@ -1878,7 +1901,36 @@ export class SolicitudesController {
               grupo_rt_bf: cara.grupo_rt_bf || null,
             },
           });
+          // grupo_masivo_id (campo nuevo, escrito por SQL crudo hasta regenerar Prisma client)
+          if (cara.grupo_masivo_id) {
+            await tx.$executeRawUnsafe(
+              `UPDATE solicitudCaras SET grupo_masivo_id = ? WHERE id = ?`,
+              cara.grupo_masivo_id, solicitudCara.id
+            );
+          }
           createdCaras.push(solicitudCara);
+
+          // Auto-reserva circuito digital
+          // Si la cara es parte de un grupo BF (grupo_rt_bf no null) → respetar cantidad pedida
+          // (RT toma N libres, BF toma los restantes para no doblar reservas).
+          // Sin grupo BF → comportamiento legacy (reservar todos los inventarios del circuito).
+          // Para BF: la cantidad real está en bonificacion (no en caras, que es 0)
+          const tieneGrupoBf = !!cara.grupo_rt_bf;
+          const esBfArt = (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF');
+          const cantidadReal = esBfArt ? Number(cara.bonificacion) : Number(cara.caras);
+          const autoRes = await autoReservarCircuitoSiAplica(tx, {
+            solicitudCaraId: solicitudCara.id,
+            itemCode: cara.articulo || articulo,
+            clienteId: cliente_id,
+            calendarioId: null,
+            fechaInicio: new Date(cara.inicio_periodo),
+            fechaFin: new Date(cara.fin_periodo),
+            esBf: esBfArt,
+            cantidad: tieneGrupoBf && cantidadReal > 0 ? cantidadReal : undefined,
+          });
+          if (autoRes) {
+            console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
+          }
         }
 
         // Propagate RT auth state to BF pairs within each grupo_rt_bf
@@ -1901,18 +1953,31 @@ export class SolicitudesController {
           }
         }
 
-        // Regla: si el total global de caras es impar, TODAS requieren autorización DG
-        const totalCarasGlobal = caras.reduce((acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0), 0);
+        // Regla: si el total global de caras NO-digitales es impar, todas las
+        // NO-digitales requieren autorización DG. Los digitales/circuitos quedan exentos.
+        const noDigitalesPayload = caras.filter((c: any) => {
+          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+          return !isDigital;
+        });
+        const totalCarasGlobal = noDigitalesPayload.reduce(
+          (acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0),
+          0
+        );
         if (totalCarasGlobal % 2 !== 0) {
+          // Identificar las caras creadas que son NO-digitales
+          const isCaraNoDigital = (cara: any) => {
+            const tipo = (cara.tipo || '').toLowerCase();
+            return tipo !== 'digital' && !isCircuitoDigital(cara.articulo);
+          };
           for (const createdCara of createdCaras) {
-            if (createdCara.autorizacion_dg !== 'pendiente') {
+            if (createdCara.autorizacion_dg !== 'pendiente' && isCaraNoDigital(createdCara)) {
               await tx.solicitudCaras.update({
                 where: { id: createdCara.id },
                 data: { autorizacion_dg: 'pendiente' },
               });
             }
           }
-          console.log(`[create] Total caras impar (${totalCarasGlobal}), todas las caras requieren autorización DG`);
+          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DG`);
         }
 
         return {
@@ -2756,6 +2821,17 @@ export class SolicitudesController {
 
         // Delete existing caras and recreate with authorization status
         if (propuesta) {
+          // Eliminar reservas asociadas antes del deleteMany de caras
+          // (evita reservas huérfanas y conflictos fantasma al re-auto-reservar circuitos)
+          const oldCaras = await tx.solicitudCaras.findMany({
+            where: { idquote: propuesta.id.toString() },
+            select: { id: true },
+          });
+          if (oldCaras.length > 0) {
+            await tx.reservas.deleteMany({
+              where: { solicitudCaras_id: { in: oldCaras.map(c => c.id) } },
+            });
+          }
           await tx.solicitudCaras.deleteMany({
             where: { idquote: propuesta.id.toString() },
           });
@@ -2822,7 +2898,33 @@ export class SolicitudesController {
                 grupo_rt_bf: cara.grupo_rt_bf || null,
               },
             });
+            // grupo_masivo_id (SQL crudo hasta regenerar Prisma client)
+            if (cara.grupo_masivo_id) {
+              await tx.$executeRawUnsafe(
+                `UPDATE solicitudCaras SET grupo_masivo_id = ? WHERE id = ?`,
+                cara.grupo_masivo_id, createdCara.id
+              );
+            }
             recreatedCaras.push(createdCara);
+
+            // Auto-reserva circuito digital (en update se borraron reservas al deleteMany caras, por eso hay que reservar de nuevo)
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
+            const tieneGrupoBfUpd = !!cara.grupo_rt_bf;
+            const esBfArtUpd = (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF');
+            const cantidadRealUpd = esBfArtUpd ? Number(cara.bonificacion) : Number(cara.caras);
+            const autoRes = await autoReservarCircuitoSiAplica(tx, {
+              solicitudCaraId: createdCara.id,
+              itemCode: cara.articulo || articulo,
+              clienteId: cliente_id,
+              calendarioId: null,
+              fechaInicio: new Date(cara.inicio_periodo),
+              fechaFin: new Date(cara.fin_periodo),
+              esBf: esBfArtUpd,
+              cantidad: tieneGrupoBfUpd && cantidadRealUpd > 0 ? cantidadRealUpd : undefined,
+            });
+            if (autoRes) {
+              console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
+            }
           }
 
           // Propagate RT auth state to BF pairs within each grupo_rt_bf

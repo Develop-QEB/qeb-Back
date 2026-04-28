@@ -10,6 +10,8 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
+import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
@@ -143,6 +145,9 @@ export class CampanasController {
             filterFechaFin = catFinData.fecha_fin;
           }
 
+          // 1) Rango de la campania debe traslapar con la catorcena filtrada (filtro rapido)
+          // 2) Y debe existir AL MENOS UNA cara (solicitudCaras) con periodo dentro del rango filtrado.
+          //    Esto excluye campanias cuyo rango anotado cubre la catorcena pero no tienen circuitos en ella.
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -150,8 +155,23 @@ export class CampanasController {
             AND cm.fecha_fin >= (
               SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
+            AND EXISTS (
+              SELECT 1 FROM solicitudCaras sc_filt
+              WHERE CAST(sc_filt.idquote AS UNSIGNED) = pr.id
+                AND sc_filt.inicio_periodo <= (
+                  SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+                AND sc_filt.fin_periodo >= (
+                  SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
+                )
+            )
           `);
-          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+          params.push(
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+            yearFin, catorcenaFin,
+            yearInicio, catorcenaInicio,
+          );
         } else {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
@@ -271,7 +291,7 @@ export class CampanasController {
             GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
           FROM solicitudCaras sc_c
           INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
-          INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+          INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
         ) cat_content ON cat_content.cotizacion_id = ct.id
@@ -306,20 +326,26 @@ export class CampanasController {
         }
       });
 
-      // Recalculate inversion based on catorcena filter (sum only overlapping caras)
+      // Recalculate inversion PRORRATEADA por días dentro del rango del filtro de catorcena.
+      // Solo cuenta la porción de días de cada cara que cae dentro de [filterFechaInicio, filterFechaFin].
       if (filterFechaInicio && filterFechaFin && campanas.length > 0) {
         const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
         if (propuestaIds.length > 0) {
           const placeholders = propuestaIds.map(() => '?').join(',');
           const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
-            SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+            SELECT pr.id as propuesta_id,
+                   COALESCE(SUM(
+                     sc.costo
+                     * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                     / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                   ), 0) as inversion_filtrada
             FROM propuesta pr
             LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE pr.id IN (${placeholders})
             GROUP BY pr.id
-          `, filterFechaFin, filterFechaInicio, ...propuestaIds);
+          `, filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds);
 
           const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
           campanas.forEach((c: any) => {
@@ -736,7 +762,9 @@ export class CampanasController {
         data: { status },
       });
 
-      // Si se rechaza, liberar todas las reservas (soft delete) — misma lógica que propuestas
+      // Si se rechaza, liberar reservas + eliminar grupos/circuitos (caras).
+      // Misma lógica que propuestas: el bloqueo por APS arriba garantiza que solo
+      // se ejecuta antes de comprometer inventario.
       if (status === 'Rechazada' && campana.cotizacion_id) {
         const cotizacionData = await prisma.cotizacion.findUnique({
           where: { id: campana.cotizacion_id },
@@ -748,15 +776,32 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
-            const liberadas = await prisma.reservas.updateMany({
-              where: {
-                solicitudCaras_id: { in: carasIds },
-                deleted_at: null,
-              },
-              data: { deleted_at: new Date() },
-            });
-            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas`);
+            const [liberadas, eliminadas] = await prisma.$transaction([
+              prisma.reservas.updateMany({
+                where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
+                data: { deleted_at: new Date() },
+              }),
+              prisma.solicitudCaras.deleteMany({
+                where: { id: { in: carasIds } },
+              }),
+            ]);
+            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
           }
+        }
+      }
+
+      // Si se rechaza, finalizar tareas de autorización pendientes
+      if (status === 'Rechazada') {
+        const tareasAuth = await prisma.tareas.updateMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { contains: 'Autorización' },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          data: { estatus: 'Atendido' },
+        });
+        if (tareasAuth.count > 0) {
+          console.log(`[Rechazada] Campaña #${campanaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
         }
       }
 
@@ -1399,7 +1444,20 @@ export class CampanasController {
 
       console.log('[getCaras Campaña] Encontradas', caras.length, 'caras para idquote:', String(cotizacion.id_propuesta));
 
-      const carasSerializable = serializeBigInt(caras);
+      // Enriquecer con grupo_masivo_id (campo no presente en Prisma client cacheado)
+      let carasEnriched: any[] = caras;
+      if (caras.length > 0) {
+        const ids = caras.map(c => c.id);
+        const ph = ids.map(() => '?').join(',');
+        const masivoRows = await prisma.$queryRawUnsafe<{ id: number; grupo_masivo_id: number | null }[]>(
+          `SELECT id, grupo_masivo_id FROM solicitudCaras WHERE id IN (${ph})`,
+          ...ids
+        );
+        const map = new Map(masivoRows.map(r => [Number(r.id), r.grupo_masivo_id]));
+        carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
+      }
+
+      const carasSerializable = serializeBigInt(carasEnriched);
 
       res.json({
         success: true,
@@ -1500,7 +1558,7 @@ export class CampanasController {
           NULL as longitud,
           NULL as ancho,
           NULL as alto,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
           'Impresión' as estatus_reserva,
@@ -1590,7 +1648,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -1743,7 +1801,7 @@ export class CampanasController {
           NULL as mueble,
           NULL as latitud,
           NULL as longitud,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as municipio,
           NULL as tipo_de_mueble,
@@ -1872,7 +1930,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProg && (tProg.estatus === 'Activo' || tProg.estatus === 'Atendido' || tProg.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -2102,7 +2160,7 @@ export class CampanasController {
           NULL as longitud,
           NULL as ancho,
           NULL as alto,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
           'Impresión' as estatus_reserva,
@@ -2152,7 +2210,7 @@ export class CampanasController {
           NULL as mueble,
           NULL as latitud,
           NULL as longitud,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as municipio,
           NULL as tipo_de_mueble,
@@ -2278,7 +2336,7 @@ export class CampanasController {
         } else if ((tImpresion && (tImpresion.estatus === 'Activo' || tImpresion.estatus === 'Atendido' || tImpresion.estatus === 'Completado')) ||
                    (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
-        } else if (row.arte_aprobado === 'aprobado') {
+        } else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') {
           estatus_arte = 'Artes Aprobados';
         } else if (row.archivo != null && row.archivo !== '') {
           estatus_arte = 'Revision Artes';
@@ -2544,7 +2602,7 @@ export class CampanasController {
           sc.articulo as codigo_unico,
           'Impresión' as tipo_de_cara,
           NULL as mueble,
-          sc.ciudad as plaza,
+          COALESCE((SELECT inv_pl.plaza FROM inventarios inv_pl WHERE inv_pl.municipio = SUBSTRING_INDEX(sc.ciudad, ',', 1) AND inv_pl.plaza IS NOT NULL LIMIT 1), sc.ciudad) as plaza,
           sc.estados as estado,
           NULL as tradicional_digital,
           NULL as tarifa_publica,
@@ -2626,7 +2684,7 @@ export class CampanasController {
               GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
             FROM solicitudCaras sc_c
             INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
-            INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo BETWEEN cat_c.fecha_inicio AND cat_c.fecha_fin
+            INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
             WHERE ct_c.id IN (SELECT cotizacion_id FROM campania WHERE id IN (${cmIdPh}))
             GROUP BY ct_c.id
           ) cat_content ON cat_content.cotizacion_id = ct.id
@@ -2708,7 +2766,7 @@ export class CampanasController {
                  (tProgramacion && (tProgramacion.estatus === 'Activo' || tProgramacion.estatus === 'Atendido' || tProgramacion.estatus === 'Completado'))) {
           estatus_arte = 'En Impresion';
         }
-        else if (row.arte_aprobado === 'aprobado') estatus_arte = 'Artes Aprobados';
+        else if (String(row.arte_aprobado || '').trim().toLowerCase() === 'aprobado') estatus_arte = 'Artes Aprobados';
         else if (row.archivo != null && row.archivo !== '') estatus_arte = 'Revision Artes';
         else estatus_arte = 'Carga Artes';
 
@@ -6585,7 +6643,7 @@ export class CampanasController {
       const query = `
         -- BONIFICACIONES (BF, CT, IM con bonificacion > 0)
         SELECT
-          COALESCE(MIN(inv.plaza), sc.ciudad) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -6635,7 +6693,7 @@ export class CampanasController {
 
         -- RENTA (RT, IN, CT, IM con caras > bonificacion)
         SELECT
-          COALESCE(MIN(inv.plaza), sc.ciudad) AS plaza,
+          MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
           ROUND(AVG(rsv.APS), 0) AS aps_especifico,
@@ -6786,7 +6844,7 @@ export class CampanasController {
           inv.tradicional_digital AS tradicional_digital,
           CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
           CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
-          CAST(inv.municipio AS CHAR(255)) AS Ciudad,
+          CAST(inv.plaza AS CHAR(255)) AS Ciudad,
           CASE
             WHEN sc.cortesia = 1 THEN 'CORTESIA'
             WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
@@ -7271,7 +7329,7 @@ export class CampanasController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Apartado', 'Vendido'] },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
           },
           select: { inventario_id: true },
         });
@@ -7353,7 +7411,7 @@ export class CampanasController {
             inventario_id: espacioId,
             calendario_id: calendario.id,
             cliente_id: clienteId || 0,
-            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Apartado',
+            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
             arte_aprobado: '',
             comentario_rechazo: '',
             estatus_original: '',
@@ -7509,12 +7567,90 @@ export class CampanasController {
         data: updateData,
       });
 
+      // Auto-reserva circuito digital: si cambió itemCode/fechas, re-reservar
+      if (isCircuitoDigital(data.articulo) && currentCaraFull) {
+        const fechasIguales = data.inicio_periodo && data.fin_periodo && currentCaraFull.inicio_periodo && currentCaraFull.fin_periodo
+          && new Date(data.inicio_periodo).getTime() === new Date(currentCaraFull.inicio_periodo).getTime()
+          && new Date(data.fin_periodo).getTime() === new Date(currentCaraFull.fin_periodo).getTime();
+        const articuloIgual = (data.articulo || '') === (currentCaraFull.articulo || '');
+        if (!fechasIguales || !articuloIgual) {
+          await prisma.reservas.deleteMany({ where: { solicitudCaras_id: parseInt(caraId) } });
+          try {
+            const propuestaDB = await prisma.propuesta.findFirst({
+              where: { id: parseInt(currentCara.idquote || '0') },
+              select: { cliente_id: true },
+            });
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
+            const tieneGrupoBfUpd = !!currentCaraFull?.grupo_rt_bf;
+            const esBfArt = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
+            const cantidadUpd = esBfArt
+              ? (data.bonificacion ?? Number(currentCaraFull?.bonificacion || 0))
+              : (data.caras ?? currentCaraFull?.caras ?? 0);
+            await autoReservarCircuito({
+              solicitudCaraId: parseInt(caraId),
+              itemCode: data.articulo,
+              clienteId: propuestaDB?.cliente_id || 0,
+              calendarioId: null,
+              fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
+              fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
+              cantidad: tieneGrupoBfUpd && cantidadUpd > 0 ? cantidadUpd : undefined,
+            });
+          } catch (e: any) {
+            res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
+            return;
+          }
+        } else if (currentCaraFull?.grupo_rt_bf) {
+          // Mismas fechas + mismo articulo: solo cambió cantidad → redistribuir RT/BF
+          try {
+            await prisma.$transaction(async (tx) => {
+              await redistribuirReservasCircuito(tx, parseInt(caraId));
+            });
+          } catch (e: any) {
+            console.error('Error redistribuyendo reservas circuito:', e);
+          }
+        }
+      }
+
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCaraFull?.grupo_rt_bf) {
         await prisma.solicitudCaras.updateMany({
           where: { grupo_rt_bf: currentCaraFull.grupo_rt_bf, id: { not: parseInt(caraId) } },
           data: { autorizacion_dg, autorizacion_dcm },
         });
+      }
+
+      // Propagar a grupo masivo (campos no-temporales)
+      if (data.aplicarAGrupo) {
+        const grupoRow = await prisma.$queryRawUnsafe<{ grupo_masivo_id: number | null }[]>(
+          `SELECT grupo_masivo_id FROM solicitudCaras WHERE id = ? LIMIT 1`,
+          parseInt(caraId)
+        );
+        const grupoMasivoId = grupoRow[0]?.grupo_masivo_id;
+        if (grupoMasivoId) {
+          const setParts: string[] = [];
+          const values: any[] = [];
+          const addField = (col: string, val: any) => {
+            if (val !== undefined && val !== null) { setParts.push(`${col} = ?`); values.push(val); }
+          };
+          addField('ciudad', data.ciudad);
+          addField('estados', data.estados);
+          addField('tipo', data.tipo);
+          addField('flujo', data.flujo);
+          addField('bonificacion', data.bonificacion);
+          addField('caras', data.caras);
+          addField('nivel_socioeconomico', data.nivel_socioeconomico);
+          addField('formato', data.formato);
+          addField('costo', data.costo);
+          addField('tarifa_publica', data.tarifa_publica);
+          addField('caras_flujo', data.caras_flujo);
+          addField('caras_contraflujo', data.caras_contraflujo);
+          addField('articulo', data.articulo);
+          addField('descuento', data.descuento);
+          if (setParts.length > 0) {
+            const sql = `UPDATE solicitudCaras SET ${setParts.join(', ')} WHERE grupo_masivo_id = ? AND id <> ?`;
+            await prisma.$executeRawUnsafe(sql, ...values, grupoMasivoId, parseInt(caraId));
+          }
+        }
       }
 
       // Registrar cambios en historial
@@ -7655,6 +7791,35 @@ export class CampanasController {
         data: createData,
       });
 
+      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      if (isCircuitoDigital(data.articulo)) {
+        try {
+          const propuestaDB = await prisma.propuesta.findUnique({
+            where: { id: cotizacion.id_propuesta },
+            select: { cliente_id: true },
+          });
+          // Para BF: la cantidad real está en bonificacion (caras es 0)
+          const tieneGrupoBfNew = !!data.grupo_rt_bf;
+          const esBfArtNew = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
+          const cantidadNew = esBfArtNew
+            ? (data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : 0)
+            : (data.caras !== undefined && data.caras !== null ? data.caras : 0);
+          await autoReservarCircuito({
+            solicitudCaraId: cara.id,
+            itemCode: data.articulo,
+            clienteId: propuestaDB?.cliente_id || 0,
+            calendarioId: null,
+            fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
+            fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
+            cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+          });
+        } catch (e: any) {
+          await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});
+          res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });
+          return;
+        }
+      }
+
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
@@ -7724,7 +7889,9 @@ export class CampanasController {
         }
       }
 
-      // Run all updates in a single transaction
+      // Run all updates in a single transaction.
+      // Timeout extendido: con grupos masivos puede iterar 10+ caras,
+      // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
 
@@ -7822,8 +7989,21 @@ export class CampanasController {
           }
         }
 
+        // Post-pass: redistribuir reservas RT/BF para circuitos digitales
+        const gruposRedistribuidos = new Set<number>();
+        for (const result of results) {
+          if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (!isCircuitoDigital(result.articulo || '')) continue;
+          gruposRedistribuidos.add(result.grupo_rt_bf);
+          try {
+            await redistribuirReservasCircuito(tx, result.id);
+          } catch (e) {
+            console.error('[campanas.bulkUpdateCaras] Error redistribuyendo reservas circuito:', e);
+          }
+        }
+
         return results;
-      });
+      }, { maxWait: 15000, timeout: 60000 });
 
       // Registrar cambios en historial
       const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });
@@ -7887,19 +8067,30 @@ export class CampanasController {
     try {
       const { caraId } = req.params;
       const id = parseInt(caraId);
+      const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
-      // Liberar reservas activas y luego eliminar la cara
+      let idsToDelete: number[] = [id];
+      if (eliminarGrupo) {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT s2.id FROM solicitudCaras s1
+             INNER JOIN solicitudCaras s2 ON s2.grupo_masivo_id = s1.grupo_masivo_id
+            WHERE s1.id = ? AND s1.grupo_masivo_id IS NOT NULL`,
+          id
+        );
+        if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
+      }
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
-          where: { solicitudCaras_id: id, deleted_at: null },
+          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
           data: { deleted_at: new Date() },
         }),
-        prisma.solicitudCaras.delete({
-          where: { id },
+        prisma.solicitudCaras.deleteMany({
+          where: { id: { in: idsToDelete } },
         }),
       ]);
 
-      res.json({ success: true, message: 'Cara eliminada' });
+      res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
@@ -8278,6 +8469,104 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en getBatchInversiones:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener inversiones batch';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Batch de inversión (costo) por catorcena, basado en solicitudCaras.costo.
+   * Mismo criterio que el filtro de catorcena en GET /campanas, pero agrupado por catorcena.
+   * Body: { ids: number[] } (ids de campania)
+   * Response: { campaniaId: { "numCat:anio": { inversion }, total: { inversion } } }
+   */
+  async getBatchInversionesCostoPorCatorcena(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const campanaIds = ids.map(Number).filter(id => Number.isFinite(id));
+      if (campanaIds.length === 0) {
+        res.json({ success: true, data: {} });
+        return;
+      }
+
+      const placeholders = campanaIds.map(() => '?').join(', ');
+
+      // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
+      //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
+      const perCatorcenaQuery = `
+        SELECT
+          cm.id AS campania_id,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COALESCE(SUM(
+            sc.costo
+            * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
+            / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+          ), 0) AS inversion
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          INNER JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          INNER JOIN catorcenas cat
+            ON sc.inicio_periodo <= cat.fecha_fin
+           AND sc.fin_periodo    >= cat.fecha_inicio
+        WHERE cm.id IN (${placeholders})
+        GROUP BY cm.id, cat.numero_catorcena, cat.año
+      `;
+
+      // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
+      const totalQuery = `
+        SELECT
+          cm.id AS campania_id,
+          COALESCE(SUM(sc.costo), 0) AS inversion
+        FROM campania cm
+          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+        WHERE cm.id IN (${placeholders})
+        GROUP BY cm.id
+      `;
+
+      const [perCatorcenaRows, totalRows] = await Promise.all([
+        prisma.$queryRawUnsafe<Array<{
+          campania_id: number;
+          numero_catorcena: number | null;
+          anio_catorcena: number | null;
+          inversion: bigint | number;
+        }>>(perCatorcenaQuery, ...campanaIds),
+        prisma.$queryRawUnsafe<Array<{
+          campania_id: number;
+          inversion: bigint | number;
+        }>>(totalQuery, ...campanaIds),
+      ]);
+
+      const result: Record<number, Record<string, { inversion: number }>> = {};
+
+      for (const row of perCatorcenaRows) {
+        const cid = Number(row.campania_id);
+        if (!result[cid]) result[cid] = {};
+        const inv = Number(row.inversion || 0);
+        if (row.numero_catorcena != null && row.anio_catorcena != null) {
+          const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
+          if (!result[cid][catKey]) result[cid][catKey] = { inversion: 0 };
+          result[cid][catKey].inversion += inv;
+        }
+      }
+
+      for (const row of totalRows) {
+        const cid = Number(row.campania_id);
+        if (!result[cid]) result[cid] = {};
+        result[cid]['total'] = { inversion: Number(row.inversion || 0) };
+      }
+
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error en getBatchInversionesCostoPorCatorcena:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener inversiones por catorcena';
       res.status(500).json({ success: false, error: message });
     }
   }

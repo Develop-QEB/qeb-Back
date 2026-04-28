@@ -59,6 +59,7 @@ model inventarios {
   tarifa_piso          Decimal? @db.Decimal(12, 2)
   tarifa_publica       Decimal? @db.Decimal(12, 2)
   mundialista          String?  @db.VarChar(10)
+  cto                  String?  @db.VarChar(20)
 
   @@index([archivos_id], map: "idx_archivos_id")
   @@map("inventarios")
@@ -347,9 +348,11 @@ model solicitudCaras {
   autorizacion_dcm     String?  @default("aprobado") @db.VarChar(255)
   cortesia             Int?     @default(0)
   grupo_rt_bf          Int?
+  grupo_masivo_id      Int?
 
   @@index([idquote])
   @@index([inicio_periodo, fin_periodo], map: "idx_periodos")
+  @@index([grupo_masivo_id], map: "idx_grupo_masivo")
 }
 
 model tareas {

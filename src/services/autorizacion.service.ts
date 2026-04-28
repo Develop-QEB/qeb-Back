@@ -238,9 +238,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
   const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
 
-  // Caras impares requieren autorización DCM (excepto Kiosco)
+  // Caras impares requieren autorización DCM (excepto Kiosco y Digital/Circuitos)
   const isKiosco = (cara.formato || '').toUpperCase().includes('KIOSK') || (cara.formato || '').toUpperCase().includes('KIOSCO');
-  const oddCarasNeedsDcm = !isKiosco && totalCaras > 0 && totalCaras % 2 !== 0;
+  const isDigital = (cara.tipo || '').toLowerCase() === 'digital'
+    || (cara.formato || '').toUpperCase() === 'MIXTO'
+    || /^(RT|BF|CT|CF)-DIG-\d+-[A-Z]+$/i.test(cara.articulo || '');
+  const oddCarasNeedsDcm = !isKiosco && !isDigital && totalCaras > 0 && totalCaras % 2 !== 0;
 
   console.log('[calcularEstadoAutorizacion] Valores calculados:', {
     totalCaras,
@@ -544,13 +547,13 @@ export async function crearTareasAutorizacion(
   const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
-  // Verificar si ya existen tareas pendientes para evitar duplicados
+  // Verificar si ya existen tareas abiertas para evitar duplicados
   const tareasExistentes = await prisma.tareas.findMany({
     where: {
       id_solicitud: solicitudId.toString(),
       ...(propuestaId ? { id_propuesta: propuestaId.toString() } : {}),
       tipo: { contains: 'Autorización' },
-      estatus: 'Pendiente'
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
     },
     select: { tipo: true }
   });
@@ -1171,5 +1174,89 @@ export default {
   aprobarCaras,
   rechazarSolicitud,
   obtenerResumenAutorizacion,
-  enviarResumenAutorizacionesPendientes
+  enviarResumenAutorizacionesPendientes,
+  depurarTareasAutorizacionResueltas
 };
+
+/**
+ * Depura tareas de autorización que siguen como Pendiente/Activo
+ * pero cuyas caras ya fueron todas resueltas (aprobadas o rechazadas).
+ */
+export async function depurarTareasAutorizacionResueltas(): Promise<number> {
+  const tareasAbiertas = await prisma.tareas.findMany({
+    where: {
+      tipo: { contains: 'Autorización' },
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+    },
+    select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true },
+  });
+
+  let finalizadas = 0;
+
+  // Deduplicar: agrupar por (id_propuesta + tipo) y quedarse solo con la más reciente
+  const gruposPorPropuesta = new Map<string, typeof tareasAbiertas>();
+  for (const tarea of tareasAbiertas) {
+    const key = `${tarea.id_propuesta || tarea.id_solicitud}::${tarea.tipo}`;
+    if (!gruposPorPropuesta.has(key)) gruposPorPropuesta.set(key, []);
+    gruposPorPropuesta.get(key)!.push(tarea);
+  }
+  const duplicadasIds: number[] = [];
+  for (const grupo of gruposPorPropuesta.values()) {
+    if (grupo.length <= 1) continue;
+    grupo.sort((a, b) => b.id - a.id);
+    for (let i = 1; i < grupo.length; i++) duplicadasIds.push(grupo[i].id);
+  }
+  if (duplicadasIds.length > 0) {
+    await prisma.tareas.updateMany({
+      where: { id: { in: duplicadasIds } },
+      data: { estatus: 'Atendido' },
+    });
+    finalizadas += duplicadasIds.length;
+    console.log(`[DepurarAutorizaciones] ${duplicadasIds.length} tareas duplicadas finalizadas`);
+  }
+
+  // Ahora revisar las restantes (no duplicadas) por caras resueltas
+  const tareasRestantes = tareasAbiertas.filter(t => !duplicadasIds.includes(t.id));
+
+  for (const tarea of tareasRestantes) {
+    let idquote = tarea.id_propuesta;
+
+    if (!idquote && tarea.id_solicitud) {
+      const prop = await prisma.propuesta.findFirst({
+        where: { solicitud_id: parseInt(tarea.id_solicitud) },
+        select: { id: true },
+        orderBy: { id: 'desc' },
+      });
+      if (prop) idquote = String(prop.id);
+    }
+
+    if (!idquote) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+      continue;
+    }
+
+    const caras = await prisma.solicitudCaras.findMany({
+      where: { idquote },
+      select: { autorizacion_dg: true, autorizacion_dcm: true },
+    });
+
+    if (caras.length === 0) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+      continue;
+    }
+
+    const esDG = tarea.tipo?.includes('DG');
+    const campo = esDG ? 'autorizacion_dg' : 'autorizacion_dcm';
+    const tienePendientes = caras.some(c => (c as any)[campo] === 'pendiente');
+
+    if (!tienePendientes) {
+      await prisma.tareas.update({ where: { id: tarea.id }, data: { estatus: 'Atendido' } });
+      finalizadas++;
+    }
+  }
+
+  console.log(`[DepurarAutorizaciones] ${finalizadas} de ${tareasAbiertas.length} tareas finalizadas`);
+  return finalizadas;
+}
