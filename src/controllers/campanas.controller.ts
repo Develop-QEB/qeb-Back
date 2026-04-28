@@ -787,6 +787,12 @@ export class CampanasController {
             ]);
             console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
           }
+
+          await prisma.propuesta.update({
+            where: { id: cotizacionData.id_propuesta },
+            data: { status: 'Abierto' },
+          });
+          console.log(`[Rechazada] Campaña #${campanaId}: propuesta #${cotizacionData.id_propuesta} regresada a Abierto`);
         }
       }
 
