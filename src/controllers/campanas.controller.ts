@@ -10,7 +10,7 @@ import {
   verificarCarasPendientes,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
-import { autoReservarCircuito } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
@@ -7598,6 +7598,15 @@ export class CampanasController {
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
             return;
+          }
+        } else if (currentCaraFull?.grupo_rt_bf) {
+          // Mismas fechas + mismo articulo: solo cambió cantidad → redistribuir RT/BF
+          try {
+            await prisma.$transaction(async (tx) => {
+              await redistribuirReservasCircuito(tx, parseInt(caraId));
+            });
+          } catch (e: any) {
+            console.error('Error redistribuyendo reservas circuito:', e);
           }
         }
       }

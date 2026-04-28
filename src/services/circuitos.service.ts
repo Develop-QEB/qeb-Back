@@ -223,3 +223,109 @@ export async function autoReservarCircuito(params: AutoReservarParams): Promise<
     return r;
   });
 }
+
+/**
+ * Redistribuye reservas entre el par RT/BF de un circuito digital cuando
+ * se editan las cantidades. Se llama después de actualizar la cara editada.
+ *
+ * Lógica:
+ * - Cara RT: necesita exactamente `caras` reservas con estatus 'Vendido'.
+ * - Cara BF pareja (mismo grupo_rt_bf, periodo): necesita exactamente
+ *   `bonificacion` reservas con estatus 'Bonificado'.
+ *
+ * Si el RT tiene más reservas de las pedidas, MUEVE el excedente al BF
+ * (cambia solicitudCaras_id y estatus). Y al revés.
+ *
+ * Idempotente: si ya están en proporción correcta, no hace nada.
+ */
+export async function redistribuirReservasCircuito(
+  tx: Prisma.TransactionClient,
+  caraEditadaId: number
+): Promise<{ movidas: number } | null> {
+  // 1. Leer la cara editada
+  const caraRow = await tx.$queryRawUnsafe<{
+    id: number; articulo: string | null; caras: number; bonificacion: number | null;
+    grupo_rt_bf: number | null; inicio_periodo: Date; fin_periodo: Date; idquote: string | null;
+  }[]>(
+    `SELECT id, articulo, caras, bonificacion, grupo_rt_bf, inicio_periodo, fin_periodo, idquote
+     FROM solicitudCaras WHERE id = ?`,
+    caraEditadaId
+  );
+  const cara = caraRow[0];
+  if (!cara) return null;
+
+  // 2. Solo aplica a circuitos digitales con par RT/BF
+  if (!parseCircuitoDigital(cara.articulo || '') || !cara.grupo_rt_bf) return null;
+
+  // 3. Encontrar la cara pareja (mismo grupo_rt_bf, periodo, distinto id)
+  const parejas = await tx.$queryRawUnsafe<{
+    id: number; articulo: string | null; caras: number; bonificacion: number | null;
+  }[]>(
+    `SELECT id, articulo, caras, bonificacion
+     FROM solicitudCaras
+     WHERE grupo_rt_bf = ? AND inicio_periodo = ? AND fin_periodo = ?
+       AND id <> ? AND idquote = ?`,
+    cara.grupo_rt_bf, cara.inicio_periodo, cara.fin_periodo, cara.id, cara.idquote
+  );
+  const pareja = parejas[0];
+  if (!pareja) return null;
+
+  // 4. Identificar quién es RT y quién es BF
+  const esBfArt = (s: string | null | undefined) => {
+    const u = (s || '').toUpperCase();
+    return u.startsWith('BF') || u.startsWith('CF');
+  };
+  const caraEsRt = !esBfArt(cara.articulo);
+  const rt = caraEsRt ? cara : pareja;
+  const bf = caraEsRt ? pareja : cara;
+
+  // 5. Cantidad esperada por cada uno
+  const rtEsperado = Number(rt.caras) || 0;
+  const bfEsperado = Number(bf.bonificacion) || 0;
+
+  // 6. Reservas actuales de cada uno (activas)
+  const [rtRows, bfRows] = await Promise.all([
+    tx.$queryRawUnsafe<{ id: number }[]>(
+      `SELECT id FROM reservas WHERE solicitudCaras_id = ? AND deleted_at IS NULL ORDER BY id`,
+      rt.id
+    ),
+    tx.$queryRawUnsafe<{ id: number }[]>(
+      `SELECT id FROM reservas WHERE solicitudCaras_id = ? AND deleted_at IS NULL ORDER BY id`,
+      bf.id
+    ),
+  ]);
+  const rtActual = rtRows.length;
+  const bfActual = bfRows.length;
+
+  // 7. Calcular movimientos
+  let movidas = 0;
+  if (rtActual > rtEsperado && bfActual < bfEsperado) {
+    // Mover (rtActual - rtEsperado) del RT al BF (las últimas)
+    const aMover = Math.min(rtActual - rtEsperado, bfEsperado - bfActual);
+    if (aMover > 0) {
+      const ids = rtRows.slice(rtActual - aMover).map(r => r.id);
+      const ph = ids.map(() => '?').join(',');
+      await tx.$executeRawUnsafe(
+        `UPDATE reservas SET solicitudCaras_id = ?, estatus = 'Bonificado', estatus_original = 'Bonificado'
+         WHERE id IN (${ph})`,
+        bf.id, ...ids
+      );
+      movidas += aMover;
+    }
+  } else if (bfActual > bfEsperado && rtActual < rtEsperado) {
+    // Mover (bfActual - bfEsperado) del BF al RT
+    const aMover = Math.min(bfActual - bfEsperado, rtEsperado - rtActual);
+    if (aMover > 0) {
+      const ids = bfRows.slice(bfActual - aMover).map(r => r.id);
+      const ph = ids.map(() => '?').join(',');
+      await tx.$executeRawUnsafe(
+        `UPDATE reservas SET solicitudCaras_id = ?, estatus = 'Vendido', estatus_original = 'Vendido'
+         WHERE id IN (${ph})`,
+        rt.id, ...ids
+      );
+      movidas += aMover;
+    }
+  }
+
+  return { movidas };
+}
