@@ -808,18 +808,8 @@ export async function aprobarCaras(
       select: { usuario_id: true, nombre_usuario: true }
     });
 
-    // Si la tarea original tiene valores basura (ej. id_responsable=1 o responsable='Sistema'
-    // de migraciones), caer al creador real de la solicitud para que la notificación llegue
-    // al asesor correcto en lugar de propagar el dato inválido.
-    const origenResponsableValido = tareaOriginal?.id_responsable
-      && tareaOriginal.id_responsable > 1
-      && (tareaOriginal.responsable || '').trim().toLowerCase() !== 'sistema';
-    const destinatarioId = origenResponsableValido
-      ? tareaOriginal!.id_responsable
-      : solicitud?.usuario_id;
-    const destinatarioNombre = origenResponsableValido
-      ? (tareaOriginal!.responsable || '')
-      : (solicitud?.nombre_usuario || '');
+    const destinatarioId = solicitud?.usuario_id;
+    const destinatarioNombre = solicitud?.nombre_usuario || '';
     const origen = tareaOriginal?.contenido || 'solicitud';
     const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
     const idOrigen = origen === 'campana' ? (tareaOriginal?.campania_id || propuesta.solicitud_id)
@@ -925,20 +915,10 @@ export async function rechazarSolicitud(
     select: { usuario_id: true, nombre_usuario: true }
   });
 
-  // Si la tarea original tiene valores basura (ej. id_responsable=1 o responsable='Sistema'
-  // de migraciones), caer al creador real de la solicitud.
-  const origenResponsableValido = tareaOriginal?.id_responsable
-    && tareaOriginal.id_responsable > 1
-    && (tareaOriginal.responsable || '').trim().toLowerCase() !== 'sistema';
-  const destinatarioId = origenResponsableValido
-    ? tareaOriginal!.id_responsable
-    : solicitud?.usuario_id;
-  const destinatarioNombre = origenResponsableValido
-    ? (tareaOriginal!.responsable || '')
-    : (solicitud?.nombre_usuario || '');
+  const destinatarioId = solicitud?.usuario_id;
+  const destinatarioNombre = solicitud?.nombre_usuario || '';
 
   if (destinatarioId) {
-    // Determinar etiqueta del origen (Propuesta, Campaña o Solicitud)
     const origen = tareaOriginal?.contenido || 'solicitud';
     const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
     const idOrigen = origen === 'campana' ? (tareaOriginal?.campania_id || solicitudId)

@@ -1633,14 +1633,18 @@ export class PropuestasController {
         where: { id: propuesta.solicitud_id },
       });
 
+      // Declare outside transaction so post-tx code can use them
+      let cotizacion: any = null;
+      let campania: any = null;
+
       // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
         // Get cotizacion and campania INSIDE the transaction to avoid race conditions
-        const cotizacion = await tx.cotizacion.findFirst({
+        cotizacion = await tx.cotizacion.findFirst({
           where: { id_propuesta: propuestaId },
         });
 
-        const campania = cotizacion ? await tx.campania.findFirst({
+        campania = cotizacion ? await tx.campania.findFirst({
           where: { cotizacion_id: cotizacion.id },
         }) : null;
 
