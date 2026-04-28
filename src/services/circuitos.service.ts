@@ -188,6 +188,27 @@ export async function autoReservarCircuitoSiAplica(
     });
   }
 
+  // 9. Actualizar caras_flujo / caras_contraflujo en la cara con el conteo REAL
+  //    de las reservas creadas (basado en inventarios.tipo_de_cara). Así el form
+  //    muestra exactamente lo que se reservó, sin desfase con el ratio del circuito.
+  if (aReservar.length > 0) {
+    const reservadosIds = aReservar.map(r => r.inventario_id);
+    const phRes = reservadosIds.map(() => '?').join(',');
+    const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
+      `SELECT
+         SUM(CASE WHEN tipo_de_cara = 'Flujo' THEN 1 ELSE 0 END) AS flujo,
+         SUM(CASE WHEN tipo_de_cara = 'Contraflujo' THEN 1 ELSE 0 END) AS ctra
+       FROM inventarios WHERE id IN (${phRes})`,
+      ...reservadosIds
+    );
+    const flujoReal = Number(tipos[0]?.flujo || 0);
+    const ctraReal = Number(tipos[0]?.ctra || 0);
+    await tx.solicitudCaras.update({
+      where: { id: params.solicitudCaraId },
+      data: { caras_flujo: flujoReal, caras_contraflujo: ctraReal },
+    });
+  }
+
   return { reservadas: aReservar.length, conflictos: [] };
 }
 
