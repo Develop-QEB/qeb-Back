@@ -327,5 +327,27 @@ export async function redistribuirReservasCircuito(
     }
   }
 
+  // 8. Reconciliar caras_flujo / caras_contraflujo del RT con el split real de reservas.
+  //    Para circuitos digitales: los inventarios reservados pueden no respetar el ratio
+  //    proporcional que envió el frontend. Aquí garantizamos que los valores guardados
+  //    reflejen el split real, para que getCaraCompletionStatus muestre la cara como
+  //    "verde" cuando la cantidad total está completa.
+  const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
+    `SELECT
+       SUM(CASE WHEN i.tipo_de_cara = 'Flujo' THEN 1 ELSE 0 END) AS flujo,
+       SUM(CASE WHEN i.tipo_de_cara = 'Contraflujo' THEN 1 ELSE 0 END) AS ctra
+     FROM reservas r
+     JOIN espacio_inventario ei ON ei.id = r.inventario_id
+     JOIN inventarios i ON i.id = ei.inventario_id
+     WHERE r.solicitudCaras_id = ? AND r.deleted_at IS NULL`,
+    rt.id
+  );
+  const flujoReal = Number(tipos[0]?.flujo || 0);
+  const ctraReal = Number(tipos[0]?.ctra || 0);
+  await tx.solicitudCaras.update({
+    where: { id: rt.id },
+    data: { caras_flujo: flujoReal, caras_contraflujo: ctraReal },
+  });
+
   return { movidas };
 }

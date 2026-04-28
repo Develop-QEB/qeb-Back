@@ -7889,7 +7889,9 @@ export class CampanasController {
         }
       }
 
-      // Run all updates in a single transaction
+      // Run all updates in a single transaction.
+      // Timeout extendido: con grupos masivos puede iterar 10+ caras,
+      // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
 
@@ -8001,7 +8003,7 @@ export class CampanasController {
         }
 
         return results;
-      });
+      }, { maxWait: 15000, timeout: 60000 });
 
       // Registrar cambios en historial
       const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });

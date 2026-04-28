@@ -3888,7 +3888,9 @@ export class PropuestasController {
         }
       }
 
-      // Run all updates in a single transaction
+      // Run all updates in a single transaction.
+      // Timeout extendido: con grupos masivos puede iterar 10+ caras,
+      // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
 
@@ -3998,7 +4000,7 @@ export class PropuestasController {
         }
 
         return results;
-      });
+      }, { maxWait: 15000, timeout: 60000 });
 
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
