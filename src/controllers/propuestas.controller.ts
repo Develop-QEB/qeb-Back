@@ -1633,18 +1633,17 @@ export class PropuestasController {
         where: { id: propuesta.solicitud_id },
       });
 
-      // Get cotizacion
-      const cotizacion = await prisma.cotizacion.findFirst({
-        where: { id_propuesta: propuestaId },
-      });
-
-      // Get campania
-      const campania = cotizacion ? await prisma.campania.findFirst({
-        where: { cotizacion_id: cotizacion.id },
-      }) : null;
-
       // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
+        // Get cotizacion and campania INSIDE the transaction to avoid race conditions
+        const cotizacion = await tx.cotizacion.findFirst({
+          where: { id_propuesta: propuestaId },
+        });
+
+        const campania = cotizacion ? await tx.campania.findFirst({
+          where: { cotizacion_id: cotizacion.id },
+        }) : null;
+
         // 1. Call stored procedure for reservas
         await tx.$executeRaw`CALL actualizar_reservas(${propuestaId})`;
 
