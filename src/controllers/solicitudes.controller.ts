@@ -1914,7 +1914,10 @@ export class SolicitudesController {
           // Si la cara es parte de un grupo BF (grupo_rt_bf no null) → respetar cantidad pedida
           // (RT toma N libres, BF toma los restantes para no doblar reservas).
           // Sin grupo BF → comportamiento legacy (reservar todos los inventarios del circuito).
+          // Para BF: la cantidad real está en bonificacion (no en caras, que es 0)
           const tieneGrupoBf = !!cara.grupo_rt_bf;
+          const esBfArt = (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF');
+          const cantidadReal = esBfArt ? Number(cara.bonificacion) : Number(cara.caras);
           const autoRes = await autoReservarCircuitoSiAplica(tx, {
             solicitudCaraId: solicitudCara.id,
             itemCode: cara.articulo || articulo,
@@ -1922,8 +1925,8 @@ export class SolicitudesController {
             calendarioId: null,
             fechaInicio: new Date(cara.inicio_periodo),
             fechaFin: new Date(cara.fin_periodo),
-            esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
-            cantidad: tieneGrupoBf ? (cara.caras || undefined) : undefined,
+            esBf: esBfArt,
+            cantidad: tieneGrupoBf && cantidadReal > 0 ? cantidadReal : undefined,
           });
           if (autoRes) {
             console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
@@ -2905,7 +2908,10 @@ export class SolicitudesController {
             recreatedCaras.push(createdCara);
 
             // Auto-reserva circuito digital (en update se borraron reservas al deleteMany caras, por eso hay que reservar de nuevo)
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!cara.grupo_rt_bf;
+            const esBfArtUpd = (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF');
+            const cantidadRealUpd = esBfArtUpd ? Number(cara.bonificacion) : Number(cara.caras);
             const autoRes = await autoReservarCircuitoSiAplica(tx, {
               solicitudCaraId: createdCara.id,
               itemCode: cara.articulo || articulo,
@@ -2913,8 +2919,8 @@ export class SolicitudesController {
               calendarioId: null,
               fechaInicio: new Date(cara.inicio_periodo),
               fechaFin: new Date(cara.fin_periodo),
-              esBf: (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF'),
-              cantidad: tieneGrupoBfUpd ? (cara.caras || undefined) : undefined,
+              esBf: esBfArtUpd,
+              cantidad: tieneGrupoBfUpd && cantidadRealUpd > 0 ? cantidadRealUpd : undefined,
             });
             if (autoRes) {
               console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);

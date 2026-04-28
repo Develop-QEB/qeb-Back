@@ -7580,8 +7580,12 @@ export class CampanasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCaraFull?.grupo_rt_bf;
-            const cantidadUpd = data.caras ?? currentCaraFull?.caras ?? undefined;
+            const esBfArt = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
+            const cantidadUpd = esBfArt
+              ? (data.bonificacion ?? Number(currentCaraFull?.bonificacion || 0))
+              : (data.caras ?? currentCaraFull?.caras ?? 0);
             await autoReservarCircuito({
               solicitudCaraId: parseInt(caraId),
               itemCode: data.articulo,
@@ -7589,7 +7593,7 @@ export class CampanasController {
               calendarioId: null,
               fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
               fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
-              cantidad: tieneGrupoBfUpd ? cantidadUpd : undefined,
+              cantidad: tieneGrupoBfUpd && cantidadUpd > 0 ? cantidadUpd : undefined,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -7785,8 +7789,12 @@ export class CampanasController {
             where: { id: cotizacion.id_propuesta },
             select: { cliente_id: true },
           });
+          // Para BF: la cantidad real está en bonificacion (caras es 0)
           const tieneGrupoBfNew = !!data.grupo_rt_bf;
-          const cantidadNew = data.caras !== undefined && data.caras !== null ? data.caras : undefined;
+          const esBfArtNew = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
+          const cantidadNew = esBfArtNew
+            ? (data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : 0)
+            : (data.caras !== undefined && data.caras !== null ? data.caras : 0);
           await autoReservarCircuito({
             solicitudCaraId: cara.id,
             itemCode: data.articulo,
@@ -7794,7 +7802,7 @@ export class CampanasController {
             calendarioId: null,
             fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
             fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
-            cantidad: tieneGrupoBfNew ? cantidadNew : undefined,
+            cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
           });
         } catch (e: any) {
           await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});

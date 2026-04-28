@@ -3551,8 +3551,12 @@ export class PropuestasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCara.grupo_rt_bf;
-            const cantidadActual = caras !== undefined && caras !== null ? parseInt(caras) : (currentCara.caras || undefined);
+            const esBfArt = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
+            const cantidadReal = esBfArt
+              ? (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : Number(currentCara.bonificacion || 0))
+              : (caras !== undefined && caras !== null ? parseInt(caras) : Number(currentCara.caras || 0));
             await autoReservarCircuito({
               solicitudCaraId: parseInt(caraId),
               itemCode: articulo,
@@ -3560,7 +3564,7 @@ export class PropuestasController {
               calendarioId: null,
               fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
               fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
-              cantidad: tieneGrupoBfUpd ? cantidadActual : undefined,
+              cantidad: tieneGrupoBfUpd && cantidadReal > 0 ? cantidadReal : undefined,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -3746,8 +3750,12 @@ export class PropuestasController {
             where: { id: parseInt(id) },
             select: { cliente_id: true },
           });
+          // Para BF: la cantidad real está en bonificacion (caras es 0)
           const tieneGrupoBfNew = !!grupoRtBfCreate;
-          const cantidadNew = caras !== undefined && caras !== null ? parseInt(caras) : undefined;
+          const esBfArtNew = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
+          const cantidadNew = esBfArtNew
+            ? (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : 0)
+            : (caras !== undefined && caras !== null ? parseInt(caras) : 0);
           await autoReservarCircuito({
             solicitudCaraId: newCara.id,
             itemCode: articulo,
@@ -3755,7 +3763,7 @@ export class PropuestasController {
             calendarioId: null,
             fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
             fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
-            cantidad: tieneGrupoBfNew ? cantidadNew : undefined,
+            cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
           });
         } catch (e: any) {
           // Rollback manual
