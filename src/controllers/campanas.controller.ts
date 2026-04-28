@@ -1083,26 +1083,44 @@ export class CampanasController {
         return;
       }
 
-      // Obtener fechas de las catorcenas seleccionadas
+      // Obtener fechas según tipo_periodo de la cotización (catorcena vs mensual)
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
 
-      if (catorcenaInicioNum && catorcenaInicioAnio) {
-        const catIni = await prisma.catorcenas.findFirst({
-          where: { numero_catorcena: catorcenaInicioNum, a_o: catorcenaInicioAnio },
-        });
-        if (catIni) fechaInicio = catIni.fecha_inicio;
-      }
-
-      if (catorcenaFinNum && catorcenaFinAnio) {
-        const catFin = await prisma.catorcenas.findFirst({
-          where: { numero_catorcena: catorcenaFinNum, a_o: catorcenaFinAnio },
-        });
-        if (catFin) fechaFin = catFin.fecha_fin;
-      }
-
-      // Obtener cotizacion_id
+      // Detectar tipo_periodo de la cotización asociada a la campaña
       const cotizacionId = campanaActual.cotizacion_id;
+      let tipoPeriodo: string = 'catorcena';
+      if (cotizacionId) {
+        const cot = await prisma.cotizacion.findUnique({
+          where: { id: cotizacionId },
+          select: { tipo_periodo: true },
+        });
+        tipoPeriodo = cot?.tipo_periodo || 'catorcena';
+      }
+
+      if (tipoPeriodo === 'mensual') {
+        // En mensual, los "Num" son mes 1-12. Construir primer/último día del mes.
+        if (catorcenaInicioNum && catorcenaInicioAnio) {
+          fechaInicio = new Date(Date.UTC(catorcenaInicioAnio, catorcenaInicioNum - 1, 1));
+        }
+        if (catorcenaFinNum && catorcenaFinAnio) {
+          // Último día del mes: día 0 del mes siguiente
+          fechaFin = new Date(Date.UTC(catorcenaFinAnio, catorcenaFinNum, 0));
+        }
+      } else {
+        if (catorcenaInicioNum && catorcenaInicioAnio) {
+          const catIni = await prisma.catorcenas.findFirst({
+            where: { numero_catorcena: catorcenaInicioNum, a_o: catorcenaInicioAnio },
+          });
+          if (catIni) fechaInicio = catIni.fecha_inicio;
+        }
+        if (catorcenaFinNum && catorcenaFinAnio) {
+          const catFin = await prisma.catorcenas.findFirst({
+            where: { numero_catorcena: catorcenaFinNum, a_o: catorcenaFinAnio },
+          });
+          if (catFin) fechaFin = catFin.fecha_fin;
+        }
+      }
 
       if (cotizacionId) {
         // Obtener propuesta y solicitud relacionadas
