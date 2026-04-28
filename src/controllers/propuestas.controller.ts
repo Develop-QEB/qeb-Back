@@ -3337,25 +3337,36 @@ export class PropuestasController {
         });
 
         if (cotizacion) {
-          // Calculate new dates from catorcenas if provided
+          // Detectar tipo_periodo para interpretar correctamente catorcena_inicio/catorcena_fin
+          const tipoPeriodo = (cotizacion as { tipo_periodo?: string }).tipo_periodo || 'catorcena';
           let fechaInicio: Date | undefined;
           let fechaFin: Date | undefined;
 
-          if (year_inicio && catorcena_inicio) {
-            const catInicio = await prisma.catorcenas.findFirst({
-              where: { a_o: year_inicio, numero_catorcena: catorcena_inicio },
-            });
-            if (catInicio) {
-              fechaInicio = catInicio.fecha_inicio;
+          if (tipoPeriodo === 'mensual') {
+            // En mensual los valores son mes 1-12; construir primer/último día del mes
+            if (year_inicio && catorcena_inicio) {
+              fechaInicio = new Date(Date.UTC(year_inicio, catorcena_inicio - 1, 1));
             }
-          }
+            if (year_fin && catorcena_fin) {
+              fechaFin = new Date(Date.UTC(year_fin, catorcena_fin, 0));
+            }
+          } else {
+            if (year_inicio && catorcena_inicio) {
+              const catInicio = await prisma.catorcenas.findFirst({
+                where: { a_o: year_inicio, numero_catorcena: catorcena_inicio },
+              });
+              if (catInicio) {
+                fechaInicio = catInicio.fecha_inicio;
+              }
+            }
 
-          if (year_fin && catorcena_fin) {
-            const catFin = await prisma.catorcenas.findFirst({
-              where: { a_o: year_fin, numero_catorcena: catorcena_fin },
-            });
-            if (catFin) {
-              fechaFin = catFin.fecha_fin;
+            if (year_fin && catorcena_fin) {
+              const catFin = await prisma.catorcenas.findFirst({
+                where: { a_o: year_fin, numero_catorcena: catorcena_fin },
+              });
+              if (catFin) {
+                fechaFin = catFin.fecha_fin;
+              }
             }
           }
 
