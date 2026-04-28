@@ -893,7 +893,78 @@ Puedes guiar al usuario paso a paso en estas acciones:
 - Crear una Orden de Programacion o Instalacion
 - Cambiar el estatus de una propuesta a "Atendido"
 - Exportar datos a CSV o XLSX
-- Cambiar contrasena y editar perfil`;
+- Cambiar contrasena y editar perfil
+
+=== BASE DE DATOS - REFERENCIA TECNICA ===
+
+La base de datos de QEB (MySQL) tiene las siguientes tablas principales organizadas por el flujo comercial:
+
+CADENA PRINCIPAL (flujo comercial):
+solicitud -> propuesta (via solicitud_id) -> cotizacion (via id_propuesta) -> campania (via cotizacion_id) -> tareas (via campania_id)
+
+CONVENCION DE IDs: campania.id = propuesta.id = cotizacion.id por convencion de autoincrement. Esta equivalencia NO esta forzada por foreign keys, sino por el orden de creacion. Es la columna vertebral del sistema.
+
+TABLAS Y SUS PANTALLAS:
+- solicitud: Pantalla Solicitudes. Primera etapa del flujo. Status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida. Soft delete (deleted_at).
+- propuesta: Pantalla Propuestas. Propuesta comercial para un cliente. Status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada. Soft delete (deleted_at).
+- cotizacion: Sin pantalla propia. Tabla puente entre propuesta y campania. Se crea automaticamente al aprobar propuesta.
+- campania: Pantalla Campanas. Propuesta aprobada en ejecucion. Status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada. NUNCA eliminar (rompe autoincrement de IDs).
+- solicitudCaras: Modal de asignar inventario en Propuestas/Campanas. Cada registro es un grupo de caras/circuitos. Ligada a propuesta via idquote (propuesta.id como string). Tiene campos de autorizacion DG/DCM.
+- reservas: Modal de reservar inventario. Cada registro reserva un mueble (inventario) para un periodo y cliente. Ligada a solicitudCaras via solicitudCaras_id y a inventarios via inventario_id. Soft delete (deleted_at). Tiene campo APS (numero de entrega SAP).
+- inventarios: Pantalla Inventarios y Mapa. Catalogo de muebles publicitarios con ubicacion, coordenadas, tarifas, tipo (Tradicional/Digital).
+- espacio_inventario: Espacios digitales individuales dentro de un mueble digital.
+- cliente: Pantalla Clientes. Catalogo de clientes desde SAP. Tiene CUIC, card_code, sap_database. HARD DELETE (sin deleted_at).
+- usuario: Pantalla Admin Usuarios y Login. Roles: Normal, Admin, Dev, Direccion General, Direccion Comercial. Soft delete (deleted_at).
+- tareas: Pantalla Notificaciones/Mis Tareas. Multipropósito: ordenes de programacion, revision de arte, autorizaciones, notificaciones. Ligada a campania via campania_id.
+- comentarios: Comentarios en solicitudes, propuestas y campanas. Campo origen indica el modulo.
+- historial: Auditoria de cambios en propuestas y campanas. SOLO LECTURA, NUNCA editar ni eliminar.
+- historial_comentarios: Historial de comentarios con cambios de status de propuestas. SOLO LECTURA.
+- catorcenas: Periodos de 14 dias. SOLO LECTURA, NUNCA editar (rompe calculos de periodos).
+- calendario: Periodos genericos usados por reservas.
+- criterios_autorizacion: Umbrales de tarifa y caras para determinar si requiere autorizacion DG/DCM.
+- imagenes_digitales: Artes digitales por reserva. Workflow de aprobacion (Pendiente, Aprobado, Rechazado). Ligada a reservas via id_reserva.
+- artes_tradicionales: Artes para medios impresos por reserva. Sin workflow de aprobacion.
+- archivos: Archivos adjuntos a campanas y tareas.
+- correos_enviados: Log de correos del sistema. SOLO LECTURA.
+- proveedores: Catalogo de proveedores (impresores, instaladores). Soft delete.
+- notas_personales: Notas privadas de cada usuario.
+- tickets: Sistema de soporte. CASCADE a ticket_mensajes, ticket_vistas, ticket_chat, ticket_chat_vistas.
+- equipo / usuario_equipo: Equipos de trabajo. CASCADE bidireccional en usuario_equipo.
+- solicitud_original: Copia de la solicitud al ser atendida. AUDITORIA, NUNCA editar.
+- chatbot_logs: Log de interacciones con QEBooh.
+- comentarios_revision_artes: Comentarios en tareas de revision de artes.
+- session_locks: Bloqueo por modulo para ediciones concurrentes. Se puede limpiar libremente.
+- version: Numero de version del sistema.
+
+RELACIONES CLAVE (si tocas una tabla, afectas a las que dependen de ella):
+- campania afecta: tareas, comentarios, historial, archivos
+- propuesta afecta: solicitudCaras, cotizacion, historial_comentarios, tareas
+- cotizacion afecta: campania (rompe cadena propuesta->campana)
+- solicitudCaras afecta: reservas (TODAS las reservas de esa cara)
+- reservas afecta: imagenes_digitales, artes_tradicionales
+- inventarios afecta: reservas, espacio_inventario
+- cliente afecta: solicitud, propuesta, campania, reservas (TODO queda huerfano)
+- usuario afecta: usuario_equipo (CASCADE), tareas, solicitudes
+- tickets afecta: ticket_mensajes, ticket_vistas, ticket_chat, ticket_chat_vistas (CASCADE)
+
+REGLAS CRITICAS DE LA BASE DE DATOS:
+1. NUNCA usar DELETE directo en tablas con soft delete (propuesta, solicitud, reservas, usuario, proveedores). Usar deleted_at.
+2. NUNCA eliminar registros de campania (rompe autoincrement y la equivalencia de IDs).
+3. NUNCA modificar IDs (autoincrement PK) de ninguna tabla.
+4. Cambios de status SIEMPRE via API/endpoints, nunca directo en BD (omite validaciones, historial, notificaciones y liberacion de inventario).
+5. La tabla cliente usa HARD DELETE. Eliminar un cliente deja huerfanos solicitudes, propuestas y campanas.
+6. Las tablas historial, historial_comentarios, correos_enviados y solicitud_original son de AUDITORIA y NUNCA deben editarse ni eliminarse.
+7. Los campos posted_to_sap y posted_aps en campania controlan la integracion con SAP. Editarlos causa duplicaciones o perdida de datos en SAP.
+8. Los campos APS en reservas vienen de SAP. Editarlos desincroniza QEB con SAP.
+
+CAMPOS DE STATUS Y SUS VALORES VALIDOS:
+- solicitud.status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida
+- propuesta.status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada
+- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada
+- tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado
+- reservas.arte_aprobado: Pendiente, Aprobado, Rechazado
+- imagenes_digitales.aprobado_rechazado: Pendiente, Aprobado, Rechazado
+- tickets.status: Nuevo, En Progreso, Resuelto, Cerrado`;
 
 function buildUserContext(nombre: string, rol: string, permisos: string | null): string {
   return `
@@ -1004,7 +1075,43 @@ Clasificaciones:
 - DUDA: Si NO entiendes bien que pide el usuario, o no tienes suficiente contexto/conocimiento para dar una respuesta util. Cuando uses DUDA, NO escribas respuesta al usuario (deja vacio antes del tag). En la NOTA_INTERNA explica QUE es lo que no entiendes y QUE necesitas saber para poder responder
 
 La NOTA_INTERNA debe ser tecnica y honesta (aqui SI puedes decir si crees que es un bug, error de datos, problema de migracion, etc.). Esta nota SOLO la ve el equipo de desarrollo, NO el usuario.
-IMPORTANTE en la NOTA_INTERNA: Usa SIEMPRE el nombre real del usuario (ej: "Jos reporta que..."), NUNCA uses "Usuario DEV", "el usuario" ni referencias genericas.`;
+IMPORTANTE en la NOTA_INTERNA: Usa SIEMPRE el nombre real del usuario (ej: "Jos reporta que..."), NUNCA uses "Usuario DEV", "el usuario" ni referencias genericas.
+
+=== BASE DE DATOS - REFERENCIA PARA NOTAS INTERNAS ===
+
+Usa esta informacion para generar NOTA_INTERNA mas precisas, indicando tablas y columnas especificas que el equipo de desarrollo deberia revisar.
+
+CADENA PRINCIPAL: solicitud -> propuesta (via solicitud_id) -> cotizacion (via id_propuesta) -> campania (via cotizacion_id) -> tareas (via campania_id)
+CONVENCION: campania.id = propuesta.id = cotizacion.id por autoincrement.
+
+TABLAS CRITICAS Y SUS RELACIONES:
+- campania: id, cotizacion_id, cliente_id, status, posted_to_sap, posted_aps. Afecta: tareas (campania_id), comentarios, historial.
+- propuesta: id, solicitud_id, cliente_id, status, deleted_at. Afecta: solicitudCaras (idquote), cotizacion (id_propuesta), historial_comentarios.
+- cotizacion: id, id_propuesta, clientes_id, tipo_periodo. Afecta: campania (cotizacion_id).
+- solicitudCaras: id, idquote (=propuesta.id como string), autorizacion_dg, autorizacion_dcm, caras_flujo, caras_contraflujo. Afecta: reservas (solicitudCaras_id).
+- reservas: id, inventario_id, solicitudCaras_id, calendario_id, deleted_at, estatus, arte_aprobado, APS. Afecta: imagenes_digitales (id_reserva), artes_tradicionales (id_reserva).
+- inventarios: id, codigo_unico, tradicional_digital, tarifa_piso, tarifa_publica, total_espacios, estatus, cto. Afecta: reservas, espacio_inventario.
+- cliente: id, CUIC, card_code, sap_database. HARD DELETE. Afecta: solicitud, propuesta, campania, reservas.
+- usuario: id, correo_electronico, user_role, deleted_at. CASCADE a usuario_equipo.
+- tareas: id, tipo, estatus, id_responsable, campania_id, ids_reservas.
+- tickets: id, status, usuario_id. CASCADE a ticket_mensajes, ticket_vistas, ticket_chat, ticket_chat_vistas.
+- criterios_autorizacion: formato, tipo, plaza, tarifa_max_dg, tarifa_min_dcm, tarifa_max_dcm, activo.
+
+STATUS VALIDOS:
+- solicitud.status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida
+- propuesta.status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada
+- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada
+- tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado
+
+PROBLEMAS COMUNES EN BD:
+- Status incorrecto en propuestas (ej: deberia ser "Aprobada" pero dice "Atendido") -> tabla propuesta, columna status
+- Reservas no liberadas al rechazar campania -> tabla reservas, columna deleted_at deberia tener fecha
+- APS duplicados o faltantes -> tabla reservas, columna APS, y campania.posted_aps
+- Cliente no encontrado -> tabla cliente (usa HARD DELETE, puede haberse eliminado)
+- Caras desincronizadas -> tabla solicitudCaras, columnas caras_flujo/caras_contraflujo vs conteo real de reservas
+- Inventario aparece ocupado cuando no deberia -> tabla reservas, verificar deleted_at IS NULL para ese inventario_id
+- Propuesta bloqueada ("no se puede editar") -> propuesta.status = "Aprobada" y tiene campania activa (guard en backend)
+- Autorizacion DG/DCM trabada -> tabla solicitudCaras, columnas autorizacion_dg/autorizacion_dcm en "pendiente", verificar tarea tipo "Autorizacion DG/DCM" en tabla tareas`;
 
 export class ChatbotController {
   private client: Anthropic | null = null;
