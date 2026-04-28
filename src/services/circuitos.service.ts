@@ -188,10 +188,11 @@ export async function autoReservarCircuitoSiAplica(
     });
   }
 
-  // 9. Actualizar caras_flujo / caras_contraflujo en la cara con el conteo REAL
-  //    de las reservas creadas (basado en inventarios.tipo_de_cara). Así el form
-  //    muestra exactamente lo que se reservó, sin desfase con el ratio del circuito.
-  if (aReservar.length > 0) {
+  // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT).
+  //    El BF guarda su cantidad en `bonificacion`; caras_flujo/contraflujo deben
+  //    quedarse en 0 para no duplicar el conteo en getCaraCompletionStatus.
+  const esBfArt = prefijo === 'BF' || prefijo === 'CF' || prefijo === 'CT' || params.esBf;
+  if (aReservar.length > 0 && !esBfArt) {
     const reservadosIds = aReservar.map(r => r.inventario_id);
     const phRes = reservadosIds.map(() => '?').join(',');
     const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
