@@ -3984,6 +3984,19 @@ export class PropuestasController {
           }
         }
 
+        // Post-pass: redistribuir reservas RT/BF para circuitos digitales con cambio de cantidad
+        const gruposRedistribuidos = new Set<number>();
+        for (const result of results) {
+          if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (!isCircuitoDigital(result.articulo || '')) continue;
+          gruposRedistribuidos.add(result.grupo_rt_bf);
+          try {
+            await redistribuirReservasCircuito(tx, result.id);
+          } catch (e) {
+            console.error('[bulkUpdateCaras] Error redistribuyendo reservas circuito:', e);
+          }
+        }
+
         return results;
       });
 

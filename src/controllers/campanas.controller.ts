@@ -7987,6 +7987,19 @@ export class CampanasController {
           }
         }
 
+        // Post-pass: redistribuir reservas RT/BF para circuitos digitales
+        const gruposRedistribuidos = new Set<number>();
+        for (const result of results) {
+          if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (!isCircuitoDigital(result.articulo || '')) continue;
+          gruposRedistribuidos.add(result.grupo_rt_bf);
+          try {
+            await redistribuirReservasCircuito(tx, result.id);
+          } catch (e) {
+            console.error('[campanas.bulkUpdateCaras] Error redistribuyendo reservas circuito:', e);
+          }
+        }
+
         return results;
       });
 
