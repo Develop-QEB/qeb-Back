@@ -551,7 +551,7 @@ export class SolicitudesController {
       if (solicitudIds.length > 0) {
         const placeholders = solicitudIds.map(() => '?').join(',');
         const enrichmentData = await prisma.$queryRawUnsafe<any[]>(`
-          SELECT
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
             s.id as solicitud_id,
             ct.tipo_periodo,
             ct.nombre_campania,
@@ -565,7 +565,7 @@ export class SolicitudesController {
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
           LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
           WHERE s.id IN (${placeholders})
@@ -604,7 +604,7 @@ export class SolicitudesController {
             SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_filtrado
             FROM solicitud s
             LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE s.id IN (${placeholders})
