@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "nodemon --exec ts-node src/server.ts",
-    "build": "prisma generate && tsc",
+    "build": "prisma generate && rm -rf dist && tsc",
     "db:push": "prisma db push --accept-data-loss",
     "start": "node dist/server.js",
     "prisma:pull": "prisma db pull",
