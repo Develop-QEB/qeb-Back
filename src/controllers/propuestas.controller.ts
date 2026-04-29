@@ -428,14 +428,25 @@ export class PropuestasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          whereConditions += ' AND pr.id = ?';
-          params.push(searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
-          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
+          searchOrConditions.push(`(pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`);
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        }
+
+        if (searchOrConditions.length > 0) {
+          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
         }
       }
 
