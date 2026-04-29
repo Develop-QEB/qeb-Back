@@ -1078,6 +1078,12 @@ export class CampanasController {
         asignados,
         id_asignado,
         IMU,
+        cliente_id,
+        cuic,
+        razon_social,
+        marca_nombre,
+        asesor,
+        sap_database,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1153,6 +1159,11 @@ export class CampanasController {
                 ...(descripcion !== undefined && { descripcion }),
                 ...(notas !== undefined && { notas }),
                 ...(IMU !== undefined && { IMU: IMU ? 1 : 0 }),
+                ...(cuic !== undefined && { cuic: String(cuic) }),
+                ...(razon_social !== undefined && { razon_social }),
+                ...(marca_nombre !== undefined && { marca_nombre }),
+                ...(asesor !== undefined && { asesor }),
+                ...(sap_database !== undefined && { sap_database }),
               },
             });
           }
@@ -1165,6 +1176,7 @@ export class CampanasController {
               ...(notas !== undefined && { notas }),
               ...(asignados !== undefined && { asignado: asignados }),
               ...(id_asignado !== undefined && { id_asignado }),
+              ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
             },
           });
         }
