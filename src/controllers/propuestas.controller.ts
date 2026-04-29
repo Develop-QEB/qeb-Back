@@ -428,20 +428,15 @@ export class PropuestasController {
       }
 
       if (search) {
-        const searchPattern = `%${search}%`;
-        // EXISTS sobre solicitudCaras con LIKE sobre formato es lento; solo lo
-        // disparamos cuando la búsqueda parece un formato (no es solo numérica).
-        const looksLikeFormatoSearch = search.length > 3 && !/^\d+$/.test(search);
-
-        let searchClause = `(CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
-
-        if (looksLikeFormatoSearch) {
-          searchClause += ` OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?)`;
-          params.push(searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          whereConditions += ' AND pr.id = ?';
+          params.push(searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
         }
-        searchClause += ')';
-        whereConditions += ` AND ${searchClause}`;
       }
 
       // Period filter — filter by cotizacion/campania dates
@@ -1373,9 +1368,15 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
-        const searchPattern = `%${search}%`;
-        statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          whereConditions += ' AND pr.id = ?';
+          statsParams.push(searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+          statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        }
       }
 
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -2142,9 +2143,15 @@ export class PropuestasController {
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
-        const sp = `%${search}%`;
-        params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp, sp);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          whereConditions += ' AND pr.id = ?';
+          params.push(searchNum);
+        } else {
+          const sp = `%${search}%`;
+          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+          params.push(sp, sp, sp, sp);
+        }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         whereConditions += ` AND cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)`;

@@ -205,6 +205,16 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
       console.log(`[Socket] ${socket.id} salió de ticket-chat-${ticketId}`);
     });
 
+    socket.on('join-historial', () => {
+      socket.join('historial');
+      console.log(`[Socket] ${socket.id} se unió a historial`);
+    });
+
+    socket.on('leave-historial', () => {
+      socket.leave('historial');
+      console.log(`[Socket] ${socket.id} salió de historial`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`[Socket] Cliente desconectado: ${socket.id}`);
     });
@@ -295,6 +305,9 @@ export const SOCKET_EVENTS = {
   TICKET_MENSAJE_NUEVO: 'ticket:mensaje:nuevo',
   TICKET_STATUS_CHANGED: 'ticket:status:changed',
   TICKET_CHAT_NUEVO: 'ticket:chat:nuevo',
+
+  // Historial de Acciones
+  HISTORIAL_NUEVA: 'historial:nueva',
 };
 
 // Helper para emitir a una campaña específica
@@ -382,6 +395,14 @@ export function emitToInventario(event: string, data: unknown): void {
   if (io) {
     io.to('inventario').emit(event, data);
     console.log(`[Socket] Emitido ${event} a inventario`);
+  }
+}
+
+// Helper para emitir al room de historial de acciones
+export function emitToHistorial(event: string, data: unknown): void {
+  if (io) {
+    io.to('historial').emit(event, data);
+    console.log(`[Socket] Emitido ${event} a historial`);
   }
 }
 
