@@ -65,7 +65,7 @@ export class InventariosController {
           `SELECT DISTINCT epIn.inventario_id
            FROM campania cm
            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
            INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
            WHERE cm.id = ?`,
@@ -271,7 +271,7 @@ export class InventariosController {
           `SELECT DISTINCT epIn.inventario_id
            FROM campania cm
            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-           INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
            INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
            WHERE cm.id = ?`,
@@ -723,7 +723,7 @@ export class InventariosController {
           JOIN inventarios i ON i.id = ei.inventario_id
           JOIN calendario cal ON cal.id = r.calendario_id
           JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-          JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
+          JOIN propuesta p ON sc.idquote = CAST(p.id AS CHAR)
           JOIN solicitud s ON s.id = p.solicitud_id
           JOIN cliente c ON c.CUIC = s.cliente_id
           WHERE c.T2_U_Categoria = ${excluir_categoria as string}
@@ -929,7 +929,7 @@ export class InventariosController {
         FROM espacio_inventario epIn
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          LEFT JOIN cotizacion ct ON ct.id_propuesta = CAST(sc.idquote AS UNSIGNED)
+          LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           LEFT JOIN cliente cl2 ON cl2.CUIC = cl.CUIC AND cl2.T0_U_RazonSocial IS NOT NULL AND cl2.id != cl.id
@@ -1601,7 +1601,7 @@ export class InventariosController {
            INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
            INNER JOIN calendario cal ON cal.id = rsv.calendario_id
            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-           INNER JOIN propuesta p ON p.id = CAST(sc.idquote AS UNSIGNED)
+           INNER JOIN propuesta p ON sc.idquote = CAST(p.id AS CHAR)
            INNER JOIN campania camp ON camp.cotizacion_id = p.id
            WHERE ei.inventario_id IN (${placeholders2})
              AND rsv.deleted_at IS NULL

@@ -428,7 +428,7 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ? OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?))`;
+        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ? OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) AND _sc.formato LIKE ?))`;
         const searchPattern = `%${search}%`;
         params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
@@ -475,7 +475,7 @@ export class PropuestasController {
 
       // Count y main query en paralelo
       const countQuery = `
-        SELECT COUNT(DISTINCT pr.id) as total
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
@@ -486,7 +486,7 @@ export class PropuestasController {
 
       const offset = (page - 1) * limit;
       const mainQuery = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           pr.id,
           pr.cliente_id,
           pr.fecha,
@@ -532,7 +532,7 @@ export class PropuestasController {
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
-        LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+        LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -576,7 +576,7 @@ export class PropuestasController {
         const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
           SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
           FROM propuesta pr
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
             AND sc.inicio_periodo <= ?
             AND sc.fin_periodo >= ?
           WHERE pr.id IN (${placeholders})
@@ -1729,7 +1729,7 @@ export class PropuestasController {
             cat.fecha_inicio <= sc.fin_periodo AND cat.fecha_fin >= sc.inicio_periodo
           )
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
           WHERE ct.id = ?
           GROUP BY cat.numero_catorcena, cat.año, cat.fecha_inicio, cat.fecha_fin
           ORDER BY cat.año, cat.numero_catorcena
@@ -2212,7 +2212,7 @@ export class PropuestasController {
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena, cat.año as anio_catorcena
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
@@ -2232,7 +2232,7 @@ export class PropuestasController {
           COUNT(r2.id) AS reservas_count,
           cat.numero_catorcena, cat.año AS anio_catorcena
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
           LEFT JOIN reservas r2 ON r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
@@ -3337,25 +3337,36 @@ export class PropuestasController {
         });
 
         if (cotizacion) {
-          // Calculate new dates from catorcenas if provided
+          // Detectar tipo_periodo para interpretar correctamente catorcena_inicio/catorcena_fin
+          const tipoPeriodo = (cotizacion as { tipo_periodo?: string }).tipo_periodo || 'catorcena';
           let fechaInicio: Date | undefined;
           let fechaFin: Date | undefined;
 
-          if (year_inicio && catorcena_inicio) {
-            const catInicio = await prisma.catorcenas.findFirst({
-              where: { a_o: year_inicio, numero_catorcena: catorcena_inicio },
-            });
-            if (catInicio) {
-              fechaInicio = catInicio.fecha_inicio;
+          if (tipoPeriodo === 'mensual') {
+            // En mensual los valores son mes 1-12; construir primer/último día del mes
+            if (year_inicio && catorcena_inicio) {
+              fechaInicio = new Date(Date.UTC(year_inicio, catorcena_inicio - 1, 1));
             }
-          }
+            if (year_fin && catorcena_fin) {
+              fechaFin = new Date(Date.UTC(year_fin, catorcena_fin, 0));
+            }
+          } else {
+            if (year_inicio && catorcena_inicio) {
+              const catInicio = await prisma.catorcenas.findFirst({
+                where: { a_o: year_inicio, numero_catorcena: catorcena_inicio },
+              });
+              if (catInicio) {
+                fechaInicio = catInicio.fecha_inicio;
+              }
+            }
 
-          if (year_fin && catorcena_fin) {
-            const catFin = await prisma.catorcenas.findFirst({
-              where: { a_o: year_fin, numero_catorcena: catorcena_fin },
-            });
-            if (catFin) {
-              fechaFin = catFin.fecha_fin;
+            if (year_fin && catorcena_fin) {
+              const catFin = await prisma.catorcenas.findFirst({
+                where: { a_o: year_fin, numero_catorcena: catorcena_fin },
+              });
+              if (catFin) {
+                fechaFin = catFin.fecha_fin;
+              }
             }
           }
 
