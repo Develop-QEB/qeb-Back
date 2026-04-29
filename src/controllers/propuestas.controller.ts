@@ -387,7 +387,7 @@ export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
@@ -1336,7 +1336,18 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
 
-      // Build WHERE conditions (same logic as getAll)
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+
+      const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const statsParams: any[] = [];
 
@@ -1356,14 +1367,11 @@ export class PropuestasController {
         statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
       }
 
-      // Period filter
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        const catorcenasInicioData = await prisma.catorcenas.findFirst({
-          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
-        });
-        const catorcenasFinData = await prisma.catorcenas.findFirst({
-          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
-        });
+        const [catorcenasInicioData, catorcenasFinData] = await Promise.all([
+          prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
+          prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
+        ]);
         if (catorcenasInicioData && catorcenasFinData) {
           whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
           statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
@@ -1376,27 +1384,17 @@ export class PropuestasController {
         statsParams.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
-      // Visibility filter
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id IN (${placeholders})
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          statsParams.push(String(userId), ...teamIds, String(userId));
-        } else {
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id = ?
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          statsParams.push(String(userId), userId, String(userId));
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          const emptyResponse = { success: true, data: { total: 0, byStatus: {}, pendientes: 0, aprobadas: 0, rechazadas: 0 } };
+          res.json(emptyResponse);
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        whereConditions += ` AND pr.id IN (${visiblePh})`;
+        statsParams.push(...visibleIds);
       }
 
       const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
@@ -1419,17 +1417,20 @@ export class PropuestasController {
         total += count;
       });
 
-      res.json({
+      const response = {
         success: true,
         data: {
           total,
           byStatus,
-          // Keep legacy fields for compatibility
           pendientes: byStatus['Abierto'] || byStatus['Pendiente'] || byStatus['Por aprobar'] || 0,
           aprobadas: byStatus['Atendido'] || byStatus['Aprobada'] || byStatus['Activa'] || 0,
           rechazadas: byStatus['Rechazada'] || 0,
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadisticas';
       res.status(500).json({
