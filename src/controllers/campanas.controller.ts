@@ -1216,6 +1216,7 @@ export class CampanasController {
           ...(status !== undefined && { status }),
           ...(fechaInicio && { fecha_inicio: fechaInicio }),
           ...(fechaFin && { fecha_fin: fechaFin }),
+          ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
         },
       });
 
