@@ -75,7 +75,7 @@ export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
@@ -1285,7 +1285,18 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
 
-      // Build WHERE — same logic as getAll
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+
+      const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
@@ -1330,40 +1341,21 @@ export class CampanasController {
         }
       }
 
-      // Visibility filter
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(...teamIds, String(userId), String(userId), userId);
-        } else {
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(userId, String(userId), String(userId), userId);
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          const emptyResponse = { success: true, data: { total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0 } };
+          res.json(emptyResponse);
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        conditions.push(`cm.id IN (${visiblePh})`);
+        params.push(...visibleIds);
       }
 
       const whereClause = conditions.join(' AND ');
 
-      // Total + status breakdown + APS count in a single query
       const rows = await prisma.$queryRawUnsafe<Array<{
         status: string | null;
         cnt: bigint;
@@ -1372,19 +1364,17 @@ export class CampanasController {
         SELECT
           cm.status,
           COUNT(*) as cnt,
-          SUM(CASE WHEN aps_check.cotizacion_id IS NOT NULL THEN 1 ELSE 0 END) as con_aps
+          SUM(CASE WHEN EXISTS (
+            SELECT 1 FROM solicitudCaras sc_a
+            INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id
+            WHERE sc_a.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+              AND rsv_a.deleted_at IS NULL AND rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
+          ) THEN 1 ELSE 0 END) as con_aps
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        LEFT JOIN (
-          SELECT DISTINCT ct_a.id AS cotizacion_id
-          FROM cotizacion ct_a
-          INNER JOIN solicitudCaras sc_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id AND rsv_a.deleted_at IS NULL
-          WHERE rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
-        ) aps_check ON aps_check.cotizacion_id = ct.id
         WHERE ${whereClause}
         GROUP BY cm.status
       `, ...params);
@@ -1400,7 +1390,7 @@ export class CampanasController {
         conAps += Number(row.con_aps);
       }
 
-      res.json({
+      const response = {
         success: true,
         data: {
           total,
@@ -1410,7 +1400,11 @@ export class CampanasController {
           conAps,
           sinAps: total - conAps,
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadisticas';
       res.status(500).json({

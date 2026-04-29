@@ -54,25 +54,34 @@ const createPrismaClient = () => {
         return await next(params);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        // Only retry real connection errors — NOT pool exhaustion (retrying makes it worse)
         const isConnectionError = message.includes("Can't reach database server") ||
           message.includes('Connection refused') ||
           message.includes('ETIMEDOUT') ||
           message.includes('ECONNREFUSED') ||
           message.includes('Connection lost');
 
-        // max_connections_per_hour: wait longer before retrying
         const isRateLimited = message.includes('max_connections_per_hour') || message.includes('1226');
 
+        const isPoolExhausted = message.includes('Too many connections') || message.includes('1040');
+
+        if (isPoolExhausted) {
+          if (attempt === 1) {
+            console.warn(`[Prisma] Pool exhausted (attempt 1/${MAX_RETRIES}), waiting 5s...`);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            continue;
+          }
+          throw error;
+        }
+
         if (isRateLimited && attempt < MAX_RETRIES) {
-          const delay = 30000 * attempt; // 30s, 60s, 90s — wait for connections to free up
+          const delay = 30000 * attempt;
           console.warn(`[Prisma] Rate limited (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay / 1000}s...`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
 
         if (isConnectionError && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY * attempt; // 3s, 6s, 9s
+          const delay = BASE_DELAY * attempt;
           console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
