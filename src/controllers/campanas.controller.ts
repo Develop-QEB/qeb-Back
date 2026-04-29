@@ -114,13 +114,13 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
+        conditions.push(`(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
           OR EXISTS (
             SELECT 1 FROM reservas rsv_s
             INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
             INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
             INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
               AND rsv_s.deleted_at IS NULL
               AND inv_s.codigo_unico LIKE ?
           )
@@ -157,7 +157,7 @@ export class CampanasController {
             )
             AND EXISTS (
               SELECT 1 FROM solicitudCaras sc_filt
-              WHERE sc_filt.idquote = CAST(pr.id AS CHAR)
+              WHERE sc_filt.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
                 AND sc_filt.inicio_periodo <= (
                   SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
                 )
@@ -281,7 +281,7 @@ export class CampanasController {
             COUNT(DISTINCT rsv_a.solicitudCaras_id) AS circuitos
           FROM reservas rsv_a
           INNER JOIN solicitudCaras sc_a ON sc_a.id = rsv_a.solicitudCaras_id
-          INNER JOIN cotizacion ct_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE rsv_a.deleted_at IS NULL AND ct_a.id IN (${ctIdPh})
           GROUP BY ct_a.id
         ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
@@ -290,7 +290,7 @@ export class CampanasController {
             ct_c.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
           FROM solicitudCaras sc_c
-          INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
@@ -300,7 +300,7 @@ export class CampanasController {
             ct_f.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ') AS formatos
           FROM solicitudCaras sc_f
-          INNER JOIN cotizacion ct_f ON sc_f.idquote = CAST(ct_f.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct_f ON sc_f.idquote = CAST(ct_f.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct_f.id IN (${ctIdPh})
           GROUP BY ct_f.id
         ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
@@ -340,7 +340,7 @@ export class CampanasController {
                      / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
                    ), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE pr.id IN (${placeholders})
@@ -746,7 +746,7 @@ export class CampanasController {
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct.id = ? AND rsv.deleted_at IS NULL
         `, campanaAnterior.cotizacion_id);
         if (hasAps[0]?.has_aps === 1) {
@@ -1302,13 +1302,13 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
+        conditions.push(`(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
           OR EXISTS (
             SELECT 1 FROM reservas rsv_s
             INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
             INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
             INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
               AND rsv_s.deleted_at IS NULL
               AND inv_s.codigo_unico LIKE ?
           )
@@ -1381,7 +1381,7 @@ export class CampanasController {
         LEFT JOIN (
           SELECT DISTINCT ct_a.id AS cotizacion_id
           FROM cotizacion ct_a
-          INNER JOIN solicitudCaras sc_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id AND rsv_a.deleted_at IS NULL
           WHERE rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
         ) aps_check ON aps_check.cotizacion_id = ct.id
@@ -1552,7 +1552,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
@@ -1608,7 +1608,7 @@ export class CampanasController {
           cat.año as anio_catorcena,
           sc.caras AS caras_totales
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
@@ -1784,7 +1784,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE
           cm.id = ?
@@ -1856,7 +1856,7 @@ export class CampanasController {
           sc.ciudad as ciudad,
           sc.estados as estados
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
@@ -2087,7 +2087,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
@@ -2152,7 +2152,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE
           cm.id IN (${placeholders})
@@ -2211,7 +2211,7 @@ export class CampanasController {
           sc.caras AS caras_totales,
           0 as aps
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
@@ -2265,7 +2265,7 @@ export class CampanasController {
           sc.ciudad as ciudad,
           sc.estados as estados
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
@@ -2466,13 +2466,13 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
+        conditions.push(`(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
           OR EXISTS (
             SELECT 1 FROM reservas rsv_s
             INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
             INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
             INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
+            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
               AND rsv_s.deleted_at IS NULL
               AND inv_s.codigo_unico LIKE ?
           )
@@ -2594,7 +2594,7 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
@@ -2652,7 +2652,7 @@ export class CampanasController {
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE cm.id IN (${cmIdPh})
           AND UPPER(sc.articulo) LIKE 'IM%'
@@ -2707,7 +2707,7 @@ export class CampanasController {
               ct_c.id AS cotizacion_id,
               GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
             FROM solicitudCaras sc_c
-            INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR)
+            INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
             INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
             WHERE ct_c.id IN (SELECT cotizacion_id FROM campania WHERE id IN (${cmIdPh}))
             GROUP BY ct_c.id
@@ -2811,7 +2811,7 @@ export class CampanasController {
           const inversionData = await prisma.$queryRawUnsafe<any[]>(`
             SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE pr.id IN (${phInv})
@@ -3205,9 +3205,9 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR)
+          LEFT JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
           LEFT JOIN (
@@ -3384,7 +3384,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
@@ -3486,7 +3486,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN tareas tr ON tr.campania_id = cm.id
             AND tr.tipo = 'Instalación'
@@ -4125,7 +4125,7 @@ export class CampanasController {
         FROM imagenes_digitales img
         INNER JOIN reservas r ON r.id = img.id_reserva
         INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ${campanaId}
         GROUP BY img.id_reserva
@@ -6154,7 +6154,7 @@ export class CampanasController {
       // Obtener solicitudCaras de esta campaña para acotar los UPDATEs
       const campaignScIds = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT sc.id FROM solicitudCaras sc
-        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ?
       `, parseInt(campanaId));
@@ -6405,7 +6405,7 @@ export class CampanasController {
       const query = `
         UPDATE reservas r
         JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         JOIN campania cm ON cm.cotizacion_id = ct.id
         SET r.archivo = NULL, r.arte_aprobado = NULL
         WHERE cm.id = ?
@@ -6466,7 +6466,7 @@ export class CampanasController {
           COUNT(*) as uso_count
         FROM reservas r
         JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ?
           AND r.archivo IS NOT NULL
@@ -6520,7 +6520,7 @@ export class CampanasController {
             COUNT(*) as uso_count
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-          JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           JOIN campania cm ON cm.cotizacion_id = ct.id
           WHERE cm.id = ?
             AND r.archivo IS NOT NULL
@@ -6727,7 +6727,7 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -6777,7 +6777,7 @@ export class CampanasController {
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
@@ -6911,7 +6911,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR)
+          INNER JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
@@ -8408,7 +8408,7 @@ export class CampanasController {
         FROM artes_tradicionales at2
         INNER JOIN reservas r ON r.id = at2.id_reserva
         INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ${campanaId}
         GROUP BY at2.id_reserva
@@ -8460,7 +8460,7 @@ export class CampanasController {
           COUNT(*) AS total_caras
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
@@ -8559,7 +8559,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN catorcenas cat
             ON sc.inicio_periodo <= cat.fecha_fin
            AND sc.fin_periodo    >= cat.fecha_inicio
@@ -8575,7 +8575,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
         WHERE cm.id IN (${placeholders})
         GROUP BY cm.id
       `;
