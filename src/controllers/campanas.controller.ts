@@ -114,31 +114,30 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchPattern = `%${search}%`;
-        // EXISTS sobre reservas/inventarios es lentísimo (~30s) en BD grandes;
-        // solo lo disparamos cuando la búsqueda parece un codigo_unico (no es
-        // solo numérica y tiene >3 chars). Búsquedas tipo "1432" son ID de
-        // campaña/propuesta, ya cubierto por CAST(cm.id AS CHAR) LIKE.
-        const looksLikeInventarioCode = search.length > 3 && !/^\d+$/.test(search);
-
-        let searchClause = `(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
-
-        if (looksLikeInventarioCode) {
-          searchClause += `
-            OR EXISTS (
-              SELECT 1 FROM reservas rsv_s
-              INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-              INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-              INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-              WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND rsv_s.deleted_at IS NULL
-                AND inv_s.codigo_unico LIKE ?
-            )`;
-          params.push(searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
+          params.push(searchNum, searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (search.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          conditions.push(searchClause);
         }
-        searchClause += ')';
-        conditions.push(searchClause);
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
@@ -1337,31 +1336,30 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchPattern = `%${search}%`;
-        // EXISTS sobre reservas/inventarios es lentísimo (~30s) en BD grandes;
-        // solo lo disparamos cuando la búsqueda parece un codigo_unico (no es
-        // solo numérica y tiene >3 chars). Búsquedas tipo "1432" son ID de
-        // campaña/propuesta, ya cubierto por CAST(cm.id AS CHAR) LIKE.
-        const looksLikeInventarioCode = search.length > 3 && !/^\d+$/.test(search);
-
-        let searchClause = `(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
-
-        if (looksLikeInventarioCode) {
-          searchClause += `
-            OR EXISTS (
-              SELECT 1 FROM reservas rsv_s
-              INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-              INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-              INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-              WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND rsv_s.deleted_at IS NULL
-                AND inv_s.codigo_unico LIKE ?
-            )`;
-          params.push(searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
+          params.push(searchNum, searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (search.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          conditions.push(searchClause);
         }
-        searchClause += ')';
-        conditions.push(searchClause);
       }
 
       if (yearInicio && yearFin) {
@@ -2496,31 +2494,30 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchPattern = `%${search}%`;
-        // EXISTS sobre reservas/inventarios es lentísimo (~30s) en BD grandes;
-        // solo lo disparamos cuando la búsqueda parece un codigo_unico (no es
-        // solo numérica y tiene >3 chars). Búsquedas tipo "1432" son ID de
-        // campaña/propuesta, ya cubierto por CAST(cm.id AS CHAR) LIKE.
-        const looksLikeInventarioCode = search.length > 3 && !/^\d+$/.test(search);
-
-        let searchClause = `(CAST(cm.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
-
-        if (looksLikeInventarioCode) {
-          searchClause += `
-            OR EXISTS (
-              SELECT 1 FROM reservas rsv_s
-              INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-              INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-              INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-              WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND rsv_s.deleted_at IS NULL
-                AND inv_s.codigo_unico LIKE ?
-            )`;
-          params.push(searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
+          params.push(searchNum, searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (search.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          conditions.push(searchClause);
         }
-        searchClause += ')';
-        conditions.push(searchClause);
       }
 
       if (yearInicio && yearFin) {
