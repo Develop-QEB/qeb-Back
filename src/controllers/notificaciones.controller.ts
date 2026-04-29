@@ -105,7 +105,7 @@ export class NotificacionesController {
         const formatoLike = `%${search}%`;
         const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
           SELECT DISTINCT t.id FROM tareas t
-          LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '')
+          LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '') COLLATE utf8mb4_unicode_ci
           LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
           LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR)
           LEFT JOIN campania cm ON cm.id = t.campania_id
