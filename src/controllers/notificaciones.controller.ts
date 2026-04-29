@@ -107,10 +107,10 @@ export class NotificacionesController {
           SELECT DISTINCT t.id FROM tareas t
           LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '') COLLATE utf8mb4_unicode_ci
           LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
-          LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR)
+          LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN campania cm ON cm.id = t.campania_id
           LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          LEFT JOIN solicitudCaras sc_c ON sc_c.idquote = CAST(ct.id_propuesta AS CHAR)
+          LEFT JOIN solicitudCaras sc_c ON sc_c.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE sc_p.formato LIKE ${formatoLike}
              OR sc_s.formato LIKE ${formatoLike}
              OR sc_c.formato LIKE ${formatoLike}
@@ -255,7 +255,7 @@ export class NotificacionesController {
         const rows = await prisma.$queryRaw<{ solicitud_id: number; formatos: string | null }[]>`
           SELECT pr.solicitud_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
           FROM propuesta pr
-          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR)
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE pr.solicitud_id IN (${Prisma.join(solicitudIds)})
           GROUP BY pr.solicitud_id
         `;
@@ -277,7 +277,7 @@ export class NotificacionesController {
           SELECT cm.id AS campania_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
           FROM campania cm
           LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE cm.id IN (${Prisma.join(campaniaIds)})
           GROUP BY cm.id
         `;
