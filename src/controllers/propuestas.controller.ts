@@ -428,9 +428,20 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ? OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?))`;
         const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        // EXISTS sobre solicitudCaras con LIKE sobre formato es lento; solo lo
+        // disparamos cuando la búsqueda parece un formato (no es solo numérica).
+        const looksLikeFormatoSearch = search.length > 3 && !/^\d+$/.test(search);
+
+        let searchClause = `(CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+
+        if (looksLikeFormatoSearch) {
+          searchClause += ` OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?)`;
+          params.push(searchPattern);
+        }
+        searchClause += ')';
+        whereConditions += ` AND ${searchClause}`;
       }
 
       // Period filter — filter by cotizacion/campania dates
