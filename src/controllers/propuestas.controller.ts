@@ -3310,6 +3310,20 @@ export class PropuestasController {
         card_code, salesperson_code, sap_database,
       } = req.body;
 
+      const propuestaId = parseInt(id);
+      const userName = req.user?.nombre || 'Usuario';
+
+      const anterior = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+        select: { notas: true, descripcion: true, cliente_id: true },
+      });
+      const cotAnterior = nombre_campania !== undefined
+        ? await prisma.cotizacion.findFirst({
+            where: { id_propuesta: propuestaId },
+            select: { nombre_campania: true },
+          })
+        : null;
+
       // Update propuesta fields
       const updatedPropuesta = await prisma.propuesta.update({
         where: { id: parseInt(id) },
@@ -3422,11 +3436,28 @@ export class PropuestasController {
         }
       }
 
+      const cambios: string[] = [];
+      if (notas !== undefined && notas !== anterior?.notas) cambios.push('Notas actualizadas');
+      if (descripcion !== undefined && descripcion !== anterior?.descripcion) cambios.push('Descripción actualizada');
+      if (cliente_id !== undefined && cliente_id !== anterior?.cliente_id) cambios.push(`Cliente: ${razon_social || cliente_id}`);
+      if (nombre_campania !== undefined && nombre_campania !== cotAnterior?.nombre_campania) cambios.push(`Campaña: "${nombre_campania}"`);
+      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) cambios.push('Período modificado');
+
+      if (cambios.length > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Edición',
+            fecha_hora: new Date(),
+            detalles: `${userName} editó: ${cambios.join(' | ')}`,
+          },
+        });
+      }
+
       res.json({ success: true, data: updatedPropuesta });
 
       // Emitir eventos WebSocket
-      const userName = req.user?.nombre || 'Usuario';
-      const propuestaId = parseInt(id);
       emitToPropuesta(propuestaId, SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, {
         propuestaId,
         usuario: userName,
