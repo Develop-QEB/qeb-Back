@@ -36,6 +36,7 @@ export class HistorialController {
       if (accion) {
         const accionPatterns: Record<string, unknown> = {
           '~aprobacion_dcm_dg': { OR: [{ accion: { startsWith: 'Aprobación DCM por' } }, { accion: { startsWith: 'Aprobación DG por' } }] },
+          '~rechazo_dcm_dg': { OR: [{ accion: { startsWith: 'Rechazo DCM por' } }, { accion: { startsWith: 'Rechazo DG por' } }] },
           '~cambio_autorizacion': { OR: [{ accion: { contains: 'cambió Autorización DCM' } }, { accion: { contains: 'cambió Autorización DG' } }] },
           '~cambio_valor': { accion: { contains: '→' } },
         };
@@ -140,15 +141,17 @@ export class HistorialController {
       });
 
       const patterns: [RegExp, string, string][] = [
-        [/solicitó autorización/, 'Solicitud de autorización', 'solicitó autorización'],
-        [/agregó circuito/, 'Agregó circuito', 'agregó circuito'],
-        [/modificó.*campo/, 'Modificación de campos', 'modificó'],
-        [/actualizó/, 'Actualización (usuario)', 'actualizó'],
-        [/editó/, 'Edición (usuario)', 'editó'],
-        [/^Aprobación D(CM|G) por\b/, 'Aprobación (DCM/DG)', '~aprobacion_dcm_dg'],
-        [/cambió Autorización D(CM|G)/, 'Cambio de autorización', '~cambio_autorizacion'],
+        [/solicit[oó] autorizaci[oó]n/i, 'Solicitud de autorización', 'solicitó autorización'],
+        [/agreg[oó] circuito/i, 'Agregó circuito', 'agregó circuito'],
+        [/modific[oó].*campo/i, 'Modificación de campos', 'modificó'],
+        [/actualiz[oó]/i, 'Actualización (usuario)', 'actualizó'],
+        [/edit[oó]/i, 'Edición (usuario)', 'editó'],
+        [/^Aprobaci[oó]n D(CM|G) por/i, 'Aprobación (DCM/DG)', '~aprobacion_dcm_dg'],
+        [/^Rechazo D(CM|G) por/i, 'Rechazo (DCM/DG)', '~rechazo_dcm_dg'],
+        [/cambi[oó] Autorizaci[oó]n D(CM|G)/i, 'Cambio de autorización', '~cambio_autorizacion'],
+        [/^Creaci[oó]n$/i, 'Creación', 'Creación'],
         [/\| Origen:.*→/, 'Cambio de valor', '~cambio_valor'],
-        [/\bcambió\b.+→/, 'Cambio de valor', '~cambio_valor'],
+        [/cambi[oó].+→/, 'Cambio de valor', '~cambio_valor'],
       ];
 
       const categories = new Map<string, string>();
