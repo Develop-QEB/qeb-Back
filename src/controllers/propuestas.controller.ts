@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { serializeBigInt } from '../utils/serialization';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
@@ -4192,6 +4193,24 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error deleting cara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async getHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const historial = await prisma.historial.findMany({
+        where: { ref_id: propuestaId },
+        orderBy: { fecha_hora: 'asc' },
+      });
+
+      res.json({ success: true, data: serializeBigInt(historial) });
+    } catch (error) {
+      console.error('Error en getHistorial propuesta:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({ success: false, error: message });
     }
   }
