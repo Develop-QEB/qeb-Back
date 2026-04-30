@@ -1272,15 +1272,18 @@ export class CampanasController {
             }
 
             // Registrar en historial con detalle de qué cambió
-            const cambios: string[] = [];
-            if (nombre !== undefined && nombre !== campanaActual.nombre) cambios.push(`Nombre: "${campanaActual.nombre}" → "${nombre}"`);
-            if (notas !== undefined) cambios.push('Notas actualizadas');
-            if (descripcion !== undefined) cambios.push('Descripción actualizada');
-            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) cambios.push('Período modificado');
-            if (asignados !== undefined && asignados !== propuesta?.asignado) cambios.push(`Asignados: ${asignados}`);
-            if (IMU !== undefined) cambios.push(`IMU: ${IMU ? 'Sí' : 'No'}`);
-            if (cuic !== undefined) cambios.push(`CUIC: ${cuic}`);
-            if (marca_nombre !== undefined) cambios.push(`Marca: ${marca_nombre}`);
+            const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+            const addC = (label: string, antes: unknown, despues: unknown) => {
+              cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+            };
+            if (nombre !== undefined && nombre !== campanaActual.nombre) addC('Nombre', campanaActual.nombre, nombre);
+            if (notas !== undefined) addC('Notas', '', notas || '');
+            if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
+            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
+            if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
+            if (cuic !== undefined) addC('CUIC', '', String(cuic));
+            if (marca_nombre !== undefined) addC('Marca', '', marca_nombre);
 
             await prisma.historial.create({
               data: {
@@ -1288,7 +1291,7 @@ export class CampanasController {
                 ref_id: campanaId,
                 accion: 'Actualización',
                 fecha_hora: now,
-                detalles: `${userName} actualizó: ${cambios.length > 0 ? cambios.join(' | ') : 'datos de campaña'}`,
+                detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
               },
             });
           }
