@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { serializeBigInt } from '../utils/serialization';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
@@ -1197,7 +1198,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }], ...(comentario_cambio_status ? { motivo: comentario_cambio_status } : {}) }),
         },
       });
 
@@ -1325,7 +1326,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Reasignación',
           fecha_hora: now,
-          detalles: `${userName} actualizó asignados a: ${asignados}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Asignados', label: 'Asignados', antes: propuestaAnterior.asignado || '', despues: asignados }] }),
         },
       });
 
@@ -3021,11 +3022,40 @@ export class PropuestasController {
         where: { id: propuestaId, deleted_at: null },
       }) : null;
 
+      // Obtener info de reservas antes de eliminar para historial
+      const reservasInfo = await prisma.reservas.findMany({
+        where: { id: { in: reservaIds } },
+        select: { id: true, solicitudCaras_id: true },
+      });
+      const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
+      const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: caraIds as number[] } },
+        select: { id: true, articulo: true, formato: true },
+      }) : [];
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Registrar en historial
+      if (propuestaId) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Eliminación de reservas',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              origen: 'propuesta',
+              reservas_eliminadas: reservaIds.length,
+              circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            }),
+          },
+        });
+      }
 
       // Crear notificaciones para usuarios asignados
       if (propuesta?.id_asignado) {
@@ -3436,21 +3466,24 @@ export class PropuestasController {
         }
       }
 
-      const cambios: string[] = [];
-      if (notas !== undefined && notas !== anterior?.notas) cambios.push('Notas actualizadas');
-      if (descripcion !== undefined && descripcion !== anterior?.descripcion) cambios.push('Descripción actualizada');
-      if (cliente_id !== undefined && cliente_id !== anterior?.cliente_id) cambios.push(`Cliente: ${razon_social || cliente_id}`);
-      if (nombre_campania !== undefined && nombre_campania !== cotAnterior?.nombre_campania) cambios.push(`Campaña: "${nombre_campania}"`);
-      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) cambios.push('Período modificado');
+      const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+      const addC = (label: string, antes: unknown, despues: unknown) => {
+        cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+      };
+      if (notas !== undefined && notas !== anterior?.notas) addC('Notas', anterior?.notas, notas);
+      if (descripcion !== undefined && descripcion !== anterior?.descripcion) addC('Descripción', anterior?.descripcion, descripcion);
+      if (cliente_id !== undefined && cliente_id !== anterior?.cliente_id) addC('Cliente', anterior?.cliente_id, razon_social || cliente_id);
+      if (nombre_campania !== undefined && nombre_campania !== cotAnterior?.nombre_campania) addC('Nombre de campaña', cotAnterior?.nombre_campania, nombre_campania);
+      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) addC('Período', '', 'modificado');
 
-      if (cambios.length > 0) {
+      if (cambiosDetalle.length > 0) {
         await prisma.historial.create({
           data: {
             tipo: 'Propuesta',
             ref_id: propuestaId,
             accion: 'Edición',
             fecha_hora: new Date(),
-            detalles: `${userName} editó: ${cambios.join(' | ')}`,
+            detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
           },
         });
       }
@@ -4160,6 +4193,24 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error deleting cara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async getHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const historial = await prisma.historial.findMany({
+        where: { ref_id: propuestaId },
+        orderBy: { fecha_hora: 'asc' },
+      });
+
+      res.json({ success: true, data: serializeBigInt(historial) });
+    } catch (error) {
+      console.error('Error en getHistorial propuesta:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({ success: false, error: message });
     }
   }

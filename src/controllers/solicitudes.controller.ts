@@ -856,7 +856,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }] }),
         },
       });
 
@@ -988,7 +988,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Eliminación',
           fecha_hora: now,
-          detalles: `Solicitud eliminada por ${userName}`,
+          detalles: JSON.stringify({ usuario: userName }),
         },
       });
 
@@ -1741,7 +1741,7 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Creacion',
             fecha_hora: getMexicoDate(),
-            detalles: `Solicitud creada por ${userName}`,
+            detalles: JSON.stringify({ usuario: userName }),
           },
         });
 
@@ -2946,20 +2946,25 @@ export class SolicitudesController {
           // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
 
-        // Detectar qué campos cambiaron
-        const cambios: string[] = [];
-        if (descripcion !== solicitud.descripcion) cambios.push('descripción');
-        if (razon_social !== solicitud.razon_social) cambios.push('razón social');
-        if (marca_nombre !== solicitud.marca_nombre) cambios.push('marca');
-        if (presupuesto !== solicitud.presupuesto) cambios.push('presupuesto');
-        if (asignadosStr !== solicitud.asignado) cambios.push('asignados');
-        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) cambios.push('nombre de campaña');
-        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) cambios.push('fecha inicio');
-        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) cambios.push('fecha fin');
-        if (notas !== solicitud.notas) cambios.push('notas');
-        if (archivo !== solicitud.archivo) cambios.push('archivo');
+        // Detectar qué campos cambiaron con valores antes/después
+        const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+        const cambiosLabels: string[] = [];
+        const addCambio = (label: string, antes: unknown, despues: unknown) => {
+          cambiosLabels.push(label);
+          cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+        };
+        if (descripcion !== solicitud.descripcion) addCambio('descripción', solicitud.descripcion, descripcion);
+        if (razon_social !== solicitud.razon_social) addCambio('razón social', solicitud.razon_social, razon_social);
+        if (marca_nombre !== solicitud.marca_nombre) addCambio('marca', solicitud.marca_nombre, marca_nombre);
+        if (presupuesto !== solicitud.presupuesto) addCambio('presupuesto', solicitud.presupuesto, presupuesto);
+        if (asignadosStr !== solicitud.asignado) addCambio('asignados', solicitud.asignado, asignadosStr);
+        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) addCambio('nombre de campaña', cotizacion.nombre_campania, nombre_campania);
+        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) addCambio('fecha inicio', cotizacion.fecha_inicio?.toISOString()?.split('T')[0], fecha_inicio);
+        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) addCambio('fecha fin', cotizacion.fecha_fin?.toISOString()?.split('T')[0], fecha_fin);
+        if (notas !== solicitud.notas) addCambio('notas', solicitud.notas, notas);
+        if (archivo !== solicitud.archivo) addCambio('archivo', solicitud.archivo ? 'sí' : 'no', archivo ? 'sí' : 'no');
 
-        const cambiosStr = cambios.length > 0 ? cambios.join(', ') : 'datos generales';
+        const cambiosStr = cambiosLabels.length > 0 ? cambiosLabels.join(', ') : 'datos generales';
 
         // Create historial entry
         await tx.historial.create({
@@ -2968,7 +2973,7 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Edición',
             fecha_hora: new Date(),
-            detalles: `${userName} editó: ${cambiosStr}`,
+            detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
           },
         });
 
