@@ -17,6 +17,7 @@ import ticketsRoutes from './tickets.routes';
 import fichasTecnicasRoutes from './fichas-tecnicas.routes';
 import chatbotRoutes from './chatbot.routes';
 import circuitosRoutes from './circuitos.routes';
+import analisisOcupacionRoutes from './analisis-ocupacion.routes';
 
 import publicRoutes from './public.routes';
 
@@ -41,5 +42,6 @@ router.use('/tickets', ticketsRoutes);
 router.use('/fichas-tecnicas', fichasTecnicasRoutes);
 router.use('/chatbot', chatbotRoutes);
 router.use('/circuitos', circuitosRoutes);
+router.use('/analisis-ocupacion', analisisOcupacionRoutes);
 
 export default router;

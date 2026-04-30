@@ -101,7 +101,7 @@ export class NotificacionesController {
 }
 
       if (search) {
-        // IDs de tareas cuyos formatos (vía solicitud/propuesta/campaña) matchean el search
+        // IDs de tareas cuyos formatos o nombre de campaña (vía solicitud/propuesta/campaña) matchean el search
         const formatoLike = `%${search}%`;
         const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
           SELECT DISTINCT t.id FROM tareas t
@@ -111,9 +111,13 @@ export class NotificacionesController {
           LEFT JOIN campania cm ON cm.id = t.campania_id
           LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           LEFT JOIN solicitudCaras sc_c ON CAST(sc_c.idquote AS UNSIGNED) = ct.id_propuesta
+          LEFT JOIN cotizacion ct_p ON ct_p.id_propuesta = CAST(NULLIF(t.id_propuesta, '') AS UNSIGNED)
           WHERE sc_p.formato LIKE ${formatoLike}
              OR sc_s.formato LIKE ${formatoLike}
              OR sc_c.formato LIKE ${formatoLike}
+             OR cm.nombre LIKE ${formatoLike}
+             OR ct.nombre_campania LIKE ${formatoLike}
+             OR ct_p.nombre_campania LIKE ${formatoLike}
         `;
         const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
 
@@ -135,6 +139,14 @@ export class NotificacionesController {
           { responsable: { contains: search } },
           { asignado: { contains: search } },
         ];
+        // Búsqueda por ID de tarea (cuando el término es numérico)
+        const searchTrimmed = search.trim();
+        if (/^\d+$/.test(searchTrimmed)) {
+          const idNum = Number(searchTrimmed);
+          if (Number.isFinite(idNum) && idNum > 0) {
+            orConditions.push({ id: idNum });
+          }
+        }
         if (formatoMatchIds.length > 0) {
           orConditions.push({ id: { in: formatoMatchIds } });
         }
