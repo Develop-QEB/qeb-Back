@@ -34,7 +34,16 @@ export class HistorialController {
       }
 
       if (accion) {
-        where.accion = { contains: accion };
+        const accionPatterns: Record<string, unknown> = {
+          '~aprobacion_dcm_dg': { OR: [{ accion: { startsWith: 'Aprobación DCM por' } }, { accion: { startsWith: 'Aprobación DG por' } }] },
+          '~cambio_autorizacion': { OR: [{ accion: { contains: 'cambió Autorización DCM' } }, { accion: { contains: 'cambió Autorización DG' } }] },
+          '~cambio_valor': { accion: { contains: '→' } },
+        };
+        if (accionPatterns[accion]) {
+          andConditions.push(accionPatterns[accion] as Record<string, unknown>);
+        } else {
+          where.accion = { contains: accion };
+        }
       }
 
       if (fechaDesde || fechaHasta) {
@@ -136,6 +145,9 @@ export class HistorialController {
         [/modificó.*campo/, 'Modificación de campos', 'modificó'],
         [/actualizó/, 'Actualización (usuario)', 'actualizó'],
         [/editó/, 'Edición (usuario)', 'editó'],
+        [/^Aprobación D(CM|G) por\b/, 'Aprobación (DCM/DG)', '~aprobacion_dcm_dg'],
+        [/cambió Autorización D(CM|G)/, 'Cambio de autorización', '~cambio_autorizacion'],
+        [/\bcambió\b.+→/, 'Cambio de valor', '~cambio_valor'],
       ];
 
       const categories = new Map<string, string>();
