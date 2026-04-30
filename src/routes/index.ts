@@ -17,11 +17,8 @@ import ticketsRoutes from './tickets.routes';
 import fichasTecnicasRoutes from './fichas-tecnicas.routes';
 import chatbotRoutes from './chatbot.routes';
 import circuitosRoutes from './circuitos.routes';
-<<<<<<< HEAD
 import analisisOcupacionRoutes from './analisis-ocupacion.routes';
-=======
 import historialRoutes from './historial.routes';
->>>>>>> 48195d61f7d9ba878123cc321ac322fb288c604f
 
 import publicRoutes from './public.routes';
 
@@ -46,10 +43,7 @@ router.use('/tickets', ticketsRoutes);
 router.use('/fichas-tecnicas', fichasTecnicasRoutes);
 router.use('/chatbot', chatbotRoutes);
 router.use('/circuitos', circuitosRoutes);
-<<<<<<< HEAD
 router.use('/analisis-ocupacion', analisisOcupacionRoutes);
-=======
 router.use('/historial', historialRoutes);
->>>>>>> 48195d61f7d9ba878123cc321ac322fb288c604f
 
 export default router;
