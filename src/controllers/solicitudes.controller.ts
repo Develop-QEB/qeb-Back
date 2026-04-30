@@ -856,7 +856,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }] }),
         },
       });
 
@@ -988,7 +988,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Eliminación',
           fecha_hora: now,
-          detalles: `Solicitud eliminada por ${userName}`,
+          detalles: JSON.stringify({ usuario: userName }),
         },
       });
 
@@ -1741,7 +1741,7 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Creacion',
             fecha_hora: getMexicoDate(),
-            detalles: `Solicitud creada por ${userName}`,
+            detalles: JSON.stringify({ usuario: userName }),
           },
         });
 

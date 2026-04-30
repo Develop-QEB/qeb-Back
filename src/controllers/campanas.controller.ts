@@ -919,7 +919,7 @@ export class CampanasController {
           ref_id: propuesta?.id || campanaId,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }] }),
         },
       });
 

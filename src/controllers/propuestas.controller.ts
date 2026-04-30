@@ -1197,7 +1197,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }], ...(comentario_cambio_status ? { motivo: comentario_cambio_status } : {}) }),
         },
       });
 
@@ -1325,7 +1325,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Reasignación',
           fecha_hora: now,
-          detalles: `${userName} actualizó asignados a: ${asignados}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Asignados', label: 'Asignados', antes: propuestaAnterior.asignado || '', despues: asignados }] }),
         },
       });
 
