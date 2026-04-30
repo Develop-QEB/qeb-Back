@@ -7693,7 +7693,7 @@ export class CampanasController {
       const authFieldsChanged = currentCaraFull && (
         (data.caras !== undefined && parseInt(data.caras) !== currentCaraFull.caras) ||
         (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCaraFull.bonificacion)) ||
-        (data.tarifa_publica !== undefined && parseInt(data.tarifa_publica) !== Number(currentCaraFull.tarifa_publica)) ||
+        (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCaraFull.tarifa_publica)) ||
         (data.formato !== undefined && data.formato !== currentCaraFull.formato) ||
         (data.tipo !== undefined && data.tipo !== currentCaraFull.tipo) ||
         (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo)
@@ -7720,8 +7720,8 @@ export class CampanasController {
           tipo: data.tipo || undefined,
           caras: data.caras ? parseInt(data.caras) : 0,
           bonificacion: bonificacionForAuth,
-          costo: data.costo ? parseInt(data.costo) : 0,
-          tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+          costo: data.costo ? parseFloat(data.costo) : 0,
+          tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
           articulo: data.articulo || null
         }, userId);
         autorizacion_dg = estadoResult.autorizacion_dg;
@@ -7953,8 +7953,8 @@ export class CampanasController {
         tipo: data.tipo,
         caras: data.caras ? parseInt(data.caras) : 0,
         bonificacion: bonificacionForAuthCr,
-        costo: data.costo ? parseInt(data.costo) : 0,
-        tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+        costo: data.costo ? parseFloat(data.costo) : 0,
+        tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
         articulo: data.articulo || null
       }, userId);
 
@@ -8099,7 +8099,7 @@ export class CampanasController {
           const authFieldsChanged = currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
             (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCara.bonificacion)) ||
-            (data.tarifa_publica !== undefined && parseInt(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+            (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
             (data.articulo !== undefined && data.articulo !== currentCara.articulo)
@@ -8131,8 +8131,8 @@ export class CampanasController {
               tipo: data.tipo || undefined,
               caras: data.caras ? parseInt(data.caras) : 0,
               bonificacion: bonificacionForAuthBulk,
-              costo: data.costo ? parseInt(data.costo) : 0,
-              tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+              costo: data.costo ? parseFloat(data.costo) : 0,
+              tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
               articulo: data.articulo || null
             }, userId);
             autorizacion_dg = estadoResult.autorizacion_dg;

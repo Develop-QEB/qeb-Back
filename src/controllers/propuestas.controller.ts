@@ -3593,7 +3593,7 @@ export class PropuestasController {
       const authFieldsChanged =
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
         (bonificacion !== undefined && parseFloat(bonificacion) !== Number(currentCara.bonificacion)) ||
-        (tarifa_publica !== undefined && parseInt(tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+        (tarifa_publica !== undefined && parseFloat(tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
         (formato !== undefined && formato !== currentCara.formato) ||
         (tipo !== undefined && tipo !== currentCara.tipo) ||
         (articulo !== undefined && articulo !== currentCara.articulo);
@@ -3619,8 +3619,8 @@ export class PropuestasController {
           tipo: tipo || undefined,
           caras: caras ? parseInt(caras) : 0,
           bonificacion: bonificacionForAuth,
-          costo: costo ? parseInt(costo) : 0,
-          tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+          costo: costo ? parseFloat(costo) : 0,
+          tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
           articulo: articulo || null
         }, userId);
         autorizacion_dg = estadoResult.autorizacion_dg;
@@ -3638,8 +3638,8 @@ export class PropuestasController {
           caras: caras !== undefined && caras !== null ? parseInt(caras) : undefined,
           nivel_socioeconomico,
           formato,
-          costo: costo !== undefined && costo !== null ? parseInt(costo) : undefined,
-          tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseInt(tarifa_publica) : undefined,
+          costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
+          tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
           inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
           fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
           caras_flujo: caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined,
@@ -3736,8 +3736,8 @@ export class PropuestasController {
           addField('caras', caras !== undefined && caras !== null ? parseInt(caras) : undefined);
           addField('nivel_socioeconomico', nivel_socioeconomico);
           addField('formato', formato);
-          addField('costo', costo !== undefined && costo !== null ? parseInt(costo) : undefined);
-          addField('tarifa_publica', tarifa_publica !== undefined && tarifa_publica !== null ? parseInt(tarifa_publica) : undefined);
+          addField('costo', costo !== undefined && costo !== null ? parseFloat(costo) : undefined);
+          addField('tarifa_publica', tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined);
           addField('caras_flujo', caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined);
           addField('caras_contraflujo', caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined);
           addField('articulo', articulo);
@@ -3844,8 +3844,8 @@ export class PropuestasController {
         tipo,
         caras: caras ? parseInt(caras) : 0,
         bonificacion: bonificacionForAuthCrP,
-        costo: costo ? parseInt(costo) : 0,
-        tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+        costo: costo ? parseFloat(costo) : 0,
+        tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
         articulo: articulo || null
       }, userId);
 
@@ -3860,8 +3860,8 @@ export class PropuestasController {
           caras: caras ? parseInt(caras) : 0,
           nivel_socioeconomico: nivel_socioeconomico || '',
           formato: formato || '',
-          costo: costo ? parseInt(costo) : 0,
-          tarifa_publica: tarifa_publica ? parseInt(tarifa_publica) : 0,
+          costo: costo ? parseFloat(costo) : 0,
+          tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
           inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
           fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
           caras_flujo: caras_flujo ? parseInt(caras_flujo) : 0,
@@ -4032,7 +4032,7 @@ export class PropuestasController {
           const authFieldsChanged = currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
             (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCara.bonificacion)) ||
-            (data.tarifa_publica !== undefined && parseInt(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+            (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
             (data.articulo !== undefined && data.articulo !== currentCara.articulo)
@@ -4064,8 +4064,8 @@ export class PropuestasController {
               tipo: data.tipo || undefined,
               caras: data.caras ? parseInt(data.caras) : 0,
               bonificacion: bonificacionForAuthP,
-              costo: data.costo ? parseInt(data.costo) : 0,
-              tarifa_publica: data.tarifa_publica ? parseInt(data.tarifa_publica) : 0,
+              costo: data.costo ? parseFloat(data.costo) : 0,
+              tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
               articulo: data.articulo || null
             }, userId);
             autorizacion_dg = estadoResult.autorizacion_dg;
@@ -4083,8 +4083,8 @@ export class PropuestasController {
               caras: data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined,
               nivel_socioeconomico: data.nivel_socioeconomico,
               formato: data.formato,
-              costo: data.costo !== undefined && data.costo !== null ? parseInt(data.costo) : undefined,
-              tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseInt(data.tarifa_publica) : undefined,
+              costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
+              tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
               inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
               fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
               caras_flujo: data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined,
