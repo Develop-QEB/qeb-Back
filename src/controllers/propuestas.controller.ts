@@ -3021,11 +3021,40 @@ export class PropuestasController {
         where: { id: propuestaId, deleted_at: null },
       }) : null;
 
+      // Obtener info de reservas antes de eliminar para historial
+      const reservasInfo = await prisma.reservas.findMany({
+        where: { id: { in: reservaIds } },
+        select: { id: true, solicitudCaras_id: true },
+      });
+      const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
+      const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: caraIds as number[] } },
+        select: { id: true, articulo: true, formato: true },
+      }) : [];
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Registrar en historial
+      if (propuestaId) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Eliminación de reservas',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              origen: 'propuesta',
+              reservas_eliminadas: reservaIds.length,
+              circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            }),
+          },
+        });
+      }
 
       // Crear notificaciones para usuarios asignados
       if (propuesta?.id_asignado) {

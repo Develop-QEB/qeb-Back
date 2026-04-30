@@ -798,6 +798,7 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
+            const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: carasIds }, deleted_at: null } });
             const [liberadas, eliminadas] = await prisma.$transaction([
               prisma.reservas.updateMany({
                 where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
@@ -808,6 +809,23 @@ export class CampanasController {
               }),
             ]);
             console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
+
+            await prisma.historial.create({
+              data: {
+                tipo: 'Campaña',
+                ref_id: cotizacionData.id_propuesta,
+                accion: 'Eliminación de reservas',
+                fecha_hora: new Date(),
+                detalles: JSON.stringify({
+                  usuario: req.user?.nombre || 'Usuario',
+                  origen: 'campaña',
+                  motivo: 'Rechazo de campaña',
+                  reservas_eliminadas: reservasCount,
+                  circuitos_eliminados: caras.length,
+                  circuitos: caras.map(c => ({ articulo: c.articulo, formato: c.formato })),
+                }),
+              },
+            });
           }
 
           await prisma.propuesta.update({
@@ -7587,10 +7605,41 @@ export class CampanasController {
         return;
       }
 
+      // Obtener info de reservas antes de eliminar para historial
+      const reservasInfo = await prisma.reservas.findMany({
+        where: { id: { in: reservaIds } },
+        select: { id: true, solicitudCaras_id: true, inventario_id: true, estatus: true },
+      });
+      const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
+      const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: caraIds as number[] } },
+        select: { id: true, idquote: true, articulo: true, formato: true },
+      }) : [];
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
+      });
+
+      // Registrar en historial
+      const campanaId = parseInt(req.params.id);
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: { nombre: true, cotizacion_id: true } });
+      const cotizacion = campana?.cotizacion_id ? await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id }, select: { id_propuesta: true } }) : null;
+      await prisma.historial.create({
+        data: {
+          tipo: 'Campaña',
+          ref_id: cotizacion?.id_propuesta || campanaId,
+          accion: 'Eliminación de reservas',
+          fecha_hora: new Date(),
+          detalles: JSON.stringify({
+            usuario: req.user?.nombre || 'Usuario',
+            origen: 'campaña',
+            campaña: campana?.nombre || campanaId,
+            reservas_eliminadas: reservaIds.length,
+            circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+          }),
+        },
       });
 
       res.json({
@@ -8215,6 +8264,13 @@ export class CampanasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Info para historial antes de eliminar
+      const carasParaHistorial = await prisma.solicitudCaras.findMany({
+        where: { id: { in: idsToDelete } },
+        select: { id: true, idquote: true, articulo: true, formato: true },
+      });
+      const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
           where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
@@ -8224,6 +8280,25 @@ export class CampanasController {
           where: { id: { in: idsToDelete } },
         }),
       ]);
+
+      // Historial
+      const idquote = carasParaHistorial[0]?.idquote;
+      if (idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: parseInt(idquote) || 0,
+            accion: 'Eliminación de circuito',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: req.user?.nombre || 'Usuario',
+              origen: 'campaña',
+              reservas_eliminadas: reservasCount,
+              circuitos: carasParaHistorial.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            }),
+          },
+        });
+      }
 
       res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
     } catch (error) {
