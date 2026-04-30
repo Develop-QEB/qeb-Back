@@ -24,7 +24,7 @@ const TRACKED_FIELDS: Record<string, string> = {
 function formatValue(field: string, value: unknown): string {
   if (value === null || value === undefined) return '—';
   if (field === 'costo' || field === 'tarifa_publica') {
-    return `$${Number(value).toLocaleString('es-MX', { minimumFractionDigits: 0 })}`;
+    return `$${Number(value).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
   return String(value);
 }

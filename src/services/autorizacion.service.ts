@@ -562,8 +562,10 @@ export async function crearTareasAutorizacion(
   const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM');
 
   // DG contamina: si hay al menos 1 DG pendiente, TODO pasa a DG
+  const carasEscaladasDcmADg: number[] = [];
   if (pendientesDg.length > 0 && pendientesDcm.length > 0) {
     console.log('[crearTareasAutorizacion] Mixta DG+DCM → todo va a DG');
+    carasEscaladasDcmADg.push(...pendientesDcm);
     pendientesDg.push(...pendientesDcm.filter(id => !pendientesDg.includes(id)));
     // Actualizar en BD: por propuesta o por solicitud
     if (propuestaId) {
@@ -578,6 +580,25 @@ export async function crearTareasAutorizacion(
       });
     }
     pendientesDcm.length = 0;
+
+    // Bug B fix: registrar la escalación DCM → DG en historial para trazabilidad
+    const refIdEscalacion = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
+    await prisma.historial.create({
+      data: {
+        tipo: `autorizacion_solicitud_${origen}`,
+        ref_id: refIdEscalacion,
+        accion: `${carasEscaladasDcmADg.length} circuito(s) DCM escalado(s) a DG por mezcla DG+DCM`,
+        detalles: JSON.stringify({
+          usuario: responsableNombre,
+          origen,
+          solicitudId,
+          propuestaId,
+          campaniaId: campaniaId || null,
+          motivo: 'mezcla_dg_dcm',
+          carasEscaladasIds: carasEscaladasDcmADg,
+        }),
+      },
+    });
   }
 
   // Guardar snapshot de caras para historial (antes/después en ediciones)
@@ -593,17 +614,22 @@ export async function crearTareasAutorizacion(
       },
     });
     const refId = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
+    // Bug A fix: etiqueta dinámica DG vs DCM según lo que realmente quedó pendiente
+    // (tras la regla de contaminación DG+DCM, solo uno de los dos arrays tiene elementos)
+    const dirLabel = pendientesDg.length > 0 ? 'DG' : 'DCM';
+    const totalCircuitos = pendientesDg.length + pendientesDcm.length;
     await prisma.historial.create({
       data: {
         tipo: `autorizacion_solicitud_${origen}`,
         ref_id: refId,
-        accion: `${responsableNombre} solicitó autorización DG — ${pendientesDg.length + pendientesDcm.length} circuito(s)`,
+        accion: `${responsableNombre} solicitó autorización ${dirLabel} — ${totalCircuitos} circuito(s)`,
         detalles: JSON.stringify({
           usuario: responsableNombre,
           origen,
           solicitudId,
           propuestaId,
           campaniaId: campaniaId || null,
+          direccion: dirLabel,
           pendientesDg: pendientesDg.length,
           pendientesDcm: pendientesDcm.length,
           caras: carasSnapshot,
