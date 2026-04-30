@@ -128,9 +128,31 @@ export class HistorialController {
       const acciones = await prisma.historial.findMany({
         select: { accion: true },
         distinct: ['accion'],
-        orderBy: { accion: 'asc' },
       });
-      res.json({ success: true, data: acciones.map(a => a.accion) });
+
+      const patterns: [RegExp, string, string][] = [
+        [/solicitó autorización/, 'Solicitud de autorización', 'solicitó autorización'],
+        [/agregó circuito/, 'Agregó circuito', 'agregó circuito'],
+        [/modificó.*campo/, 'Modificación de campos', 'modificó'],
+        [/actualizó/, 'Actualización (usuario)', 'actualizó'],
+        [/editó/, 'Edición (usuario)', 'editó'],
+      ];
+
+      const categories = new Map<string, string>();
+      for (const { accion } of acciones) {
+        const match = patterns.find(([re]) => re.test(accion));
+        if (match) {
+          if (!categories.has(match[2])) categories.set(match[2], match[1]);
+        } else {
+          if (!categories.has(accion)) categories.set(accion, accion);
+        }
+      }
+
+      const result = Array.from(categories.entries())
+        .map(([value, label]) => ({ label, value }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'es'));
+
+      res.json({ success: true, data: result });
     } catch (error) {
       console.error('Error en historial getAcciones:', error);
       res.status(500).json({ success: false, error: 'Error al obtener acciones' });
