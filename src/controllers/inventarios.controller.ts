@@ -1740,22 +1740,32 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const idsRaw = req.query.ids as string | undefined;
 
       const where: Record<string, unknown> = {};
 
-      if (search) {
-        const searchNum = parseInt(search);
-        const orConditions: Record<string, unknown>[] = [
-          { codigo_unico: { contains: search } },
-          { ubicacion: { contains: search } },
-          { municipio: { contains: search } },
-        ];
-        if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
-        where.OR = orConditions;
+      // Si vienen IDs explícitos, descargar SOLO esos (ignorando filtros)
+      const ids = idsRaw
+        ? idsRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+        : [];
+
+      if (ids.length > 0) {
+        where.id = { in: ids };
+      } else {
+        if (search) {
+          const searchNum = parseInt(search);
+          const orConditions: Record<string, unknown>[] = [
+            { codigo_unico: { contains: search } },
+            { ubicacion: { contains: search } },
+            { municipio: { contains: search } },
+          ];
+          if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
+          where.OR = orConditions;
+        }
+        if (tipo) where.mueble = tipo;
+        if (estatus) where.estatus = estatus;
+        if (plaza) where.plaza = plaza;
       }
-      if (tipo) where.mueble = tipo;
-      if (estatus) where.estatus = estatus;
-      if (plaza) where.plaza = plaza;
 
       const inventarios = await prisma.inventarios.findMany({
         where,
