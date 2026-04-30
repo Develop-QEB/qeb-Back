@@ -114,15 +114,22 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
-          params.push(searchNum, searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-          if (search.length > 3) {
+          if (term.length > 3) {
             searchClause += `
               OR EXISTS (
                 SELECT 1 FROM reservas rsv_s
@@ -136,7 +143,11 @@ export class CampanasController {
             params.push(searchPattern);
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
         }
       }
 
@@ -1347,15 +1358,22 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
-          params.push(searchNum, searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-          if (search.length > 3) {
+          if (term.length > 3) {
             searchClause += `
               OR EXISTS (
                 SELECT 1 FROM reservas rsv_s
@@ -1369,7 +1387,11 @@ export class CampanasController {
             params.push(searchPattern);
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
         }
       }
 
@@ -2505,15 +2527,22 @@ export class CampanasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          conditions.push('(cm.id = ? OR ct.id_propuesta = ?)');
-          params.push(searchNum, searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-          if (search.length > 3) {
+          if (term.length > 3) {
             searchClause += `
               OR EXISTS (
                 SELECT 1 FROM reservas rsv_s
@@ -2527,7 +2556,11 @@ export class CampanasController {
             params.push(searchPattern);
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
         }
       }
 
