@@ -101,6 +101,7 @@ export class NotificacionesController {
 }
 
       if (search) {
+<<<<<<< HEAD
         // IDs de tareas cuyos formatos o nombre de campaña (vía solicitud/propuesta/campaña) matchean el search
         const formatoLike = `%${search}%`;
         const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
@@ -120,17 +121,47 @@ export class NotificacionesController {
              OR ct_p.nombre_campania LIKE ${formatoLike}
         `;
         const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
+=======
+        // IDs de tareas cuyos formatos (vía solicitud/propuesta/campaña) matchean el search
+        // Query con MAX_EXECUTION_TIME=5s + LIMIT 1000 para evitar zombies; si falla, búsqueda continúa sin estos IDs
+        const formatoLike = `%${search}%`;
+        let formatoMatchIds: number[] = [];
+        try {
+          const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT t.id FROM tareas t
+            LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '') COLLATE utf8mb4_unicode_ci
+            LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+            LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN campania cm ON cm.id = t.campania_id
+            LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            LEFT JOIN solicitudCaras sc_c ON sc_c.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE sc_p.formato LIKE ${formatoLike}
+               OR sc_s.formato LIKE ${formatoLike}
+               OR sc_c.formato LIKE ${formatoLike}
+            LIMIT 1000
+          `;
+          formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
+        } catch (err) {
+          console.warn('[notificaciones] formato search timeout/error, continuando sin esos IDs:', err instanceof Error ? err.message : err);
+        }
+>>>>>>> 48195d61f7d9ba878123cc321ac322fb288c604f
 
         // IDs de tareas que matchean por cliente o asesor (via solicitud + cliente)
         const clienteLike = `%${search}%`;
-        const clienteMatchRows = await prisma.$queryRaw<{ id: number }[]>`
-          SELECT DISTINCT t.id FROM tareas t
-          LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
-          LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
-          WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
-             OR sol.asesor LIKE ${clienteLike}
-        `;
-        const clienteMatchIds = clienteMatchRows.map(r => Number(r.id));
+        let clienteMatchIds: number[] = [];
+        try {
+          const clienteMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT t.id FROM tareas t
+            LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+            LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
+            WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
+               OR sol.asesor LIKE ${clienteLike}
+            LIMIT 1000
+          `;
+          clienteMatchIds = clienteMatchRows.map(r => Number(r.id));
+        } catch (err) {
+          console.warn('[notificaciones] cliente search timeout/error, continuando sin esos IDs:', err instanceof Error ? err.message : err);
+        }
 
         const orConditions: Record<string, unknown>[] = [
           { titulo: { contains: search } },
@@ -267,7 +298,7 @@ export class NotificacionesController {
         const rows = await prisma.$queryRaw<{ solicitud_id: number; formatos: string | null }[]>`
           SELECT pr.solicitud_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
           FROM propuesta pr
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE pr.solicitud_id IN (${Prisma.join(solicitudIds)})
           GROUP BY pr.solicitud_id
         `;
@@ -278,8 +309,8 @@ export class NotificacionesController {
         const rows = await prisma.$queryRaw<{ propuesta_id: number; formatos: string | null }[]>`
           SELECT CAST(sc.idquote AS UNSIGNED) AS propuesta_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
           FROM solicitudCaras sc
-          WHERE CAST(sc.idquote AS UNSIGNED) IN (${Prisma.join(propuestaIds)})
-          GROUP BY CAST(sc.idquote AS UNSIGNED)
+          WHERE sc.idquote IN (${Prisma.join(propuestaIds.map(String))})
+          GROUP BY sc.idquote
         `;
         for (const r of rows) if (r.formatos) formatosByPropuesta[Number(r.propuesta_id)] = r.formatos;
       }
@@ -289,7 +320,7 @@ export class NotificacionesController {
           SELECT cm.id AS campania_id, GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') AS formatos
           FROM campania cm
           LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = ct.id_propuesta
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE cm.id IN (${Prisma.join(campaniaIds)})
           GROUP BY cm.id
         `;

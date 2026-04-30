@@ -16,39 +16,6 @@ const PORT = process.env.PORT || 3000;
 // Crear servidor HTTP para Socket.io
 const httpServer = createServer(app);
 
-// Constante para días de expiración de reservas
-const DIAS_EXPIRACION_RESERVA = 20;
-
-/**
- * Función para liberar reservas que llevan más de 20 días sin convertirse en vendido
- * Las reservas con estatus 'Reservado' o 'Bonificado' que tengan fecha_reserva > 20 días
- * serán eliminadas (soft delete) para que el inventario vuelva a estar disponible
- */
-async function limpiarReservasExpiradas(): Promise<void> {
-  try {
-    const fechaLimite = new Date();
-    fechaLimite.setDate(fechaLimite.getDate() - DIAS_EXPIRACION_RESERVA);
-
-    // Eliminar reservas expiradas (soft delete) - el inventario queda disponible nuevamente
-    const result = await prisma.$executeRaw`
-      UPDATE reservas
-      SET deleted_at = NOW()
-      WHERE deleted_at IS NULL
-        AND estatus IN ('Reservado', 'Bonificado')
-        AND fecha_reserva < ${fechaLimite}
-    `;
-
-    if (result > 0) {
-      console.log(`[CRON] ${result} reservas liberadas por exceder ${DIAS_EXPIRACION_RESERVA} días - inventario disponible nuevamente`);
-    }
-  } catch (error) {
-    console.error('[CRON] Error al liberar reservas expiradas:', error);
-  }
-}
-
-// Intervalo para ejecutar la limpieza (cada 6 horas = 21600000 ms)
-const INTERVALO_LIMPIEZA_MS = 6 * 60 * 60 * 1000;
-
 /**
  * Programa una ejecución diaria a una hora fija en zona horaria America/Mexico_City.
  * Tras ejecutar, se reagenda para el día siguiente a la misma hora.
@@ -114,13 +81,9 @@ async function main() {
   try {
     await connectWithRetry();
 
-    // Ejecutar limpieza inicial al arrancar
-    await limpiarReservasExpiradas();
-
-    // Programar limpieza periódica
-    setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
-    console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
-
+    // CRON Limpieza de reservas DESACTIVADO: el flujo soft-deleteaba reservas
+    // Reservado/Bonificado sin generar historial. Si se reactiva, hacerlo a través
+    // de un endpoint con auditoría, no como tarea automática.
     // Procesar tickets pendientes sin respuesta de soporte
     chatbotController.processarTicketsPendientes().catch(err => {
       console.error('[AutoTicket] Error en procesamiento inicial:', err);

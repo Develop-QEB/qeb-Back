@@ -551,7 +551,7 @@ export class SolicitudesController {
       if (solicitudIds.length > 0) {
         const placeholders = solicitudIds.map(() => '?').join(',');
         const enrichmentData = await prisma.$queryRawUnsafe<any[]>(`
-          SELECT
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
             s.id as solicitud_id,
             ct.tipo_periodo,
             ct.nombre_campania,
@@ -565,7 +565,7 @@ export class SolicitudesController {
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
           WHERE s.id IN (${placeholders})
@@ -604,7 +604,7 @@ export class SolicitudesController {
             SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_filtrado
             FROM solicitud s
             LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE s.id IN (${placeholders})
@@ -856,7 +856,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }] }),
         },
       });
 
@@ -988,7 +988,7 @@ export class SolicitudesController {
           ref_id: solicitud.id,
           accion: 'Eliminación',
           fecha_hora: now,
-          detalles: `Solicitud eliminada por ${userName}`,
+          detalles: JSON.stringify({ usuario: userName }),
         },
       });
 
@@ -1741,7 +1741,7 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Creacion',
             fecha_hora: getMexicoDate(),
-            detalles: `Solicitud creada por ${userName}`,
+            detalles: JSON.stringify({ usuario: userName }),
           },
         });
 
@@ -1927,6 +1927,7 @@ export class SolicitudesController {
             fechaFin: new Date(cara.fin_periodo),
             esBf: esBfArt,
             cantidad: tieneGrupoBf && cantidadReal > 0 ? cantidadReal : undefined,
+            tipoPeriodo: tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
           });
           if (autoRes) {
             console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
@@ -2921,6 +2922,7 @@ export class SolicitudesController {
               fechaFin: new Date(cara.fin_periodo),
               esBf: esBfArtUpd,
               cantidad: tieneGrupoBfUpd && cantidadRealUpd > 0 ? cantidadRealUpd : undefined,
+              tipoPeriodo: tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
             });
             if (autoRes) {
               console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
@@ -2946,20 +2948,25 @@ export class SolicitudesController {
           // Nota: La verificación y creación de tareas de autorización se hace DESPUÉS de la transacción
         }
 
-        // Detectar qué campos cambiaron
-        const cambios: string[] = [];
-        if (descripcion !== solicitud.descripcion) cambios.push('descripción');
-        if (razon_social !== solicitud.razon_social) cambios.push('razón social');
-        if (marca_nombre !== solicitud.marca_nombre) cambios.push('marca');
-        if (presupuesto !== solicitud.presupuesto) cambios.push('presupuesto');
-        if (asignadosStr !== solicitud.asignado) cambios.push('asignados');
-        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) cambios.push('nombre de campaña');
-        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) cambios.push('fecha inicio');
-        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) cambios.push('fecha fin');
-        if (notas !== solicitud.notas) cambios.push('notas');
-        if (archivo !== solicitud.archivo) cambios.push('archivo');
+        // Detectar qué campos cambiaron con valores antes/después
+        const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+        const cambiosLabels: string[] = [];
+        const addCambio = (label: string, antes: unknown, despues: unknown) => {
+          cambiosLabels.push(label);
+          cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+        };
+        if (descripcion !== solicitud.descripcion) addCambio('descripción', solicitud.descripcion, descripcion);
+        if (razon_social !== solicitud.razon_social) addCambio('razón social', solicitud.razon_social, razon_social);
+        if (marca_nombre !== solicitud.marca_nombre) addCambio('marca', solicitud.marca_nombre, marca_nombre);
+        if (presupuesto !== solicitud.presupuesto) addCambio('presupuesto', solicitud.presupuesto, presupuesto);
+        if (asignadosStr !== solicitud.asignado) addCambio('asignados', solicitud.asignado, asignadosStr);
+        if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) addCambio('nombre de campaña', cotizacion.nombre_campania, nombre_campania);
+        if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) addCambio('fecha inicio', cotizacion.fecha_inicio?.toISOString()?.split('T')[0], fecha_inicio);
+        if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) addCambio('fecha fin', cotizacion.fecha_fin?.toISOString()?.split('T')[0], fecha_fin);
+        if (notas !== solicitud.notas) addCambio('notas', solicitud.notas, notas);
+        if (archivo !== solicitud.archivo) addCambio('archivo', solicitud.archivo ? 'sí' : 'no', archivo ? 'sí' : 'no');
 
-        const cambiosStr = cambios.length > 0 ? cambios.join(', ') : 'datos generales';
+        const cambiosStr = cambiosLabels.length > 0 ? cambiosLabels.join(', ') : 'datos generales';
 
         // Create historial entry
         await tx.historial.create({
@@ -2968,7 +2975,7 @@ export class SolicitudesController {
             ref_id: solicitud.id,
             accion: 'Edición',
             fecha_hora: new Date(),
-            detalles: `${userName} editó: ${cambiosStr}`,
+            detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
           },
         });
 

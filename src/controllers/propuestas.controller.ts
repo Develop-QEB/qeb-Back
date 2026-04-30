@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
+import { serializeBigInt } from '../utils/serialization';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
@@ -387,7 +388,7 @@ export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
@@ -428,9 +429,26 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ? OR EXISTS (SELECT 1 FROM solicitudCaras _sc WHERE _sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci AND _sc.formato LIKE ?))`;
-        const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
+          searchOrConditions.push(`(pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`);
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        }
+
+        if (searchOrConditions.length > 0) {
+          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
+        }
       }
 
       // Period filter — filter by cotizacion/campania dates
@@ -475,7 +493,7 @@ export class PropuestasController {
 
       // Count y main query en paralelo
       const countQuery = `
-        SELECT COUNT(DISTINCT pr.id) as total
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
         LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
@@ -486,7 +504,7 @@ export class PropuestasController {
 
       const offset = (page - 1) * limit;
       const mainQuery = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           pr.id,
           pr.cliente_id,
           pr.fecha,
@@ -576,7 +594,7 @@ export class PropuestasController {
         const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
           SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
           FROM propuesta pr
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
             AND sc.inicio_periodo <= ?
             AND sc.fin_periodo >= ?
           WHERE pr.id IN (${placeholders})
@@ -635,9 +653,17 @@ export class PropuestasController {
         return;
       }
 
+      // tipo_periodo vive en cotizacion; el front lo necesita para aplicar la regla
+      // "mensual = solo Flujo" en el modal de asignación de inventario.
+      const cotiTP = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+        `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+        parseInt(id)
+      );
+      const tipo_periodo = cotiTP[0]?.tipo_periodo || 'catorcena';
+
       res.json({
         success: true,
-        data: propuesta,
+        data: { ...propuesta, tipo_periodo },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener propuesta';
@@ -1180,7 +1206,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"${comentario_cambio_status ? ` - ${comentario_cambio_status}` : ''}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }], ...(comentario_cambio_status ? { motivo: comentario_cambio_status } : {}) }),
         },
       });
 
@@ -1308,7 +1334,7 @@ export class PropuestasController {
           ref_id: propuestaId,
           accion: 'Reasignación',
           fecha_hora: now,
-          detalles: `${userName} actualizó asignados a: ${asignados}`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Asignados', label: 'Asignados', antes: propuestaAnterior.asignado || '', despues: asignados }] }),
         },
       });
 
@@ -1336,7 +1362,18 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
 
-      // Build WHERE conditions (same logic as getAll)
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+
+      const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const statsParams: any[] = [];
 
@@ -1351,19 +1388,22 @@ export class PropuestasController {
       }
 
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
-        const searchPattern = `%${search}%`;
-        statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          whereConditions += ' AND pr.id = ?';
+          statsParams.push(searchNum);
+        } else {
+          const searchPattern = `%${search}%`;
+          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+          statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        }
       }
 
-      // Period filter
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
-        const catorcenasInicioData = await prisma.catorcenas.findFirst({
-          where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) },
-        });
-        const catorcenasFinData = await prisma.catorcenas.findFirst({
-          where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) },
-        });
+        const [catorcenasInicioData, catorcenasFinData] = await Promise.all([
+          prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
+          prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
+        ]);
         if (catorcenasInicioData && catorcenasFinData) {
           whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
           statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
@@ -1376,27 +1416,17 @@ export class PropuestasController {
         statsParams.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
       }
 
-      // Visibility filter
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id IN (${placeholders})
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          statsParams.push(String(userId), ...teamIds, String(userId));
-        } else {
-          whereConditions += ` AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR sl.usuario_id = ?
-            OR FIND_IN_SET(?, REPLACE(IFNULL(sl.id_asignado, ''), ' ', '')) > 0
-          )`;
-          statsParams.push(String(userId), userId, String(userId));
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          const emptyResponse = { success: true, data: { total: 0, byStatus: {}, pendientes: 0, aprobadas: 0, rechazadas: 0 } };
+          res.json(emptyResponse);
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        whereConditions += ` AND pr.id IN (${visiblePh})`;
+        statsParams.push(...visibleIds);
       }
 
       const statusCounts = await prisma.$queryRawUnsafe<Array<{ status: string; count: bigint }>>(`
@@ -1419,17 +1449,20 @@ export class PropuestasController {
         total += count;
       });
 
-      res.json({
+      const response = {
         success: true,
         data: {
           total,
           byStatus,
-          // Keep legacy fields for compatibility
           pendientes: byStatus['Abierto'] || byStatus['Pendiente'] || byStatus['Por aprobar'] || 0,
           aprobadas: byStatus['Atendido'] || byStatus['Aprobada'] || byStatus['Activa'] || 0,
           rechazadas: byStatus['Rechazada'] || 0,
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadisticas';
       res.status(500).json({
@@ -1729,7 +1762,7 @@ export class PropuestasController {
             cat.fecha_inicio <= sc.fin_periodo AND cat.fecha_fin >= sc.inicio_periodo
           )
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct.id = ?
           GROUP BY cat.numero_catorcena, cat.año, cat.fecha_inicio, cat.fecha_fin
           ORDER BY cat.año, cat.numero_catorcena
@@ -2130,9 +2163,15 @@ export class PropuestasController {
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        whereConditions += ` AND (CAST(pr.id AS CHAR) LIKE ? OR pr.descripcion LIKE ? OR cl.T2_U_Marca LIKE ? OR cl.T1_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR cm.nombre LIKE ? OR sl.marca_nombre LIKE ? OR sl.razon_social LIKE ?)`;
-        const sp = `%${search}%`;
-        params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp, sp);
+        const searchNum = parseInt(search);
+        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
+          whereConditions += ' AND pr.id = ?';
+          params.push(searchNum);
+        } else {
+          const sp = `%${search}%`;
+          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
+          params.push(sp, sp, sp, sp);
+        }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         whereConditions += ` AND cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)`;
@@ -2212,7 +2251,7 @@ export class PropuestasController {
           COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
           cat.numero_catorcena, cat.año as anio_catorcena
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
@@ -2232,7 +2271,7 @@ export class PropuestasController {
           COUNT(r2.id) AS reservas_count,
           cat.numero_catorcena, cat.año AS anio_catorcena
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN reservas r2 ON r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
@@ -2991,11 +3030,40 @@ export class PropuestasController {
         where: { id: propuestaId, deleted_at: null },
       }) : null;
 
+      // Obtener info de reservas antes de eliminar para historial
+      const reservasInfo = await prisma.reservas.findMany({
+        where: { id: { in: reservaIds } },
+        select: { id: true, solicitudCaras_id: true },
+      });
+      const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
+      const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: caraIds as number[] } },
+        select: { id: true, articulo: true, formato: true },
+      }) : [];
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Registrar en historial
+      if (propuestaId) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Eliminación de reservas',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              origen: 'propuesta',
+              reservas_eliminadas: reservaIds.length,
+              circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            }),
+          },
+        });
+      }
 
       // Crear notificaciones para usuarios asignados
       if (propuesta?.id_asignado) {
@@ -3280,6 +3348,20 @@ export class PropuestasController {
         card_code, salesperson_code, sap_database,
       } = req.body;
 
+      const propuestaId = parseInt(id);
+      const userName = req.user?.nombre || 'Usuario';
+
+      const anterior = await prisma.propuesta.findUnique({
+        where: { id: propuestaId },
+        select: { notas: true, descripcion: true, cliente_id: true },
+      });
+      const cotAnterior = nombre_campania !== undefined
+        ? await prisma.cotizacion.findFirst({
+            where: { id_propuesta: propuestaId },
+            select: { nombre_campania: true },
+          })
+        : null;
+
       // Update propuesta fields
       const updatedPropuesta = await prisma.propuesta.update({
         where: { id: parseInt(id) },
@@ -3392,11 +3474,31 @@ export class PropuestasController {
         }
       }
 
+      const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+      const addC = (label: string, antes: unknown, despues: unknown) => {
+        cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+      };
+      if (notas !== undefined && notas !== anterior?.notas) addC('Notas', anterior?.notas, notas);
+      if (descripcion !== undefined && descripcion !== anterior?.descripcion) addC('Descripción', anterior?.descripcion, descripcion);
+      if (cliente_id !== undefined && cliente_id !== anterior?.cliente_id) addC('Cliente', anterior?.cliente_id, razon_social || cliente_id);
+      if (nombre_campania !== undefined && nombre_campania !== cotAnterior?.nombre_campania) addC('Nombre de campaña', cotAnterior?.nombre_campania, nombre_campania);
+      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) addC('Período', '', 'modificado');
+
+      if (cambiosDetalle.length > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Edición',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
+          },
+        });
+      }
+
       res.json({ success: true, data: updatedPropuesta });
 
       // Emitir eventos WebSocket
-      const userName = req.user?.nombre || 'Usuario';
-      const propuestaId = parseInt(id);
       emitToPropuesta(propuestaId, SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, {
         propuestaId,
         usuario: userName,
@@ -3565,6 +3667,11 @@ export class PropuestasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const cotiTPUpd = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+              `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+              parseInt(currentCara.idquote || '0')
+            );
+            const tipoPeriodoUpd = (cotiTPUpd[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
             // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCara.grupo_rt_bf;
             const esBfArt = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
@@ -3579,6 +3686,7 @@ export class PropuestasController {
               fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
               fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
               cantidad: tieneGrupoBfUpd && cantidadReal > 0 ? cantidadReal : undefined,
+              tipoPeriodo: tipoPeriodoUpd,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -3774,6 +3882,12 @@ export class PropuestasController {
             where: { id: parseInt(id) },
             select: { cliente_id: true },
           });
+          // tipo_periodo vive en cotizacion (cotizacion.id_propuesta = propuesta.id)
+          const cotiTP = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+            `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+            parseInt(id)
+          );
+          const tipoPeriodoCre = (cotiTP[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
           // Para BF: la cantidad real está en bonificacion (caras es 0)
           const tieneGrupoBfNew = !!grupoRtBfCreate;
           const esBfArtNew = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
@@ -3788,6 +3902,7 @@ export class PropuestasController {
             fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
             fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
             cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+            tipoPeriodo: tipoPeriodoCre,
           });
         } catch (e: any) {
           // Rollback manual
@@ -4099,6 +4214,24 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error deleting cara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async getHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const historial = await prisma.historial.findMany({
+        where: { ref_id: propuestaId },
+        orderBy: { fecha_hora: 'asc' },
+      });
+
+      res.json({ success: true, data: serializeBigInt(historial) });
+    } catch (error) {
+      console.error('Error en getHistorial propuesta:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({ success: false, error: message });
     }
   }

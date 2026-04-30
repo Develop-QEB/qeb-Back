@@ -160,7 +160,9 @@ export const CACHE_KEYS = {
   DASHBOARD_STATS: (filters: string) => `dashboard:stats:${filters}`,
   INVENTORY_DETAIL: (filters: string) => `dashboard:inventory:${filters}`,
   CAMPANAS_LIST: (filters: string) => `campanas:list:${filters}`,
+  CAMPANAS_STATS: (filters: string) => `campanas:stats:${filters}`,
   PROPUESTAS_LIST: (filters: string) => `propuestas:list:${filters}`,
+  PROPUESTAS_STATS: (filters: string) => `propuestas:stats:${filters}`,
   SOLICITUDES_LIST: (filters: string) => `solicitudes:list:${filters}`,
 };
 

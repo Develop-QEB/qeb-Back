@@ -75,7 +75,7 @@ export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
@@ -114,19 +114,41 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
-          OR EXISTS (
-            SELECT 1 FROM reservas rsv_s
-            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
-              AND rsv_s.deleted_at IS NULL
-              AND inv_s.codigo_unico LIKE ?
-          )
-        )`);
-        const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (term.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+        }
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)
@@ -157,7 +179,7 @@ export class CampanasController {
             )
             AND EXISTS (
               SELECT 1 FROM solicitudCaras sc_filt
-              WHERE CAST(sc_filt.idquote AS UNSIGNED) = pr.id
+              WHERE sc_filt.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
                 AND sc_filt.inicio_periodo <= (
                   SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
                 )
@@ -196,7 +218,7 @@ export class CampanasController {
       const whereClause = conditions.join(' AND ');
 
       const countQuery = `
-        SELECT COUNT(*) as total
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ COUNT(*) as total
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -207,7 +229,7 @@ export class CampanasController {
 
       // Paso 1: obtener IDs de la página (query liviano, sin subqueries pesadas)
       const idsQuery = `
-        SELECT cm.id, cm.cotizacion_id
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ cm.id, cm.cotizacion_id
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -237,7 +259,7 @@ export class CampanasController {
 
       // Paso 2: enriquecer solo las campañas de la página (subqueries filtradas por IDs)
       const dataQuery = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           cm.*,
           cl.T0_U_Cliente as cliente_nombre,
           cl.T0_U_RazonSocial as cliente_razon_social,
@@ -281,7 +303,7 @@ export class CampanasController {
             COUNT(DISTINCT rsv_a.solicitudCaras_id) AS circuitos
           FROM reservas rsv_a
           INNER JOIN solicitudCaras sc_a ON sc_a.id = rsv_a.solicitudCaras_id
-          INNER JOIN cotizacion ct_a ON ct_a.id_propuesta = sc_a.idquote
+          INNER JOIN cotizacion ct_a ON sc_a.idquote = CAST(ct_a.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE rsv_a.deleted_at IS NULL AND ct_a.id IN (${ctIdPh})
           GROUP BY ct_a.id
         ) rsv_agg ON rsv_agg.cotizacion_id = ct.id
@@ -290,7 +312,7 @@ export class CampanasController {
             ct_c.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
           FROM solicitudCaras sc_c
-          INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
+          INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
           WHERE ct_c.id IN (${ctIdPh})
           GROUP BY ct_c.id
@@ -300,7 +322,7 @@ export class CampanasController {
             ct_f.id AS cotizacion_id,
             GROUP_CONCAT(DISTINCT NULLIF(sc_f.formato, '') ORDER BY sc_f.formato SEPARATOR ', ') AS formatos
           FROM solicitudCaras sc_f
-          INNER JOIN cotizacion ct_f ON ct_f.id_propuesta = sc_f.idquote
+          INNER JOIN cotizacion ct_f ON sc_f.idquote = CAST(ct_f.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct_f.id IN (${ctIdPh})
           GROUP BY ct_f.id
         ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
@@ -340,7 +362,7 @@ export class CampanasController {
                      / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
                    ), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE pr.id IN (${placeholders})
@@ -663,6 +685,10 @@ export class CampanasController {
         inversion: propuesta?.inversion || null,
         comentario_cambio_status: propuesta?.comentario_cambio_status || null,
         updated_at: propuesta?.updated_at || null,
+        // Archivo: vive en propuesta.archivo (subido desde el modal de propuestas);
+        // tipo_archivo se hereda de solicitud.tipo_archivo (propuesta no tiene esa columna).
+        archivo: propuesta?.archivo || solicitud?.archivo || null,
+        tipo_archivo: solicitud?.tipo_archivo || null,
         // Info de SAP desde solicitud
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
@@ -746,7 +772,7 @@ export class CampanasController {
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct.id = ? AND rsv.deleted_at IS NULL
         `, campanaAnterior.cotizacion_id);
         if (hasAps[0]?.has_aps === 1) {
@@ -776,6 +802,7 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
+            const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: carasIds }, deleted_at: null } });
             const [liberadas, eliminadas] = await prisma.$transaction([
               prisma.reservas.updateMany({
                 where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
@@ -786,6 +813,23 @@ export class CampanasController {
               }),
             ]);
             console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
+
+            await prisma.historial.create({
+              data: {
+                tipo: 'Campaña',
+                ref_id: cotizacionData.id_propuesta,
+                accion: 'Eliminación de reservas',
+                fecha_hora: new Date(),
+                detalles: JSON.stringify({
+                  usuario: req.user?.nombre || 'Usuario',
+                  origen: 'campaña',
+                  motivo: 'Rechazo de campaña',
+                  reservas_eliminadas: reservasCount,
+                  circuitos_eliminados: caras.length,
+                  circuitos: caras.map(c => ({ articulo: c.articulo, formato: c.formato })),
+                }),
+              },
+            });
           }
 
           await prisma.propuesta.update({
@@ -879,7 +923,7 @@ export class CampanasController {
           ref_id: propuesta?.id || campanaId,
           accion: 'Cambio de estado',
           fecha_hora: now,
-          detalles: `${userName} cambió estado de "${statusAnterior}" a "${status}"`,
+          detalles: JSON.stringify({ usuario: userName, cambios: [{ campo: 'Estado', label: 'Estado', antes: statusAnterior, despues: status }] }),
         },
       });
 
@@ -1066,6 +1110,12 @@ export class CampanasController {
         asignados,
         id_asignado,
         IMU,
+        cliente_id,
+        cuic,
+        razon_social,
+        marca_nombre,
+        asesor,
+        sap_database,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1141,6 +1191,11 @@ export class CampanasController {
                 ...(descripcion !== undefined && { descripcion }),
                 ...(notas !== undefined && { notas }),
                 ...(IMU !== undefined && { IMU: IMU ? 1 : 0 }),
+                ...(cuic !== undefined && { cuic: String(cuic) }),
+                ...(razon_social !== undefined && { razon_social }),
+                ...(marca_nombre !== undefined && { marca_nombre }),
+                ...(asesor !== undefined && { asesor }),
+                ...(sap_database !== undefined && { sap_database }),
               },
             });
           }
@@ -1153,6 +1208,7 @@ export class CampanasController {
               ...(notas !== undefined && { notas }),
               ...(asignados !== undefined && { asignado: asignados }),
               ...(id_asignado !== undefined && { id_asignado }),
+              ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
             },
           });
         }
@@ -1193,6 +1249,7 @@ export class CampanasController {
           ...(status !== undefined && { status }),
           ...(fechaInicio && { fecha_inicio: fechaInicio }),
           ...(fechaFin && { fecha_fin: fechaFin }),
+          ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
         },
       });
 
@@ -1236,14 +1293,27 @@ export class CampanasController {
               });
             }
 
-            // Registrar en historial
+            // Registrar en historial con detalle de qué cambió
+            const cambiosDetalle: { campo: string; label: string; antes: string; despues: string }[] = [];
+            const addC = (label: string, antes: unknown, despues: unknown) => {
+              cambiosDetalle.push({ campo: label, label, antes: antes != null ? String(antes) : '', despues: despues != null ? String(despues) : '' });
+            };
+            if (nombre !== undefined && nombre !== campanaActual.nombre) addC('Nombre', campanaActual.nombre, nombre);
+            if (notas !== undefined) addC('Notas', '', notas || '');
+            if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
+            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
+            if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
+            if (cuic !== undefined) addC('CUIC', '', String(cuic));
+            if (marca_nombre !== undefined) addC('Marca', '', marca_nombre);
+
             await prisma.historial.create({
               data: {
                 tipo: 'Campaña',
                 ref_id: campanaId,
                 accion: 'Actualización',
                 fecha_hora: now,
-                detalles: `Campaña actualizada por ${userName}`,
+                detalles: JSON.stringify({ usuario: userName, cambios: cambiosDetalle }),
               },
             });
           }
@@ -1285,7 +1355,18 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
 
-      // Build WHERE — same logic as getAll
+      const userId = req.user?.userId;
+      const userRol = req.user?.rol || '';
+
+      const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
@@ -1302,19 +1383,41 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
-          OR EXISTS (
-            SELECT 1 FROM reservas rsv_s
-            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
-              AND rsv_s.deleted_at IS NULL
-              AND inv_s.codigo_unico LIKE ?
-          )
-        )`);
-        const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (term.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+        }
       }
 
       if (yearInicio && yearFin) {
@@ -1330,40 +1433,21 @@ export class CampanasController {
         }
       }
 
-      // Visibility filter
-      const userId = req.user?.userId;
-      const userRol = req.user?.rol || '';
       if (userId && !hasFullVisibility(userRol)) {
-        if (hasTeamVisibility(userRol)) {
-          const teamIds = await getTeamMemberIds(prisma, userId);
-          const placeholders = teamIds.map(() => '?').join(',');
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(...teamIds, String(userId), String(userId), userId);
-        } else {
-          conditions.push(`(
-            EXISTS (
-              SELECT 1 FROM tareas t
-              WHERE t.campania_id = cm.id
-                AND (t.id_responsable = ? OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
-            )
-            OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )`);
-          params.push(userId, String(userId), String(userId), userId);
+        const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) {
+          const emptyResponse = { success: true, data: { total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0 } };
+          res.json(emptyResponse);
+          return;
         }
+        const visiblePh = visibleIds.map(() => '?').join(',');
+        conditions.push(`cm.id IN (${visiblePh})`);
+        params.push(...visibleIds);
       }
 
       const whereClause = conditions.join(' AND ');
 
-      // Total + status breakdown + APS count in a single query
       const rows = await prisma.$queryRawUnsafe<Array<{
         status: string | null;
         cnt: bigint;
@@ -1372,19 +1456,17 @@ export class CampanasController {
         SELECT
           cm.status,
           COUNT(*) as cnt,
-          SUM(CASE WHEN aps_check.cotizacion_id IS NOT NULL THEN 1 ELSE 0 END) as con_aps
+          SUM(CASE WHEN EXISTS (
+            SELECT 1 FROM solicitudCaras sc_a
+            INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id
+            WHERE sc_a.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+              AND rsv_a.deleted_at IS NULL AND rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
+          ) THEN 1 ELSE 0 END) as con_aps
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        LEFT JOIN (
-          SELECT DISTINCT ct_a.id AS cotizacion_id
-          FROM cotizacion ct_a
-          INNER JOIN solicitudCaras sc_a ON sc_a.idquote = ct_a.id_propuesta
-          INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id AND rsv_a.deleted_at IS NULL
-          WHERE rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
-        ) aps_check ON aps_check.cotizacion_id = ct.id
         WHERE ${whereClause}
         GROUP BY cm.status
       `, ...params);
@@ -1400,7 +1482,7 @@ export class CampanasController {
         conAps += Number(row.con_aps);
       }
 
-      res.json({
+      const response = {
         success: true,
         data: {
           total,
@@ -1410,7 +1492,11 @@ export class CampanasController {
           conAps,
           sinAps: total - conAps,
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+
+      res.json(response);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadisticas';
       res.status(500).json({
@@ -1552,7 +1638,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
@@ -1608,7 +1694,7 @@ export class CampanasController {
           cat.año as anio_catorcena,
           sc.caras AS caras_totales
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
@@ -1784,7 +1870,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE
           cm.id = ?
@@ -1856,7 +1942,7 @@ export class CampanasController {
           sc.ciudad as ciudad,
           sc.estados as estados
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
@@ -2087,7 +2173,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
@@ -2152,7 +2238,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE
           cm.id IN (${placeholders})
@@ -2211,7 +2297,7 @@ export class CampanasController {
           sc.caras AS caras_totales,
           0 as aps
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
@@ -2265,7 +2351,7 @@ export class CampanasController {
           sc.ciudad as ciudad,
           sc.estados as estados
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
@@ -2466,19 +2552,41 @@ export class CampanasController {
       }
 
       if (search) {
-        conditions.push(`(CAST(cm.id AS CHAR) LIKE ? OR CAST(ct.id_propuesta AS CHAR) LIKE ? OR cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_Cliente LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR pr.asignado LIKE ? OR s.nombre_usuario LIKE ? OR COALESCE(s.asesor, cl.T0_U_Asesor) LIKE ?
-          OR EXISTS (
-            SELECT 1 FROM reservas rsv_s
-            INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-            INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-            INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-            WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR)
-              AND rsv_s.deleted_at IS NULL
-              AND inv_s.codigo_unico LIKE ?
-          )
-        )`);
-        const searchPattern = `%${search}%`;
-        params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        const terms = search.trim().split(/\s+/);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+        }
+
+        for (const term of textTerms) {
+          const searchPattern = `%${term}%`;
+          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
+          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+          if (term.length > 3) {
+            searchClause += `
+              OR EXISTS (
+                SELECT 1 FROM reservas rsv_s
+                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
+                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
+                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
+                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+                  AND rsv_s.deleted_at IS NULL
+                  AND inv_s.codigo_unico LIKE ?
+              )`;
+            params.push(searchPattern);
+          }
+          searchClause += ')';
+          searchOrConditions.push(searchClause);
+        }
+
+        if (searchOrConditions.length > 0) {
+          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+        }
       }
 
       if (yearInicio && yearFin) {
@@ -2707,7 +2815,7 @@ export class CampanasController {
               ct_c.id AS cotizacion_id,
               GROUP_CONCAT(DISTINCT CONCAT(cat_c.numero_catorcena, ':', cat_c.año) ORDER BY cat_c.año, cat_c.numero_catorcena SEPARATOR ',') AS catorcenas_con_contenido
             FROM solicitudCaras sc_c
-            INNER JOIN cotizacion ct_c ON ct_c.id_propuesta = sc_c.idquote
+            INNER JOIN cotizacion ct_c ON sc_c.idquote = CAST(ct_c.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
             INNER JOIN catorcenas cat_c ON sc_c.inicio_periodo <= cat_c.fecha_fin AND sc_c.fin_periodo >= cat_c.fecha_inicio
             WHERE ct_c.id IN (SELECT cotizacion_id FROM campania WHERE id IN (${cmIdPh}))
             GROUP BY ct_c.id
@@ -2811,7 +2919,7 @@ export class CampanasController {
           const inversionData = await prisma.$queryRawUnsafe<any[]>(`
             SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
             FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE pr.id IN (${phInv})
@@ -3205,9 +3313,9 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN propuesta pr ON pr.id = sc.idquote
+          LEFT JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
           LEFT JOIN (
@@ -3384,7 +3492,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN archivos arc ON inv.archivos_id = arc.id
           LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
@@ -3486,7 +3594,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
           INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN tareas tr ON tr.campania_id = cm.id
             AND tr.tipo = 'Instalación'
@@ -4125,7 +4233,7 @@ export class CampanasController {
         FROM imagenes_digitales img
         INNER JOIN reservas r ON r.id = img.id_reserva
         INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-        INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ${campanaId}
         GROUP BY img.id_reserva
@@ -6144,14 +6252,34 @@ export class CampanasController {
         return;
       }
 
+      if (!campanaId) {
+        res.status(400).json({ success: false, error: 'Se requiere campanaId' });
+        return;
+      }
+
       console.log('assignAPS - inventarioIds recibidos:', inventarioIds, '| solicitudCarasIds:', solicitudCarasIds);
+
+      // Obtener solicitudCaras de esta campaña para acotar los UPDATEs
+      const campaignScIds = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+        SELECT sc.id FROM solicitudCaras sc
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+        INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ?
+      `, parseInt(campanaId));
+      const scIdsForCampaign = campaignScIds.map(r => r.id);
+
+      if (scIdsForCampaign.length === 0) {
+        res.status(400).json({ success: false, error: 'No se encontraron circuitos para esta campaña' });
+        return;
+      }
+      const scPlaceholders = scIdsForCampaign.map(() => '?').join(',');
 
       // Paso 1: Obtener el siguiente número APS
       const maxAPSResult = await prisma.$queryRaw<{ maxAPS: bigint | null }[]>`
         SELECT IFNULL(MAX(CAST(APS AS UNSIGNED)), 0) as maxAPS FROM reservas
       `;
       const newAPS = Number(maxAPSResult[0]?.maxAPS || 0) + 1;
-      console.log('assignAPS - nuevo APS:', newAPS);
+      console.log('assignAPS - nuevo APS:', newAPS, '| scIds campaña:', scIdsForCampaign.length);
 
       // Paso 2 y 3: Procesar artículos con inventario (flujo normal)
       if (hasInventario) {
@@ -6170,26 +6298,28 @@ export class CampanasController {
           const grupoIds = grupos.map(g => g.grupo_completo_id);
           console.log('assignAPS - grupos encontrados:', grupoIds);
 
-          // Actualizar solo las reservas seleccionadas
+          // Actualizar solo las reservas seleccionadas (acotado a la campaña)
           const updateDirectQuery = `
             UPDATE reservas
             SET APS = ?
             WHERE id IN (${rsvPlaceholders})
+            AND solicitudCaras_id IN (${scPlaceholders})
             AND (APS IS NULL OR APS = 0)
           `;
-          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...rsvIds);
+          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...rsvIds, ...scIdsForCampaign);
           console.log('assignAPS - actualizadas reservas directas por rsvIds');
 
-          // Actualizar reservas del mismo grupo_completo (si hay grupos)
+          // Actualizar reservas del mismo grupo_completo (acotado a la campaña)
           if (grupoIds.length > 0) {
             const grupoPlaceholders = grupoIds.map(() => '?').join(',');
             const updateGruposQuery = `
               UPDATE reservas
               SET APS = ?
               WHERE grupo_completo_id IN (${grupoPlaceholders})
+              AND solicitudCaras_id IN (${scPlaceholders})
               AND (APS IS NULL OR APS = 0)
             `;
-            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
+            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds, ...scIdsForCampaign);
             console.log('assignAPS - actualizadas reservas de grupos');
           }
         } else {
@@ -6201,10 +6331,11 @@ export class CampanasController {
             FROM reservas r
             JOIN espacio_inventario ei ON r.inventario_id = ei.id
             WHERE ei.inventario_id IN (${placeholders})
+            AND r.solicitudCaras_id IN (${scPlaceholders})
             AND r.grupo_completo_id IS NOT NULL
           `;
 
-          const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds);
+          const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...inventarioIds, ...scIdsForCampaign);
           const grupoIds = grupos.map(g => g.grupo_completo_id);
           console.log('assignAPS - grupos encontrados (fallback):', grupoIds);
 
@@ -6213,23 +6344,25 @@ export class CampanasController {
             JOIN espacio_inventario ei ON r.inventario_id = ei.id
             SET r.APS = ?
             WHERE ei.inventario_id IN (${placeholders})
+            AND r.solicitudCaras_id IN (${scPlaceholders})
             AND (r.APS IS NULL OR r.APS = 0)
           `;
 
-          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds);
+          await prisma.$executeRawUnsafe(updateDirectQuery, newAPS, ...inventarioIds, ...scIdsForCampaign);
           console.log('assignAPS - actualizadas reservas directas (fallback)');
 
-          // Actualizar reservas del mismo grupo_completo (si hay grupos)
+          // Actualizar reservas del mismo grupo_completo (acotado a la campaña)
           if (grupoIds.length > 0) {
             const grupoPlaceholders = grupoIds.map(() => '?').join(',');
             const updateGruposQuery = `
               UPDATE reservas
               SET APS = ?
               WHERE grupo_completo_id IN (${grupoPlaceholders})
+              AND solicitudCaras_id IN (${scPlaceholders})
               AND (APS IS NULL OR APS = 0)
             `;
 
-            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds);
+            await prisma.$executeRawUnsafe(updateGruposQuery, newAPS, ...grupoIds, ...scIdsForCampaign);
             console.log('assignAPS - actualizadas reservas de grupos (fallback)');
           }
         }
@@ -6380,7 +6513,7 @@ export class CampanasController {
       const query = `
         UPDATE reservas r
         JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         JOIN campania cm ON cm.cotizacion_id = ct.id
         SET r.archivo = NULL, r.arte_aprobado = NULL
         WHERE cm.id = ?
@@ -6441,7 +6574,7 @@ export class CampanasController {
           COUNT(*) as uso_count
         FROM reservas r
         JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-        JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+        JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ?
           AND r.archivo IS NOT NULL
@@ -6495,7 +6628,7 @@ export class CampanasController {
             COUNT(*) as uso_count
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
-          JOIN cotizacion ct ON sc.idquote = ct.id_propuesta
+          JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           JOIN campania cm ON cm.cotizacion_id = ct.id
           WHERE cm.id = ?
             AND r.archivo IS NOT NULL
@@ -6886,7 +7019,7 @@ export class CampanasController {
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN propuesta pr ON pr.id = sc.idquote
+          INNER JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
@@ -7476,10 +7609,41 @@ export class CampanasController {
         return;
       }
 
+      // Obtener info de reservas antes de eliminar para historial
+      const reservasInfo = await prisma.reservas.findMany({
+        where: { id: { in: reservaIds } },
+        select: { id: true, solicitudCaras_id: true, inventario_id: true, estatus: true },
+      });
+      const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
+      const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
+        where: { id: { in: caraIds as number[] } },
+        select: { id: true, idquote: true, articulo: true, formato: true },
+      }) : [];
+
       // Soft delete reservas
       await prisma.reservas.updateMany({
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
+      });
+
+      // Registrar en historial
+      const campanaId = parseInt(req.params.id);
+      const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: { nombre: true, cotizacion_id: true } });
+      const cotizacion = campana?.cotizacion_id ? await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id }, select: { id_propuesta: true } }) : null;
+      await prisma.historial.create({
+        data: {
+          tipo: 'Campaña',
+          ref_id: cotizacion?.id_propuesta || campanaId,
+          accion: 'Eliminación de reservas',
+          fecha_hora: new Date(),
+          detalles: JSON.stringify({
+            usuario: req.user?.nombre || 'Usuario',
+            origen: 'campaña',
+            campaña: campana?.nombre || campanaId,
+            reservas_eliminadas: reservaIds.length,
+            circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+          }),
+        },
       });
 
       res.json({
@@ -7604,6 +7768,11 @@ export class CampanasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const cotiTPCmpUpd = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+              `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+              parseInt(currentCara.idquote || '0')
+            );
+            const tipoPeriodoCmpUpd = (cotiTPCmpUpd[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
             // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCaraFull?.grupo_rt_bf;
             const esBfArt = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
@@ -7618,6 +7787,7 @@ export class CampanasController {
               fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
               fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
               cantidad: tieneGrupoBfUpd && cantidadUpd > 0 ? cantidadUpd : undefined,
+              tipoPeriodo: tipoPeriodoCmpUpd,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -7751,7 +7921,7 @@ export class CampanasController {
       // Obtener la propuesta asociada
       const cotizacion = await prisma.cotizacion.findFirst({
         where: { id: campana.cotizacion_id },
-        select: { id_propuesta: true }
+        select: { id_propuesta: true, tipo_periodo: true }
       });
 
       if (!cotizacion || !cotizacion.id_propuesta) {
@@ -7836,6 +8006,7 @@ export class CampanasController {
             fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
             fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
             cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+            tipoPeriodo: cotizacion.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
           });
         } catch (e: any) {
           await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});
@@ -8104,6 +8275,13 @@ export class CampanasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Info para historial antes de eliminar
+      const carasParaHistorial = await prisma.solicitudCaras.findMany({
+        where: { id: { in: idsToDelete } },
+        select: { id: true, idquote: true, articulo: true, formato: true },
+      });
+      const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
           where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
@@ -8113,6 +8291,25 @@ export class CampanasController {
           where: { id: { in: idsToDelete } },
         }),
       ]);
+
+      // Historial
+      const idquote = carasParaHistorial[0]?.idquote;
+      if (idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: parseInt(idquote) || 0,
+            accion: 'Eliminación de circuito',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: req.user?.nombre || 'Usuario',
+              origen: 'campaña',
+              reservas_eliminadas: reservasCount,
+              circuitos: carasParaHistorial.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            }),
+          },
+        });
+      }
 
       res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
     } catch (error) {
@@ -8383,7 +8580,7 @@ export class CampanasController {
         FROM artes_tradicionales at2
         INNER JOIN reservas r ON r.id = at2.id_reserva
         INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-        INNER JOIN cotizacion ct ON ct.id_propuesta = sc.idquote
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE cm.id = ${campanaId}
         GROUP BY at2.id_reserva
@@ -8435,7 +8632,7 @@ export class CampanasController {
           COUNT(*) AS total_caras
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN solicitudCaras sc ON sc.idquote = ct.id_propuesta
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
@@ -8522,7 +8719,7 @@ export class CampanasController {
       // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
       //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
       const perCatorcenaQuery = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           cm.id AS campania_id,
           cat.numero_catorcena,
           cat.año AS anio_catorcena,
@@ -8534,7 +8731,7 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          INNER JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN catorcenas cat
             ON sc.inicio_periodo <= cat.fecha_fin
            AND sc.fin_periodo    >= cat.fecha_inicio
@@ -8544,13 +8741,13 @@ export class CampanasController {
 
       // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
       const totalQuery = `
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           cm.id AS campania_id,
           COALESCE(SUM(sc.costo), 0) AS inversion
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN solicitudCaras sc ON CAST(sc.idquote AS UNSIGNED) = pr.id
+          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
         WHERE cm.id IN (${placeholders})
         GROUP BY cm.id
       `;
