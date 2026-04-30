@@ -454,13 +454,20 @@ export class InventariosController {
         }
       }
 
-      // Filter by state - puede ser múltiples estados separados por coma
+      // Filter by state OR plaza — el campo recibido puede ser un estado real
+      // (ej. "Jalisco") o una plaza (ej. "GUADALAJARA"). Hacer match contra ambos
+      // para soportar ambas convenciones sin romper compatibilidad.
       if (estado) {
         const estadoList = (estado as string).split(',').map(e => e.trim()).filter(Boolean);
-        if (estadoList.length === 1) {
-          where.estado = estadoList[0];
-        } else if (estadoList.length > 1) {
-          where.estado = { in: estadoList };
+        if (estadoList.length > 0) {
+          const filtro = estadoList.length === 1 ? estadoList[0] : { in: estadoList };
+          if (!where.AND) where.AND = [];
+          (where.AND as Record<string, unknown>[]).push({
+            OR: [
+              { estado: filtro },
+              { plaza: filtro },
+            ],
+          });
         }
       }
 

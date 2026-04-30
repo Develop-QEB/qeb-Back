@@ -685,6 +685,10 @@ export class CampanasController {
         inversion: propuesta?.inversion || null,
         comentario_cambio_status: propuesta?.comentario_cambio_status || null,
         updated_at: propuesta?.updated_at || null,
+        // Archivo: vive en propuesta.archivo (subido desde el modal de propuestas);
+        // tipo_archivo se hereda de solicitud.tipo_archivo (propuesta no tiene esa columna).
+        archivo: propuesta?.archivo || solicitud?.archivo || null,
+        tipo_archivo: solicitud?.tipo_archivo || null,
         // Info de SAP desde solicitud
         card_code: solicitud?.card_code || null,
         salesperson_code: solicitud?.salesperson_code || null,
@@ -7764,6 +7768,11 @@ export class CampanasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const cotiTPCmpUpd = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+              `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+              parseInt(currentCara.idquote || '0')
+            );
+            const tipoPeriodoCmpUpd = (cotiTPCmpUpd[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
             // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCaraFull?.grupo_rt_bf;
             const esBfArt = (data.articulo || '').toUpperCase().startsWith('BF') || (data.articulo || '').toUpperCase().startsWith('CF');
@@ -7778,6 +7787,7 @@ export class CampanasController {
               fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
               fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
               cantidad: tieneGrupoBfUpd && cantidadUpd > 0 ? cantidadUpd : undefined,
+              tipoPeriodo: tipoPeriodoCmpUpd,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -7911,7 +7921,7 @@ export class CampanasController {
       // Obtener la propuesta asociada
       const cotizacion = await prisma.cotizacion.findFirst({
         where: { id: campana.cotizacion_id },
-        select: { id_propuesta: true }
+        select: { id_propuesta: true, tipo_periodo: true }
       });
 
       if (!cotizacion || !cotizacion.id_propuesta) {
@@ -7996,6 +8006,7 @@ export class CampanasController {
             fechaInicio: data.inicio_periodo ? new Date(data.inicio_periodo) : new Date(),
             fechaFin: data.fin_periodo ? new Date(data.fin_periodo) : new Date(),
             cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+            tipoPeriodo: cotizacion.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
           });
         } catch (e: any) {
           await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});

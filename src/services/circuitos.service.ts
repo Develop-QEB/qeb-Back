@@ -25,6 +25,9 @@ export interface AutoReservarParams {
   // Cantidad de inventarios a reservar. Si se omite, reserva todos los del circuito (comportamiento legacy).
   // Si se especifica (típico para RT con BF separado): reserva solo N libres.
   cantidad?: number;
+  // Si la propuesta/campaña es mensual, todo cuenta como Flujo (Gran Formato rule),
+  // así que NO sobreescribir caras_flujo/caras_contraflujo con el split real del circuito.
+  tipoPeriodo?: 'catorcena' | 'mensual';
 }
 
 export interface AutoReservarResult {
@@ -188,11 +191,13 @@ export async function autoReservarCircuitoSiAplica(
     });
   }
 
-  // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT).
+  // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT)
+  //    y SOLO en catorcena. En mensual, todo cuenta como Flujo (regla Gran Formato),
+  //    así que dejamos los valores que mandó el front (caras_flujo = total, contraflujo = 0).
   //    El BF guarda su cantidad en `bonificacion`; caras_flujo/contraflujo deben
   //    quedarse en 0 para no duplicar el conteo en getCaraCompletionStatus.
   const esBfArt = prefijo === 'BF' || prefijo === 'CF' || prefijo === 'CT' || params.esBf;
-  if (aReservar.length > 0 && !esBfArt) {
+  if (aReservar.length > 0 && !esBfArt && params.tipoPeriodo !== 'mensual') {
     const reservadosIds = aReservar.map(r => r.inventario_id);
     const phRes = reservadosIds.map(() => '?').join(',');
     const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
@@ -328,26 +333,41 @@ export async function redistribuirReservasCircuito(
   }
 
   // 8. Reconciliar caras_flujo / caras_contraflujo del RT con el split real de reservas.
-  //    Para circuitos digitales: los inventarios reservados pueden no respetar el ratio
-  //    proporcional que envió el frontend. Aquí garantizamos que los valores guardados
-  //    reflejen el split real, para que getCaraCompletionStatus muestre la cara como
-  //    "verde" cuando la cantidad total está completa.
-  const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
-    `SELECT
-       SUM(CASE WHEN i.tipo_de_cara = 'Flujo' THEN 1 ELSE 0 END) AS flujo,
-       SUM(CASE WHEN i.tipo_de_cara = 'Contraflujo' THEN 1 ELSE 0 END) AS ctra
-     FROM reservas r
-     JOIN espacio_inventario ei ON ei.id = r.inventario_id
-     JOIN inventarios i ON i.id = ei.inventario_id
-     WHERE r.solicitudCaras_id = ? AND r.deleted_at IS NULL`,
-    rt.id
+  //    Para circuitos digitales en CATORCENA: los inventarios reservados pueden no respetar
+  //    el ratio proporcional que envió el frontend. Aquí garantizamos que los valores
+  //    guardados reflejen el split real, para que getCaraCompletionStatus muestre la cara
+  //    como "verde" cuando la cantidad total está completa.
+  //    En MENSUAL todo cuenta como Flujo (regla Gran Formato), no sobreescribir.
+  const tpRows = await tx.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+    `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+    Number(cara.idquote || 0)
   );
-  const flujoReal = Number(tipos[0]?.flujo || 0);
-  const ctraReal = Number(tipos[0]?.ctra || 0);
-  await tx.solicitudCaras.update({
-    where: { id: rt.id },
-    data: { caras_flujo: flujoReal, caras_contraflujo: ctraReal },
-  });
+  const esMensual = tpRows[0]?.tipo_periodo === 'mensual';
+  if (!esMensual) {
+    const tipos = await tx.$queryRawUnsafe<{ flujo: bigint | number; ctra: bigint | number }[]>(
+      `SELECT
+         SUM(CASE WHEN i.tipo_de_cara = 'Flujo' THEN 1 ELSE 0 END) AS flujo,
+         SUM(CASE WHEN i.tipo_de_cara = 'Contraflujo' THEN 1 ELSE 0 END) AS ctra
+       FROM reservas r
+       JOIN espacio_inventario ei ON ei.id = r.inventario_id
+       JOIN inventarios i ON i.id = ei.inventario_id
+       WHERE r.solicitudCaras_id = ? AND r.deleted_at IS NULL`,
+      rt.id
+    );
+    const flujoReal = Number(tipos[0]?.flujo || 0);
+    const ctraReal = Number(tipos[0]?.ctra || 0);
+    await tx.solicitudCaras.update({
+      where: { id: rt.id },
+      data: { caras_flujo: flujoReal, caras_contraflujo: ctraReal },
+    });
+  } else {
+    // Mensual: caras_flujo = total caras del RT, caras_contraflujo = 0
+    const totalRt = Number(rt.caras) || 0;
+    await tx.solicitudCaras.update({
+      where: { id: rt.id },
+      data: { caras_flujo: totalRt, caras_contraflujo: 0 },
+    });
+  }
 
   return { movidas };
 }
