@@ -114,12 +114,11 @@ async function main() {
   try {
     await connectWithRetry();
 
-    // Ejecutar limpieza inicial al arrancar
-    await limpiarReservasExpiradas();
-
-    // Programar limpieza periódica
-    setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
-    console.log(`[CRON] Limpieza de reservas programada cada ${INTERVALO_LIMPIEZA_MS / 3600000} horas`);
+    // DESACTIVADO: el cron borraba reservas (soft delete) con estatus Reservado/Bonificado
+    // sin pasar por el flujo normal ni generar historial. Deshabilitado por indicación de Mario.
+    // await limpiarReservasExpiradas();
+    // setInterval(limpiarReservasExpiradas, INTERVALO_LIMPIEZA_MS);
+    console.log(`[CRON] Limpieza de reservas DESACTIVADA`);
 
     // Procesar tickets pendientes sin respuesta de soporte
     chatbotController.processarTicketsPendientes().catch(err => {
