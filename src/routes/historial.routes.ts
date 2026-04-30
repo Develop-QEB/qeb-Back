@@ -8,6 +8,7 @@ router.use(authMiddleware);
 
 router.get('/', historialController.getAll.bind(historialController));
 router.get('/tipos', historialController.getTipos.bind(historialController));
+router.get('/acciones', historialController.getAcciones.bind(historialController));
 router.post('/notas', historialController.addNota.bind(historialController));
 
 export default router;

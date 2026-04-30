@@ -1260,14 +1260,24 @@ export class CampanasController {
               });
             }
 
-            // Registrar en historial
+            // Registrar en historial con detalle de qué cambió
+            const cambios: string[] = [];
+            if (nombre !== undefined && nombre !== campanaActual.nombre) cambios.push(`Nombre: "${campanaActual.nombre}" → "${nombre}"`);
+            if (notas !== undefined) cambios.push('Notas actualizadas');
+            if (descripcion !== undefined) cambios.push('Descripción actualizada');
+            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) cambios.push('Período modificado');
+            if (asignados !== undefined && asignados !== propuesta?.asignado) cambios.push(`Asignados: ${asignados}`);
+            if (IMU !== undefined) cambios.push(`IMU: ${IMU ? 'Sí' : 'No'}`);
+            if (cuic !== undefined) cambios.push(`CUIC: ${cuic}`);
+            if (marca_nombre !== undefined) cambios.push(`Marca: ${marca_nombre}`);
+
             await prisma.historial.create({
               data: {
                 tipo: 'Campaña',
                 ref_id: campanaId,
                 accion: 'Actualización',
                 fecha_hora: now,
-                detalles: `Campaña actualizada por ${userName}`,
+                detalles: `${userName} actualizó: ${cambios.length > 0 ? cambios.join(' | ') : 'datos de campaña'}`,
               },
             });
           }
