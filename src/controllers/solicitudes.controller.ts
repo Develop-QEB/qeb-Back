@@ -1927,6 +1927,7 @@ export class SolicitudesController {
             fechaFin: new Date(cara.fin_periodo),
             esBf: esBfArt,
             cantidad: tieneGrupoBf && cantidadReal > 0 ? cantidadReal : undefined,
+            tipoPeriodo: tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
           });
           if (autoRes) {
             console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
@@ -2921,6 +2922,7 @@ export class SolicitudesController {
               fechaFin: new Date(cara.fin_periodo),
               esBf: esBfArtUpd,
               cantidad: tieneGrupoBfUpd && cantidadRealUpd > 0 ? cantidadRealUpd : undefined,
+              tipoPeriodo: tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
             });
             if (autoRes) {
               console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);

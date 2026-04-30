@@ -653,9 +653,17 @@ export class PropuestasController {
         return;
       }
 
+      // tipo_periodo vive en cotizacion; el front lo necesita para aplicar la regla
+      // "mensual = solo Flujo" en el modal de asignación de inventario.
+      const cotiTP = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+        `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+        parseInt(id)
+      );
+      const tipo_periodo = cotiTP[0]?.tipo_periodo || 'catorcena';
+
       res.json({
         success: true,
-        data: propuesta,
+        data: { ...propuesta, tipo_periodo },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener propuesta';
@@ -3659,6 +3667,11 @@ export class PropuestasController {
               where: { id: parseInt(currentCara.idquote || '0') },
               select: { cliente_id: true },
             });
+            const cotiTPUpd = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+              `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+              parseInt(currentCara.idquote || '0')
+            );
+            const tipoPeriodoUpd = (cotiTPUpd[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
             // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!currentCara.grupo_rt_bf;
             const esBfArt = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
@@ -3673,6 +3686,7 @@ export class PropuestasController {
               fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
               fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
               cantidad: tieneGrupoBfUpd && cantidadReal > 0 ? cantidadReal : undefined,
+              tipoPeriodo: tipoPeriodoUpd,
             });
           } catch (e: any) {
             res.status(400).json({ success: false, error: e?.message || 'Error al re-reservar circuito' });
@@ -3868,6 +3882,12 @@ export class PropuestasController {
             where: { id: parseInt(id) },
             select: { cliente_id: true },
           });
+          // tipo_periodo vive en cotizacion (cotizacion.id_propuesta = propuesta.id)
+          const cotiTP = await prisma.$queryRawUnsafe<{ tipo_periodo: string | null }[]>(
+            `SELECT tipo_periodo FROM cotizacion WHERE id_propuesta = ? LIMIT 1`,
+            parseInt(id)
+          );
+          const tipoPeriodoCre = (cotiTP[0]?.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena') as 'mensual' | 'catorcena';
           // Para BF: la cantidad real está en bonificacion (caras es 0)
           const tieneGrupoBfNew = !!grupoRtBfCreate;
           const esBfArtNew = (articulo || '').toUpperCase().startsWith('BF') || (articulo || '').toUpperCase().startsWith('CF');
@@ -3882,6 +3902,7 @@ export class PropuestasController {
             fechaInicio: inicio_periodo ? new Date(inicio_periodo) : new Date(),
             fechaFin: fin_periodo ? new Date(fin_periodo) : new Date(),
             cantidad: tieneGrupoBfNew && cantidadNew > 0 ? cantidadNew : undefined,
+            tipoPeriodo: tipoPeriodoCre,
           });
         } catch (e: any) {
           // Rollback manual

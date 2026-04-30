@@ -102,31 +102,44 @@ export class NotificacionesController {
 
       if (search) {
         // IDs de tareas cuyos formatos (vía solicitud/propuesta/campaña) matchean el search
+        // Query con MAX_EXECUTION_TIME=5s + LIMIT 1000 para evitar zombies; si falla, búsqueda continúa sin estos IDs
         const formatoLike = `%${search}%`;
-        const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
-          SELECT DISTINCT t.id FROM tareas t
-          LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '') COLLATE utf8mb4_unicode_ci
-          LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
-          LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR) COLLATE utf8mb4_unicode_ci
-          LEFT JOIN campania cm ON cm.id = t.campania_id
-          LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          LEFT JOIN solicitudCaras sc_c ON sc_c.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          WHERE sc_p.formato LIKE ${formatoLike}
-             OR sc_s.formato LIKE ${formatoLike}
-             OR sc_c.formato LIKE ${formatoLike}
-        `;
-        const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
+        let formatoMatchIds: number[] = [];
+        try {
+          const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT t.id FROM tareas t
+            LEFT JOIN solicitudCaras sc_p ON sc_p.idquote = NULLIF(t.id_propuesta, '') COLLATE utf8mb4_unicode_ci
+            LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+            LEFT JOIN solicitudCaras sc_s ON sc_s.idquote = CAST(pr_s.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN campania cm ON cm.id = t.campania_id
+            LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            LEFT JOIN solicitudCaras sc_c ON sc_c.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE sc_p.formato LIKE ${formatoLike}
+               OR sc_s.formato LIKE ${formatoLike}
+               OR sc_c.formato LIKE ${formatoLike}
+            LIMIT 1000
+          `;
+          formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
+        } catch (err) {
+          console.warn('[notificaciones] formato search timeout/error, continuando sin esos IDs:', err instanceof Error ? err.message : err);
+        }
 
         // IDs de tareas que matchean por cliente o asesor (via solicitud + cliente)
         const clienteLike = `%${search}%`;
-        const clienteMatchRows = await prisma.$queryRaw<{ id: number }[]>`
-          SELECT DISTINCT t.id FROM tareas t
-          LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
-          LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
-          WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
-             OR sol.asesor LIKE ${clienteLike}
-        `;
-        const clienteMatchIds = clienteMatchRows.map(r => Number(r.id));
+        let clienteMatchIds: number[] = [];
+        try {
+          const clienteMatchRows = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT t.id FROM tareas t
+            LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
+            LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
+            WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
+               OR sol.asesor LIKE ${clienteLike}
+            LIMIT 1000
+          `;
+          clienteMatchIds = clienteMatchRows.map(r => Number(r.id));
+        } catch (err) {
+          console.warn('[notificaciones] cliente search timeout/error, continuando sin esos IDs:', err instanceof Error ? err.message : err);
+        }
 
         const orConditions: Record<string, unknown>[] = [
           { titulo: { contains: search } },
@@ -135,6 +148,14 @@ export class NotificacionesController {
           { responsable: { contains: search } },
           { asignado: { contains: search } },
         ];
+        // Búsqueda por ID de tarea (cuando el término es numérico)
+        const searchTrimmed = search.trim();
+        if (/^\d+$/.test(searchTrimmed)) {
+          const idNum = Number(searchTrimmed);
+          if (Number.isFinite(idNum) && idNum > 0) {
+            orConditions.push({ id: idNum });
+          }
+        }
         if (formatoMatchIds.length > 0) {
           orConditions.push({ id: { in: formatoMatchIds } });
         }

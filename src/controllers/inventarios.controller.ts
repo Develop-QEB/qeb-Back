@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
+import { cache, CACHE_TTL } from '../utils/cache';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371; // km
@@ -90,6 +91,35 @@ export class InventariosController {
           skip: (page - 1) * limit,
           take: limit,
           orderBy: { codigo_unico: 'asc' },
+          select: {
+            id: true,
+            codigo_unico: true,
+            ubicacion: true,
+            mueble: true,
+            tipo_de_mueble: true,
+            tipo_de_cara: true,
+            cara: true,
+            latitud: true,
+            longitud: true,
+            plaza: true,
+            estado: true,
+            municipio: true,
+            estatus: true,
+            tradicional_digital: true,
+            nivel_socioeconomico: true,
+            ancho: true,
+            alto: true,
+            tarifa_publica: true,
+            tarifa_piso: true,
+            total_espacios: true,
+            cto: true,
+            entre_calle_1: true,
+            entre_calle_2: true,
+            orientacion: true,
+            sentido: true,
+            isla: true,
+            mueble_isla: true,
+          },
         }),
         prisma.inventarios.count({ where }),
       ]);
@@ -341,57 +371,51 @@ export class InventariosController {
 
   async getTipos(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const tipos = await prisma.inventarios.findMany({
-        select: { mueble: true },
-        distinct: ['mueble'],
-      });
+      const data = await cache.getOrSet('inventarios:tipos', async () => {
+        const tipos = await prisma.inventarios.findMany({
+          select: { mueble: true },
+          distinct: ['mueble'],
+        });
+        return tipos.map((t) => t.mueble).filter(Boolean);
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: tipos.map((t) => t.mueble).filter(Boolean),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener tipos';
-      res.status(500).json({
-        success: false,
-        error: message,
-      });
+      res.status(500).json({ success: false, error: message });
     }
   }
 
   async getPlazas(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const plazas = await prisma.inventarios.findMany({
-        select: { plaza: true },
-        distinct: ['plaza'],
-      });
+      const data = await cache.getOrSet('inventarios:plazas', async () => {
+        const plazas = await prisma.inventarios.findMany({
+          select: { plaza: true },
+          distinct: ['plaza'],
+        });
+        return plazas.map((p) => p.plaza).filter(Boolean);
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: plazas.map((p) => p.plaza).filter(Boolean),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener plazas';
-      res.status(500).json({
-        success: false,
-        error: message,
-      });
+      res.status(500).json({ success: false, error: message });
     }
   }
 
   async getCtos(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const ctos = await prisma.inventarios.findMany({
-        select: { cto: true },
-        where: { cto: { not: null } },
-        distinct: ['cto'],
-        orderBy: { cto: 'asc' },
-      });
+      const data = await cache.getOrSet('inventarios:ctos', async () => {
+        const ctos = await prisma.inventarios.findMany({
+          select: { cto: true },
+          where: { cto: { not: null } },
+          distinct: ['cto'],
+          orderBy: { cto: 'asc' },
+        });
+        return ctos.map(c => c.cto).filter(Boolean);
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: ctos.map(c => c.cto).filter(Boolean),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener CTOs';
       res.status(500).json({ success: false, error: message });
@@ -400,21 +424,18 @@ export class InventariosController {
 
   async getEstatus(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const estatusList = await prisma.inventarios.findMany({
-        select: { estatus: true },
-        distinct: ['estatus'],
-      });
+      const data = await cache.getOrSet('inventarios:estatus', async () => {
+        const estatusList = await prisma.inventarios.findMany({
+          select: { estatus: true },
+          distinct: ['estatus'],
+        });
+        return estatusList.map((e) => e.estatus).filter(Boolean);
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: estatusList.map((e) => e.estatus).filter(Boolean),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estatus';
-      res.status(500).json({
-        success: false,
-        error: message,
-      });
+      res.status(500).json({ success: false, error: message });
     }
   }
 
@@ -454,13 +475,20 @@ export class InventariosController {
         }
       }
 
-      // Filter by state - puede ser múltiples estados separados por coma
+      // Filter by state OR plaza — el campo recibido puede ser un estado real
+      // (ej. "Jalisco") o una plaza (ej. "GUADALAJARA"). Hacer match contra ambos
+      // para soportar ambas convenciones sin romper compatibilidad.
       if (estado) {
         const estadoList = (estado as string).split(',').map(e => e.trim()).filter(Boolean);
-        if (estadoList.length === 1) {
-          where.estado = estadoList[0];
-        } else if (estadoList.length > 1) {
-          where.estado = { in: estadoList };
+        if (estadoList.length > 0) {
+          const filtro = estadoList.length === 1 ? estadoList[0] : { in: estadoList };
+          if (!where.AND) where.AND = [];
+          (where.AND as Record<string, unknown>[]).push({
+            OR: [
+              { estado: filtro },
+              { plaza: filtro },
+            ],
+          });
         }
       }
 
@@ -528,56 +556,56 @@ export class InventariosController {
       const inventarioIds = inventarios.map(inv => inv.id);
       const espacios = await prisma.espacio_inventario.findMany({
         where: { inventario_id: { in: inventarioIds } },
+        select: { id: true, inventario_id: true, numero_espacio: true },
       });
 
-      // If we have date range, get reservations for that period
-      let reservedInventarioIds: Set<number> = new Set();
-
+      // Get calendar IDs once (reused for both inventario-level and espacio-level reservation checks)
+      let calendarioIds: number[] = [];
       if (fecha_inicio && fecha_fin) {
         const fechaIni = new Date(fecha_inicio as string);
         const fechaFin = new Date(fecha_fin as string);
-
-        // Get calendarios that overlap with the date range
         const calendarios = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            OR: [
-              {
-                fecha_inicio: { lt: fechaFin },
-                fecha_fin: { gt: fechaIni },
-              },
-            ],
+            fecha_inicio: { lt: fechaFin },
+            fecha_fin: { gt: fechaIni },
           },
           select: { id: true },
         });
+        calendarioIds = calendarios.map(c => c.id);
+      }
 
-        const calendarioIds = calendarios.map(c => c.id);
+      // Get ALL reservations once (both espacio-level and inventario-level info)
+      let reservedInventarioIds: Set<number> = new Set();
+      let reservedEspacioIds: Set<number> = new Set();
 
-        if (calendarioIds.length > 0) {
-          // Get reservations in those calendarios - need to map through espacio_inventario
-          const reservas = await prisma.reservas.findMany({
-            where: {
-              deleted_at: null,
-              calendario_id: { in: calendarioIds },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
-            },
+      if (calendarioIds.length > 0) {
+        const reservas = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIds },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
+          },
+          select: { inventario_id: true },
+        });
+
+        // reservas.inventario_id is actually espacio_inventario.id
+        reservedEspacioIds = new Set(reservas.map(r => r.inventario_id));
+
+        // Map espacio IDs back to inventario IDs
+        if (reservedEspacioIds.size > 0) {
+          const espaciosReservados = await prisma.espacio_inventario.findMany({
+            where: { id: { in: [...reservedEspacioIds] } },
             select: { inventario_id: true },
           });
-
-          // reservas.inventario_id is actually espacio_inventario.id, need to map to inventarios.id
-          const espacioIds = reservas.map(r => r.inventario_id);
-          if (espacioIds.length > 0) {
-            const espaciosReservados = await prisma.espacio_inventario.findMany({
-              where: { id: { in: espacioIds } },
-              select: { inventario_id: true },
-            });
-            reservedInventarioIds = new Set(espaciosReservados.map(e => e.inventario_id));
-          }
+          reservedInventarioIds = new Set(espaciosReservados.map(e => e.inventario_id));
         }
       }
 
       // Get already reserved for this solicitudCara if provided
       let alreadyReservedForCara: Set<number> = new Set();
+      let reservedForCaraEspacioIds: Set<number> = new Set();
+
       if (solicitudCaraId) {
         const existingReservas = await prisma.reservas.findMany({
           where: {
@@ -586,55 +614,16 @@ export class InventariosController {
           },
           select: { inventario_id: true },
         });
-        // reservas.inventario_id is actually espacio_inventario.id, need to map to inventarios.id
-        const espacioIds = existingReservas.map(r => r.inventario_id);
-        if (espacioIds.length > 0) {
+        reservedForCaraEspacioIds = new Set(existingReservas.map(r => r.inventario_id));
+
+        // Map espacio IDs back to inventario IDs
+        if (reservedForCaraEspacioIds.size > 0) {
           const espaciosReservados = await prisma.espacio_inventario.findMany({
-            where: { id: { in: espacioIds } },
+            where: { id: { in: [...reservedForCaraEspacioIds] } },
             select: { inventario_id: true },
           });
           alreadyReservedForCara = new Set(espaciosReservados.map(e => e.inventario_id));
         }
-      }
-
-      // Get reserved espacio_ids (not inventario_ids) for digital inventory
-      let reservedEspacioIds: Set<number> = new Set();
-      let reservedForCaraEspacioIds: Set<number> = new Set();
-
-      if (fecha_inicio && fecha_fin) {
-        const fechaIni2 = new Date(fecha_inicio as string);
-        const fechaFin2 = new Date(fecha_fin as string);
-
-        const calendarios2 = await prisma.calendario.findMany({
-          where: {
-            deleted_at: null,
-            OR: [{ fecha_inicio: { lt: fechaFin2 }, fecha_fin: { gt: fechaIni2 } }],
-          },
-          select: { id: true },
-        });
-
-        if (calendarios2.length > 0) {
-          const reservas2 = await prisma.reservas.findMany({
-            where: {
-              deleted_at: null,
-              calendario_id: { in: calendarios2.map(c => c.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
-            },
-            select: { inventario_id: true }, // This is actually espacio_inventario.id
-          });
-          reservedEspacioIds = new Set(reservas2.map(r => r.inventario_id));
-        }
-      }
-
-      if (solicitudCaraId) {
-        const existingReservas2 = await prisma.reservas.findMany({
-          where: {
-            deleted_at: null,
-            solicitudCaras_id: parseInt(solicitudCaraId as string),
-          },
-          select: { inventario_id: true },
-        });
-        reservedForCaraEspacioIds = new Set(existingReservas2.map(r => r.inventario_id));
       }
 
       // Build the response - for digital items, create one entry per available espacio
@@ -806,42 +795,36 @@ export class InventariosController {
   // Get NSE disponibles
   async getNSE(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const nseList = await prisma.inventarios.findMany({
-        select: { nivel_socioeconomico: true },
-        distinct: ['nivel_socioeconomico'],
-      });
+      const data = await cache.getOrSet('inventarios:nse', async () => {
+        const nseList = await prisma.inventarios.findMany({
+          select: { nivel_socioeconomico: true },
+          distinct: ['nivel_socioeconomico'],
+        });
+        return nseList.map(n => n.nivel_socioeconomico).filter(Boolean);
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: nseList.map(n => n.nivel_socioeconomico).filter(Boolean),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener NSE';
-      res.status(500).json({
-        success: false,
-        error: message,
-      });
+      res.status(500).json({ success: false, error: message });
     }
   }
 
   // Get estados disponibles
   async getEstados(_req: AuthRequest, res: Response): Promise<void> {
     try {
-      const estados = await prisma.inventarios.findMany({
-        select: { estado: true },
-        distinct: ['estado'],
-      });
+      const data = await cache.getOrSet('inventarios:estados', async () => {
+        const estados = await prisma.inventarios.findMany({
+          select: { estado: true },
+          distinct: ['estado'],
+        });
+        return estados.map(e => e.estado).filter(Boolean).sort();
+      }, CACHE_TTL.FILTER_OPTIONS);
 
-      res.json({
-        success: true,
-        data: estados.map(e => e.estado).filter(Boolean).sort(),
-      });
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estados';
-      res.status(500).json({
-        success: false,
-        error: message,
-      });
+      res.status(500).json({ success: false, error: message });
     }
   }
 

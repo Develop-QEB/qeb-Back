@@ -624,6 +624,20 @@ model chatbot_logs {
   created_at  DateTime? @default(now()) @db.Timestamp(0)
 }
 
+model analisis_ocupacion {
+  id                     Int       @id @default(autoincrement())
+  usuario_id             Int
+  nombre                 String    @db.VarChar(255)
+  inventarios_data       String    @db.LongText
+  catorcenas_data        String    @db.Text
+  codigos_no_encontrados String?   @db.Text
+  fecha_creacion         DateTime  @default(now()) @db.Timestamp(0)
+  fecha_actualizacion    DateTime? @db.Timestamp(0)
+
+  @@index([usuario_id])
+  @@map("analisis_ocupacion")
+}
+
 enum proveedores_estado {
   activo
   inactivo
