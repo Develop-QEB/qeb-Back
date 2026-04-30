@@ -13,6 +13,7 @@ export class HistorialController {
       const search = req.query.search as string;
       const fechaDesde = req.query.fechaDesde as string;
       const fechaHasta = req.query.fechaHasta as string;
+      const accion = req.query.accion as string;
 
       const userId = req.user?.userId;
       const userRole = req.user?.rol;
@@ -28,6 +29,10 @@ export class HistorialController {
         } else {
           where.tipo = tipo;
         }
+      }
+
+      if (accion) {
+        where.accion = { contains: accion };
       }
 
       if (fechaDesde || fechaHasta) {
@@ -108,6 +113,24 @@ export class HistorialController {
     }
   }
 
+  async getAcciones(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const acciones = await prisma.historial.findMany({
+        select: { accion: true },
+        distinct: ['accion'],
+        orderBy: { accion: 'asc' },
+      });
+
+      res.json({
+        success: true,
+        data: acciones.map(a => a.accion),
+      });
+    } catch (error) {
+      console.error('Error en historial getAcciones:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener acciones' });
+    }
+  }
+
   async addNota(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { ref_id, tipo, nota } = req.body;
@@ -122,7 +145,7 @@ export class HistorialController {
         data: {
           tipo,
           ref_id: ref_id || 0,
-          accion: 'Nota agregada',
+          accion: 'Acción registrada',
           detalles: `${userName}: ${nota}`,
         },
       });
