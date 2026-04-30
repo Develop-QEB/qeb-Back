@@ -147,6 +147,7 @@ export class HistorialController {
         [/editó/, 'Edición (usuario)', 'editó'],
         [/^Aprobación D(CM|G) por\b/, 'Aprobación (DCM/DG)', '~aprobacion_dcm_dg'],
         [/cambió Autorización D(CM|G)/, 'Cambio de autorización', '~cambio_autorizacion'],
+        [/\| Origen:.*→/, 'Cambio de valor', '~cambio_valor'],
         [/\bcambió\b.+→/, 'Cambio de valor', '~cambio_valor'],
       ];
 
