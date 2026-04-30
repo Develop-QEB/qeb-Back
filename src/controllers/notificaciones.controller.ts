@@ -101,27 +101,6 @@ export class NotificacionesController {
 }
 
       if (search) {
-<<<<<<< HEAD
-        // IDs de tareas cuyos formatos o nombre de campaña (vía solicitud/propuesta/campaña) matchean el search
-        const formatoLike = `%${search}%`;
-        const formatoMatchRows = await prisma.$queryRaw<{ id: number }[]>`
-          SELECT DISTINCT t.id FROM tareas t
-          LEFT JOIN solicitudCaras sc_p ON CAST(sc_p.idquote AS UNSIGNED) = CAST(NULLIF(t.id_propuesta, '') AS UNSIGNED)
-          LEFT JOIN propuesta pr_s ON pr_s.solicitud_id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
-          LEFT JOIN solicitudCaras sc_s ON CAST(sc_s.idquote AS UNSIGNED) = pr_s.id
-          LEFT JOIN campania cm ON cm.id = t.campania_id
-          LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          LEFT JOIN solicitudCaras sc_c ON CAST(sc_c.idquote AS UNSIGNED) = ct.id_propuesta
-          LEFT JOIN cotizacion ct_p ON ct_p.id_propuesta = CAST(NULLIF(t.id_propuesta, '') AS UNSIGNED)
-          WHERE sc_p.formato LIKE ${formatoLike}
-             OR sc_s.formato LIKE ${formatoLike}
-             OR sc_c.formato LIKE ${formatoLike}
-             OR cm.nombre LIKE ${formatoLike}
-             OR ct.nombre_campania LIKE ${formatoLike}
-             OR ct_p.nombre_campania LIKE ${formatoLike}
-        `;
-        const formatoMatchIds = formatoMatchRows.map(r => Number(r.id));
-=======
         // IDs de tareas cuyos formatos (vía solicitud/propuesta/campaña) matchean el search
         // Query con MAX_EXECUTION_TIME=5s + LIMIT 1000 para evitar zombies; si falla, búsqueda continúa sin estos IDs
         const formatoLike = `%${search}%`;
@@ -144,7 +123,6 @@ export class NotificacionesController {
         } catch (err) {
           console.warn('[notificaciones] formato search timeout/error, continuando sin esos IDs:', err instanceof Error ? err.message : err);
         }
->>>>>>> 48195d61f7d9ba878123cc321ac322fb288c604f
 
         // IDs de tareas que matchean por cliente o asesor (via solicitud + cliente)
         const clienteLike = `%${search}%`;
