@@ -2639,8 +2639,12 @@ export class PropuestasController {
       });
       const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
 
-      // Obtener espacios ya reservados en el período (excluyendo los de esta propuesta)
+      // Obtener espacios ya reservados en el período (excluyendo los de esta propuesta).
+      // Los espacios de inventarios DIGITALES se excluyen del bloqueo: tienen spots
+      // ilimitados y muchas campañas pueden compartir la misma pantalla en el mismo
+      // período (la pantalla rota los anuncios, no compite por slot fijo).
       let espaciosReservadosEnPeriodo: Set<number> = new Set();
+      let digitalEspacioIds: Set<number> = new Set();
       if (calendarioIdsOverlap.length > 0) {
         const reservasExistentes = await prisma.reservas.findMany({
           where: {
@@ -2651,7 +2655,23 @@ export class PropuestasController {
           },
           select: { inventario_id: true },
         });
-        espaciosReservadosEnPeriodo = new Set(reservasExistentes.map(r => r.inventario_id));
+        const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
+        if (espacioIdsExistentes.length > 0) {
+          const phDig = espacioIdsExistentes.map(() => '?').join(',');
+          const digitalRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT ei.id FROM espacio_inventario ei
+             JOIN inventarios i ON i.id = ei.inventario_id
+             WHERE ei.id IN (${phDig})
+               AND (i.tradicional_digital = 'Digital' OR i.total_espacios > 0)`,
+            ...espacioIdsExistentes
+          );
+          digitalEspacioIds = new Set(digitalRows.map(r => Number(r.id)));
+        }
+        espaciosReservadosEnPeriodo = new Set(
+          reservasExistentes
+            .filter(r => !digitalEspacioIds.has(r.inventario_id))
+            .map(r => r.inventario_id)
+        );
       }
 
       // Group reservas by whether they are completo (flujo + contraflujo at same location)

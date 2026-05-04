@@ -195,7 +195,9 @@ class CircuitosController {
       const invIds = invs.map(i => i.id);
       const placeholders = invIds.map(() => '?').join(',');
 
-      // Reservas que solapan con el rango — via espacio_inventario
+      // Reservas que solapan con el rango — via espacio_inventario.
+      // Digitales se EXCLUYEN del cálculo de conflictos: spots ilimitados,
+      // varias campañas pueden compartir la misma pantalla en el mismo período.
       const conflictos = await prisma.$queryRawUnsafe<
         { inventario_id: number; codigo_unico: string; fecha_inicio: Date; fecha_fin: Date; propuesta_id: number | null }[]
       >(
@@ -210,6 +212,7 @@ class CircuitosController {
            AND r.deleted_at IS NULL
            AND r.estatus NOT IN ('eliminada', 'Eliminada', 'cancelado', 'Cancelado')
            AND NOT (sc.fin_periodo < ? OR sc.inicio_periodo > ?)
+           AND COALESCE(inv.tradicional_digital, 'Tradicional') <> 'Digital'
          ORDER BY inv.id, sc.inicio_periodo`,
         ...invIds,
         fecha_inicio,
