@@ -72,6 +72,7 @@ export class DashboardController {
           estado: true,
           nivel_socioeconomico: true,
           tradicional_digital: true,
+          estatus: true,
         },
       });
 
@@ -152,6 +153,13 @@ export class DashboardController {
         }
       });
 
+      // Estatus efectivo: Bloqueado del inventario manda sobre cualquier reserva,
+      // luego prevalece el estatus de reserva (Vendido/Reservado/etc), default Disponible
+      const getEstatusEfectivo = (inv: { id: number; estatus: string | null }): string => {
+        if (inv.estatus === 'Bloqueado') return 'Bloqueado';
+        return inventarioEstatus[inv.id] || 'Disponible';
+      };
+
       // Calcular KPIs
       const total = inventariosBase.length;
       let disponibles = 0;
@@ -160,7 +168,7 @@ export class DashboardController {
       let bloqueados = 0;
 
       inventariosBase.forEach((inv) => {
-        const estatus = inventarioEstatus[inv.id];
+        const estatus = getEstatusEfectivo(inv);
         if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte') {
           vendidos++;
         } else if (estatus === 'Reservado') {
@@ -180,7 +188,7 @@ export class DashboardController {
         const conteo: Record<string, number> = {};
 
         inventariosBase.forEach((inv) => {
-          const estatusInv = inventarioEstatus[inv.id] || 'Disponible';
+          const estatusInv = getEstatusEfectivo(inv);
 
           if (estatusFiltro && estatusInv !== estatusFiltro) {
             return;
@@ -201,7 +209,7 @@ export class DashboardController {
         const conteo: Record<string, number> = {};
 
         inventariosBase.forEach((inv) => {
-          const estatusInv = inventarioEstatus[inv.id] || 'Disponible';
+          const estatusInv = getEstatusEfectivo(inv);
 
           if (estatusFiltro && estatusInv !== estatusFiltro) {
             return;
@@ -294,6 +302,7 @@ export class DashboardController {
           estado: true,
           nivel_socioeconomico: true,
           tradicional_digital: true,
+          estatus: true,
         },
       });
 
@@ -371,8 +380,11 @@ export class DashboardController {
       });
 
       // Filtrar inventarios por estatus seleccionado
+      // Bloqueado del inventario manda sobre cualquier reserva
       const inventariosFiltrados = inventariosBase.filter((inv) => {
-        const est = inventarioEstatus[inv.id] || 'Disponible';
+        const est = inv.estatus === 'Bloqueado'
+          ? 'Bloqueado'
+          : inventarioEstatus[inv.id] || 'Disponible';
 
         if (estatus_filtro === 'Reservado') {
           return est === 'Reservado' || est === 'Bonificado';
@@ -725,6 +737,7 @@ export class DashboardController {
           nivel_socioeconomico: true,
           latitud: true,
           longitud: true,
+          estatus: true,
         },
       });
 
@@ -928,10 +941,13 @@ export class DashboardController {
       });
 
       // Construir resultado con filtro de estatus
+      // Bloqueado del inventario manda sobre cualquier reserva
       const allResults = inventarios
         .map((inv) => {
           const info = inventarioInfo[inv.id];
-          const estatusActual = info?.estatus || 'Disponible';
+          const estatusActual = inv.estatus === 'Bloqueado'
+            ? 'Bloqueado'
+            : info?.estatus || 'Disponible';
 
           return {
             id: inv.id,
