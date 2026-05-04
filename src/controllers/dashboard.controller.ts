@@ -3,44 +3,63 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
 
+// Convierte un valor de query (string, string[], undefined) a array limpio
+// Soporta tanto formato CSV ("a,b,c") como repetido (?x=a&x=b)
+function toMultiValue(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  return arr
+    .flatMap((v) => String(v).split(','))
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
+
+// Construye una cláusula prisma { in: [...] } o equality según el array
+function multiClause(values: string[]): unknown {
+  if (values.length === 0) return undefined;
+  if (values.length === 1) return values[0];
+  return { in: values };
+}
+
 export class DashboardController {
   // Obtener estadisticas del dashboard con filtros (cached 10min)
   async getStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const {
-        estado,
-        ciudad,
-        formato,
-        nse,
         catorcena_id,
         fecha_inicio,
         fecha_fin,
       } = req.query;
 
+      const estados = toMultiValue(req.query.estado);
+      const ciudades = toMultiValue(req.query.ciudad);
+      const formatos = toMultiValue(req.query.formato);
+      const nses = toMultiValue(req.query.nse);
+      const tipos = toMultiValue(req.query.tipo);
+
       // Cache key based on filters
       const cacheKey = CACHE_KEYS.DASHBOARD_STATS(
-        JSON.stringify({ estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin })
+        JSON.stringify({ estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })
       );
 
       const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
-      if (estado) {
-        inventarioWhere.estado = estado as string;
-      }
+      const estadoClause = multiClause(estados);
+      if (estadoClause !== undefined) inventarioWhere.estado = estadoClause;
 
-      if (ciudad) {
-        inventarioWhere.plaza = ciudad as string;
-      }
+      const ciudadClause = multiClause(ciudades);
+      if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
 
-      if (formato) {
-        inventarioWhere.mueble = formato as string;
-      }
+      const formatoClause = multiClause(formatos);
+      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
 
-      if (nse) {
-        inventarioWhere.nivel_socioeconomico = nse as string;
-      }
+      const nseClause = multiClause(nses);
+      if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
+
+      const tipoClause = multiClause(tipos);
+      if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
 
       // Obtener todos los inventarios que cumplen los filtros
       const inventariosBase = await prisma.inventarios.findMany({
@@ -233,36 +252,37 @@ export class DashboardController {
     try {
       const { estatus_filtro } = req.params;
       const {
-        estado,
-        ciudad,
-        formato,
-        nse,
         catorcena_id,
         fecha_inicio,
         fecha_fin,
       } = req.query;
 
-      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin })}`;
+      const estados = toMultiValue(req.query.estado);
+      const ciudades = toMultiValue(req.query.ciudad);
+      const formatos = toMultiValue(req.query.formato);
+      const nses = toMultiValue(req.query.nse);
+      const tipos = toMultiValue(req.query.tipo);
+
+      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
-      if (estado) {
-        inventarioWhere.estado = estado as string;
-      }
+      const estadoClause = multiClause(estados);
+      if (estadoClause !== undefined) inventarioWhere.estado = estadoClause;
 
-      if (ciudad) {
-        inventarioWhere.plaza = ciudad as string;
-      }
+      const ciudadClause = multiClause(ciudades);
+      if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
 
-      if (formato) {
-        inventarioWhere.mueble = formato as string;
-      }
+      const formatoClause = multiClause(formatos);
+      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
 
-      if (nse) {
-        inventarioWhere.nivel_socioeconomico = nse as string;
-      }
+      const nseClause = multiClause(nses);
+      if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
+
+      const tipoClause = multiClause(tipos);
+      if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
 
       const inventariosBase = await prisma.inventarios.findMany({
         where: inventarioWhere,
@@ -410,7 +430,7 @@ export class DashboardController {
       const data = await cache.getOrSet(
         CACHE_KEYS.FILTER_OPTIONS,
         async () => {
-          const [estados, ciudades, formatos, nses, catorcenas] = await Promise.all([
+          const [estados, ciudades, formatos, nses, tipos, catorcenas] = await Promise.all([
             // Estados
             prisma.inventarios.findMany({
               select: { estado: true },
@@ -435,6 +455,12 @@ export class DashboardController {
               distinct: ['nivel_socioeconomico', 'plaza', 'estado'],
               where: { nivel_socioeconomico: { not: null } },
             }),
+            // Tipos (tradicional_digital)
+            prisma.inventarios.findMany({
+              select: { tradicional_digital: true },
+              distinct: ['tradicional_digital'],
+              where: { tradicional_digital: { not: null } },
+            }),
             // Catorcenas (ultimos 2 anos)
             prisma.catorcenas.findMany({
               where: {
@@ -457,6 +483,7 @@ export class DashboardController {
             ciudades: ciudades.filter(c => c.plaza).map(c => ({ ciudad: c.plaza!, estado: c.estado || '' })).sort((a, b) => a.ciudad.localeCompare(b.ciudad)),
             formatos: formatos.filter(f => f.mueble).map(f => ({ formato: f.mueble!, estado: f.estado || '', ciudad: f.plaza || '' })),
             nses: nses.filter(n => n.nivel_socioeconomico).map(n => ({ nse: n.nivel_socioeconomico!, estado: n.estado || '', ciudad: n.plaza || '' })),
+            tipos: tipos.map((t) => t.tradicional_digital).filter((v): v is string => Boolean(v)).sort(),
             catorcenaActual: catorcenaActual ? {
               id: catorcenaActual.id,
               label: `Cat ${catorcenaActual.numero_catorcena} - ${catorcenaActual.a_o} (Actual)`,
@@ -640,10 +667,6 @@ export class DashboardController {
   async getInventoryDetail(req: AuthRequest, res: Response): Promise<void> {
     try {
       const {
-        estado,
-        ciudad,
-        formato,
-        nse,
         catorcena_id,
         fecha_inicio,
         fecha_fin,
@@ -654,33 +677,38 @@ export class DashboardController {
       } = req.query;
       const wantCoords = includeCoords === 'true';
 
+      const estados = toMultiValue(req.query.estado);
+      const ciudades = toMultiValue(req.query.ciudad);
+      const formatos = toMultiValue(req.query.formato);
+      const nses = toMultiValue(req.query.nse);
+      const tipos = toMultiValue(req.query.tipo);
+
       const pageNum = parseInt(page as string) || 1;
       const limitNum = parseInt(limit as string) || 50;
       const skip = (pageNum - 1) * limitNum;
 
       const cacheKey = CACHE_KEYS.INVENTORY_DETAIL(
-        JSON.stringify({ estado, ciudad, formato, nse, catorcena_id, fecha_inicio, fecha_fin, estatus: estatusFiltro, page, limit, includeCoords })
+        JSON.stringify({ estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin, estatus: estatusFiltro, page, limit, includeCoords })
       );
 
       const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
-      if (estado) {
-        inventarioWhere.estado = estado as string;
-      }
+      const estadoClause = multiClause(estados);
+      if (estadoClause !== undefined) inventarioWhere.estado = estadoClause;
 
-      if (ciudad) {
-        inventarioWhere.plaza = ciudad as string;
-      }
+      const ciudadClause = multiClause(ciudades);
+      if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
 
-      if (formato) {
-        inventarioWhere.mueble = formato as string;
-      }
+      const formatoClause = multiClause(formatos);
+      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
 
-      if (nse) {
-        inventarioWhere.nivel_socioeconomico = nse as string;
-      }
+      const nseClause = multiClause(nses);
+      if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
+
+      const tipoClause = multiClause(tipos);
+      if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
 
       // Obtener TODOS los inventarios para calcular estatus
       const inventarios = await prisma.inventarios.findMany({
