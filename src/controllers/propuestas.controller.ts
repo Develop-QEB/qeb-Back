@@ -3555,6 +3555,8 @@ export class PropuestasController {
       const { caraId } = req.params;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+      const userRol = req.user?.rol || '';
+      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const {
         ciudad,
         estados,
@@ -3589,14 +3591,21 @@ export class PropuestasController {
       const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
       const beforeSnap = await snapshotCaras([parseInt(caraId)]);
 
-      // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE)
-      const authFieldsChanged =
+      // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE).
+      // Comparación de decimales con toFixed(2) para evitar falsos positivos por
+      // precisión float (ej. 120 * 3327.28 = 399273.59999999997 en JS) que disparaban
+      // recalc cuando el usuario solo cambiaba NSE.
+      // Admin/DEV: nunca recalcular auth — sus ediciones preservan el estado actual.
+      const decimalEq = (a: unknown, b: unknown) =>
+        parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const authFieldsChanged = !isAdminOrDev && (
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
-        (bonificacion !== undefined && parseFloat(bonificacion) !== Number(currentCara.bonificacion)) ||
-        (tarifa_publica !== undefined && parseFloat(tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+        (bonificacion !== undefined && !decimalEq(bonificacion, currentCara.bonificacion)) ||
+        (tarifa_publica !== undefined && !decimalEq(tarifa_publica, currentCara.tarifa_publica)) ||
         (formato !== undefined && formato !== currentCara.formato) ||
         (tipo !== undefined && tipo !== currentCara.tipo) ||
-        (articulo !== undefined && articulo !== currentCara.articulo);
+        (articulo !== undefined && articulo !== currentCara.articulo)
+      );
 
       let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
       let autorizacion_dcm = currentCara.autorizacion_dcm || 'aprobado';
@@ -3994,6 +4003,8 @@ export class PropuestasController {
       const { id } = req.params; // propuesta id
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+      const userRol = req.user?.rol || '';
+      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -4029,10 +4040,14 @@ export class PropuestasController {
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
-          const authFieldsChanged = currentCara && (
+          // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
+          // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
+          const decimalEqP = (a: unknown, b: unknown) =>
+            parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+          const authFieldsChanged = !isAdminOrDev && currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
-            (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCara.bonificacion)) ||
-            (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+            (data.bonificacion !== undefined && !decimalEqP(data.bonificacion, currentCara.bonificacion)) ||
+            (data.tarifa_publica !== undefined && !decimalEqP(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
             (data.articulo !== undefined && data.articulo !== currentCara.articulo)
