@@ -93,6 +93,8 @@ export async function autoReservarCircuitoSiAplica(
     throw new Error(`Circuito ${info.ctoLabel}: los inventarios no tienen espacios creados`);
   }
 
+  // Inventarios DIGITALES tienen spots ilimitados: NO se consideran "conflicto"
+  // aunque ya haya reservas en ese período (varias campañas comparten la pantalla).
   const conflictsRaw = await tx.$queryRawUnsafe<
     { inventario_id: number; codigo_unico: string; espacio_id: number }[]
   >(
@@ -104,7 +106,8 @@ export async function autoReservarCircuitoSiAplica(
      WHERE ei.id IN (${todosEspacios.map(() => '?').join(',')})
        AND r.deleted_at IS NULL
        AND r.estatus NOT IN ('eliminada', 'Eliminada', 'cancelado', 'Cancelado')
-       AND NOT (sc.fin_periodo < ? OR sc.inicio_periodo > ?)`,
+       AND NOT (sc.fin_periodo < ? OR sc.inicio_periodo > ?)
+       AND COALESCE(inv.tradicional_digital, 'Tradicional') <> 'Digital'`,
     ...todosEspacios,
     params.fechaInicio,
     params.fechaFin

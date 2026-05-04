@@ -7479,7 +7479,9 @@ export class CampanasController {
       });
       const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
 
-      // Obtener espacios ya reservados en el período
+      // Obtener espacios ya reservados en el período.
+      // Inventarios DIGITALES se excluyen del bloqueo: spots ilimitados,
+      // muchas campañas comparten la misma pantalla en el mismo período.
       let espaciosReservadosEnPeriodo: Set<number> = new Set();
       if (calendarioIdsOverlap.length > 0) {
         const reservasExistentes = await prisma.reservas.findMany({
@@ -7490,7 +7492,24 @@ export class CampanasController {
           },
           select: { inventario_id: true },
         });
-        espaciosReservadosEnPeriodo = new Set(reservasExistentes.map(r => r.inventario_id));
+        const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
+        let digitalEspacioIds = new Set<number>();
+        if (espacioIdsExistentes.length > 0) {
+          const phDig = espacioIdsExistentes.map(() => '?').join(',');
+          const digitalRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT ei.id FROM espacio_inventario ei
+             JOIN inventarios i ON i.id = ei.inventario_id
+             WHERE ei.id IN (${phDig})
+               AND (i.tradicional_digital = 'Digital' OR i.total_espacios > 0)`,
+            ...espacioIdsExistentes
+          );
+          digitalEspacioIds = new Set(digitalRows.map(r => Number(r.id)));
+        }
+        espaciosReservadosEnPeriodo = new Set(
+          reservasExistentes
+            .filter(r => !digitalEspacioIds.has(r.inventario_id))
+            .map(r => r.inventario_id)
+        );
       }
 
       let reservasCreadas = 0;
@@ -7668,6 +7687,8 @@ export class CampanasController {
       const data = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+      const userRol = req.user?.rol || '';
+      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
 
       // Get current cara to get idquote
       const currentCara = await prisma.solicitudCaras.findUnique({
@@ -7689,11 +7710,16 @@ export class CampanasController {
         where: { id: parseInt(caraId) },
       });
 
-      // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE)
-      const authFieldsChanged = currentCaraFull && (
+      // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE).
+      // toFixed(2) en decimales evita falsos positivos por precisión float (ej.
+      // 120 * 3327.28 = 399273.59999999997 en JS).
+      // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
+      const decimalEqC = (a: unknown, b: unknown) =>
+        parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const authFieldsChanged = !isAdminOrDev && currentCaraFull && (
         (data.caras !== undefined && parseInt(data.caras) !== currentCaraFull.caras) ||
-        (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCaraFull.bonificacion)) ||
-        (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCaraFull.tarifa_publica)) ||
+        (data.bonificacion !== undefined && !decimalEqC(data.bonificacion, currentCaraFull.bonificacion)) ||
+        (data.tarifa_publica !== undefined && !decimalEqC(data.tarifa_publica, currentCaraFull.tarifa_publica)) ||
         (data.formato !== undefined && data.formato !== currentCaraFull.formato) ||
         (data.tipo !== undefined && data.tipo !== currentCaraFull.tipo) ||
         (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo)
@@ -8061,6 +8087,8 @@ export class CampanasController {
       const campanaId = parseInt(id);
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+      const userRol = req.user?.rol || '';
+      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -8096,10 +8124,14 @@ export class CampanasController {
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
-          const authFieldsChanged = currentCara && (
+          // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
+          // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
+          const decimalEqB = (a: unknown, b: unknown) =>
+            parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+          const authFieldsChanged = !isAdminOrDev && currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
-            (data.bonificacion !== undefined && parseFloat(data.bonificacion) !== Number(currentCara.bonificacion)) ||
-            (data.tarifa_publica !== undefined && parseFloat(data.tarifa_publica) !== Number(currentCara.tarifa_publica)) ||
+            (data.bonificacion !== undefined && !decimalEqB(data.bonificacion, currentCara.bonificacion)) ||
+            (data.tarifa_publica !== undefined && !decimalEqB(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
             (data.articulo !== undefined && data.articulo !== currentCara.articulo)

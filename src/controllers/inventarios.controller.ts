@@ -663,24 +663,23 @@ export class InventariosController {
         const isDigital = inv.tradicional_digital === 'Digital' || (inv.total_espacios && inv.total_espacios > 0);
 
         if (isDigital && invEspacios.length > 0) {
-          // Digital: create one entry per available espacio
-          for (const esp of invEspacios) {
-            const isReserved = reservedEspacioIds.has(esp.id);
-            const isReservedForCara = reservedForCaraEspacioIds.has(esp.id);
-
-            if (!isReserved) {
-              disponibles.push({
-                ...inv,
-                tarifa_publica: inv.tarifa_publica ? Number(inv.tarifa_publica) : null,
-                tarifa_piso: inv.tarifa_piso ? Number(inv.tarifa_piso) : null,
-                espacio_id: esp.id,
-                numero_espacio: esp.numero_espacio,
-                espacios: [esp],
-                espacios_count: 1,
-                ya_reservado_para_cara: isReservedForCara,
-              });
-            }
-          }
+          // Digital con spots ILIMITADOS: un solo entry por inventario, siempre
+          // disponible. Reservas múltiples comparten espacio_id sin conflicto
+          // (la pantalla rota los anuncios, no hay competencia por slot fijo).
+          // Tomamos el primer espacio como referencia para la FK; backend permite
+          // que muchas reservas apunten al mismo espacio_inventario.id.
+          const firstEsp = invEspacios[0];
+          const yaReservadoParaCara = invEspacios.some(e => reservedForCaraEspacioIds.has(e.id));
+          disponibles.push({
+            ...inv,
+            tarifa_publica: inv.tarifa_publica ? Number(inv.tarifa_publica) : null,
+            tarifa_piso: inv.tarifa_piso ? Number(inv.tarifa_piso) : null,
+            espacio_id: firstEsp.id,
+            numero_espacio: firstEsp.numero_espacio,
+            espacios: invEspacios,
+            espacios_count: -1, // -1 = sin límite (front lo interpreta)
+            ya_reservado_para_cara: yaReservadoParaCara,
+          });
         } else {
           // Traditional: show once if not all reserved
           const allReserved = invEspacios.length > 0 && invEspacios.every(e => reservedEspacioIds.has(e.id));
@@ -1158,6 +1157,13 @@ export class InventariosController {
       const inventarioId = parseInt(req.params.id);
       const { fecha_inicio, fecha_fin, solicitudCaraId } = req.query;
 
+      // Detectar si el inventario es digital (sin límite de spots)
+      const inventario = await prisma.inventarios.findUnique({
+        where: { id: inventarioId },
+        select: { tradicional_digital: true, total_espacios: true }
+      });
+      const isDigital = inventario?.tradicional_digital === 'Digital';
+
       // Obtener todos los espacios del inventario
       const espacios = await prisma.espacio_inventario.findMany({
         where: { inventario_id: inventarioId }
@@ -1176,10 +1182,12 @@ export class InventariosController {
         return;
       }
 
-      // Obtener calendarios del período
+      // Obtener calendarios del período.
+      // Para digitales (spots ilimitados): todos los espacios siempre cuentan como
+      // disponibles, salvo los ya reservados por la propia cara (para no duplicar).
       let reservadosIds: Set<number> = new Set();
 
-      if (fecha_inicio && fecha_fin) {
+      if (fecha_inicio && fecha_fin && !isDigital) {
         const calendarios = await prisma.calendario.findMany({
           where: {
             OR: [
