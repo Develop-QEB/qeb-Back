@@ -1712,10 +1712,13 @@ export class SolicitudesController {
         });
       }
       if (!clienteRow && cuic) {
-        clienteRow = await prisma.cliente.findFirst({
-          where: { CUIC: cuic.toString(), T0_U_RazonSocial: { not: null } },
-          select: { card_code: true, salesperson_code: true, sap_database: true },
-        });
+        const cuicNum = Number(cuic);
+        if (Number.isFinite(cuicNum)) {
+          clienteRow = await prisma.cliente.findFirst({
+            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
+            select: { card_code: true, salesperson_code: true, sap_database: true },
+          });
+        }
       }
       if (clienteRow) {
         card_code_final = clienteRow.card_code ?? card_code_final;
@@ -2762,10 +2765,13 @@ export class SolicitudesController {
         });
       }
       if (!clienteRowUpd && cuic) {
-        clienteRowUpd = await prisma.cliente.findFirst({
-          where: { CUIC: cuic.toString(), T0_U_RazonSocial: { not: null } },
-          select: { card_code: true, salesperson_code: true, sap_database: true },
-        });
+        const cuicNum = Number(cuic);
+        if (Number.isFinite(cuicNum)) {
+          clienteRowUpd = await prisma.cliente.findFirst({
+            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
+            select: { card_code: true, salesperson_code: true, sap_database: true },
+          });
+        }
       }
       if (clienteRowUpd) {
         card_code_upd = clienteRowUpd.card_code ?? card_code_upd;
