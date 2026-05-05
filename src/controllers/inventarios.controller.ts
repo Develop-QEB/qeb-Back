@@ -972,9 +972,31 @@ export class InventariosController {
    * Poblar/actualizar la tabla espacio_inventario basado en todos los inventarios
    * - Para digitales (total_espacios > 0): crear N registros (1 por espacio)
    * - Para tradicionales: crear 1 registro por inventario
+   *
+   * Soft-deletea las reservas activas que apuntan a los espacios actuales ANTES
+   * de purgar la tabla — sin esto las reservas quedan zombi (apuntando a IDs
+   * de espacio_inventario que ya no existen). Las reservas con APS se reportan
+   * para revisión manual: borrarlas en QEB sin coordinar con SAP genera desfase
+   * contable.
    */
   async poblarEspaciosInventario(_req: AuthRequest, res: Response): Promise<void> {
     try {
+      // 0. Detectar y soft-deletear reservas activas que apuntan a espacios
+      // que están a punto de eliminarse. Las que tienen APS se loguean.
+      const reservasActivas = await prisma.reservas.findMany({
+        where: { deleted_at: null },
+        select: { id: true, APS: true },
+      });
+      const conApsCount = reservasActivas.filter(r => r.APS != null && r.APS > 0).length;
+      const sinApsIds = reservasActivas.filter(r => r.APS == null || r.APS === 0).map(r => r.id);
+      if (sinApsIds.length > 0) {
+        await prisma.reservas.updateMany({
+          where: { id: { in: sinApsIds } },
+          data: { deleted_at: new Date() },
+        });
+      }
+      console.log(`[poblarEspacios] Soft-deletadas ${sinApsIds.length} reservas sin APS para evitar zombis. ${conApsCount} con APS preservadas (revisar manualmente porque van a quedar huérfanas tras el truncate).`);
+
       // 1. Limpiar la tabla espacio_inventario
       await prisma.espacio_inventario.deleteMany({});
       console.log('[poblarEspacios] Tabla espacio_inventario limpiada');

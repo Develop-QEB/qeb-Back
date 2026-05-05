@@ -125,22 +125,54 @@ export class CampanasController {
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
+        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
+        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
+        // del outer query) que disparaba timeout 30s para términos como "sabritas".
+        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
+        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+
           if (term.length > 3) {
-            searchClause += `
-              OR EXISTS (
-                SELECT 1 FROM reservas rsv_s
-                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                  AND rsv_s.deleted_at IS NULL
-                  AND inv_s.codigo_unico LIKE ?
-              )`;
-            params.push(searchPattern);
+            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
+            // genéricos como "Mexico" que harían explotar la siguiente query).
+            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
+              searchPattern
+            );
+
+            if (invMatchRows.length > 0) {
+              const invMatchIds = invMatchRows.map(r => r.id);
+              const phInv = invMatchIds.map(() => '?').join(',');
+              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
+              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+                `SELECT DISTINCT sc.idquote
+                 FROM espacio_inventario ei
+                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
+                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+                 WHERE ei.inventario_id IN (${phInv})`,
+                ...invMatchIds
+              );
+              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
+              if (propIdsByInv.length > 0) {
+                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
+                const phPr = propIdsByInv.map(() => '?').join(',');
+                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+                  `SELECT DISTINCT cm.id
+                   FROM cotizacion ct
+                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+                   WHERE ct.id_propuesta IN (${phPr})`,
+                  ...propIdsByInv
+                );
+                if (campRows.length > 0) {
+                  const phCm = campRows.map(() => '?').join(',');
+                  searchClause += ` OR cm.id IN (${phCm})`;
+                  params.push(...campRows.map(c => c.id));
+                }
+              }
+            }
           }
           searchClause += ')';
           searchOrConditions.push(searchClause);
@@ -1406,22 +1438,54 @@ export class CampanasController {
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
+        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
+        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
+        // del outer query) que disparaba timeout 30s para términos como "sabritas".
+        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
+        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+
           if (term.length > 3) {
-            searchClause += `
-              OR EXISTS (
-                SELECT 1 FROM reservas rsv_s
-                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                  AND rsv_s.deleted_at IS NULL
-                  AND inv_s.codigo_unico LIKE ?
-              )`;
-            params.push(searchPattern);
+            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
+            // genéricos como "Mexico" que harían explotar la siguiente query).
+            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
+              searchPattern
+            );
+
+            if (invMatchRows.length > 0) {
+              const invMatchIds = invMatchRows.map(r => r.id);
+              const phInv = invMatchIds.map(() => '?').join(',');
+              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
+              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+                `SELECT DISTINCT sc.idquote
+                 FROM espacio_inventario ei
+                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
+                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+                 WHERE ei.inventario_id IN (${phInv})`,
+                ...invMatchIds
+              );
+              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
+              if (propIdsByInv.length > 0) {
+                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
+                const phPr = propIdsByInv.map(() => '?').join(',');
+                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+                  `SELECT DISTINCT cm.id
+                   FROM cotizacion ct
+                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+                   WHERE ct.id_propuesta IN (${phPr})`,
+                  ...propIdsByInv
+                );
+                if (campRows.length > 0) {
+                  const phCm = campRows.map(() => '?').join(',');
+                  searchClause += ` OR cm.id IN (${phCm})`;
+                  params.push(...campRows.map(c => c.id));
+                }
+              }
+            }
           }
           searchClause += ')';
           searchOrConditions.push(searchClause);
@@ -2575,22 +2639,54 @@ export class CampanasController {
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
+        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
+        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
+        // del outer query) que disparaba timeout 30s para términos como "sabritas".
+        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
+        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+
           if (term.length > 3) {
-            searchClause += `
-              OR EXISTS (
-                SELECT 1 FROM reservas rsv_s
-                INNER JOIN espacio_inventario ei_s ON ei_s.id = rsv_s.inventario_id
-                INNER JOIN inventarios inv_s ON inv_s.id = ei_s.inventario_id
-                INNER JOIN solicitudCaras sc_s ON sc_s.id = rsv_s.solicitudCaras_id
-                WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-                  AND rsv_s.deleted_at IS NULL
-                  AND inv_s.codigo_unico LIKE ?
-              )`;
-            params.push(searchPattern);
+            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
+            // genéricos como "Mexico" que harían explotar la siguiente query).
+            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
+              searchPattern
+            );
+
+            if (invMatchRows.length > 0) {
+              const invMatchIds = invMatchRows.map(r => r.id);
+              const phInv = invMatchIds.map(() => '?').join(',');
+              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
+              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+                `SELECT DISTINCT sc.idquote
+                 FROM espacio_inventario ei
+                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
+                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+                 WHERE ei.inventario_id IN (${phInv})`,
+                ...invMatchIds
+              );
+              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
+              if (propIdsByInv.length > 0) {
+                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
+                const phPr = propIdsByInv.map(() => '?').join(',');
+                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+                  `SELECT DISTINCT cm.id
+                   FROM cotizacion ct
+                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+                   WHERE ct.id_propuesta IN (${phPr})`,
+                  ...propIdsByInv
+                );
+                if (campRows.length > 0) {
+                  const phCm = campRows.map(() => '?').join(',');
+                  searchClause += ` OR cm.id IN (${phCm})`;
+                  params.push(...campRows.map(c => c.id));
+                }
+              }
+            }
           }
           searchClause += ')';
           searchOrConditions.push(searchClause);
@@ -6964,87 +7060,169 @@ export class CampanasController {
         }
       }
 
-      let statusFilter = '';
-      const params: (string | number)[] = [];
-
-      if (status) {
-        statusFilter = 'AND cm.status = ?';
-        params.push(status);
-      }
-
-      let dateFilter = '';
+      // PASO 1: Resolver fechas de la catorcena pedida (1 query)
+      let inicioFiltro: Date | null = null;
+      let finFiltro: Date | null = null;
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
-        dateFilter = `
-          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-        `;
-        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+        const [catRange] = await prisma.$queryRawUnsafe<{ inicio_filtro: Date | null; fin_filtro: Date | null }[]>(`
+          SELECT
+            (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS inicio_filtro,
+            (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS fin_filtro
+        `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        inicioFiltro = catRange?.inicio_filtro || null;
+        finFiltro = catRange?.fin_filtro || null;
       }
+
+      // PASO 2: Pre-filtrar campañas en el rango — tabla pequeña (~758 filas).
+      // Esto reduce el universo antes del query principal y evita que MySQL
+      // arranque por `reservas` (~112K filas) que es lo que causa el timeout.
+      const campStatusFilter = status ? 'AND cm.status = ?' : '';
+      const campDateFilter = (inicioFiltro && finFiltro) ? 'AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?' : '';
+      const campParams: (string | number | Date)[] = [];
+      if (status) campParams.push(status);
+      if (inicioFiltro && finFiltro) campParams.push(finFiltro, inicioFiltro);
+
+      const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string }[]>(`
+        SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status
+        FROM campania cm
+        INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        WHERE 1=1 ${campStatusFilter} ${campDateFilter}
+      `, ...campParams);
+
+      if (campsRows.length === 0) {
+        res.json({ success: true, data: [], filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin } });
+        return;
+      }
+
+      const propuestaIdsStr = [...new Set(campsRows.map(c => String(c.id_propuesta)).filter(Boolean))];
+      const campMap = new Map(campsRows.map(c => [String(c.id_propuesta), c]));
+
+      // PASO 3: Pre-fetch clientes, catorcenas y propuestas (tablas chiquitas en
+      // este recorte, queries rápidas con IN). Las usamos en JS para evitar
+      // JOINs costosos: cliente con OR (cliente.id OR cliente.CUIC mata el
+      // índice y dispara fullscan), subqueries correlacionadas contra
+      // catorcenas, y CAST en `sc.idquote = CAST(pr.id AS CHAR)`.
+      const propuestaIdsNum = [...new Set(campsRows.map(c => Number(c.id_propuesta)).filter(Boolean))];
+      const phPr = propuestaIdsNum.map(() => '?').join(',');
+      const [clientesArr, catorcenasArr, propuestasArr] = await Promise.all([
+        prisma.$queryRawUnsafe<{ id: number; CUIC: string | null; T1_U_Cliente: string | null; T2_U_Marca: string | null }[]>(
+          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca FROM cliente`
+        ),
+        prisma.$queryRawUnsafe<{ id: number; numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date }[]>(
+          `SELECT id, numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
+        ),
+        propuestaIdsNum.length > 0
+          ? prisma.$queryRawUnsafe<{ id: number; asignado: string | null }[]>(
+              `SELECT id, asignado FROM propuesta WHERE id IN (${phPr})`,
+              ...propuestaIdsNum
+            )
+          : Promise.resolve([]),
+      ]);
+
+      const clienteByIdMap = new Map(clientesArr.map(c => [c.id, c]));
+      const clienteByCuicMap = new Map(clientesArr.filter(c => c.CUIC).map(c => [String(c.CUIC), c]));
+      const propuestaByIdMap = new Map(propuestasArr.map(p => [String(p.id), p]));
+
+      // PASO 4: Query principal — solo reservas de las propuestas filtradas.
+      const ph = propuestaIdsStr.map(() => '?').join(',');
+      const dateClauseSc = (inicioFiltro && finFiltro)
+        ? 'AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?'
+        : '';
+      const queryParams: (string | number | Date)[] = [...propuestaIdsStr];
+      if (inicioFiltro && finFiltro) queryParams.push(finFiltro, inicioFiltro);
 
       const query = `
         SELECT
-          cm.nombre AS Campania,
-          cliente.T1_U_Cliente AS Anunciante,
-          CASE
-            WHEN sc.articulo LIKE 'RT%' THEN 'RENTA'
-            WHEN sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 'BONIFICACION'
-            WHEN sc.articulo LIKE 'CT%' THEN 'CORTESIA'
-            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
-            ELSE 'RENTA'
-          END AS Operacion,
-          cm.id AS CodigoContrato,
-          CASE
-            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 0
-            ELSE ROUND(sc.tarifa_publica * (1 - COALESCE(ct.descuento, 0)), 2)
-          END AS PrecioPorCara,
-          pr.asignado AS Vendedor,
-          NULL AS Descripcion,
-          CONCAT('Catorcenas ', YEAR(sc.inicio_periodo)) AS InicioPeriodo,
-          CONCAT('Catorcena #', LPAD(
-            FLOOR((DAYOFYEAR(sc.inicio_periodo) - 1) / 14) + 1,
-            2, '0'
-          )) AS FinSegmento,
-          cliente.T2_U_Marca AS Arte,
-          rsv.id AS CodigoArte,
-          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN 'HAS_ARTE' ELSE NULL END AS ArteUrl,
-          CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo != '' THEN SUBSTRING_INDEX(rsv.archivo, '/', -1) ELSE NULL END AS ArteFileName,
-          NULL AS OrigenArte,
-          rsv.id AS rsv_id,
-          inv.tradicional_digital AS tradicional_digital,
-          CAST(inv.codigo_unico AS CHAR(255)) AS Unidad,
-          CAST(inv.tipo_de_cara AS CHAR(255)) AS Cara,
-          CAST(inv.plaza AS CHAR(255)) AS Ciudad,
-          CASE
-            WHEN sc.cortesia = 1 THEN 'CORTESIA'
-            WHEN rsv.estatus = 'Vendido bonificado' OR rsv.estatus = 'Bonificado' THEN 'BONIFICACION'
-            ELSE 'RENTA'
-          END AS TipoDistribucion,
-          NULL AS Reproducciones,
-          sc.inicio_periodo AS fecha_inicio,
-          sc.fin_periodo AS fecha_fin,
-          cm.status AS status_campania,
-          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
-          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
+          sc.idquote,
+          sc.articulo,
+          sc.tarifa_publica,
           sc.cortesia,
-          sc.articulo AS numero_articulo
-        FROM reservas rsv
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          rsv.id AS rsv_id,
+          rsv.estatus AS rsv_estatus,
+          rsv.archivo AS rsv_archivo,
+          inv.tradicional_digital,
+          inv.codigo_unico,
+          inv.tipo_de_cara,
+          inv.plaza
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+            AND rsv.deleted_at IS NULL
+            AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
           INNER JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           INNER JOIN inventarios inv ON inv.id = esInv.inventario_id
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
-        WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus NOT IN ('eliminada', 'Eliminada')
-          ${statusFilter}
-          ${dateFilter}
-        ORDER BY cm.id, sc.id, inv.id
+        WHERE sc.idquote IN (${ph})
+          ${dateClauseSc}
+        ORDER BY sc.idquote, sc.id, inv.id
       `;
 
-      const data = await prisma.$queryRawUnsafe(query, ...params);
+      const rawData = (await prisma.$queryRawUnsafe(query, ...queryParams)) as any[];
 
-      const dataArr = data as any[];
+      // PASO 5: Mapear cada fila al shape que espera el front (mismo de antes).
+      const dataArr: any[] = rawData.map((r: any) => {
+        const camp = campMap.get(String(r.idquote));
+        const cliId = camp?.cliente_id;
+        const cliente = (cliId ? clienteByIdMap.get(cliId) : undefined)
+          || (cliId ? clienteByCuicMap.get(String(cliId)) : undefined);
+        const inicio = r.inicio_periodo instanceof Date ? r.inicio_periodo : new Date(r.inicio_periodo);
+        const cat = catorcenasArr.find(c => {
+          const fIni = c.fecha_inicio instanceof Date ? c.fecha_inicio : new Date(c.fecha_inicio);
+          const fFin = c.fecha_fin instanceof Date ? c.fecha_fin : new Date(c.fecha_fin);
+          return inicio >= fIni && inicio <= fFin;
+        });
+
+        const articuloUp = String(r.articulo || '').toUpperCase();
+        const operacion = articuloUp.startsWith('RT') ? 'RENTA'
+          : (articuloUp.startsWith('BF') || articuloUp.startsWith('CF')) ? 'BONIFICACION'
+          : articuloUp.startsWith('CT') ? 'CORTESIA'
+          : articuloUp.startsWith('IN') ? 'INTERCAMBIO'
+          : 'RENTA';
+        const isBonificado = r.rsv_estatus === 'Vendido bonificado' || r.rsv_estatus === 'Bonificado';
+        const precioPorCara = isBonificado
+          ? 0
+          : Math.round((Number(r.tarifa_publica) || 0) * (1 - (Number(camp?.descuento) || 0)) * 100) / 100;
+        const tipoDist = r.cortesia === 1 ? 'CORTESIA'
+          : isBonificado ? 'BONIFICACION'
+          : 'RENTA';
+        const arteFileName = r.rsv_archivo
+          ? String(r.rsv_archivo).split('/').pop() || null
+          : null;
+        const arteUrl = r.rsv_archivo ? 'HAS_ARTE' : null;
+        const inicioYear = inicio.getFullYear();
+        const finSegmento = `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
+
+        return {
+          Campania: camp?.nombre || null,
+          Anunciante: cliente?.T1_U_Cliente || null,
+          Operacion: operacion,
+          CodigoContrato: camp?.id || null,
+          PrecioPorCara: precioPorCara,
+          Vendedor: propuestaByIdMap.get(String(r.idquote))?.asignado || null,
+          Descripcion: null,
+          InicioPeriodo: `Catorcenas ${inicioYear}`,
+          FinSegmento: finSegmento,
+          Arte: cliente?.T2_U_Marca || null,
+          CodigoArte: r.rsv_id,
+          ArteUrl: arteUrl,
+          ArteFileName: arteFileName,
+          OrigenArte: null,
+          rsv_id: r.rsv_id,
+          tradicional_digital: r.tradicional_digital,
+          Unidad: r.codigo_unico ? String(r.codigo_unico) : null,
+          Cara: r.tipo_de_cara ? String(r.tipo_de_cara) : null,
+          Ciudad: r.plaza ? String(r.plaza) : null,
+          TipoDistribucion: tipoDist,
+          Reproducciones: null,
+          fecha_inicio: r.inicio_periodo,
+          fecha_fin: r.fin_periodo,
+          status_campania: camp?.status || null,
+          catorcena_numero: cat?.numero_catorcena || null,
+          catorcena_year: cat?.ano || null,
+          cortesia: r.cortesia,
+          numero_articulo: r.articulo,
+        };
+      });
 
       // Collect unique campania_ids and rsv_ids from results
       const campaniaIds = [...new Set(dataArr.map((r: any) => Number(r.CodigoContrato)).filter(Boolean))];
