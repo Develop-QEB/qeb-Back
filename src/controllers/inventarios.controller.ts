@@ -905,7 +905,7 @@ export class InventariosController {
           CAST(sc.idquote AS UNSIGNED) as propuesta_id,
           cm.id as campana_id,
           cm.nombre as campana_nombre,
-          COALESCE(cl2.T0_U_RazonSocial, cl2.T0_U_Cliente, cl.T0_U_RazonSocial, cl.T0_U_Cliente) as cliente_nombre,
+          COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial) as cliente_nombre,
           cat.numero_catorcena,
           cat.año as anio_catorcena
         FROM espacio_inventario epIn
@@ -913,8 +913,15 @@ export class InventariosController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
           LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
-          LEFT JOIN cliente cl2 ON cl2.CUIC = cl.CUIC AND cl2.T0_U_RazonSocial IS NOT NULL AND cl2.id != cl.id
+          -- cm.cliente_id puede guardar el PK de cliente o el CUIC dependiendo del flujo;
+          -- buscamos la fila que matchee por id o CUIC, prefiriendo la que tenga T0_U_Cliente lleno.
+          LEFT JOIN cliente cl ON cl.id = (
+            SELECT cl_in.id FROM cliente cl_in
+            WHERE cl_in.id = cm.cliente_id OR cl_in.CUIC = cm.cliente_id
+            ORDER BY (cl_in.T0_U_Cliente IS NULL),
+                     (CASE WHEN cl_in.id = cm.cliente_id THEN 0 ELSE 1 END)
+            LIMIT 1
+          )
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE epIn.inventario_id = ?
           AND rsv.estatus != 'eliminada'
