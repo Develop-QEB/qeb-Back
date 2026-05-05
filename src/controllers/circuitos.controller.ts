@@ -9,6 +9,12 @@ const prisma = new PrismaClient();
 const PLAZA_CODE_TO_SQL_LIKE: Record<string, string> = {
   MX: 'CIUDAD DE M%', // captura "Ciudad de México" con/sin acento y mayúsculas
   MTY: 'MONTERREY%',
+  GD: 'GUADALAJARA%',
+  GDL: 'GUADALAJARA%',
+  PB: 'PUEBLA%',
+  MR: 'M%RIDA%',
+  MER: 'M%RIDA%',
+  TOL: 'TOLUCA%',
 };
 
 function plazaLike(plazaCode: string): string {

@@ -12,6 +12,12 @@ const prisma = new PrismaClient();
 const PLAZA_CODE_TO_SQL_LIKE: Record<string, string> = {
   MX: 'CIUDAD DE M%',
   MTY: 'MONTERREY%',
+  GD: 'GUADALAJARA%',
+  GDL: 'GUADALAJARA%',
+  PB: 'PUEBLA%',
+  MR: 'M%RIDA%',
+  MER: 'M%RIDA%',
+  TOL: 'TOLUCA%',
 };
 
 export interface AutoReservarParams {
