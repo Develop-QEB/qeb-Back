@@ -1697,7 +1697,34 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
-      // Use salesperson_code from request (ASESOR_U_SAPCode_Original from frontend)
+      // Re-leer SIEMPRE card_code/salesperson_code/sap_database desde cliente
+      // para evitar desincronización. Lookup robusta: por id primero, fallback
+      // por CUIC. Si nada encuentra, conserva los valores que mandó el front
+      // (no los sobreescribe con null).
+      let card_code_final: string | null = card_code || null;
+      let salesperson_code_final: number | null = salesperson_code != null ? Number(salesperson_code) : null;
+      let sap_database_final: string | null = sap_database || null;
+      let clienteRow: { card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
+      if (cliente_id) {
+        clienteRow = await prisma.cliente.findFirst({
+          where: { id: cliente_id },
+          select: { card_code: true, salesperson_code: true, sap_database: true },
+        });
+      }
+      if (!clienteRow && cuic) {
+        const cuicNum = Number(cuic);
+        if (Number.isFinite(cuicNum)) {
+          clienteRow = await prisma.cliente.findFirst({
+            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
+            select: { card_code: true, salesperson_code: true, sap_database: true },
+          });
+        }
+      }
+      if (clienteRow) {
+        card_code_final = clienteRow.card_code ?? card_code_final;
+        salesperson_code_final = clienteRow.salesperson_code ?? salesperson_code_final;
+        sap_database_final = clienteRow.sap_database ?? sap_database_final;
+      }
 
       // Use transaction for complex creation with extended timeout
       const result = await prisma.$transaction(async (tx) => {
@@ -1728,9 +1755,9 @@ export class SolicitudesController {
             IMU: IMU ? 1 : 0,
             archivo,
             tipo_archivo,
-            card_code: card_code || null,
-            salesperson_code,
-            sap_database: sap_database || null,
+            card_code: card_code_final,
+            salesperson_code: salesperson_code_final,
+            sap_database: sap_database_final,
           },
         });
 
@@ -2721,6 +2748,37 @@ export class SolicitudesController {
       const asignadosStr = asignados.map((a: { nombre: string }) => a.nombre).join(', ');
       const asignadosIds = asignados.map((a: { id: number }) => a.id).join(',');
 
+      // Re-leer card_code/salesperson_code/sap_database desde cliente cuando se
+      // actualiza la solicitud — evita el bug de desincronización cuando se
+      // cambia el cliente_id/cuic pero los campos derivados quedan del cliente
+      // anterior, rompiendo el POST a SAP (casos NESQUIK 70873, BONAFONT 80090).
+      // Lookup por id primero, fallback por CUIC. Si nada encuentra, preserva
+      // los valores actuales en la solicitud (no los borra).
+      let card_code_upd: string | null = solicitud.card_code;
+      let salesperson_code_upd: number | null = solicitud.salesperson_code;
+      let sap_database_upd: string | null = solicitud.sap_database;
+      let clienteRowUpd: { card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
+      if (cliente_id) {
+        clienteRowUpd = await prisma.cliente.findFirst({
+          where: { id: cliente_id },
+          select: { card_code: true, salesperson_code: true, sap_database: true },
+        });
+      }
+      if (!clienteRowUpd && cuic) {
+        const cuicNum = Number(cuic);
+        if (Number.isFinite(cuicNum)) {
+          clienteRowUpd = await prisma.cliente.findFirst({
+            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
+            select: { card_code: true, salesperson_code: true, sap_database: true },
+          });
+        }
+      }
+      if (clienteRowUpd) {
+        card_code_upd = clienteRowUpd.card_code ?? card_code_upd;
+        salesperson_code_upd = clienteRowUpd.salesperson_code ?? salesperson_code_upd;
+        sap_database_upd = clienteRowUpd.sap_database ?? sap_database_upd;
+      }
+
       // Get existing propuesta
       const propuesta = await prisma.propuesta.findFirst({
         where: { solicitud_id: solicitud.id, deleted_at: null },
@@ -2761,6 +2819,9 @@ export class SolicitudesController {
             IMU: IMU ? 1 : 0,
             archivo,
             tipo_archivo,
+            card_code: card_code_upd,
+            salesperson_code: salesperson_code_upd,
+            sap_database: sap_database_upd,
           },
         });
 

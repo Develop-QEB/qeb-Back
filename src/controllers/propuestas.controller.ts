@@ -587,25 +587,33 @@ export class PropuestasController {
         formatos: p.formatos || null,
       }));
 
-      // Recalculate inversion based on catorcena filter (sum only overlapping caras)
-      if (filterFechaInicio && filterFechaFin && formattedPropuestas.length > 0) {
+      // Recalcular SIEMPRE inversion como SUM(sc.costo) — si hay filtro de
+      // catorcena, sólo cuenta caras que solapan con el rango. Sin filtro,
+      // suma todas las caras de la propuesta. Esto evita el drift donde
+      // propuesta.inversion quedaba congelada con el valor del momento de
+      // creación y nunca se actualizaba al editar caras.
+      if (formattedPropuestas.length > 0) {
         const propuestaIds = formattedPropuestas.map(p => p.id);
         const placeholders = propuestaIds.map(() => '?').join(',');
+        const usarFiltro = !!(filterFechaInicio && filterFechaFin);
+        const dateClause = usarFiltro
+          ? 'AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?'
+          : '';
+        const dateParams = usarFiltro ? [filterFechaFin, filterFechaInicio] : [];
         const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
           SELECT pr.id as propuesta_id, COALESCE(SUM(sc.costo), 0) as inversion_filtrada
           FROM propuesta pr
           LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-            AND sc.inicio_periodo <= ?
-            AND sc.fin_periodo >= ?
+            ${dateClause}
           WHERE pr.id IN (${placeholders})
           GROUP BY pr.id
-        `, filterFechaFin, filterFechaInicio, ...propuestaIds);
+        `, ...dateParams, ...propuestaIds);
 
         const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
         formattedPropuestas.forEach(p => {
-          const filtered = inversionMap.get(p.id);
-          if (filtered !== undefined) {
-            p.inversion = filtered;
+          const fresh = inversionMap.get(p.id);
+          if (fresh !== undefined) {
+            p.inversion = fresh;
           }
         });
       }

@@ -348,32 +348,44 @@ export class CampanasController {
         }
       });
 
-      // Recalculate inversion PRORRATEADA por días dentro del rango del filtro de catorcena.
-      // Solo cuenta la porción de días de cada cara que cae dentro de [filterFechaInicio, filterFechaFin].
-      if (filterFechaInicio && filterFechaFin && campanas.length > 0) {
+      // Recalcular SIEMPRE inversion como SUM(sc.costo) para evitar drift
+      // (propuesta.inversion quedaba congelada al crear y nunca se actualizaba
+      // al editar caras). Si hay filtro de catorcena, prorratea por días que
+      // solapen con el rango. Sin filtro, suma total de la propuesta.
+      if (campanas.length > 0) {
         const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
         if (propuestaIds.length > 0) {
           const placeholders = propuestaIds.map(() => '?').join(',');
-          const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(`
-            SELECT pr.id as propuesta_id,
-                   COALESCE(SUM(
-                     sc.costo
-                     * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
-                     / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
-                   ), 0) as inversion_filtrada
-            FROM propuesta pr
-            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-              AND sc.inicio_periodo <= ?
-              AND sc.fin_periodo >= ?
-            WHERE pr.id IN (${placeholders})
-            GROUP BY pr.id
-          `, filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds);
+          const usarFiltroC = !!(filterFechaInicio && filterFechaFin);
+          const queryC = usarFiltroC
+            ? `SELECT pr.id as propuesta_id,
+                      COALESCE(SUM(
+                        sc.costo
+                        * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                        / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                      ), 0) as inversion_filtrada
+               FROM propuesta pr
+               LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+                 AND sc.inicio_periodo <= ?
+                 AND sc.fin_periodo >= ?
+               WHERE pr.id IN (${placeholders})
+               GROUP BY pr.id`
+            : `SELECT pr.id as propuesta_id,
+                      COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+               FROM propuesta pr
+               LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+               WHERE pr.id IN (${placeholders})
+               GROUP BY pr.id`;
+          const params = usarFiltroC
+            ? [filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds]
+            : [...propuestaIds];
+          const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(queryC, ...params);
 
           const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
           campanas.forEach((c: any) => {
-            const filtered = inversionMap.get(Number(c.propuesta_id));
-            if (filtered !== undefined) {
-              c.inversion = filtered;
+            const fresh = inversionMap.get(Number(c.propuesta_id));
+            if (fresh !== undefined) {
+              c.inversion = fresh;
             }
           });
         }
