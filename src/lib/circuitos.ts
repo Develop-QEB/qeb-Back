@@ -18,10 +18,17 @@
 
 export const CIRCUITO_REGEX = /^(RT|BF|CT|CF)-DIG-(\d+)-([A-Z]+)$/i;
 
+// Los valores deben coincidir con `inventarios.plaza` (MAYÚSCULAS).
+// CDMX es excepción: usa label especial "Ciudad de México / AM".
 export const PLAZA_CODE_TO_LABEL: Record<string, string> = {
   MX: 'Ciudad de México / AM',
-  MTY: 'Monterrey',
-  // MR: pending — otros archivos
+  MTY: 'MONTERREY',
+  GD: 'GUADALAJARA',
+  GDL: 'GUADALAJARA',
+  PB: 'PUEBLA',
+  MR: 'MÉRIDA',
+  MER: 'MÉRIDA',
+  TOL: 'TOLUCA',
 };
 
 export interface CircuitoInfo {

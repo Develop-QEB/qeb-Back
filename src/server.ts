@@ -4,6 +4,7 @@ import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
+import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -97,6 +98,11 @@ async function main() {
     // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
     programarDiario(9, 'ResumenAutorizaciones 09:00', enviarResumenAutorizacionesPendientes);
     programarDiario(16, 'ResumenAutorizaciones 16:00', enviarResumenAutorizacionesPendientes);
+
+    // Detectar y limpiar reservas zombi cada día (3am CDMX, hora valle).
+    // Soft-deletea las que NO tienen APS y loguea las que SÍ para revisión manual
+    // (no se borran automáticamente porque su APS ya está en SAP como documento).
+    programarDiario(3, 'ZombiMonitor 03:00', async () => { await detectarYLimpiarZombis(); });
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
     console.log('[DB] Server running without DB — requests will retry on demand.');
