@@ -3942,6 +3942,7 @@ export class PropuestasController {
             tipoPeriodo: tipoPeriodoCre,
           });
         } catch (e: any) {
+          console.error('[propuestas createCara] Error auto-reservar circuito:', e?.message, e?.stack);
           // Rollback manual
           await prisma.solicitudCaras.delete({ where: { id: newCara.id } }).catch(() => {});
           res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });
