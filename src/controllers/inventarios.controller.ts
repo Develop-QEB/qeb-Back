@@ -3,6 +3,7 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
+import { ESTATUS_QUE_BLOQUEAN } from '../services/inventario-bloqueo.service';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371; // km
@@ -1862,6 +1863,193 @@ export class InventariosController {
     } catch (error) {
       console.error('Error getCategoriasCliente:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener categorías de cliente';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Verifica una lista de códigos del CSV contra el inventario y devuelve, por
+  // cada código, su estado real para la cara/periodo dado: libre,
+  // ya_reservado_para_cara, ocupado o no_existe — con un mensaje en lenguaje
+  // claro para que el panel del modal lo muestre tal cual al usuario.
+  async checkCodigos(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { codigos, solicitudCaraId, fechaInicio, fechaFin } = req.body as {
+        codigos?: unknown;
+        solicitudCaraId?: number | null;
+        fechaInicio?: string;
+        fechaFin?: string;
+      };
+
+      if (!Array.isArray(codigos) || codigos.length === 0) {
+        res.status(400).json({ success: false, error: 'codigos[] es requerido' });
+        return;
+      }
+      if (!fechaInicio || !fechaFin) {
+        res.status(400).json({ success: false, error: 'fechaInicio y fechaFin son requeridos' });
+        return;
+      }
+
+      const codigosUnicos = [
+        ...new Set(
+          codigos
+            .map(c => (typeof c === 'string' ? c.trim() : ''))
+            .filter(c => c.length > 0)
+        ),
+      ];
+
+      type EstadoCodigo = 'libre' | 'ya_reservado_para_cara' | 'ocupado' | 'no_existe';
+      type ResultadoCodigo = { codigo_unico: string; estado: EstadoCodigo; mensaje: string };
+
+      if (codigosUnicos.length === 0) {
+        res.json({ success: true, data: { codigos: [] as ResultadoCodigo[] } });
+        return;
+      }
+
+      const inventarios = await prisma.inventarios.findMany({
+        where: { codigo_unico: { in: codigosUnicos } },
+        select: { id: true, codigo_unico: true, tradicional_digital: true },
+      });
+
+      const inventarioByCodigo = new Map<string, typeof inventarios[number]>();
+      for (const inv of inventarios) {
+        if (inv.codigo_unico) inventarioByCodigo.set(inv.codigo_unico, inv);
+      }
+
+      const inventarioIds = inventarios.map(i => i.id);
+      const espacios = inventarioIds.length > 0
+        ? await prisma.espacio_inventario.findMany({
+            where: { inventario_id: { in: inventarioIds } },
+            select: { id: true, inventario_id: true },
+          })
+        : [];
+
+      const espaciosByInv = new Map<number, number[]>();
+      for (const e of espacios) {
+        const arr = espaciosByInv.get(e.inventario_id) ?? [];
+        arr.push(e.id);
+        espaciosByInv.set(e.inventario_id, arr);
+      }
+
+      const fechaIni = new Date(fechaInicio);
+      const fechaFinDate = new Date(fechaFin);
+      const calendariosOverlap = await prisma.calendario.findMany({
+        where: {
+          deleted_at: null,
+          fecha_inicio: { lte: fechaFinDate },
+          fecha_fin: { gte: fechaIni },
+        },
+        select: { id: true },
+      });
+      const calendarioIds = calendariosOverlap.map(c => c.id);
+
+      const espacioIds = espacios.map(e => e.id);
+      const reservasActivas = (espacioIds.length > 0 && calendarioIds.length > 0)
+        ? await prisma.reservas.findMany({
+            where: {
+              deleted_at: null,
+              calendario_id: { in: calendarioIds },
+              estatus: { in: [...ESTATUS_QUE_BLOQUEAN] },
+              inventario_id: { in: espacioIds },
+            },
+            select: { inventario_id: true, solicitudCaras_id: true },
+          })
+        : [];
+
+      // espacio_inventario.id -> [solicitudCaras_id de cada reserva activa]
+      const reservasByEspacio = new Map<number, Array<number | null>>();
+      for (const r of reservasActivas) {
+        const arr = reservasByEspacio.get(r.inventario_id) ?? [];
+        arr.push(r.solicitudCaras_id);
+        reservasByEspacio.set(r.inventario_id, arr);
+      }
+
+      const result: ResultadoCodigo[] = codigosUnicos.map(codigo => {
+        const inv = inventarioByCodigo.get(codigo);
+        if (!inv) {
+          return {
+            codigo_unico: codigo,
+            estado: 'no_existe',
+            mensaje: 'Este código no existe en el sistema',
+          };
+        }
+
+        const invEspacios = espaciosByInv.get(inv.id) ?? [];
+        if (invEspacios.length === 0) {
+          return {
+            codigo_unico: codigo,
+            estado: 'ocupado',
+            mensaje: 'No tiene espacios físicos registrados',
+          };
+        }
+
+        let libres = 0;
+        let reservadosEstaCara = 0;
+        let ocupadosOtros = 0;
+
+        for (const espId of invEspacios) {
+          const reservas = reservasByEspacio.get(espId) ?? [];
+          if (reservas.length === 0) {
+            libres++;
+          } else if (solicitudCaraId && reservas.some(scId => scId === solicitudCaraId)) {
+            reservadosEstaCara++;
+          } else {
+            ocupadosOtros++;
+          }
+        }
+
+        const isDigital = inv.tradicional_digital === 'Digital';
+
+        if (isDigital) {
+          // En digitales cada spot es independiente: con que haya uno libre se puede reservar.
+          if (libres > 0) {
+            return {
+              codigo_unico: codigo,
+              estado: 'libre',
+              mensaje: invEspacios.length > 1
+                ? `Disponible (${libres} de ${invEspacios.length} spots libres)`
+                : 'Disponible para reservar',
+            };
+          }
+          if (reservadosEstaCara > 0) {
+            return {
+              codigo_unico: codigo,
+              estado: 'ya_reservado_para_cara',
+              mensaje: 'Ya está reservado en este circuito',
+            };
+          }
+          return {
+            codigo_unico: codigo,
+            estado: 'ocupado',
+            mensaje: 'Todos los spots están ocupados en este periodo',
+          };
+        }
+
+        // Tradicional: una sola reserva ajena bloquea el inventario completo.
+        if (ocupadosOtros > 0) {
+          return {
+            codigo_unico: codigo,
+            estado: 'ocupado',
+            mensaje: 'Ocupado por otra reserva en este periodo',
+          };
+        }
+        if (reservadosEstaCara > 0) {
+          return {
+            codigo_unico: codigo,
+            estado: 'ya_reservado_para_cara',
+            mensaje: 'Ya está reservado en este circuito',
+          };
+        }
+        return {
+          codigo_unico: codigo,
+          estado: 'libre',
+          mensaje: 'Disponible para reservar',
+        };
+      });
+
+      res.json({ success: true, data: { codigos: result } });
+    } catch (error) {
+      console.error('Error en checkCodigos:', error);
+      const message = error instanceof Error ? error.message : 'Error al verificar códigos';
       res.status(500).json({ success: false, error: message });
     }
   }

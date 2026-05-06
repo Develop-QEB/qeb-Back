@@ -2926,6 +2926,7 @@ export class PropuestasController {
         data: {
           calendarioId: calendario.id,
           reservasCreadas: createdReservas.length,
+          reservasOmitidas: Math.max(0, totalReservas - createdReservas.length),
         },
       });
     } catch (error) {
