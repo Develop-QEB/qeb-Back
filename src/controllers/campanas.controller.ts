@@ -3779,7 +3779,7 @@ export class CampanasController {
         // Limpiar arte - poner archivo NULL y resetear estados
         const updateDirectQuery = `
           UPDATE reservas
-          SET archivo = NULL, arte_aprobado = NULL, estatus = 'Sin Arte'
+          SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
           WHERE id IN (${placeholders})
         `;
 
@@ -3804,7 +3804,7 @@ export class CampanasController {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
           const updateGruposQuery = `
             UPDATE reservas
-            SET archivo = NULL, arte_aprobado = NULL, estatus = 'Sin Arte'
+            SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
             WHERE grupo_completo_id IN (${grupoPlaceholders})
           `;
 
