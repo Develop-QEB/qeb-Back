@@ -492,13 +492,17 @@ export class InventariosController {
         }
       }
 
-      // Filter by format (mueble) - puede ser múltiples formatos separados por coma
+      // Filter by format (mueble) — exact match. El front envía el valor del
+      // dropdown que viene de DISTINCT inventarios.mueble, así que coinciden
+      // exacto. Antes era `contains` y por eso al buscar "PARABUS" salían
+      // también muebles tipo "MI MACRO BUS PARABUS GDL" que comparten
+      // substring pero son productos distintos.
       if (formato) {
         const formatoList = (formato as string).split(',').map(f => f.trim()).filter(Boolean);
         if (formatoList.length === 1) {
-          where.mueble = { contains: formatoList[0] };
+          where.mueble = formatoList[0];
         } else if (formatoList.length > 1) {
-          where.OR = formatoList.map(f => ({ mueble: { contains: f } }));
+          where.mueble = { in: formatoList };
         }
       }
 

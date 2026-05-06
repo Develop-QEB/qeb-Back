@@ -11,6 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
@@ -7685,38 +7686,10 @@ export class CampanasController {
       });
       const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
 
-      // Obtener espacios ya reservados en el período.
-      // Inventarios DIGITALES se excluyen del bloqueo: spots ilimitados,
-      // muchas campañas comparten la misma pantalla en el mismo período.
-      let espaciosReservadosEnPeriodo: Set<number> = new Set();
-      if (calendarioIdsOverlap.length > 0) {
-        const reservasExistentes = await prisma.reservas.findMany({
-          where: {
-            deleted_at: null,
-            calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
-          },
-          select: { inventario_id: true },
-        });
-        const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
-        let digitalEspacioIds = new Set<number>();
-        if (espacioIdsExistentes.length > 0) {
-          const phDig = espacioIdsExistentes.map(() => '?').join(',');
-          const digitalRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-            `SELECT ei.id FROM espacio_inventario ei
-             JOIN inventarios i ON i.id = ei.inventario_id
-             WHERE ei.id IN (${phDig})
-               AND (i.tradicional_digital = 'Digital' OR i.total_espacios > 0)`,
-            ...espacioIdsExistentes
-          );
-          digitalEspacioIds = new Set(digitalRows.map(r => Number(r.id)));
-        }
-        espaciosReservadosEnPeriodo = new Set(
-          reservasExistentes
-            .filter(r => !digitalEspacioIds.has(r.inventario_id))
-            .map(r => r.inventario_id)
-        );
-      }
+      // Espacios ya bloqueados en el período. Helper centralizado.
+      const espaciosReservadosEnPeriodo = await getEspaciosBloqueados({
+        calendarioIds: calendarioIdsOverlap,
+      });
 
       let reservasCreadas = 0;
       // Determinar si el solicitudCara es BF (bonificación) por su artículo
