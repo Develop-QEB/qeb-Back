@@ -8,6 +8,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
@@ -2647,40 +2648,12 @@ export class PropuestasController {
       });
       const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
 
-      // Obtener espacios ya reservados en el período (excluyendo los de esta propuesta).
-      // Los espacios de inventarios DIGITALES se excluyen del bloqueo: tienen spots
-      // ilimitados y muchas campañas pueden compartir la misma pantalla en el mismo
-      // período (la pantalla rota los anuncios, no compite por slot fijo).
-      let espaciosReservadosEnPeriodo: Set<number> = new Set();
-      let digitalEspacioIds: Set<number> = new Set();
-      if (calendarioIdsOverlap.length > 0) {
-        const reservasExistentes = await prisma.reservas.findMany({
-          where: {
-            deleted_at: null,
-            calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
-            solicitudCaras_id: { notIn: proposalCaraIds }, // Excluir reservas de esta propuesta
-          },
-          select: { inventario_id: true },
-        });
-        const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
-        if (espacioIdsExistentes.length > 0) {
-          const phDig = espacioIdsExistentes.map(() => '?').join(',');
-          const digitalRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-            `SELECT ei.id FROM espacio_inventario ei
-             JOIN inventarios i ON i.id = ei.inventario_id
-             WHERE ei.id IN (${phDig})
-               AND (i.tradicional_digital = 'Digital' OR i.total_espacios > 0)`,
-            ...espacioIdsExistentes
-          );
-          digitalEspacioIds = new Set(digitalRows.map(r => Number(r.id)));
-        }
-        espaciosReservadosEnPeriodo = new Set(
-          reservasExistentes
-            .filter(r => !digitalEspacioIds.has(r.inventario_id))
-            .map(r => r.inventario_id)
-        );
-      }
+      // Espacios ya bloqueados en el período (excluyendo los de esta propuesta).
+      // Helper centralizado: ver inventario-bloqueo.service.ts.
+      const espaciosReservadosEnPeriodo = await getEspaciosBloqueados({
+        calendarioIds: calendarioIdsOverlap,
+        excludeCaraIds: proposalCaraIds,
+      });
 
       // Group reservas by whether they are completo (flujo + contraflujo at same location)
       const gruposCompletos: Map<string, number[]> = new Map();
@@ -3278,6 +3251,33 @@ export class PropuestasController {
 
       if (!espacio) {
         res.status(400).json({ success: false, error: 'Espacio de inventario no encontrado' });
+        return;
+      }
+
+      // Validar que el espacio no esté ya bloqueado por OTRA propuesta en el
+      // período. Antes este endpoint no validaba contra otras propuestas y por
+      // ahí se colaba parte de las dupes en producción.
+      const calendariosOverlapToggle = await prisma.calendario.findMany({
+        where: {
+          deleted_at: null,
+          fecha_inicio: { lte: new Date(fechaFin) },
+          fecha_fin: { gte: new Date(fechaInicio) },
+        },
+        select: { id: true },
+      });
+      const proposalCaraIdsToggle = (await prisma.solicitudCaras.findMany({
+        where: { idquote: String(propuestaId) },
+        select: { id: true },
+      })).map(c => c.id);
+      const espaciosBloqueados = await getEspaciosBloqueados({
+        calendarioIds: calendariosOverlapToggle.map(c => c.id),
+        excludeCaraIds: proposalCaraIdsToggle,
+      });
+      if (espaciosBloqueados.has(espacio.id)) {
+        res.status(409).json({
+          success: false,
+          error: 'Este inventario ya está reservado por otra campaña en el mismo período',
+        });
         return;
       }
 
@@ -3942,6 +3942,7 @@ export class PropuestasController {
             tipoPeriodo: tipoPeriodoCre,
           });
         } catch (e: any) {
+          console.error('[propuestas createCara] Error auto-reservar circuito:', e?.message, e?.stack);
           // Rollback manual
           await prisma.solicitudCaras.delete({ where: { id: newCara.id } }).catch(() => {});
           res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });

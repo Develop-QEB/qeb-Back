@@ -11,6 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
@@ -6911,8 +6912,9 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
-          ROUND(AVG(rsv.APS), 0) AS aps_especifico,
+          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ', ') AS aps_especifico,
           ct.id_propuesta AS aps_global,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
           DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
           DATE(sc.fin_periodo) AS fecha_fin_periodo,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
@@ -6920,6 +6922,7 @@ export class CampanasController {
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
           cliente.CUIC AS cuic,
+          COALESCE(sol.sap_database, cliente.sap_database) AS sap_database,
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
@@ -6948,11 +6951,11 @@ export class CampanasController {
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE sc.bonificacion > 0
-          AND cm.status != 'inactiva'
+          AND cm.status NOT IN ('inactiva', 'Rechazada')
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.id_propuesta, sc.ciudad, sc.tipo
+                 sol.nombre_usuario, ct.id_propuesta, ct.tipo_periodo, sc.ciudad, sc.tipo
 
         UNION ALL
 
@@ -6961,8 +6964,9 @@ export class CampanasController {
           MIN(inv.plaza) AS plaza,
           sc.formato AS tipo,
           sol.nombre_usuario AS asesor,
-          ROUND(AVG(rsv.APS), 0) AS aps_especifico,
+          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ', ') AS aps_especifico,
           ct.id_propuesta AS aps_global,
+          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
           DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
           DATE(sc.fin_periodo) AS fecha_fin_periodo,
           (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
@@ -6970,6 +6974,7 @@ export class CampanasController {
           cliente.T1_U_Cliente AS cliente,
           cliente.T2_U_Marca AS marca,
           cliente.CUIC AS cuic,
+          COALESCE(sol.sap_database, cliente.sap_database) AS sap_database,
           sol.unidad_negocio AS unidad_negocio,
           cm.nombre AS campania,
           sc.articulo AS numero_articulo,
@@ -6998,11 +7003,11 @@ export class CampanasController {
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
         WHERE (sc.caras - sc.bonificacion) > 0
-          AND cm.status != 'inactiva'
+          AND cm.status NOT IN ('inactiva', 'Rechazada')
           ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, sol.unidad_negocio, cm.nombre,
+        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
                  sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.descuento, ct.id_propuesta, sc.ciudad, sc.tipo
+                 sol.nombre_usuario, ct.descuento, ct.id_propuesta, ct.tipo_periodo, sc.ciudad, sc.tipo
 
         ORDER BY campania_id, grupo_id, tipo_fila
       `;
@@ -7082,11 +7087,14 @@ export class CampanasController {
       if (status) campParams.push(status);
       if (inicioFiltro && finFiltro) campParams.push(finFiltro, inicioFiltro);
 
+      // Solo campañas cuya propuesta esté Aprobada — INVIAN VP/Digital es vista
+      // de campaña activa, no de propuestas en revisión.
       const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string }[]>(`
         SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status
         FROM campania cm
         INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-        WHERE 1=1 ${campStatusFilter} ${campDateFilter}
+        INNER JOIN propuesta pr ON pr.id = ct.id_propuesta AND pr.deleted_at IS NULL
+        WHERE pr.status = 'Aprobada' AND cm.status NOT IN ('inactiva', 'Rechazada') ${campStatusFilter} ${campDateFilter}
       `, ...campParams);
 
       if (campsRows.length === 0) {
@@ -7105,15 +7113,21 @@ export class CampanasController {
       const propuestaIdsNum = [...new Set(campsRows.map(c => Number(c.id_propuesta)).filter(Boolean))];
       const phPr = propuestaIdsNum.map(() => '?').join(',');
       const [clientesArr, catorcenasArr, propuestasArr] = await Promise.all([
-        prisma.$queryRawUnsafe<{ id: number; CUIC: string | null; T1_U_Cliente: string | null; T2_U_Marca: string | null }[]>(
-          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca FROM cliente`
+        prisma.$queryRawUnsafe<{ id: number; CUIC: string | null; T1_U_Cliente: string | null; T2_U_Marca: string | null; sap_database: string | null }[]>(
+          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, sap_database FROM cliente`
         ),
         prisma.$queryRawUnsafe<{ id: number; numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date }[]>(
           `SELECT id, numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
         ),
+        // Vendedor = solicitud.nombre_usuario (el creador de la solicitud, que es
+        // el asesor que vende esa campaña). Antes se usaba pr.asignado (la lista
+        // completa del equipo) o cliente.T0_U_Asesor (asesor genérico del cliente).
         propuestaIdsNum.length > 0
-          ? prisma.$queryRawUnsafe<{ id: number; asignado: string | null }[]>(
-              `SELECT id, asignado FROM propuesta WHERE id IN (${phPr})`,
+          ? prisma.$queryRawUnsafe<{ id: number; asignado: string | null; nombre_usuario: string | null }[]>(
+              `SELECT pr.id, pr.asignado, sl.nombre_usuario
+               FROM propuesta pr
+               LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+               WHERE pr.id IN (${phPr})`,
               ...propuestaIdsNum
             )
           : Promise.resolve([]),
@@ -7145,7 +7159,8 @@ export class CampanasController {
           inv.tradicional_digital,
           inv.codigo_unico,
           inv.tipo_de_cara,
-          inv.plaza
+          inv.plaza,
+          inv.cto
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
             AND rsv.deleted_at IS NULL
@@ -7198,7 +7213,7 @@ export class CampanasController {
           Operacion: operacion,
           CodigoContrato: camp?.id || null,
           PrecioPorCara: precioPorCara,
-          Vendedor: propuestaByIdMap.get(String(r.idquote))?.asignado || null,
+          Vendedor: propuestaByIdMap.get(String(r.idquote))?.nombre_usuario || null,
           Descripcion: null,
           InicioPeriodo: `Catorcenas ${inicioYear}`,
           FinSegmento: finSegmento,
@@ -7212,6 +7227,7 @@ export class CampanasController {
           Unidad: r.codigo_unico ? String(r.codigo_unico) : null,
           Cara: r.tipo_de_cara ? String(r.tipo_de_cara) : null,
           Ciudad: r.plaza ? String(r.plaza) : null,
+          sap_database: cliente?.sap_database || null,
           TipoDistribucion: tipoDist,
           Reproducciones: null,
           fecha_inicio: r.inicio_periodo,
@@ -7221,6 +7237,7 @@ export class CampanasController {
           catorcena_year: cat?.ano || null,
           cortesia: r.cortesia,
           numero_articulo: r.articulo,
+          cto: r.cto || null,
         };
       });
 
@@ -7669,38 +7686,10 @@ export class CampanasController {
       });
       const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
 
-      // Obtener espacios ya reservados en el período.
-      // Inventarios DIGITALES se excluyen del bloqueo: spots ilimitados,
-      // muchas campañas comparten la misma pantalla en el mismo período.
-      let espaciosReservadosEnPeriodo: Set<number> = new Set();
-      if (calendarioIdsOverlap.length > 0) {
-        const reservasExistentes = await prisma.reservas.findMany({
-          where: {
-            deleted_at: null,
-            calendario_id: { in: calendarioIdsOverlap },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido'] },
-          },
-          select: { inventario_id: true },
-        });
-        const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
-        let digitalEspacioIds = new Set<number>();
-        if (espacioIdsExistentes.length > 0) {
-          const phDig = espacioIdsExistentes.map(() => '?').join(',');
-          const digitalRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-            `SELECT ei.id FROM espacio_inventario ei
-             JOIN inventarios i ON i.id = ei.inventario_id
-             WHERE ei.id IN (${phDig})
-               AND (i.tradicional_digital = 'Digital' OR i.total_espacios > 0)`,
-            ...espacioIdsExistentes
-          );
-          digitalEspacioIds = new Set(digitalRows.map(r => Number(r.id)));
-        }
-        espaciosReservadosEnPeriodo = new Set(
-          reservasExistentes
-            .filter(r => !digitalEspacioIds.has(r.inventario_id))
-            .map(r => r.inventario_id)
-        );
-      }
+      // Espacios ya bloqueados en el período. Helper centralizado.
+      const espaciosReservadosEnPeriodo = await getEspaciosBloqueados({
+        calendarioIds: calendarioIdsOverlap,
+      });
 
       let reservasCreadas = 0;
       // Determinar si el solicitudCara es BF (bonificación) por su artículo
@@ -8225,6 +8214,7 @@ export class CampanasController {
             tipoPeriodo: cotizacion.tipo_periodo === 'mensual' ? 'mensual' : 'catorcena',
           });
         } catch (e: any) {
+          console.error('[campanas createCara] Error auto-reservar circuito:', e?.message, e?.stack);
           await prisma.solicitudCaras.delete({ where: { id: cara.id } }).catch(() => {});
           res.status(400).json({ success: false, error: e?.message || 'Error al auto-reservar circuito' });
           return;
