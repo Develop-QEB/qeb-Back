@@ -665,7 +665,13 @@ export class InventariosController {
 
       for (const inv of inventarios) {
         const invEspacios = espacios.filter(e => e.inventario_id === inv.id);
-        const isDigital = inv.tradicional_digital === 'Digital' || (inv.total_espacios && inv.total_espacios > 0);
+        // Solo cuenta como digital si tradicional_digital === 'Digital'.
+        // total_espacios > 0 NO es discriminador: tradicionales tambien tienen
+        // total_espacios = 1, y antes el OR los empujaba al branch digital
+        // (que no chequea bloqueo) — por eso aparecian como disponibles aunque
+        // ya estuvieran vendidos en la catorcena. Mismo criterio que
+        // getEspaciosBloqueados en inventario-bloqueo.service.ts.
+        const isDigital = inv.tradicional_digital === 'Digital';
 
         if (isDigital && invEspacios.length > 0) {
           // Digital con spots ILIMITADOS: un solo entry por inventario, siempre
