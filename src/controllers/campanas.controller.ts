@@ -1396,6 +1396,9 @@ export class CampanasController {
         }
       }
 
+      cache.deletePattern('propuestas:list:');
+      cache.deletePattern('campanas:list:');
+
       res.json({
         success: true,
         data: campana,
@@ -2840,8 +2843,8 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id OR (cl.CUIC = cm.cliente_id AND (s.sap_database IS NULL OR cl.sap_database = s.sap_database))
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -2898,8 +2901,8 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id OR (cl.CUIC = cm.cliente_id AND (s.sap_database IS NULL OR cl.sap_database = s.sap_database))
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE cm.id IN (${cmIdPh})
@@ -2946,8 +2949,8 @@ export class CampanasController {
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN cliente cl ON cl.CUIC = cm.cliente_id
           INNER JOIN solicitud s ON s.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = cm.cliente_id OR (cl.CUIC = cm.cliente_id AND (s.sap_database IS NULL OR cl.sap_database = s.sap_database))
           LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
           LEFT JOIN (
@@ -6973,10 +6976,10 @@ export class CampanasController {
           'bonificacion' AS tipo_fila,
           COALESCE(MIN(inv.tradicional_digital), sc.tipo) AS tradicional_digital
         FROM campania cm
-          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR (cliente.CUIC = cm.cliente_id AND (sol.sap_database IS NULL OR cliente.sap_database = sol.sap_database))
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
@@ -7025,10 +7028,10 @@ export class CampanasController {
           'renta' AS tipo_fila,
           COALESCE(MIN(inv.tradicional_digital), sc.tipo) AS tradicional_digital
         FROM campania cm
-          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR cliente.CUIC = cm.cliente_id
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
+          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR (cliente.CUIC = cm.cliente_id AND (sol.sap_database IS NULL OR cliente.sap_database = sol.sap_database))
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
