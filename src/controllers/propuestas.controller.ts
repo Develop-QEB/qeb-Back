@@ -3391,23 +3391,55 @@ export class PropuestasController {
           })
         : null;
 
+      // Remapeo cliente_id: el front a veces manda CUIC en lugar del id interno
+      // (el modal usa SAPCuicItem que sólo tiene CUIC). Resolvemos al cliente.id real.
+      let cliente_id_final: number | undefined = cliente_id !== undefined ? Number(cliente_id) : undefined;
+      let card_code_final: string | undefined = card_code;
+      let salesperson_code_final: number | undefined = salesperson_code != null ? Number(salesperson_code) : undefined;
+      let sap_database_final: string | undefined = sap_database;
+      if (cliente_id !== undefined) {
+        let clienteRow = await prisma.cliente.findFirst({
+          where: { id: Number(cliente_id) },
+          select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
+        });
+        if (!clienteRow) {
+          const cuicNum = Number(cuic ?? cliente_id);
+          if (Number.isFinite(cuicNum)) {
+            clienteRow = await prisma.cliente.findFirst({
+              where: {
+                CUIC: cuicNum,
+                T0_U_RazonSocial: { not: null },
+                ...(sap_database ? { sap_database } : {}),
+              },
+              select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
+            });
+          }
+        }
+        if (clienteRow) {
+          cliente_id_final = clienteRow.id;
+          card_code_final = card_code_final ?? clienteRow.card_code ?? undefined;
+          salesperson_code_final = salesperson_code_final ?? clienteRow.salesperson_code ?? undefined;
+          sap_database_final = sap_database_final ?? clienteRow.sap_database ?? undefined;
+        }
+      }
+
       // Update propuesta fields
       const updatedPropuesta = await prisma.propuesta.update({
         where: { id: parseInt(id) },
         data: {
           notas: notas !== undefined ? notas : undefined,
           descripcion: descripcion !== undefined ? descripcion : undefined,
-          ...(cliente_id !== undefined && { cliente_id }),
+          ...(cliente_id_final !== undefined && { cliente_id: cliente_id_final }),
           updated_at: new Date(),
         },
       });
 
       // Update solicitud client fields if provided
-      if (cliente_id !== undefined) {
+      if (cliente_id_final !== undefined) {
         await prisma.solicitud.update({
           where: { id: updatedPropuesta.solicitud_id },
           data: {
-            cliente_id,
+            cliente_id: cliente_id_final,
             cuic: cuic?.toString(),
             razon_social,
             unidad_negocio,
@@ -3419,16 +3451,16 @@ export class PropuestasController {
             agencia,
             categoria_id,
             categoria_nombre,
-            card_code,
-            salesperson_code,
-            sap_database,
+            card_code: card_code_final,
+            salesperson_code: salesperson_code_final,
+            sap_database: sap_database_final,
           },
         });
 
         // Also update cotizacion client reference
         await prisma.cotizacion.updateMany({
           where: { id_propuesta: parseInt(id) },
-          data: { clientes_id: cliente_id },
+          data: { clientes_id: cliente_id_final },
         });
       }
 

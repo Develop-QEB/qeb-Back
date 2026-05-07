@@ -933,10 +933,58 @@ export class SolicitudesController {
         return;
       }
 
+      // Cascade: cuando se elimina una solicitud hay que liberar inventario
+      // y marcar como inactivos los descendientes (propuesta + cotización +
+      // campaña + reservas + sc), si no quedan reservas zombi vivas.
+      const propuestas = await prisma.propuesta.findMany({
+        where: { solicitud_id: solicitud.id, deleted_at: null },
+        select: { id: true },
+      });
+      const propuestaIds = propuestas.map(p => p.id);
+
+      // 1. Liberar reservas + borrar sc (mismo patrón que rechazo de propuesta)
+      const carasIds = propuestaIds.length > 0
+        ? (await prisma.solicitudCaras.findMany({
+            where: { idquote: { in: propuestaIds.map(String) } },
+            select: { id: true },
+          })).map(c => c.id)
+        : [];
+      let reservasLiberadas = 0;
+      if (carasIds.length > 0) {
+        const [libRes, _delSc] = await prisma.$transaction([
+          prisma.reservas.updateMany({
+            where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
+            data: { deleted_at: new Date() },
+          }),
+          prisma.solicitudCaras.deleteMany({ where: { id: { in: carasIds } } }),
+        ]);
+        reservasLiberadas = libRes.count;
+      }
+
+      // 2. Soft-delete propuestas
+      if (propuestaIds.length > 0) {
+        await prisma.propuesta.updateMany({
+          where: { id: { in: propuestaIds } },
+          data: { deleted_at: new Date() },
+        });
+        // 3. Marcar campañas asociadas como Cancelada (vía cotización)
+        await prisma.$executeRawUnsafe(
+          `UPDATE campania cm
+             INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+             SET cm.status = 'Cancelada'
+           WHERE ct.id_propuesta IN (${propuestaIds.map(() => '?').join(',')})
+             AND cm.status NOT IN ('Cancelada','Rechazada','Finalizada')`,
+          ...propuestaIds
+        );
+      }
+
+      // 4. Soft-delete la solicitud
       await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { deleted_at: new Date() },
       });
+
+      console.log(`[Solicitud #${solicitud.id} eliminada] cascade: ${propuestaIds.length} propuestas, ${carasIds.length} sc, ${reservasLiberadas} reservas liberadas`);
 
       // Cancelar tareas pendientes asociadas a esta solicitud
       await prisma.tareas.updateMany({
@@ -1701,26 +1749,34 @@ export class SolicitudesController {
       // para evitar desincronización. Lookup robusta: por id primero, fallback
       // por CUIC. Si nada encuentra, conserva los valores que mandó el front
       // (no los sobreescribe con null).
+      // El front a veces manda CUIC en cliente_id (SAPCuicItem no tiene id interno);
+      // remapeamos a cliente.id real para no guardar el CUIC en cliente_id.
       let card_code_final: string | null = card_code || null;
       let salesperson_code_final: number | null = salesperson_code != null ? Number(salesperson_code) : null;
       let sap_database_final: string | null = sap_database || null;
-      let clienteRow: { card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
+      let cliente_id_final: number = Number(cliente_id) || 0;
+      let clienteRow: { id: number; card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
       if (cliente_id) {
         clienteRow = await prisma.cliente.findFirst({
-          where: { id: cliente_id },
-          select: { card_code: true, salesperson_code: true, sap_database: true },
+          where: { id: Number(cliente_id) },
+          select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
       }
       if (!clienteRow && cuic) {
         const cuicNum = Number(cuic);
         if (Number.isFinite(cuicNum)) {
           clienteRow = await prisma.cliente.findFirst({
-            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
-            select: { card_code: true, salesperson_code: true, sap_database: true },
+            where: {
+              CUIC: cuicNum,
+              T0_U_RazonSocial: { not: null },
+              ...(sap_database ? { sap_database } : {}),
+            },
+            select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
           });
         }
       }
       if (clienteRow) {
+        cliente_id_final = clienteRow.id;
         card_code_final = clienteRow.card_code ?? card_code_final;
         salesperson_code_final = clienteRow.salesperson_code ?? salesperson_code_final;
         sap_database_final = clienteRow.sap_database ?? sap_database_final;
@@ -1735,7 +1791,7 @@ export class SolicitudesController {
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
-            cliente_id,
+            cliente_id: cliente_id_final,
             usuario_id: userId,
             status: 'Pendiente',
             nombre_usuario: userName,
@@ -1775,7 +1831,7 @@ export class SolicitudesController {
         // 3. Create propuesta
         const propuesta = await tx.propuesta.create({
           data: {
-            cliente_id,
+            cliente_id: cliente_id_final,
             fecha: getMexicoDate(),
             status: 'Abierto',
             descripcion,
@@ -1794,7 +1850,7 @@ export class SolicitudesController {
         const cotizacion = await tx.cotizacion.create({
           data: {
             user_id: userId || 0,
-            clientes_id: cliente_id,
+            clientes_id: cliente_id_final,
             nombre_campania,
             numero_caras: totalCaras,
             fecha_inicio: new Date(fecha_inicio),
@@ -1817,7 +1873,7 @@ export class SolicitudesController {
         // 5. Create campania
         const campania = await tx.campania.create({
           data: {
-            cliente_id,
+            cliente_id: cliente_id_final,
             nombre: nombre_campania,
             fecha_inicio: new Date(fecha_inicio),
             fecha_fin: new Date(fecha_fin),
@@ -1836,7 +1892,7 @@ export class SolicitudesController {
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
-            cliente_id,
+            cliente_id: cliente_id_final,
             usuario_id: userId,
             status: 'Pendiente',
             nombre_usuario: userName,
@@ -1948,7 +2004,7 @@ export class SolicitudesController {
           const autoRes = await autoReservarCircuitoSiAplica(tx, {
             solicitudCaraId: solicitudCara.id,
             itemCode: cara.articulo || articulo,
-            clienteId: cliente_id,
+            clienteId: cliente_id_final,
             calendarioId: null,
             fechaInicio: new Date(cara.inicio_periodo),
             fechaFin: new Date(cara.fin_periodo),
@@ -2754,26 +2810,34 @@ export class SolicitudesController {
       // anterior, rompiendo el POST a SAP (casos NESQUIK 70873, BONAFONT 80090).
       // Lookup por id primero, fallback por CUIC. Si nada encuentra, preserva
       // los valores actuales en la solicitud (no los borra).
+      // El front a veces manda CUIC en cliente_id (SAPCuicItem no tiene id interno);
+      // remapeamos a cliente.id real para no guardar el CUIC en cliente_id.
       let card_code_upd: string | null = solicitud.card_code;
       let salesperson_code_upd: number | null = solicitud.salesperson_code;
       let sap_database_upd: string | null = solicitud.sap_database;
-      let clienteRowUpd: { card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
+      let cliente_id_upd: number = cliente_id ?? solicitud.cliente_id ?? 0;
+      let clienteRowUpd: { id: number; card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
       if (cliente_id) {
         clienteRowUpd = await prisma.cliente.findFirst({
           where: { id: cliente_id },
-          select: { card_code: true, salesperson_code: true, sap_database: true },
+          select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
       }
       if (!clienteRowUpd && cuic) {
         const cuicNum = Number(cuic);
         if (Number.isFinite(cuicNum)) {
           clienteRowUpd = await prisma.cliente.findFirst({
-            where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
-            select: { card_code: true, salesperson_code: true, sap_database: true },
+            where: {
+              CUIC: cuicNum,
+              T0_U_RazonSocial: { not: null },
+              ...(sap_database_upd ? { sap_database: sap_database_upd } : {}),
+            },
+            select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
           });
         }
       }
       if (clienteRowUpd) {
+        cliente_id_upd = clienteRowUpd.id;
         card_code_upd = clienteRowUpd.card_code ?? card_code_upd;
         salesperson_code_upd = clienteRowUpd.salesperson_code ?? salesperson_code_upd;
         sap_database_upd = clienteRowUpd.sap_database ?? sap_database_upd;
@@ -2802,7 +2866,7 @@ export class SolicitudesController {
             descripcion,
             presupuesto: presupuesto || totalInversion,
             notas: notas || '',
-            cliente_id,
+            cliente_id: cliente_id_upd,
             asignado: asignadosStr,
             id_asignado: asignadosIds,
             cuic: cuic?.toString(),
@@ -2830,7 +2894,7 @@ export class SolicitudesController {
           await tx.propuesta.update({
             where: { id: propuesta.id },
             data: {
-              cliente_id,
+              cliente_id: cliente_id_upd,
               descripcion,
               notas,
               asignado: asignadosStr,
@@ -2847,7 +2911,7 @@ export class SolicitudesController {
           await tx.cotizacion.update({
             where: { id: cotizacion.id },
             data: {
-              clientes_id: cliente_id,
+              clientes_id: cliente_id_upd,
               nombre_campania,
               numero_caras: totalCaras,
               fecha_inicio: new Date(fecha_inicio),
@@ -2870,7 +2934,7 @@ export class SolicitudesController {
           await tx.campania.update({
             where: { id: campania.id },
             data: {
-              cliente_id,
+              cliente_id: cliente_id_upd,
               nombre: nombre_campania,
               fecha_inicio: new Date(fecha_inicio),
               fecha_fin: new Date(fecha_fin),
@@ -2977,7 +3041,7 @@ export class SolicitudesController {
             const autoRes = await autoReservarCircuitoSiAplica(tx, {
               solicitudCaraId: createdCara.id,
               itemCode: cara.articulo || articulo,
-              clienteId: cliente_id,
+              clienteId: cliente_id_upd,
               calendarioId: null,
               fechaInicio: new Date(cara.inicio_periodo),
               fechaFin: new Date(cara.fin_periodo),
