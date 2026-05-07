@@ -811,8 +811,9 @@ export class CampanasController {
         }
       }
 
-      // Si tiene APS, no permitir rechazo
-      if (status === 'Rechazada' && campanaAnterior.cotizacion_id) {
+      // Si tiene APS, no permitir rechazo/cancelación
+      const STATUS_LIBERA = ['Rechazada', 'Cancelada'];
+      if (STATUS_LIBERA.includes(status) && campanaAnterior.cotizacion_id) {
         const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
@@ -821,7 +822,7 @@ export class CampanasController {
           WHERE ct.id = ? AND rsv.deleted_at IS NULL
         `, campanaAnterior.cotizacion_id);
         if (hasAps[0]?.has_aps === 1) {
-          res.status(400).json({ success: false, error: 'No se puede rechazar una campaña que ya tiene APS asignado.' });
+          res.status(400).json({ success: false, error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} una campaña que ya tiene APS asignado.` });
           return;
         }
       }
@@ -833,10 +834,10 @@ export class CampanasController {
         data: { status },
       });
 
-      // Si se rechaza, liberar reservas + eliminar grupos/circuitos (caras).
-      // Misma lógica que propuestas: el bloqueo por APS arriba garantiza que solo
-      // se ejecuta antes de comprometer inventario.
-      if (status === 'Rechazada' && campana.cotizacion_id) {
+      // Si se rechaza o cancela, liberar reservas + eliminar grupos/circuitos
+      // (caras). El bloqueo por APS arriba garantiza que solo se ejecuta antes
+      // de comprometer inventario.
+      if (STATUS_LIBERA.includes(status) && campana.cotizacion_id) {
         const cotizacionData = await prisma.cotizacion.findUnique({
           where: { id: campana.cotizacion_id },
           select: { id_propuesta: true },
@@ -857,7 +858,7 @@ export class CampanasController {
                 where: { id: { in: carasIds } },
               }),
             ]);
-            console.log(`[Rechazada] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
+            console.log(`[${status}] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
 
             await prisma.historial.create({
               data: {
@@ -868,7 +869,7 @@ export class CampanasController {
                 detalles: JSON.stringify({
                   usuario: req.user?.nombre || 'Usuario',
                   origen: 'campaña',
-                  motivo: 'Rechazo de campaña',
+                  motivo: `${status} de campaña`,
                   reservas_eliminadas: reservasCount,
                   circuitos_eliminados: caras.length,
                   circuitos: caras.map(c => ({ articulo: c.articulo, formato: c.formato })),
@@ -877,16 +878,21 @@ export class CampanasController {
             });
           }
 
-          await prisma.propuesta.update({
-            where: { id: cotizacionData.id_propuesta },
-            data: { status: 'Abierto' },
-          });
-          console.log(`[Rechazada] Campaña #${campanaId}: propuesta #${cotizacionData.id_propuesta} regresada a Abierto`);
+          // Solo regresar la propuesta a 'Abierto' cuando se rechaza (la
+          // intención es revertir a estado pre-aprobación). En 'Cancelada' la
+          // propuesta puede haberse cumplido y luego anulado — dejamos status.
+          if (status === 'Rechazada') {
+            await prisma.propuesta.update({
+              where: { id: cotizacionData.id_propuesta },
+              data: { status: 'Abierto' },
+            });
+            console.log(`[Rechazada] Campaña #${campanaId}: propuesta #${cotizacionData.id_propuesta} regresada a Abierto`);
+          }
         }
       }
 
-      // Si se rechaza, finalizar tareas de autorización pendientes
-      if (status === 'Rechazada') {
+      // Si se rechaza o cancela, finalizar tareas de autorización pendientes
+      if (STATUS_LIBERA.includes(status)) {
         const tareasAuth = await prisma.tareas.updateMany({
           where: {
             campania_id: campanaId,
@@ -896,7 +902,7 @@ export class CampanasController {
           data: { estatus: 'Atendido' },
         });
         if (tareasAuth.count > 0) {
-          console.log(`[Rechazada] Campaña #${campanaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
+          console.log(`[${status}] Campaña #${campanaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
         }
       }
 
@@ -1178,6 +1184,31 @@ export class CampanasController {
         return;
       }
 
+      // Remapeo cliente_id: el front a veces manda CUIC en lugar del id interno
+      // (el modal usa SAPCuicItem que sólo tiene CUIC). Resolvemos al cliente.id real.
+      let cliente_id_final: number | null = cliente_id !== undefined ? Number(cliente_id) : null;
+      if (cliente_id !== undefined) {
+        const idCandidato = Number(cliente_id);
+        let clienteRow = await prisma.cliente.findFirst({
+          where: { id: idCandidato },
+          select: { id: true },
+        });
+        if (!clienteRow) {
+          const cuicNum = Number(cuic ?? cliente_id);
+          if (Number.isFinite(cuicNum)) {
+            clienteRow = await prisma.cliente.findFirst({
+              where: {
+                CUIC: cuicNum,
+                T0_U_RazonSocial: { not: null },
+                ...(sap_database ? { sap_database } : {}),
+              },
+              select: { id: true },
+            });
+          }
+        }
+        if (clienteRow) cliente_id_final = clienteRow.id;
+      }
+
       // Obtener fechas según tipo_periodo de la cotización (catorcena vs mensual)
       let fechaInicio: Date | null = null;
       let fechaFin: Date | null = null;
@@ -1253,7 +1284,7 @@ export class CampanasController {
               ...(notas !== undefined && { notas }),
               ...(asignados !== undefined && { asignado: asignados }),
               ...(id_asignado !== undefined && { id_asignado }),
-              ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
+              ...(cliente_id_final !== null && { cliente_id: cliente_id_final }),
             },
           });
         }
@@ -1294,7 +1325,7 @@ export class CampanasController {
           ...(status !== undefined && { status }),
           ...(fechaInicio && { fecha_inicio: fechaInicio }),
           ...(fechaFin && { fecha_fin: fechaFin }),
-          ...(cliente_id !== undefined && { cliente_id: Number(cliente_id) }),
+          ...(cliente_id_final !== null && { cliente_id: cliente_id_final }),
         },
       });
 
