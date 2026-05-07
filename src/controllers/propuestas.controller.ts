@@ -2164,22 +2164,43 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
 
-      // Build WHERE (same as getAll)
+      const emptyPayload = {
+        inventarios: [] as any[],
+        propuestasInfo: [] as any[],
+        carasInfo: [] as any[],
+        total: 0,
+        page,
+        limit,
+      };
+
+      // Build WHERE (same as getAll — multi-term search, OR-combined per text term)
       let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
       const params: any[] = [];
 
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          whereConditions += ' AND pr.id = ?';
-          params.push(searchNum);
-        } else {
-          const sp = `%${search}%`;
-          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
-          params.push(sp, sp, sp, sp);
+        const terms = search.trim().split(/\s+/).filter(Boolean);
+        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        const searchOrConditions: string[] = [];
+
+        if (numericTerms.length > 0) {
+          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+        }
+        for (const term of textTerms) {
+          const sp = `%${term}%`;
+          searchOrConditions.push(
+            `(pr.descripcion LIKE ? OR ct.nombre_campania LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR sl.nombre_usuario LIKE ? OR pr.asignado LIKE ?)`
+          );
+          params.push(sp, sp, sp, sp, sp, sp, sp);
+        }
+        if (searchOrConditions.length > 0) {
+          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
         }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -2196,12 +2217,12 @@ export class PropuestasController {
       if (userId && !hasFullVisibility(userRol)) {
         const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
         const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
-        if (visibleIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
+        if (visibleIds.length === 0) { res.json({ success: true, data: emptyPayload }); return; }
         whereConditions += ` AND pr.id IN (${visibleIds.map(() => '?').join(',')})`;
         params.push(...visibleIds);
       }
 
-      // 1. Get all matching propuesta IDs
+      // 1. Get all matching propuesta IDs (paginated to keep IN-list bounded)
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT DISTINCT pr.id FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
@@ -2209,16 +2230,23 @@ export class PropuestasController {
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
+        ORDER BY pr.id DESC
       `, ...params);
-      const propIds = idsResult.map(r => Number(r.id));
-      if (propIds.length === 0) { res.json({ success: true, data: { inventarios: [], propuestasInfo: [] } }); return; }
+      const allPropIds = idsResult.map(r => Number(r.id));
+      const total = allPropIds.length;
+      if (total === 0) { res.json({ success: true, data: emptyPayload }); return; }
+
+      const offset = (page - 1) * limit;
+      const propIds = allPropIds.slice(offset, offset + limit);
+      if (propIds.length === 0) { res.json({ success: true, data: { ...emptyPayload, total } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
-      // 2. Propuesta info
+      // 2. Propuesta info — include cotizacion.nombre_campania (proper propuesta name pre-approval)
       const propInfoQuery = `
         SELECT
           pr.id AS propuesta_id, pr.status, pr.descripcion, pr.inversion, pr.asignado,
           cm.nombre AS campana_nombre, cm.fecha_inicio, cm.fecha_fin, cm.status AS campana_status,
+          ct.nombre_campania AS nombre_campania,
           COALESCE(sl.marca_nombre, cl.T2_U_Marca, cl.T0_U_Cliente, '') AS anunciante,
           cl.CUIC AS cuic, sl.nombre_usuario AS vendedor,
           COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
@@ -2307,6 +2335,9 @@ export class PropuestasController {
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
+        total,
+        page,
+        limit,
       }, (_, value) => typeof value === 'bigint' ? Number(value) : value));
 
       res.json({ success: true, data: result });
