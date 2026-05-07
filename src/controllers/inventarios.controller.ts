@@ -455,6 +455,7 @@ export class InventariosController {
         solicitudCaraId,
         excluir_categoria,
         excluir_distancia_km,
+        excluir_mi_macro,
       } = req.query;
 
       console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
@@ -521,6 +522,16 @@ export class InventariosController {
       // Filter by tipo (tradicional/digital)
       if (tipo) {
         where.tradicional_digital = tipo;
+      }
+
+      // Excluir Mi Macro Periférico cuando el artículo es catorcenal (parabuses
+      // regulares vs Mi Macro comparten mueble='PARABUS' pero los Mi Macro son
+      // mensuales y no aplican al circuito catorcenal). El front lo manda
+      // cuando el cara.articulo NO es de Mi Macro.
+      if (excluir_mi_macro === '1' || excluir_mi_macro === 'true') {
+        const prevAnd = (where.AND as Record<string, unknown>[]) || [];
+        prevAnd.push({ tipo_de_mueble: { not: { contains: 'MI MACRO' } } });
+        where.AND = prevAnd;
       }
 
       // Get all inventarios that match the criteria
