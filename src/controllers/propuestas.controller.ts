@@ -497,7 +497,7 @@ export class PropuestasController {
         SELECT /*+ MAX_EXECUTION_TIME(30000) */ COUNT(DISTINCT pr.id) as total
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -547,8 +547,8 @@ export class PropuestasController {
         FROM propuesta pr
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -1442,7 +1442,7 @@ export class PropuestasController {
         SELECT pr.status, COUNT(DISTINCT pr.id) as count
         FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -2226,7 +2226,7 @@ export class PropuestasController {
       const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
         SELECT DISTINCT pr.id FROM propuesta pr
         LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
+        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ${whereConditions}
@@ -2255,8 +2255,8 @@ export class PropuestasController {
         FROM propuesta pr
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-          LEFT JOIN cliente cl ON cl.CUIC = pr.cliente_id
           LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
           LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         WHERE pr.id IN (${phIds})
@@ -3587,6 +3587,9 @@ export class PropuestasController {
           },
         });
       }
+
+      cache.deletePattern('propuestas:list:');
+      cache.deletePattern('campanas:list:');
 
       res.json({ success: true, data: updatedPropuesta });
 
