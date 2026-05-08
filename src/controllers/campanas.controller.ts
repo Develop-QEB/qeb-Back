@@ -7292,14 +7292,19 @@ export class CampanasController {
         tareasArr = (await prisma.$queryRawUnsafe(tareasQuery, ...campaniaIds)) as any[];
       }
 
-      // Query imagenes_digitales count and filenames per reserva
+      // Query imagenes_digitales count y nombres de archivos por reserva.
+      // archivo: filename "código" (lo que muestra "Nombre Arte / Código").
+      // archivo_data: URL completa al archivo subido (sfo3 spaces). El front
+      // muestra el filename de archivo_data en la columna "Arte".
       let artesCountMap = new Map<number, number>();
       let artesNamesMap = new Map<number, string>();
+      let artesDataFilenamesMap = new Map<number, string>();
       if (rsvIds.length > 0) {
         const placeholdersRsv = rsvIds.map(() => '?').join(',');
         const artesCountQuery = `
           SELECT id_reserva, COUNT(*) as total_artes,
-                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes
+                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes,
+                 GROUP_CONCAT(SUBSTRING_INDEX(archivo_data, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_archivo_data
           FROM imagenes_digitales
           WHERE id_reserva IN (${placeholdersRsv})
           GROUP BY id_reserva
@@ -7308,6 +7313,7 @@ export class CampanasController {
         for (const row of artesCountArr) {
           artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
           if (row.nombres_artes) artesNamesMap.set(Number(row.id_reserva), String(row.nombres_artes));
+          if (row.nombres_archivo_data) artesDataFilenamesMap.set(Number(row.id_reserva), String(row.nombres_archivo_data));
         }
       }
 
@@ -7373,6 +7379,7 @@ export class CampanasController {
           indicaciones,
           num_artes_digitales: artesCountMap.get(rsvId) || 0,
           nombres_artes_digitales: artesNamesMap.get(rsvId) || null,
+          nombres_archivo_data: artesDataFilenamesMap.get(rsvId) || null,
         };
       });
 
