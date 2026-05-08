@@ -7840,6 +7840,11 @@ export class CampanasController {
         reservasCreadas++;
       }
 
+      if (reservasCreadas > 0) {
+        emitToCampana(campanaId, SOCKET_EVENTS.RESERVA_CREADA, { campanaId });
+        emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { campanaId });
+      }
+
       res.json({
         success: true,
         data: {
@@ -7900,6 +7905,9 @@ export class CampanasController {
           }),
         },
       });
+
+      emitToCampana(campanaId, SOCKET_EVENTS.RESERVA_ELIMINADA, { campanaId });
+      emitToAll(SOCKET_EVENTS.RESERVA_ELIMINADA, { campanaId });
 
       res.json({
         success: true,
