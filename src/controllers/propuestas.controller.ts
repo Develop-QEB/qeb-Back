@@ -3673,6 +3673,17 @@ export class PropuestasController {
         aplicarAGrupo, // si true, propaga campos no-temporales a las demás caras con el mismo grupo_masivo_id
       } = req.body;
 
+      // Validar fechas obligatorias. Aplica si el cliente está mandando
+      // updates de fechas (si no manda nada, no las tocamos).
+      if (inicio_periodo !== undefined && !inicio_periodo) {
+        res.status(400).json({ success: false, error: 'inicio_periodo no puede ser vacío' });
+        return;
+      }
+      if (fin_periodo !== undefined && !fin_periodo) {
+        res.status(400).json({ success: false, error: 'fin_periodo no puede ser vacío' });
+        return;
+      }
+
       // Get current cara to compare auth-affecting fields
       const currentCara = await prisma.solicitudCaras.findUnique({
         where: { id: parseInt(caraId) },
@@ -3757,7 +3768,10 @@ export class PropuestasController {
         },
       });
 
-      // Auto-reserva circuito digital: si cambió el itemCode o las fechas, re-reservar
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
+      // cara — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si cambió el itemCode o las fechas, re-reservar
       if (isCircuitoDigital(articulo)) {
         const fechasIguales = inicio_periodo && fin_periodo && currentCara.inicio_periodo && currentCara.fin_periodo
           && new Date(inicio_periodo).getTime() === new Date(currentCara.inicio_periodo).getTime()
@@ -3808,6 +3822,7 @@ export class PropuestasController {
           }
         }
       }
+      */
 
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCara.grupo_rt_bf) {
@@ -3930,6 +3945,15 @@ export class PropuestasController {
         grupo_rt_bf: grupoRtBfCreate,
       } = req.body;
 
+      // Validar fechas obligatorias.
+      if (!inicio_periodo || !fin_periodo) {
+        res.status(400).json({
+          success: false,
+          error: 'inicio_periodo y fin_periodo son obligatorios. Define la catorcena/mes de la cara antes de guardar.',
+        });
+        return;
+      }
+
       // Calculate authorization state — use BF pair's bonificacion for RT rows
       const artUpperCrP = (articulo || '').toUpperCase();
       const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
@@ -3979,7 +4003,10 @@ export class PropuestasController {
         },
       });
 
-      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al crear
+      // cara — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si falla, rollback: borrar la cara.
       if (isCircuitoDigital(articulo)) {
         try {
           const propuestaDB = await prisma.propuesta.findUnique({
@@ -4016,6 +4043,7 @@ export class PropuestasController {
           return;
         }
       }
+      */
 
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');

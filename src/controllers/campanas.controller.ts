@@ -7019,9 +7019,9 @@ export class CampanasController {
             WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'RENTA'
           END AS negociacion,
-          (sc.caras - sc.bonificacion) AS caras,
+          sc.caras AS caras,
           ROUND(AVG(sc.tarifa_publica), 2) AS tarifa,
-          ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
+          ROUND(sc.caras * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
           (CAST(COUNT(DISTINCT rsv.id) AS SIGNED) - (sc.caras + COALESCE(sc.bonificacion, 0))) AS delta_caras,
           cm.id AS campania_id,
           sc.id AS grupo_id,
@@ -7036,7 +7036,7 @@ export class CampanasController {
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE (sc.caras - sc.bonificacion) > 0
+        WHERE sc.caras > 0
           AND cm.status NOT IN ('inactiva', 'Rechazada')
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
@@ -7903,6 +7903,16 @@ export class CampanasController {
       const userRol = req.user?.rol || '';
       const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
 
+      // Validar fechas obligatorias si vienen en el payload.
+      if ('inicio_periodo' in data && !data.inicio_periodo) {
+        res.status(400).json({ success: false, error: 'inicio_periodo no puede ser vacío' });
+        return;
+      }
+      if ('fin_periodo' in data && !data.fin_periodo) {
+        res.status(400).json({ success: false, error: 'fin_periodo no puede ser vacío' });
+        return;
+      }
+
       // Get current cara to get idquote
       const currentCara = await prisma.solicitudCaras.findUnique({
         where: { id: parseInt(caraId) },
@@ -7994,7 +8004,10 @@ export class CampanasController {
         data: updateData,
       });
 
-      // Auto-reserva circuito digital: si cambió itemCode/fechas, re-reservar
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
+      // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si cambió itemCode/fechas, re-reservar
       if (isCircuitoDigital(data.articulo) && currentCaraFull) {
         const fechasIguales = data.inicio_periodo && data.fin_periodo && currentCaraFull.inicio_periodo && currentCaraFull.fin_periodo
           && new Date(data.inicio_periodo).getTime() === new Date(currentCaraFull.inicio_periodo).getTime()
@@ -8043,6 +8056,7 @@ export class CampanasController {
           }
         }
       }
+      */
 
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCaraFull?.grupo_rt_bf) {
@@ -8146,6 +8160,15 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
 
+      // Validar fechas obligatorias.
+      if (!data.inicio_periodo || !data.fin_periodo) {
+        res.status(400).json({
+          success: false,
+          error: 'inicio_periodo y fin_periodo son obligatorios. Define la catorcena/mes de la cara antes de guardar.',
+        });
+        return;
+      }
+
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -8224,7 +8247,10 @@ export class CampanasController {
         data: createData,
       });
 
-      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al crear
+      // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si falla, rollback: borrar la cara.
       if (isCircuitoDigital(data.articulo)) {
         try {
           const propuestaDB = await prisma.propuesta.findUnique({
@@ -8254,6 +8280,7 @@ export class CampanasController {
           return;
         }
       }
+      */
 
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
