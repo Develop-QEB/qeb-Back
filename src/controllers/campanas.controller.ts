@@ -7019,9 +7019,9 @@ export class CampanasController {
             WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
             ELSE 'RENTA'
           END AS negociacion,
-          (sc.caras - sc.bonificacion) AS caras,
+          sc.caras AS caras,
           ROUND(AVG(sc.tarifa_publica), 2) AS tarifa,
-          ROUND((sc.caras - sc.bonificacion) * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
+          ROUND(sc.caras * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
           (CAST(COUNT(DISTINCT rsv.id) AS SIGNED) - (sc.caras + COALESCE(sc.bonificacion, 0))) AS delta_caras,
           cm.id AS campania_id,
           sc.id AS grupo_id,
@@ -7036,7 +7036,7 @@ export class CampanasController {
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
           LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE (sc.caras - sc.bonificacion) > 0
+        WHERE sc.caras > 0
           AND cm.status NOT IN ('inactiva', 'Rechazada')
           ${dateFilter}
         GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
