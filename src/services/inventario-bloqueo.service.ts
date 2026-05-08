@@ -1,5 +1,5 @@
 // Lógica compartida para detectar qué espacios físicos (espacio_inventario.id)
-// están BLOQUEADOS en un rango de calendarios — usado por el endpoint de
+// están BLOQUEADOS en un rango de fechas — usado por el endpoint de
 // disponibles, los endpoints de creación de reservas (propuestas / campañas) y
 // la asignación manual.
 //
@@ -12,6 +12,17 @@
 //     `i.tradicional_digital = 'Digital' OR i.total_espacios > 0`. Como TODOS
 //     los tradicionales tienen `total_espacios = 1`, el OR los marcaba como
 //     "digitales" y los excluía del bloqueo.
+//
+// 2026-05-08: el filtro original cruzaba por `reservas.calendario_id IN
+// (calendariosOverlap)`. Eso falla en datos sucios: ~1,800 reservas tienen
+// `calendario_id = 0` y ~400 apuntan a un calendario que no se solapa con el
+// `solicitudCaras.inicio_periodo` real. Esas reservas no se detectaban como
+// bloqueantes y dejaban entrar dupes (caso F1 OOH cam 80578, BIG MIX cam 80060,
+// SEPHORA COMPLEMENTO cam 80511, etc). Ahora el helper toma directamente el
+// rango `fechaInicio/fechaFin` y JOINea con `solicitudCaras` filtrando por
+// `sc.inicio_periodo`/`sc.fin_periodo` — la fuente de verdad del período de
+// la reserva. Funciona igual para catorcena que para mensual: ambos guardan
+// el rango como FECHAS reales en el SC.
 //
 // Ahora todo pasa por `getEspaciosBloqueados` y comparte la misma constante
 // de estatus.
@@ -33,8 +44,9 @@ export const ESTATUS_QUE_BLOQUEAN = [
 type TxClient = PrismaClient | Prisma.TransactionClient;
 
 interface GetEspaciosBloqueadosArgs {
-  // IDs de calendario que se solapan con el período pedido.
-  calendarioIds: number[];
+  // Rango del período pedido (catorcena, mensual, o lo que sea).
+  fechaInicio: Date;
+  fechaFin: Date;
   // solicitudCaras_id que pertenecen a la propuesta/campaña actual — se excluyen
   // del bloqueo (para no chocar con reservas propias al re-guardar).
   excludeCaraIds?: number[];
@@ -44,30 +56,38 @@ interface GetEspaciosBloqueadosArgs {
 
 /**
  * Devuelve el set de `espacio_inventario.id` que están bloqueados en el rango
- * de calendarios dado, EXCLUYENDO los que corresponden a inventarios digitales
+ * de fechas dado, EXCLUYENDO los que corresponden a inventarios digitales
  * (los digitales tienen spots ilimitados — varias campañas comparten pantalla).
+ *
+ * Filtra por `solicitudCaras.inicio_periodo`/`fin_periodo` (no por
+ * `reservas.calendario_id`) — eso evita que reservas con calendario huérfano
+ * o desincronizado escapen al check.
  */
 export async function getEspaciosBloqueados(
   args: GetEspaciosBloqueadosArgs
 ): Promise<Set<number>> {
-  const { calendarioIds, excludeCaraIds, tx } = args;
-  if (calendarioIds.length === 0) return new Set();
-
+  const { fechaInicio, fechaFin, excludeCaraIds, tx } = args;
   const client = tx ?? defaultPrisma;
 
-  const reservasExistentes = await client.reservas.findMany({
-    where: {
-      deleted_at: null,
-      calendario_id: { in: calendarioIds },
-      estatus: { in: [...ESTATUS_QUE_BLOQUEAN] },
-      ...(excludeCaraIds && excludeCaraIds.length > 0
-        ? { solicitudCaras_id: { notIn: excludeCaraIds } }
-        : {}),
-    },
-    select: { inventario_id: true },
-  });
+  const excludeFilter = excludeCaraIds && excludeCaraIds.length > 0
+    ? `AND rv.solicitudCaras_id NOT IN (${excludeCaraIds.map(() => '?').join(',')})`
+    : '';
 
-  const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => r.inventario_id))];
+  const reservasExistentes = await client.$queryRawUnsafe<{ inventario_id: number }[]>(
+    `SELECT DISTINCT rv.inventario_id
+     FROM reservas rv
+     INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
+     WHERE rv.deleted_at IS NULL
+       AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+       AND sc.inicio_periodo <= ?
+       AND sc.fin_periodo >= ?
+       ${excludeFilter}`,
+    fechaFin,
+    fechaInicio,
+    ...(excludeCaraIds || [])
+  );
+
+  const espacioIdsExistentes = [...new Set(reservasExistentes.map(r => Number(r.inventario_id)))];
   if (espacioIdsExistentes.length === 0) return new Set();
 
   // Identificar cuáles de esos espacios corresponden a inventarios DIGITALES

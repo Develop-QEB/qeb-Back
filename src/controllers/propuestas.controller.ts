@@ -2666,23 +2666,15 @@ export class PropuestasController {
         },
       });
 
-      // Obtener calendarios que se solapan con el período para validar disponibilidad
+      // Espacios ya bloqueados en el período (excluyendo los de esta propuesta).
+      // Helper centralizado: ver inventario-bloqueo.service.ts. Usa rango de
+      // fechas directo contra solicitudCaras.inicio_periodo (no via calendario_id,
+      // que tenía data sucia y dejaba colar dupes).
       const fechaIni = new Date(fechaInicio);
       const fechaFinDate = new Date(fechaFin);
-      const calendariosOverlap = await prisma.calendario.findMany({
-        where: {
-          deleted_at: null,
-          fecha_inicio: { lte: fechaFinDate },
-          fecha_fin: { gte: fechaIni },
-        },
-        select: { id: true },
-      });
-      const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
-
-      // Espacios ya bloqueados en el período (excluyendo los de esta propuesta).
-      // Helper centralizado: ver inventario-bloqueo.service.ts.
       const espaciosReservadosEnPeriodo = await getEspaciosBloqueados({
-        calendarioIds: calendarioIdsOverlap,
+        fechaInicio: fechaIni,
+        fechaFin: fechaFinDate,
         excludeCaraIds: proposalCaraIds,
       });
 
@@ -3289,20 +3281,13 @@ export class PropuestasController {
       // Validar que el espacio no esté ya bloqueado por OTRA propuesta en el
       // período. Antes este endpoint no validaba contra otras propuestas y por
       // ahí se colaba parte de las dupes en producción.
-      const calendariosOverlapToggle = await prisma.calendario.findMany({
-        where: {
-          deleted_at: null,
-          fecha_inicio: { lte: new Date(fechaFin) },
-          fecha_fin: { gte: new Date(fechaInicio) },
-        },
-        select: { id: true },
-      });
       const proposalCaraIdsToggle = (await prisma.solicitudCaras.findMany({
         where: { idquote: String(propuestaId) },
         select: { id: true },
       })).map(c => c.id);
       const espaciosBloqueados = await getEspaciosBloqueados({
-        calendarioIds: calendariosOverlapToggle.map(c => c.id),
+        fechaInicio: new Date(fechaInicio),
+        fechaFin: new Date(fechaFin),
         excludeCaraIds: proposalCaraIdsToggle,
       });
       if (espaciosBloqueados.has(espacio.id)) {

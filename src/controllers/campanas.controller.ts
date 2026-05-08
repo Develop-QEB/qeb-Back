@@ -1298,7 +1298,13 @@ export class CampanasController {
           },
         });
 
-        // 4. Actualizar solicitudCaras y calendario si cambian las fechas
+        // 4. Actualizar solicitudCaras y calendario si cambian las fechas.
+        // OJO: si el rango original del SC no se solapa con el nuevo rango de la
+        // campania, GREATEST/LEAST mueve las fechas a extremos opuestos y termina
+        // invirtiéndolas (fin < inicio). Antes de hoy esto generaba SCs con fechas
+        // invertidas (caso BIG MIX cam 80060: SC quedó con ini=2026-09-01,
+        // fin=2026-05-11). Ahora si no hay overlap, REEMPLAZAMOS completo con el
+        // nuevo rango.
         if (fechaInicio && fechaFin && cotizacion?.id_propuesta) {
           await prisma.$executeRaw`
             UPDATE solicitudCaras slc
@@ -1307,10 +1313,26 @@ export class CampanasController {
             INNER JOIN reservas rs ON rs.solicitudCaras_id = slc.id
             INNER JOIN calendario cl ON cl.id = rs.calendario_id
             SET
-              slc.inicio_periodo = GREATEST(slc.inicio_periodo, ${fechaInicio}),
-              slc.fin_periodo = LEAST(slc.fin_periodo, ${fechaFin}),
-              cl.fecha_inicio = GREATEST(cl.fecha_inicio, ${fechaInicio}),
-              cl.fecha_fin = LEAST(cl.fecha_fin, ${fechaFin})
+              slc.inicio_periodo = CASE
+                WHEN slc.fin_periodo < ${fechaInicio} OR slc.inicio_periodo > ${fechaFin}
+                  THEN ${fechaInicio}
+                ELSE GREATEST(slc.inicio_periodo, ${fechaInicio})
+              END,
+              slc.fin_periodo = CASE
+                WHEN slc.fin_periodo < ${fechaInicio} OR slc.inicio_periodo > ${fechaFin}
+                  THEN ${fechaFin}
+                ELSE LEAST(slc.fin_periodo, ${fechaFin})
+              END,
+              cl.fecha_inicio = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaInicio}
+                ELSE GREATEST(cl.fecha_inicio, ${fechaInicio})
+              END,
+              cl.fecha_fin = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaFin}
+                ELSE LEAST(cl.fecha_fin, ${fechaFin})
+              END
             WHERE ct.id = ${cotizacionId}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
           `;
@@ -7716,22 +7738,14 @@ export class CampanasController {
         },
       });
 
-      // Obtener calendarios que se solapan con el período para validar disponibilidad
+      // Espacios ya bloqueados en el período. Helper centralizado: filtra por
+      // el rango de fechas contra solicitudCaras (no por calendario_id, que
+      // tenía data sucia y dejaba colar dupes).
       const fechaIni = new Date(fechaInicio);
       const fechaFinDate = new Date(fechaFin);
-      const calendariosOverlap = await prisma.calendario.findMany({
-        where: {
-          deleted_at: null,
-          fecha_inicio: { lte: fechaFinDate },
-          fecha_fin: { gte: fechaIni },
-        },
-        select: { id: true },
-      });
-      const calendarioIdsOverlap = calendariosOverlap.map(c => c.id);
-
-      // Espacios ya bloqueados en el período. Helper centralizado.
       const espaciosReservadosEnPeriodo = await getEspaciosBloqueados({
-        calendarioIds: calendarioIdsOverlap,
+        fechaInicio: fechaIni,
+        fechaFin: fechaFinDate,
       });
 
       let reservasCreadas = 0;
