@@ -139,7 +139,7 @@ export class InventariosController {
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -741,7 +741,7 @@ export class InventariosController {
           AND cal.deleted_at IS NULL
           AND cal.fecha_inicio <= ${new Date(fecha_fin as string)}
           AND cal.fecha_fin >= ${new Date(fecha_inicio as string)}
-          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido')
+          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')
         `;
 
         if (categoriaCoordenadas.length > 0) {
@@ -1479,7 +1479,7 @@ export class InventariosController {
                AND cal.deleted_at IS NULL
                AND cal.fecha_inicio <= CURDATE()
                AND cal.fecha_fin >= CURDATE()
-               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
             ...invIds
           );
           for (const row of rows) {
@@ -1622,7 +1622,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -1650,7 +1650,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
           ...invIds
         );
         for (const row of campRows) {

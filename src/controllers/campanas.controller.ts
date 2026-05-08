@@ -4502,23 +4502,25 @@ export class CampanasController {
       const grupoIds = grupos.map(g => g.grupo_completo_id);
 
       // Construir query de actualización según el estado
+      // IMPORTANTE: solo actualizamos arte_aprobado (y comentario_rechazo si aplica).
+      // El campo `estatus` representa el estado COMERCIAL (Vendido/Reservado/Bonificado/...)
+      // y NO se debe machacar con el estado del arte. Antes lo hacía y eso provocaba que
+      // getDisponibles dejara de bloquear el inventario porque ya no veía 'Vendido' allí
+      // (causaba duplicados de reservas en el mismo inv+catorcena).
       let updateFields: string;
       let updateParams: (string | number)[];
 
       if (status === 'Rechazado') {
         if (comentarioRechazo) {
-          updateFields = `arte_aprobado = ?, comentario_rechazo = ?, estatus = 'Arte Rechazado'`;
+          updateFields = `arte_aprobado = ?, comentario_rechazo = ?`;
           updateParams = [status, comentarioRechazo, ...reservaIds];
         } else {
-          updateFields = `arte_aprobado = ?, estatus = 'Arte Rechazado'`;
+          updateFields = `arte_aprobado = ?`;
           updateParams = [status, ...reservaIds];
         }
-      } else if (status === 'Pendiente') {
-        updateFields = `arte_aprobado = ?, estatus = 'En Arte'`;
-        updateParams = [status, ...reservaIds];
       } else {
-        // Aprobado
-        updateFields = `arte_aprobado = ?, estatus = 'Arte Aprobado'`;
+        // 'Aprobado' o 'Pendiente'
+        updateFields = `arte_aprobado = ?`;
         updateParams = [status, ...reservaIds];
       }
 
