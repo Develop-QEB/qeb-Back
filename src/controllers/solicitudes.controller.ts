@@ -1727,6 +1727,28 @@ export class SolicitudesController {
         caras,
       } = req.body;
 
+      // Validar fechas obligatorias — el front antes permitía guardar sin
+      // catorcena/mes definidos y eso dejaba registros sin periodo.
+      if (!fecha_inicio || !fecha_fin) {
+        res.status(400).json({
+          success: false,
+          error: 'fecha_inicio y fecha_fin son obligatorios para crear la solicitud',
+        });
+        return;
+      }
+      if (Array.isArray(caras) && caras.length > 0) {
+        for (let i = 0; i < caras.length; i++) {
+          const c = caras[i];
+          if (!c.inicio_periodo || !c.fin_periodo) {
+            res.status(400).json({
+              success: false,
+              error: `La cara ${i + 1} (${c.articulo || 'sin articulo'}) no tiene fecha inicio o fin de periodo. Define la catorcena/mes antes de guardar.`,
+            });
+            return;
+          }
+        }
+      }
+
       const userId = req.user?.userId;
       // Get user name from database if not in token
       let userName = req.user?.nombre;
@@ -2789,6 +2811,27 @@ export class SolicitudesController {
         tipo_periodo,
         caras,
       } = req.body;
+
+      // Validar fechas obligatorias.
+      if (!fecha_inicio || !fecha_fin) {
+        res.status(400).json({
+          success: false,
+          error: 'fecha_inicio y fecha_fin son obligatorios para actualizar la solicitud',
+        });
+        return;
+      }
+      if (Array.isArray(caras) && caras.length > 0) {
+        for (let i = 0; i < caras.length; i++) {
+          const c = caras[i];
+          if (!c.inicio_periodo || !c.fin_periodo) {
+            res.status(400).json({
+              success: false,
+              error: `La cara ${i + 1} (${c.articulo || 'sin articulo'}) no tiene fecha inicio o fin de periodo. Define la catorcena/mes antes de guardar.`,
+            });
+            return;
+          }
+        }
+      }
 
       const solicitud = await prisma.solicitud.findFirst({
         where: { id: parseInt(id), deleted_at: null },

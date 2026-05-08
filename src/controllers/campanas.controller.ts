@@ -7903,6 +7903,16 @@ export class CampanasController {
       const userRol = req.user?.rol || '';
       const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
 
+      // Validar fechas obligatorias si vienen en el payload.
+      if ('inicio_periodo' in data && !data.inicio_periodo) {
+        res.status(400).json({ success: false, error: 'inicio_periodo no puede ser vacío' });
+        return;
+      }
+      if ('fin_periodo' in data && !data.fin_periodo) {
+        res.status(400).json({ success: false, error: 'fin_periodo no puede ser vacío' });
+        return;
+      }
+
       // Get current cara to get idquote
       const currentCara = await prisma.solicitudCaras.findUnique({
         where: { id: parseInt(caraId) },
@@ -8149,6 +8159,15 @@ export class CampanasController {
       const data = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+
+      // Validar fechas obligatorias.
+      if (!data.inicio_periodo || !data.fin_periodo) {
+        res.status(400).json({
+          success: false,
+          error: 'inicio_periodo y fin_periodo son obligatorios. Define la catorcena/mes de la cara antes de guardar.',
+        });
+        return;
+      }
 
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
       const campana = await prisma.campania.findFirst({
