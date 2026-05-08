@@ -1993,7 +1993,10 @@ export class SolicitudesController {
           }
           createdCaras.push(solicitudCara);
 
-          // Auto-reserva circuito digital
+          // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital — el equipo
+          // pidió tenerla deshabilitada por un rato. Para reactivar, descomenta
+          // el bloque y borra este comentario.
+          /*
           // Si la cara es parte de un grupo BF (grupo_rt_bf no null) → respetar cantidad pedida
           // (RT toma N libres, BF toma los restantes para no doblar reservas).
           // Sin grupo BF → comportamiento legacy (reservar todos los inventarios del circuito).
@@ -2015,6 +2018,7 @@ export class SolicitudesController {
           if (autoRes) {
             console.log(`[circuitos] solicitudCara ${solicitudCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
           }
+          */
         }
 
         // Propagate RT auth state to BF pairs within each grupo_rt_bf

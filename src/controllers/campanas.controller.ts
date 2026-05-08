@@ -7994,7 +7994,10 @@ export class CampanasController {
         data: updateData,
       });
 
-      // Auto-reserva circuito digital: si cambió itemCode/fechas, re-reservar
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
+      // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si cambió itemCode/fechas, re-reservar
       if (isCircuitoDigital(data.articulo) && currentCaraFull) {
         const fechasIguales = data.inicio_periodo && data.fin_periodo && currentCaraFull.inicio_periodo && currentCaraFull.fin_periodo
           && new Date(data.inicio_periodo).getTime() === new Date(currentCaraFull.inicio_periodo).getTime()
@@ -8043,6 +8046,7 @@ export class CampanasController {
           }
         }
       }
+      */
 
       // Propagate auth state to BF/RT pair in same grupo_rt_bf
       if (authFieldsChanged && currentCaraFull?.grupo_rt_bf) {
@@ -8224,7 +8228,10 @@ export class CampanasController {
         data: createData,
       });
 
-      // Auto-reserva circuito digital (si aplica). Si falla, rollback: borrar la cara.
+      // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al crear
+      // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
+      /*
+      // Si falla, rollback: borrar la cara.
       if (isCircuitoDigital(data.articulo)) {
         try {
           const propuestaDB = await prisma.propuesta.findUnique({
@@ -8254,6 +8261,7 @@ export class CampanasController {
           return;
         }
       }
+      */
 
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
