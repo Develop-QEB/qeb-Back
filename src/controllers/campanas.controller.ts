@@ -6928,6 +6928,14 @@ export class CampanasController {
   /**
    * Obtener datos para Orden de Montaje CAT - Ocupación
    * Agrupa por campaña, artículo y tipo (RENTA/BONIFICACIÓN)
+   *
+   * Estrategia (espejo de getOrdenMontajeINVIAN): pre-filtramos campañas en el
+   * rango, traemos sc + reservas + inventarios con queries chiquitas y
+   * agregamos en JS. Antes era un UNION ALL con LEFT JOIN cliente por OR
+   * (cliente.id OR cliente.CUIC), subqueries correlacionadas contra catorcenas
+   * y GROUP_CONCAT — combinación que disparaba fullscans contra reservas
+   * (~112K filas) y mataba el socket_timeout=30 → 500 con
+   * "Code: N/A, Message: N/A".
    */
   async getOrdenMontajeCAT(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -6953,130 +6961,302 @@ export class CampanasController {
         }
       }
 
-      const params: (string | number)[] = [];
-
-      let dateFilter = '';
+      // PASO 1: Resolver fechas de la catorcena pedida (1 query corta).
+      let inicioFiltro: Date | null = null;
+      let finFiltro: Date | null = null;
       if (yearInicio && catorcenaInicio && yearFin && catorcenaFin) {
-        dateFilter = `
-          AND sc.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-          AND sc.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-        `;
-        params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+        const [catRange] = await prisma.$queryRawUnsafe<{ inicio_filtro: Date | null; fin_filtro: Date | null }[]>(`
+          SELECT
+            (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS inicio_filtro,
+            (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS fin_filtro
+        `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
+        inicioFiltro = catRange?.inicio_filtro || null;
+        finFiltro = catRange?.fin_filtro || null;
       }
 
-      const query = `
-        -- BONIFICACIONES (BF, CT, IM con bonificacion > 0)
+      // PASO 2: traer campañas + cotizacion + solicitud + solicitudCaras filtradas
+      // por rango de fechas de sc (mismo criterio que la versión anterior) y
+      // excluyendo inactiva/Rechazada. Sin JOIN a cliente ni a reservas todavía.
+      const dateScFilter = (inicioFiltro && finFiltro)
+        ? 'AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?'
+        : '';
+      const statusFilter = status ? 'AND cm.status = ?' : '';
+      const scParams: (string | number | Date)[] = [];
+      if (inicioFiltro && finFiltro) scParams.push(finFiltro, inicioFiltro);
+      if (status) scParams.push(status);
+
+      type ScRow = {
+        sc_id: number;
+        idquote: string | null;
+        formato: string | null;
+        articulo: string | null;
+        bonificacion: number | null;
+        caras: number;
+        tarifa_publica: number | null;
+        cortesia: number | null;
+        sc_tipo: string | null;
+        inicio_periodo: Date | string | null;
+        fin_periodo: Date | string | null;
+        campania_id: number;
+        campania_nombre: string | null;
+        cliente_id: number | null;
+        cm_status: string | null;
+        id_propuesta: number | null;
+        tipo_periodo: string | null;
+        descuento: number | null;
+        sol_nombre_usuario: string | null;
+        unidad_negocio: string | null;
+        sol_sap_database: string | null;
+      };
+
+      const scRows = await prisma.$queryRawUnsafe<ScRow[]>(`
         SELECT
-          MIN(inv.plaza) AS plaza,
-          sc.formato AS tipo,
-          sol.nombre_usuario AS asesor,
-          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ', ') AS aps_especifico,
-          ct.id_propuesta AS aps_global,
-          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
-          DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
-          DATE(sc.fin_periodo) AS fecha_fin_periodo,
-          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
-          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
-          cliente.T1_U_Cliente AS cliente,
-          cliente.T2_U_Marca AS marca,
-          cliente.CUIC AS cuic,
-          COALESCE(sol.sap_database, cliente.sap_database) AS sap_database,
-          sol.unidad_negocio AS unidad_negocio,
-          cm.nombre AS campania,
-          sc.articulo AS numero_articulo,
-          CASE
-            WHEN sc.cortesia = 1 THEN 'CORTESIA'
-            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
-            WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
-            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
-            ELSE 'BONIFICACION'
-          END AS negociacion,
-          sc.bonificacion AS caras,
-          0 AS tarifa,
-          0 AS monto_total,
-          (CAST(COUNT(DISTINCT rsv.id) AS SIGNED) - (sc.caras + COALESCE(sc.bonificacion, 0))) AS delta_caras,
+          sc.id AS sc_id,
+          sc.idquote,
+          sc.formato,
+          sc.articulo,
+          sc.bonificacion,
+          sc.caras,
+          sc.tarifa_publica,
+          sc.cortesia,
+          sc.tipo AS sc_tipo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
           cm.id AS campania_id,
-          sc.id AS grupo_id,
-          'bonificacion' AS tipo_fila,
-          COALESCE(MIN(inv.tradicional_digital), sc.tipo) AS tradicional_digital
+          cm.nombre AS campania_nombre,
+          cm.cliente_id,
+          cm.status AS cm_status,
+          ct.id_propuesta,
+          ct.tipo_periodo,
+          ct.descuento,
+          sol.nombre_usuario AS sol_nombre_usuario,
+          sol.unidad_negocio,
+          sol.sap_database AS sol_sap_database
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
           INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR (cliente.CUIC = cm.cliente_id AND (sol.sap_database IS NULL OR cliente.sap_database = sol.sap_database))
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
-          LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
-          LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE sc.bonificacion > 0
-          AND cm.status NOT IN ('inactiva', 'Rechazada')
-          ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
-                 sc.id, sc.formato, sc.articulo, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.id_propuesta, ct.tipo_periodo, sc.ciudad, sc.tipo
+        WHERE cm.status NOT IN ('inactiva', 'Rechazada')
+          AND (sc.caras > 0 OR sc.bonificacion > 0)
+          ${dateScFilter}
+          ${statusFilter}
+      `, ...scParams);
 
-        UNION ALL
+      if (scRows.length === 0) {
+        res.json({
+          success: true,
+          data: [],
+          filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
+          catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
+        });
+        return;
+      }
 
-        -- RENTA (RT, IN, CT, IM con caras > bonificacion)
-        SELECT
-          MIN(inv.plaza) AS plaza,
-          sc.formato AS tipo,
-          sol.nombre_usuario AS asesor,
-          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ', ') AS aps_especifico,
-          ct.id_propuesta AS aps_global,
-          COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
-          DATE(sc.inicio_periodo) AS fecha_inicio_periodo,
-          DATE(sc.fin_periodo) AS fecha_fin_periodo,
-          (SELECT numero_catorcena FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_numero,
-          (SELECT año FROM catorcenas WHERE sc.inicio_periodo BETWEEN fecha_inicio AND fecha_fin LIMIT 1) AS catorcena_year,
-          cliente.T1_U_Cliente AS cliente,
-          cliente.T2_U_Marca AS marca,
-          cliente.CUIC AS cuic,
-          COALESCE(sol.sap_database, cliente.sap_database) AS sap_database,
-          sol.unidad_negocio AS unidad_negocio,
-          cm.nombre AS campania,
-          sc.articulo AS numero_articulo,
-          CASE
-            WHEN sc.cortesia = 1 THEN 'CORTESIA'
-            WHEN sc.articulo LIKE 'IN%' THEN 'INTERCAMBIO'
-            WHEN sc.articulo LIKE 'IM%' THEN 'IMPRESION'
-            WHEN sc.articulo LIKE 'ESP%' OR sc.articulo LIKE 'ES-%' THEN 'EJEC_ESPECIAL'
-            ELSE 'RENTA'
-          END AS negociacion,
-          sc.caras AS caras,
-          ROUND(AVG(sc.tarifa_publica), 2) AS tarifa,
-          ROUND(sc.caras * AVG(sc.tarifa_publica) * (1 - COALESCE(ct.descuento, 0)), 2) AS monto_total,
-          (CAST(COUNT(DISTINCT rsv.id) AS SIGNED) - (sc.caras + COALESCE(sc.bonificacion, 0))) AS delta_caras,
-          cm.id AS campania_id,
-          sc.id AS grupo_id,
-          'renta' AS tipo_fila,
-          COALESCE(MIN(inv.tradicional_digital), sc.tipo) AS tradicional_digital
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          INNER JOIN solicitud sol ON sol.id = pr.solicitud_id
-          LEFT JOIN cliente ON cliente.id = cm.cliente_id OR (cliente.CUIC = cm.cliente_id AND (sol.sap_database IS NULL OR cliente.sap_database = sol.sap_database))
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
-          LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
-          LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
-        WHERE sc.caras > 0
-          AND cm.status NOT IN ('inactiva', 'Rechazada')
-          ${dateFilter}
-        GROUP BY cm.id, cliente.T1_U_Cliente, cliente.T2_U_Marca, cliente.CUIC, cliente.sap_database, sol.sap_database, sol.unidad_negocio, cm.nombre,
-                 sc.id, sc.formato, sc.articulo, sc.caras, sc.bonificacion, sc.inicio_periodo, sc.fin_periodo,
-                 sol.nombre_usuario, ct.descuento, ct.id_propuesta, ct.tipo_periodo, sc.ciudad, sc.tipo
+      // PASO 3: Pre-fetch en paralelo de reservas (con inventario) y cliente.
+      // Catorcenas las cacheamos en memoria por sesión-de-request.
+      const scIds = scRows.map(r => Number(r.sc_id));
+      const phSc = scIds.map(() => '?').join(',');
 
-        ORDER BY campania_id, grupo_id, tipo_fila
-      `;
+      type ResRow = {
+        rsv_id: number;
+        solicitudCaras_id: number;
+        APS: number | null;
+        plaza: string | null;
+        tradicional_digital: string | null;
+      };
+      type CliRow = {
+        id: number;
+        CUIC: number | null;
+        T1_U_Cliente: string | null;
+        T2_U_Marca: string | null;
+        sap_database: string | null;
+      };
+      type CatRow = { numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date };
 
-      const data = await prisma.$queryRawUnsafe(query, ...params, ...params);
+      const [reservasArr, clientesArr, catorcenasArr] = await Promise.all([
+        prisma.$queryRawUnsafe<ResRow[]>(
+          `SELECT
+             rsv.id AS rsv_id,
+             rsv.solicitudCaras_id,
+             rsv.APS,
+             inv.plaza,
+             inv.tradicional_digital
+           FROM reservas rsv
+             LEFT JOIN espacio_inventario esInv ON esInv.id = rsv.inventario_id
+             LEFT JOIN inventarios inv ON inv.id = esInv.inventario_id
+           WHERE rsv.solicitudCaras_id IN (${phSc})
+             AND rsv.deleted_at IS NULL`,
+          ...scIds
+        ),
+        prisma.$queryRawUnsafe<CliRow[]>(
+          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, sap_database FROM cliente`
+        ),
+        prisma.$queryRawUnsafe<CatRow[]>(
+          `SELECT numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
+        ),
+      ]);
 
-      const dataSerializable = serializeBigInt(data);
+      // Index reservas por solicitudCaras_id
+      const reservasBySc = new Map<number, ResRow[]>();
+      for (const r of reservasArr) {
+        const k = Number(r.solicitudCaras_id);
+        const list = reservasBySc.get(k);
+        if (list) list.push(r); else reservasBySc.set(k, [r]);
+      }
+
+      // Index clientes: por id (PK) y por CUIC (puede haber duplicados → desempate por sap_database)
+      const clienteById = new Map<number, CliRow>();
+      const clientesByCuic = new Map<number, CliRow[]>();
+      for (const c of clientesArr) {
+        if (c.id != null) clienteById.set(Number(c.id), c);
+        if (c.CUIC != null) {
+          const k = Number(c.CUIC);
+          const list = clientesByCuic.get(k);
+          if (list) list.push(c); else clientesByCuic.set(k, [c]);
+        }
+      }
+
+      const findCliente = (cliente_id: number | null, solSapDb: string | null): CliRow | null => {
+        if (cliente_id == null) return null;
+        const byId = clienteById.get(cliente_id);
+        if (byId) return byId;
+        const cands = clientesByCuic.get(cliente_id);
+        if (!cands || cands.length === 0) return null;
+        if (cands.length === 1) return cands[0];
+        if (solSapDb) {
+          const matchSap = cands.find(c => c.sap_database === solSapDb);
+          if (matchSap) return matchSap;
+        }
+        return cands[0];
+      };
+
+      const findCatorcena = (date: Date): { numero: number; year: number } | null => {
+        for (const c of catorcenasArr) {
+          const fi = c.fecha_inicio instanceof Date ? c.fecha_inicio : new Date(c.fecha_inicio);
+          const ff = c.fecha_fin instanceof Date ? c.fecha_fin : new Date(c.fecha_fin);
+          if (date >= fi && date <= ff) return { numero: c.numero_catorcena, year: c.ano };
+        }
+        return null;
+      };
+
+      // YYYY-MM-DD en UTC para replicar DATE() de MySQL sin shift de timezone
+      const dateOnly = (d: Date | string | null): string | null => {
+        if (!d) return null;
+        const dt = d instanceof Date ? d : new Date(d);
+        if (isNaN(dt.getTime())) return null;
+        const yy = dt.getUTCFullYear();
+        const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(dt.getUTCDate()).padStart(2, '0');
+        return `${yy}-${mm}-${dd}`;
+      };
+
+      // PASO 4: armar filas (BONIFICACIÓN y/o RENTA por cada solicitudCaras)
+      const result: any[] = [];
+      for (const sc of scRows) {
+        const reservas = reservasBySc.get(Number(sc.sc_id)) || [];
+        const cliente = findCliente(
+          sc.cliente_id != null ? Number(sc.cliente_id) : null,
+          sc.sol_sap_database
+        );
+
+        // GROUP_CONCAT DISTINCT rsv.APS ORDER BY rsv.APS
+        const apsValues = reservas
+          .map(r => r.APS)
+          .filter((v): v is number => v != null);
+        const apsList = [...new Set(apsValues)].sort((a, b) => Number(a) - Number(b));
+        const aps_especifico = apsList.length > 0 ? apsList.join(', ') : null;
+
+        // MIN(inv.plaza)
+        const plazas = reservas.map(r => r.plaza).filter((v): v is string => !!v);
+        const plaza = plazas.length > 0 ? plazas.slice().sort()[0] : null;
+
+        // COALESCE(MIN(inv.tradicional_digital), sc.tipo)
+        const tds = reservas.map(r => r.tradicional_digital).filter((v): v is string => !!v);
+        const tradicional_digital = tds.length > 0 ? tds.slice().sort()[0] : (sc.sc_tipo || null);
+
+        // COUNT(DISTINCT rsv.id) — con LEFT JOIN PK 1-a-1 no se duplican, pero
+        // hacemos Set por seguridad
+        const rsvCount = new Set(reservas.map(r => Number(r.rsv_id))).size;
+        const scCaras = Number(sc.caras) || 0;
+        const scBonif = Number(sc.bonificacion) || 0;
+        const delta_caras = rsvCount - (scCaras + scBonif);
+
+        const sap_database = sc.sol_sap_database || cliente?.sap_database || null;
+        const inicioDate = sc.inicio_periodo instanceof Date
+          ? sc.inicio_periodo
+          : (sc.inicio_periodo ? new Date(sc.inicio_periodo) : null);
+        const cat = inicioDate ? findCatorcena(inicioDate) : null;
+
+        const articuloUp = String(sc.articulo || '').toUpperCase();
+        const getNegociacion = (tipoFila: 'bonificacion' | 'renta'): string => {
+          if (sc.cortesia === 1) return 'CORTESIA';
+          if (articuloUp.startsWith('IN')) return 'INTERCAMBIO';
+          if (articuloUp.startsWith('IM')) return 'IMPRESION';
+          if (articuloUp.startsWith('ESP') || articuloUp.startsWith('ES-')) return 'EJEC_ESPECIAL';
+          return tipoFila === 'bonificacion' ? 'BONIFICACION' : 'RENTA';
+        };
+
+        const base = {
+          plaza,
+          tipo: sc.formato,
+          asesor: sc.sol_nombre_usuario,
+          aps_especifico,
+          aps_global: sc.id_propuesta != null ? Number(sc.id_propuesta) : null,
+          tipo_periodo: sc.tipo_periodo || 'catorcena',
+          fecha_inicio_periodo: dateOnly(sc.inicio_periodo),
+          fecha_fin_periodo: dateOnly(sc.fin_periodo),
+          catorcena_numero: cat?.numero ?? null,
+          catorcena_year: cat?.year ?? null,
+          cliente: cliente?.T1_U_Cliente ?? null,
+          marca: cliente?.T2_U_Marca ?? null,
+          cuic: cliente?.CUIC != null ? Number(cliente.CUIC) : null,
+          sap_database,
+          unidad_negocio: sc.unidad_negocio,
+          campania: sc.campania_nombre,
+          numero_articulo: sc.articulo,
+          delta_caras,
+          campania_id: Number(sc.campania_id),
+          grupo_id: Number(sc.sc_id),
+          tradicional_digital,
+        };
+
+        if (scBonif > 0) {
+          result.push({
+            ...base,
+            negociacion: getNegociacion('bonificacion'),
+            caras: scBonif,
+            tarifa: 0,
+            monto_total: 0,
+            tipo_fila: 'bonificacion',
+          });
+        }
+
+        if (scCaras > 0) {
+          const tarifa = Number(sc.tarifa_publica) || 0;
+          const descuento = Number(sc.descuento) || 0;
+          const monto_total = Math.round(scCaras * tarifa * (1 - descuento) * 100) / 100;
+          result.push({
+            ...base,
+            negociacion: getNegociacion('renta'),
+            caras: scCaras,
+            tarifa: Math.round(tarifa * 100) / 100,
+            monto_total,
+            tipo_fila: 'renta',
+          });
+        }
+      }
+
+      // ORDER BY campania_id, grupo_id, tipo_fila (bonificacion < renta alfabéticamente)
+      result.sort((a, b) => {
+        if (a.campania_id !== b.campania_id) return a.campania_id - b.campania_id;
+        if (a.grupo_id !== b.grupo_id) return a.grupo_id - b.grupo_id;
+        return String(a.tipo_fila).localeCompare(String(b.tipo_fila));
+      });
 
       res.json({
         success: true,
-        data: dataSerializable,
+        data: serializeBigInt(result),
         filtroAplicado: {
           catorcenaInicio,
           catorcenaFin,
