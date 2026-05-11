@@ -786,6 +786,24 @@ export class SolicitudesController {
 
       const statusAnterior = solicitudAnterior.status;
 
+      // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
+      // autorización DG/DCM. Política: la solicitud no avanza a propuesta
+      // hasta que dirección apruebe (o rechace) los circuitos pendientes.
+      if (status === 'Aprobada' || status === 'Atendida') {
+        const auth = await verificarCarasPendientes(parseInt(id).toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar el estatus a "${status}" mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
+      }
+
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
@@ -2422,6 +2440,23 @@ export class SolicitudesController {
       if (solicitud.status !== 'Aprobada') {
         res.status(400).json({ success: false, error: 'Solo se pueden atender solicitudes aprobadas' });
         return;
+      }
+
+      // Defensa en profundidad: aunque updateStatus ya bloquea Aprobada con pendientes,
+      // re-verificamos aquí por si la solicitud llegó a este estado por otra vía.
+      {
+        const auth = await verificarCarasPendientes(solicitud.id.toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede atender la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}).`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
       }
 
       // Get propuesta
