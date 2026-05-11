@@ -408,21 +408,52 @@ export class SolicitudesController {
         where.status = status;
       }
 
-      // Search filter
+      // Search filter — semántica AND entre tags (cada tag refina), OR entre
+      // los campos de un mismo tag. Tags separados por '|' desde el frontend.
+      // Para cada tag textual se busca también en nombre_campania (vive en
+      // cotización) via subquery por tag.
       if (search) {
-        const orConditions: any[] = [
-          { razon_social: { contains: search } },
-          { descripcion: { contains: search } },
-          { marca_nombre: { contains: search } },
-          { asignado: { contains: search } },
-          { cuic: { contains: search } },
-          { nombre_usuario: { contains: search } },
-        ];
-        const searchAsInt = parseInt(search);
-        if (!isNaN(searchAsInt)) {
-          orConditions.push({ id: searchAsInt });
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
+        const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
+
+        const andConditions: any[] = [];
+
+        // Pool numérico: id IN (lista) como UNA condición AND.
+        if (numericPhrases.length > 0) {
+          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
-        where.OR = orConditions;
+
+        // Cada frase textual = AND adicional con OR interno (campos directos
+        // + ids de solicitudes cuyas cotizaciones contienen la frase).
+        for (const phrase of textPhrases) {
+          const phraseOr: any[] = [
+            { razon_social: { contains: phrase } },
+            { descripcion: { contains: phrase } },
+            { marca_nombre: { contains: phrase } },
+            { asignado: { contains: phrase } },
+            { cuic: { contains: phrase } },
+            { nombre_usuario: { contains: phrase } },
+          ];
+
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL AND ct.nombre_campania LIKE ?`,
+            `%${phrase}%`
+          );
+          if (rows.length > 0) {
+            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+          }
+
+          andConditions.push({ OR: phraseOr });
+        }
+
+        if (andConditions.length > 0) {
+          where.AND = andConditions;
+        }
       }
 
       // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
@@ -1097,20 +1128,45 @@ export class SolicitudesController {
         where.status = status;
       }
 
+      // Search filter — mismo formato que getAll: AND entre tags, OR entre
+      // los campos por tag (incluyendo nombre_campania via subquery).
       if (search) {
-        const orConditions: any[] = [
-          { razon_social: { contains: search } },
-          { descripcion: { contains: search } },
-          { marca_nombre: { contains: search } },
-          { asignado: { contains: search } },
-          { cuic: { contains: search } },
-          { nombre_usuario: { contains: search } },
-        ];
-        const searchAsInt = parseInt(search);
-        if (!isNaN(searchAsInt)) {
-          orConditions.push({ id: searchAsInt });
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
+        const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
+
+        const andConditions: any[] = [];
+
+        if (numericPhrases.length > 0) {
+          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
-        where.OR = orConditions;
+
+        for (const phrase of textPhrases) {
+          const phraseOr: any[] = [
+            { razon_social: { contains: phrase } },
+            { descripcion: { contains: phrase } },
+            { marca_nombre: { contains: phrase } },
+            { asignado: { contains: phrase } },
+            { cuic: { contains: phrase } },
+            { nombre_usuario: { contains: phrase } },
+          ];
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL AND ct.nombre_campania LIKE ?`,
+            `%${phrase}%`
+          );
+          if (rows.length > 0) {
+            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+          }
+          andConditions.push({ OR: phraseOr });
+        }
+
+        if (andConditions.length > 0) {
+          where.AND = andConditions;
+        }
       }
 
       // Visibility filter

@@ -430,25 +430,36 @@ export class PropuestasController {
       }
 
       if (search) {
-        const terms = search.trim().split(/\s+/);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        // Cada tag (separado por '|') es una frase que REFINA la búsqueda.
+        // Semántica: cada frase debe matchear en al menos un campo (OR entre
+        // campos) y entre frases se hace AND. Así "walmart|bodega aurrera"
+        // sólo devuelve propuestas que toquen walmart Y bodega aurrera.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        const searchOrConditions: string[] = [];
-
+        // Pool de IDs numéricos: si hay varios, se vuelve un solo IN(...)
+        // (un mismo registro no puede ser id=123 y id=456 a la vez).
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
+        // Cada frase textual = AND adicional, con OR entre los campos.
         for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          searchOrConditions.push(`(pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`);
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-        }
-
-        if (searchOrConditions.length > 0) {
-          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
+          const sp = `%${term}%`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            sl.nombre_usuario LIKE ?
+          )`;
+          params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
 
@@ -1397,14 +1408,29 @@ export class PropuestasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          whereConditions += ' AND pr.id = ?';
-          statsParams.push(searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
-          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
-          statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        // Mismo formato que getAll: AND entre tags, OR entre campos por tag.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        if (numericTerms.length > 0) {
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
+          statsParams.push(...numericTerms.map(t => parseInt(t)));
+        }
+        for (const term of textTerms) {
+          const sp = `%${term}%`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            sl.nombre_usuario LIKE ?
+          )`;
+          statsParams.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
 
@@ -2183,24 +2209,29 @@ export class PropuestasController {
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        const terms = search.trim().split(/\s+/).filter(Boolean);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-        const searchOrConditions: string[] = [];
+        // AND entre tags, OR entre campos por tag (alineado con getAll/getStats).
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
           params.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
           const sp = `%${term}%`;
-          searchOrConditions.push(
-            `(pr.descripcion LIKE ? OR ct.nombre_campania LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR sl.nombre_usuario LIKE ? OR pr.asignado LIKE ?)`
-          );
-          params.push(sp, sp, sp, sp, sp, sp, sp);
-        }
-        if (searchOrConditions.length > 0) {
-          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            sl.nombre_usuario LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ?
+          )`;
+          params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
