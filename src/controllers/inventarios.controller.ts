@@ -721,7 +721,16 @@ export class InventariosController {
         }
       }
 
-      // Filter out inventory near reserved locations for excluded category
+      // Filter out inventory near reserved locations for excluded category.
+      //
+      // 2026-05-08 fixes:
+      //   - `c.CUIC = s.cliente_id` estaba mal (compara CUIC contra cliente.id);
+      //     casi nunca matcheaba → la exclusión nunca filtraba nada. Ahora
+      //     `c.id = s.cliente_id`.
+      //   - El JOIN por calendario fallaba con ~1,800 reservas con
+      //     calendario_id=0 o desincronizado. Usamos las fechas del SC
+      //     (`sc.inicio_periodo`/`sc.fin_periodo`) como source of truth, igual
+      //     que getEspaciosBloqueados.
       let resultados = disponibles;
       if (excluir_categoria && fecha_inicio && fecha_fin) {
         const categoriaCoordenadas = await prisma.$queryRaw<
@@ -731,16 +740,14 @@ export class InventariosController {
           FROM reservas r
           JOIN espacio_inventario ei ON ei.id = r.inventario_id
           JOIN inventarios i ON i.id = ei.inventario_id
-          JOIN calendario cal ON cal.id = r.calendario_id
           JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
           JOIN propuesta p ON sc.idquote = CAST(p.id AS CHAR) COLLATE utf8mb4_unicode_ci
           JOIN solicitud s ON s.id = p.solicitud_id
-          JOIN cliente c ON c.CUIC = s.cliente_id
+          JOIN cliente c ON c.id = s.cliente_id
           WHERE c.T2_U_Categoria = ${excluir_categoria as string}
           AND r.deleted_at IS NULL
-          AND cal.deleted_at IS NULL
-          AND cal.fecha_inicio <= ${new Date(fecha_fin as string)}
-          AND cal.fecha_fin >= ${new Date(fecha_inicio as string)}
+          AND sc.inicio_periodo <= ${new Date(fecha_fin as string)}
+          AND sc.fin_periodo >= ${new Date(fecha_inicio as string)}
           AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')
         `;
 
@@ -1864,13 +1871,24 @@ export class InventariosController {
 
   async getCategoriasCliente(_req: AuthRequest, res: Response): Promise<void> {
     try {
+      // Solo devolvemos categorías que TIENEN reservas activas. Antes traíamos
+      // todas las categorías de cliente sin importar si alguna campaña las
+      // estaba usando, lo que llenaba el dropdown con opciones que no hacían
+      // nada (ej. "AUTOMOTRIZ" sin reservas en BD). Ahora si el dropdown está
+      // vacío en pruebas, es porque no hay reservas — esperado.
       const categorias = await prisma.$queryRaw<
         Array<{ T2_U_Categoria: string }>
       >`
-        SELECT DISTINCT T2_U_Categoria
-        FROM cliente
-        WHERE T2_U_Categoria IS NOT NULL AND T2_U_Categoria != ''
-        ORDER BY T2_U_Categoria
+        SELECT DISTINCT c.T2_U_Categoria
+        FROM cliente c
+        INNER JOIN solicitud s ON s.cliente_id = c.id
+        INNER JOIN propuesta p ON p.solicitud_id = s.id AND p.deleted_at IS NULL
+        INNER JOIN solicitudCaras sc ON sc.idquote = CAST(p.id AS CHAR) COLLATE utf8mb4_unicode_ci
+        INNER JOIN reservas r ON r.solicitudCaras_id = sc.id
+          AND r.deleted_at IS NULL
+          AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+        WHERE c.T2_U_Categoria IS NOT NULL AND c.T2_U_Categoria != ''
+        ORDER BY c.T2_U_Categoria
       `;
 
       res.json({
