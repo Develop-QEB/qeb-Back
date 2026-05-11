@@ -2621,6 +2621,29 @@ export class SolicitudesController {
         }
       }, { timeout: 30000 });
 
+      // Re-crear tareas de Autorización a nivel propuesta si quedaron caras pendientes
+      // tras la conversión solicitud→propuesta. La tx anterior cerró todas las tareas
+      // del id_solicitud (incluyendo Autorización Pendiente sin aprobar), por lo que sin
+      // este bloque las caras quedarían en pendiente sin tarea visible para DG/DCM.
+      if (propuesta) {
+        try {
+          const autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+          if (autorizacion.tienePendientes) {
+            await crearTareasAutorizacion(
+              solicitud.id,
+              propuesta.id,
+              userId,
+              userName,
+              autorizacion.pendientesDg,
+              autorizacion.pendientesDcm,
+              'propuesta'
+            );
+          }
+        } catch (err) {
+          console.error('[atender] Error replicando tareas de autorización a propuesta:', err);
+        }
+      }
+
       // Obtener catorcenas para el correo
       const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({
         where: { id_propuesta: propuesta?.id },
