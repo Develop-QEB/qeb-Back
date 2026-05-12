@@ -2257,22 +2257,41 @@ export class PropuestasController {
         params.push(...visibleIds);
       }
 
-      // 1. Get all matching propuesta IDs (paginated to keep IN-list bounded)
-      const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
-        SELECT DISTINCT pr.id FROM propuesta pr
-        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
-        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
-        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-        WHERE ${whereConditions}
-        ORDER BY pr.id DESC
-      `, ...params);
-      const allPropIds = idsResult.map(r => Number(r.id));
+      // 1. Get matching propuesta IDs. Si viene ?propuestaIds=1,2,3 (hasta 50),
+      // se usa esa lista directamente (modo "detalle on-demand" para el desglose
+      // que carga propuestas individuales al expandir). Si no, query normal.
+      const propuestaIdsParam = req.query.propuestaIds as string | undefined;
+      let allPropIds: number[];
+      if (propuestaIdsParam) {
+        const requested = propuestaIdsParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0).slice(0, 50);
+        if (requested.length === 0) { res.json({ success: true, data: emptyPayload }); return; }
+        // Aplicar visibility filter sobre los IDs pedidos
+        if (userId && !hasFullVisibility(userRol)) {
+          const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+          const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+          const visibleSet = new Set(visibleIds);
+          allPropIds = requested.filter(id => visibleSet.has(id));
+        } else {
+          allPropIds = requested;
+        }
+        if (allPropIds.length === 0) { res.json({ success: true, data: emptyPayload }); return; }
+      } else {
+        const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+          SELECT DISTINCT pr.id FROM propuesta pr
+          LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE ${whereConditions}
+          ORDER BY pr.id DESC
+        `, ...params);
+        allPropIds = idsResult.map(r => Number(r.id));
+      }
       const total = allPropIds.length;
       if (total === 0) { res.json({ success: true, data: emptyPayload }); return; }
 
-      const offset = (page - 1) * limit;
-      const propIds = allPropIds.slice(offset, offset + limit);
+      const offset = propuestaIdsParam ? 0 : (page - 1) * limit;
+      const propIds = propuestaIdsParam ? allPropIds : allPropIds.slice(offset, offset + limit);
       if (propIds.length === 0) { res.json({ success: true, data: { ...emptyPayload, total } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
@@ -2352,19 +2371,38 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
+      // Modo ligero: cuando ?lite=true, solo devuelve propuestasInfo. Esto evita
+      // las dos queries pesadas (inventarios + caras) que con muchos miles de
+      // reservas estaban saturando memoria y conexiones de DB (Hostinger pruebas
+      // capeaba a ~100 conexiones, los joins masivos las agotaban).
+      // El front del desglose usa lite=true por default y agrupa solo sobre
+      // propuestasInfo. Si en el futuro hace falta inventarios al expandir,
+      // se carga on-demand por propuesta.
+      const lite = req.query.lite === 'true' || req.query.lite === '1';
+
       const QUERY_TIMEOUT = 60000;
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
       );
 
-      const [propInfo, inventario, carasInfo] = await Promise.race([
-        Promise.all([
+      let propInfo: any, inventario: any, carasInfo: any;
+      if (lite) {
+        propInfo = await Promise.race([
           prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
-          prisma.$queryRawUnsafe(invQuery, ...propIds),
-          prisma.$queryRawUnsafe(carasQuery, ...propIds),
-        ]),
-        timeoutPromise as never,
-      ]);
+          timeoutPromise as never,
+        ]);
+        inventario = [];
+        carasInfo = [];
+      } else {
+        [propInfo, inventario, carasInfo] = await Promise.race([
+          Promise.all([
+            prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+            prisma.$queryRawUnsafe(invQuery, ...propIds),
+            prisma.$queryRawUnsafe(carasQuery, ...propIds),
+          ]),
+          timeoutPromise as never,
+        ]);
+      }
 
       const result = JSON.parse(JSON.stringify({
         inventarios: inventario,
