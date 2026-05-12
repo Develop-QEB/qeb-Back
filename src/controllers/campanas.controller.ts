@@ -76,7 +76,7 @@ export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 5000);
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 50000);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
