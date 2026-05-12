@@ -2290,8 +2290,9 @@ export class PropuestasController {
       const total = allPropIds.length;
       if (total === 0) { res.json({ success: true, data: emptyPayload }); return; }
 
-      const offset = propuestaIdsParam ? 0 : (page - 1) * limit;
-      const propIds = propuestaIdsParam ? allPropIds : allPropIds.slice(offset, offset + limit);
+      const exportLayoutFlag = req.query.exportLayout === 'true' || req.query.exportLayout === '1';
+      const offset = (propuestaIdsParam || exportLayoutFlag) ? 0 : (page - 1) * limit;
+      const propIds = (propuestaIdsParam || exportLayoutFlag) ? allPropIds : allPropIds.slice(offset, offset + limit);
       if (propIds.length === 0) { res.json({ success: true, data: { ...emptyPayload, total } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
@@ -2379,14 +2380,61 @@ export class PropuestasController {
       // propuestasInfo. Si en el futuro hace falta inventarios al expandir,
       // se carga on-demand por propuesta.
       const lite = req.query.lite === 'true' || req.query.lite === '1';
+      // exportLayout: replica el patrón del versionario de campañas. El back
+      // procesa TODOS los propuestaIds filtrados en batches secuenciales
+      // (30 a la vez) sin tope de 1000 propIds. Devuelve full data en una
+      // sola request — el front no tiene que hacer 16 round-trips.
+      const exportLayout = req.query.exportLayout === 'true' || req.query.exportLayout === '1';
 
       const QUERY_TIMEOUT = 60000;
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
       );
 
+      // Si hay filtro de rango catorcena, restringir invs/caras a ese rango.
+      // Aplica al flujo regular (lite=false) Y al exportLayout — así footer y
+      // export usan el mismo criterio: "propuestas con circuitos EN el rango".
+      const hasCatRange = !!(yearInicio && yearFin && catorcenaInicio && catorcenaFin);
+      const catRangeStart = hasCatRange ? parseInt(yearInicio) * 100 + parseInt(catorcenaInicio) : 0;
+      const catRangeEnd = hasCatRange ? parseInt(yearFin) * 100 + parseInt(catorcenaFin) : 999999;
+      const catWhereInv = hasCatRange
+        ? ` AND (cat.año * 100 + cat.numero_catorcena) BETWEEN ${catRangeStart} AND ${catRangeEnd}`
+        : '';
+      const filteredInvQuery = hasCatRange
+        ? invQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
+        : invQuery;
+      const filteredCarasQuery = hasCatRange
+        ? carasQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
+        : carasQuery;
+
       let propInfo: any, inventario: any, carasInfo: any;
-      if (lite) {
+      if (exportLayout) {
+        const injectCatFilterInv = (sql: string) => sql; // ya está filtrado arriba
+
+        // Batches de 30, secuenciales, para no saturar conexiones DB.
+        const BATCH_SIZE = 30;
+        const propInfoArr: any[] = [];
+        const inventarioArr: any[] = [];
+        const carasArr: any[] = [];
+        for (let i = 0; i < propIds.length; i += BATCH_SIZE) {
+          const batch = propIds.slice(i, i + BATCH_SIZE);
+          const batchPh = batch.map(() => '?').join(',');
+          const bPropQ = propInfoQuery.replace(`pr.id IN (${phIds})`, `pr.id IN (${batchPh})`);
+          const bInvQ = injectCatFilterInv(filteredInvQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const bCarQ = injectCatFilterInv(filteredCarasQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const [pi, inv, ci] = await Promise.all([
+            prisma.$queryRawUnsafe<any[]>(bPropQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bInvQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bCarQ, ...batch),
+          ]);
+          propInfoArr.push(...pi);
+          inventarioArr.push(...inv);
+          carasArr.push(...ci);
+        }
+        propInfo = propInfoArr;
+        inventario = inventarioArr;
+        carasInfo = carasArr;
+      } else if (lite) {
         propInfo = await Promise.race([
           prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
           timeoutPromise as never,
@@ -2397,8 +2445,8 @@ export class PropuestasController {
         [propInfo, inventario, carasInfo] = await Promise.race([
           Promise.all([
             prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
-            prisma.$queryRawUnsafe(invQuery, ...propIds),
-            prisma.$queryRawUnsafe(carasQuery, ...propIds),
+            prisma.$queryRawUnsafe(filteredInvQuery, ...propIds),
+            prisma.$queryRawUnsafe(filteredCarasQuery, ...propIds),
           ]),
           timeoutPromise as never,
         ]);
