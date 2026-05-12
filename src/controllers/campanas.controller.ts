@@ -76,7 +76,7 @@ export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 5000);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const yearInicio = req.query.yearInicio ? parseInt(req.query.yearInicio as string) : undefined;
@@ -115,30 +115,27 @@ export class CampanasController {
       }
 
       if (search) {
-        const terms = search.trim().split(/\s+/);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
+        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        const searchOrConditions: string[] = [];
-
+        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
-        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
-        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
-        // del outer query) que disparaba timeout 30s para términos como "sabritas".
-        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
-        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
+        // Cada frase textual = AND adicional, con OR entre los campos.
+        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
+        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
 
           if (term.length > 3) {
-            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
-            // genéricos como "Mexico" que harían explotar la siguiente query).
             const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
               `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
               searchPattern
@@ -147,7 +144,6 @@ export class CampanasController {
             if (invMatchRows.length > 0) {
               const invMatchIds = invMatchRows.map(r => r.id);
               const phInv = invMatchIds.map(() => '?').join(',');
-              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
               const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
                 `SELECT DISTINCT sc.idquote
                  FROM espacio_inventario ei
@@ -158,7 +154,6 @@ export class CampanasController {
               );
               const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
               if (propIdsByInv.length > 0) {
-                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
                 const phPr = propIdsByInv.map(() => '?').join(',');
                 const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
                   `SELECT DISTINCT cm.id
@@ -176,11 +171,7 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          searchOrConditions.push(searchClause);
-        }
-
-        if (searchOrConditions.length > 0) {
-          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+          conditions.push(searchClause);
         }
       }
 
@@ -260,9 +251,11 @@ export class CampanasController {
         WHERE ${whereClause}
       `;
 
-      // Paso 1: obtener IDs de la página (query liviano, sin subqueries pesadas)
+      // Paso 1: obtener IDs de la página (query liviano, sin subqueries pesadas).
+      // Incluimos id_propuesta para poder lanzar la query de inversión en
+      // paralelo con el dataQuery — antes era una cadena secuencial.
       const idsQuery = `
-        SELECT /*+ MAX_EXECUTION_TIME(30000) */ cm.id, cm.cotizacion_id
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ cm.id, cm.cotizacion_id, ct.id_propuesta
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
@@ -275,7 +268,7 @@ export class CampanasController {
 
       const offset = (page - 1) * limit;
       const [idsResult, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number | null }[]>(idsQuery, ...params, limit, offset),
+        prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number | null; id_propuesta: number | null }[]>(idsQuery, ...params, limit, offset),
         prisma.$queryRawUnsafe<{ total: bigint }[]>(countQuery, ...params),
       ]);
       const total = Number(countResult[0]?.total || 0);
@@ -287,6 +280,7 @@ export class CampanasController {
 
       const campaignIds = idsResult.map(r => Number(r.id));
       const cotizacionIds = idsResult.map(r => Number(r.cotizacion_id)).filter(Boolean);
+      const propuestaIdsFromIds = idsResult.map(r => Number(r.id_propuesta)).filter(Boolean);
       const cmIdPh = campaignIds.map(() => '?').join(',');
       const ctIdPh = cotizacionIds.length > 0 ? cotizacionIds.map(() => '?').join(',') : '0';
 
@@ -371,7 +365,47 @@ export class CampanasController {
         ...campaignIds,
       ];
 
-      const campanas = await prisma.$queryRawUnsafe<any[]>(dataQuery, ...dataParams);
+      // Paso 2: lanzar `dataQuery` y la query de inversión EN PARALELO.
+      // Antes era una cadena: primero `dataQuery` (200-400ms), luego
+      // `inversionQuery` (100-200ms). Ahora con Promise.all las dos corren
+      // a la vez, ahorrando ~100-200ms del tiempo total.
+      const usarFiltroC = !!(filterFechaInicio && filterFechaFin);
+      const inversionPlaceholders = propuestaIdsFromIds.length > 0
+        ? propuestaIdsFromIds.map(() => '?').join(',')
+        : '0';
+      const inversionQuery = propuestaIdsFromIds.length === 0
+        ? null
+        : (usarFiltroC
+          ? `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(
+                      sc.costo
+                      * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                      / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                    ), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+               AND sc.inicio_periodo <= ?
+               AND sc.fin_periodo >= ?
+             WHERE pr.id IN (${inversionPlaceholders})
+             GROUP BY pr.id`
+          : `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+             WHERE pr.id IN (${inversionPlaceholders})
+             GROUP BY pr.id`);
+      const inversionParams = inversionQuery == null
+        ? []
+        : (usarFiltroC
+          ? [filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIdsFromIds]
+          : [...propuestaIdsFromIds]);
+
+      const [campanas, inversionData] = await Promise.all([
+        prisma.$queryRawUnsafe<any[]>(dataQuery, ...dataParams),
+        inversionQuery
+          ? prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(inversionQuery, ...inversionParams)
+          : Promise.resolve([] as { propuesta_id: number; inversion_filtrada: number }[]),
+      ]);
 
       // Remap propuesta_inversion → inversion to avoid cm.* column name collision
       campanas.forEach((campana: any) => {
@@ -385,43 +419,14 @@ export class CampanasController {
       // (propuesta.inversion quedaba congelada al crear y nunca se actualizaba
       // al editar caras). Si hay filtro de catorcena, prorratea por días que
       // solapen con el rango. Sin filtro, suma total de la propuesta.
-      if (campanas.length > 0) {
-        const propuestaIds = campanas.map((c: any) => c.propuesta_id).filter(Boolean).map(Number);
-        if (propuestaIds.length > 0) {
-          const placeholders = propuestaIds.map(() => '?').join(',');
-          const usarFiltroC = !!(filterFechaInicio && filterFechaFin);
-          const queryC = usarFiltroC
-            ? `SELECT pr.id as propuesta_id,
-                      COALESCE(SUM(
-                        sc.costo
-                        * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
-                        / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
-                      ), 0) as inversion_filtrada
-               FROM propuesta pr
-               LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-                 AND sc.inicio_periodo <= ?
-                 AND sc.fin_periodo >= ?
-               WHERE pr.id IN (${placeholders})
-               GROUP BY pr.id`
-            : `SELECT pr.id as propuesta_id,
-                      COALESCE(SUM(sc.costo), 0) as inversion_filtrada
-               FROM propuesta pr
-               LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-               WHERE pr.id IN (${placeholders})
-               GROUP BY pr.id`;
-          const params = usarFiltroC
-            ? [filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds]
-            : [...propuestaIds];
-          const inversionData = await prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(queryC, ...params);
-
-          const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
-          campanas.forEach((c: any) => {
-            const fresh = inversionMap.get(Number(c.propuesta_id));
-            if (fresh !== undefined) {
-              c.inversion = fresh;
-            }
-          });
-        }
+      if (campanas.length > 0 && inversionData.length > 0) {
+        const inversionMap = new Map(inversionData.map((p: any) => [Number(p.propuesta_id), Number(p.inversion_filtrada)]));
+        campanas.forEach((c: any) => {
+          const fresh = inversionMap.get(Number(c.propuesta_id));
+          if (fresh !== undefined) {
+            c.inversion = fresh;
+          }
+        });
       }
 
       // Convert BigInt to Number for JSON serialization
@@ -455,9 +460,11 @@ export class CampanasController {
   async getById(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      const campanaId = parseInt(id);
 
+      // Wave 1: traer la campana base.
       const campana = await prisma.campania.findUnique({
-        where: { id: parseInt(id) },
+        where: { id: campanaId },
         select: CAMPANIA_SAFE_SELECT,
       });
 
@@ -469,95 +476,159 @@ export class CampanasController {
         return;
       }
 
-      // Obtener posted_aps de forma segura (columna puede no existir en producción)
+      // Wave 2: las queries que sólo dependen de `campana` corren EN PARALELO.
+      // Antes eran 4 round-trips secuenciales (postedAps → clienteInicial →
+      // cotizacion → catorcenaData); ahora es 1.
+      const [postedApsRaw, clienteInicial, cotizacion, catorcenaData] = await Promise.all([
+        // postedAps — columna puede no existir en producción
+        prisma.$queryRawUnsafe<{ posted_aps: string | null }[]>(
+          `SELECT posted_aps FROM campania WHERE id = ?`, campanaId
+        ).catch(() => [] as { posted_aps: string | null }[]),
+        // cliente inicial por id
+        prisma.cliente.findUnique({ where: { id: campana.cliente_id } }),
+        // cotizacion (sólo si campana tiene cotizacion_id)
+        campana.cotizacion_id
+          ? prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } })
+          : Promise.resolve(null),
+        // catorcenas de inicio/fin de la campaña
+        prisma.$queryRaw<{
+          catorcena_inicio_num: number | null;
+          catorcena_inicio_anio: number | null;
+          catorcena_fin_num: number | null;
+          catorcena_fin_anio: number | null;
+        }[]>`
+          SELECT
+            cat_ini.numero_catorcena as catorcena_inicio_num,
+            cat_ini.año as catorcena_inicio_anio,
+            cat_fin.numero_catorcena as catorcena_fin_num,
+            cat_fin.año as catorcena_fin_anio
+          FROM campania cm
+          LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
+          LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
+          WHERE cm.id = ${campanaId}
+        `,
+      ]);
+
+      // Parsear postedAps (intencionalmente best-effort)
       let postedAps: string[] = [];
       try {
-        const apsResult = await prisma.$queryRawUnsafe<{ posted_aps: string | null }[]>(
-          `SELECT posted_aps FROM campania WHERE id = ?`, parseInt(id)
-        );
-        if (apsResult[0]?.posted_aps) {
-          postedAps = JSON.parse(apsResult[0].posted_aps);
+        if (postedApsRaw[0]?.posted_aps) {
+          postedAps = JSON.parse(postedApsRaw[0].posted_aps);
         }
-      } catch { /* Column may not exist yet */ }
+      } catch { /* JSON inválido o columna inexistente */ }
 
-      // Obtener info del cliente - buscar por id, si no tiene datos buscar por CUIC
-      let cliente = await prisma.cliente.findUnique({
-        where: { id: campana.cliente_id },
-      });
-      // Si el cliente no tiene datos (campos NULL), intentar buscar por CUIC desde la solicitud
-      if (cliente && !cliente.T0_U_RazonSocial && !cliente.T0_U_Cliente) {
-        const cuic = cliente.CUIC || campana.cliente_id;
-        const clientePorCuic = await prisma.cliente.findFirst({
-          where: { CUIC: cuic, T0_U_RazonSocial: { not: null } },
-        });
-        if (clientePorCuic) cliente = clientePorCuic;
-      }
-
-      // Obtener info de cotizacion si existe
-      let cotizacion = null;
-      if (campana.cotizacion_id) {
-        cotizacion = await prisma.cotizacion.findUnique({
-          where: { id: campana.cotizacion_id },
-        });
-      }
-
-      // Obtener info de propuesta relacionada a la cotizacion
-      let propuesta = null;
-      if (cotizacion?.id_propuesta) {
-        propuesta = await prisma.propuesta.findUnique({
-          where: { id: cotizacion.id_propuesta },
-        });
-      }
-
-      // Obtener info de solicitud relacionada a la propuesta
-      let solicitud = null;
-      if (propuesta?.solicitud_id) {
-        solicitud = await prisma.solicitud.findUnique({
-          where: { id: propuesta.solicitud_id },
-        });
-      }
-
-      // Obtener catorcenas de inicio y fin basadas en las fechas de la campaña
-      const catorcenaData = await prisma.$queryRaw<{
-        catorcena_inicio_num: number | null;
-        catorcena_inicio_anio: number | null;
-        catorcena_fin_num: number | null;
-        catorcena_fin_anio: number | null;
-      }[]>`
-        SELECT
-          cat_ini.numero_catorcena as catorcena_inicio_num,
-          cat_ini.año as catorcena_inicio_anio,
-          cat_fin.numero_catorcena as catorcena_fin_num,
-          cat_fin.año as catorcena_fin_anio
-        FROM campania cm
-        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
-        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
-        WHERE cm.id = ${parseInt(id)}
-      `;
       const catorcenas = catorcenaData[0] || {};
 
-      // Obtener comentarios usando solicitud_id de la propuesta o campania_id
-      let comentarios: { id: number; autor_id: number; autor_nombre: string; autor_foto: string | null; contenido: string; fecha: Date; solicitud_id: number }[] = [];
-      const solicitudId = propuesta?.solicitud_id;
+      // Wave 3: dos cosas INDEPENDIENTES que dependen de Wave 2 — en paralelo:
+      // (a) clienteFallback por CUIC si el inicial vino sin razon_social
+      // (b) propuesta a partir de cotizacion.id_propuesta
+      // Se mantiene la lógica original 1:1, sólo que las dos esperas viven a la vez.
+      const needsClienteFallback = !!(clienteInicial && !clienteInicial.T0_U_RazonSocial && !clienteInicial.T0_U_Cliente);
+      const [clienteFallback, propuesta] = await Promise.all([
+        needsClienteFallback
+          ? prisma.cliente.findFirst({
+              where: {
+                CUIC: clienteInicial!.CUIC || campana.cliente_id,
+                T0_U_RazonSocial: { not: null },
+              },
+            })
+          : Promise.resolve(null),
+        cotizacion?.id_propuesta
+          ? prisma.propuesta.findUnique({ where: { id: cotizacion.id_propuesta } })
+          : Promise.resolve(null),
+      ]);
+      const cliente = clienteFallback || clienteInicial;
 
+      // Wave 4: solicitud depende de propuesta.solicitud_id (cadena obligatoria).
+      const solicitud = propuesta?.solicitud_id
+        ? await prisma.solicitud.findUnique({ where: { id: propuesta.solicitud_id } })
+        : null;
+
+      // Wave 5: comentarios + reservas counts + incompleteness detail, en PARALELO.
+      // Antes eran 3-4 round-trips secuenciales; ahora 1.
+      const solicitudId = propuesta?.solicitud_id;
       const whereComentarios = solicitudId
         ? { solicitud_id: solicitudId }
         : { campania_id: campana.id };
 
-      const rawComentarios = await prisma.comentarios.findMany({
-        where: whereComentarios,
-        orderBy: { creado_en: 'desc' },
-      });
+      const [rawComentarios, countResult, ultCatResult, detailResult] = await Promise.all([
+        prisma.comentarios.findMany({
+          where: whereComentarios,
+          orderBy: { creado_en: 'desc' },
+        }),
+        // Total reservas (solo si hay solicitud)
+        solicitudId
+          ? prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
+              `SELECT COUNT(*) as cnt FROM reservas r
+               INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+               WHERE sc.idquote = ? AND r.deleted_at IS NULL`,
+              solicitudId
+            )
+          : Promise.resolve([] as { cnt: bigint }[]),
+        // Reservas de la última catorcena (solo si hay solicitud y fecha_fin)
+        solicitudId && campana.fecha_fin
+          ? prisma.$queryRawUnsafe<{ cnt: bigint, caras_esperadas: any }[]>(
+              `SELECT
+                (SELECT COUNT(*) FROM reservas r2
+                 INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+                 INNER JOIN calendario cal2 ON cal2.id = r2.calendario_id
+                 INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
+                 WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
+                   AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
+                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
+                ) as cnt,
+                (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
+                 FROM solicitudCaras sc3
+                 INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
+                 WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
+                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
+                ) as caras_esperadas`,
+              solicitudId, campana.fecha_fin,
+              solicitudId, campana.fecha_fin
+            )
+          : Promise.resolve([] as { cnt: bigint, caras_esperadas: any }[]),
+        // Detalle de completitud (solo si hay solicitud)
+        solicitudId
+          ? prisma.$queryRawUnsafe<any[]>(
+              `SELECT
+                cat.numero_catorcena as catorcena,
+                cat.año as anio,
+                sc.id as sc_id,
+                sc.articulo,
+                sc.ciudad,
+                sc.caras as caras_renta,
+                sc.caras_flujo,
+                sc.caras_contraflujo,
+                sc.bonificacion as caras_bonif,
+                (sc.caras + sc.bonificacion) as caras_esperadas,
+                (SELECT COUNT(*) FROM reservas r2
+                 WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+                ) as reservas_count
+              FROM solicitudCaras sc
+              INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+              WHERE sc.idquote = ?
+                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
+              ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+              solicitudId
+            )
+          : Promise.resolve([] as any[]),
+      ]);
 
-      // Obtener los nombres y fotos de los autores
+      const reservasCount = Number(countResult[0]?.cnt || 0);
+      const reservasCountUltimaCat = Number(ultCatResult[0]?.cnt || 0);
+      const carasUltimaCat = Number(ultCatResult[0]?.caras_esperadas || 0);
+
+      // Wave 6: autores depende de los IDs presentes en los comentarios.
       const autorIds = [...new Set(rawComentarios.map(c => c.autor_id))];
-      const autores = await prisma.usuario.findMany({
-        where: { id: { in: autorIds } },
-        select: { id: true, nombre: true, foto_perfil: true },
-      });
+      const autores = autorIds.length > 0
+        ? await prisma.usuario.findMany({
+            where: { id: { in: autorIds } },
+            select: { id: true, nombre: true, foto_perfil: true },
+          })
+        : [];
       const autoresMap = new Map(autores.map(a => [a.id, { nombre: a.nombre, foto_perfil: a.foto_perfil }]));
 
-      comentarios = rawComentarios.map(c => ({
+      const comentarios = rawComentarios.map(c => ({
         id: c.id,
         autor_id: c.autor_id,
         autor_nombre: autoresMap.get(c.autor_id)?.nombre || 'Usuario',
@@ -567,72 +638,9 @@ export class CampanasController {
         solicitud_id: c.solicitud_id,
       }));
 
-      // Contar reservas para detectar campañas incompletas
-      let reservasCount = 0;
-      let reservasCountUltimaCat = 0;
-      let carasUltimaCat = 0;
-      if (propuesta?.solicitud_id) {
-        const countResult = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
-          `SELECT COUNT(*) as cnt FROM reservas r
-           INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-           WHERE sc.idquote = ? AND r.deleted_at IS NULL`,
-          propuesta.solicitud_id
-        );
-        reservasCount = Number(countResult[0]?.cnt || 0);
-
-        // Contar solo reservas de la última catorcena
-        if (campana.fecha_fin) {
-          const ultCatResult = await prisma.$queryRawUnsafe<{ cnt: bigint, caras_esperadas: any }[]>(
-            `SELECT
-              (SELECT COUNT(*) FROM reservas r2
-               INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
-               INNER JOIN calendario cal2 ON cal2.id = r2.calendario_id
-               INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
-               WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
-                 AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                 AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
-              ) as cnt,
-              (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
-               FROM solicitudCaras sc3
-               INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
-               WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                 AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
-              ) as caras_esperadas`,
-            propuesta.solicitud_id, campana.fecha_fin,
-            propuesta.solicitud_id, campana.fecha_fin
-          );
-          reservasCountUltimaCat = Number(ultCatResult[0]?.cnt || 0);
-          carasUltimaCat = Number(ultCatResult[0]?.caras_esperadas || 0);
-        }
-      }
-
-      // Desglose de completitud por catorcena - detalle por grupo (solicitudCaras)
+      // Agrupar detailResult por catorcena (post-procesamiento sin queries).
       let incompletenessDetail: any[] = [];
-      if (propuesta?.solicitud_id) {
-        const detailResult = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT
-            cat.numero_catorcena as catorcena,
-            cat.año as anio,
-            sc.id as sc_id,
-            sc.articulo,
-            sc.ciudad,
-            sc.caras as caras_renta,
-            sc.caras_flujo,
-            sc.caras_contraflujo,
-            sc.bonificacion as caras_bonif,
-            (sc.caras + sc.bonificacion) as caras_esperadas,
-            (SELECT COUNT(*) FROM reservas r2
-             WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
-            ) as reservas_count
-          FROM solicitudCaras sc
-          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
-          WHERE sc.idquote = ?
-            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
-          ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
-          propuesta.solicitud_id
-        );
-
-        // Agrupar por catorcena
+      if (detailResult.length > 0) {
         const byCat: Record<string, any> = {};
         for (const r of detailResult) {
           const key = `${r.anio}-${r.catorcena}`;
@@ -1484,30 +1492,27 @@ export class CampanasController {
       }
 
       if (search) {
-        const terms = search.trim().split(/\s+/);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
+        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        const searchOrConditions: string[] = [];
-
+        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
-        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
-        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
-        // del outer query) que disparaba timeout 30s para términos como "sabritas".
-        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
-        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
+        // Cada frase textual = AND adicional, con OR entre los campos.
+        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
+        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
 
           if (term.length > 3) {
-            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
-            // genéricos como "Mexico" que harían explotar la siguiente query).
             const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
               `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
               searchPattern
@@ -1516,7 +1521,6 @@ export class CampanasController {
             if (invMatchRows.length > 0) {
               const invMatchIds = invMatchRows.map(r => r.id);
               const phInv = invMatchIds.map(() => '?').join(',');
-              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
               const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
                 `SELECT DISTINCT sc.idquote
                  FROM espacio_inventario ei
@@ -1527,7 +1531,6 @@ export class CampanasController {
               );
               const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
               if (propIdsByInv.length > 0) {
-                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
                 const phPr = propIdsByInv.map(() => '?').join(',');
                 const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
                   `SELECT DISTINCT cm.id
@@ -1545,11 +1548,7 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          searchOrConditions.push(searchClause);
-        }
-
-        if (searchOrConditions.length > 0) {
-          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+          conditions.push(searchClause);
         }
       }
 
@@ -1581,25 +1580,31 @@ export class CampanasController {
 
       const whereClause = conditions.join(' AND ');
 
+      // EXISTS correlacionado reescrito como LEFT JOIN agregado: en lugar de
+      // ejecutar la subquery por CADA fila de campania (N veces), pre-calculamos
+      // UNA vez qué propuestas tienen al menos una reserva con APS válido y
+      // hacemos un único JOIN. Mismo resultado, mucho menos costo cuando hay
+      // muchas campañas.
       const rows = await prisma.$queryRawUnsafe<Array<{
         status: string | null;
         cnt: bigint;
         con_aps: bigint;
       }>>(`
-        SELECT
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */
           cm.status,
           COUNT(*) as cnt,
-          SUM(CASE WHEN EXISTS (
-            SELECT 1 FROM solicitudCaras sc_a
-            INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id
-            WHERE sc_a.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-              AND rsv_a.deleted_at IS NULL AND rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
-          ) THEN 1 ELSE 0 END) as con_aps
+          SUM(CASE WHEN aps_props.idquote_str IS NOT NULL THEN 1 ELSE 0 END) as con_aps
         FROM campania cm
         LEFT JOIN cliente cl ON cm.cliente_id = cl.id
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        LEFT JOIN (
+          SELECT DISTINCT sc_a.idquote AS idquote_str
+          FROM solicitudCaras sc_a
+          INNER JOIN reservas rsv_a ON rsv_a.solicitudCaras_id = sc_a.id
+          WHERE rsv_a.deleted_at IS NULL AND rsv_a.APS IS NOT NULL AND rsv_a.APS > 0
+        ) aps_props ON aps_props.idquote_str = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
         WHERE ${whereClause}
         GROUP BY cm.status
       `, ...params);
@@ -2685,30 +2690,27 @@ export class CampanasController {
       }
 
       if (search) {
-        const terms = search.trim().split(/\s+/);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
+        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        const searchOrConditions: string[] = [];
-
+        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
           params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
         }
 
-        // Pre-query: buscar campañas que tengan inventarios cuyo codigo_unico matchee
-        // el término. Antes era un EXISTS correlacionado (corre N veces, una por cara
-        // del outer query) que disparaba timeout 30s para términos como "sabritas".
-        // Ahora se hace en pasos separados: buscar inventarios LIMIT 200, sacar los
-        // sc/idquote, sacar campañas. Mucho más rápido y se inyecta como cm.id IN (...).
+        // Cada frase textual = AND adicional, con OR entre los campos.
+        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
+        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
           params.push(searchPattern, searchPattern, searchPattern, searchPattern);
 
           if (term.length > 3) {
-            // Paso 1: inventarios con codigo_unico match (LIMIT 200 para términos
-            // genéricos como "Mexico" que harían explotar la siguiente query).
             const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
               `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
               searchPattern
@@ -2717,7 +2719,6 @@ export class CampanasController {
             if (invMatchRows.length > 0) {
               const invMatchIds = invMatchRows.map(r => r.id);
               const phInv = invMatchIds.map(() => '?').join(',');
-              // Paso 2: get distinct propuesta IDs (idquote) via reservas → sc
               const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
                 `SELECT DISTINCT sc.idquote
                  FROM espacio_inventario ei
@@ -2728,7 +2729,6 @@ export class CampanasController {
               );
               const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
               if (propIdsByInv.length > 0) {
-                // Paso 3: campania IDs via cotizacion (id_propuesta es índice numérico).
                 const phPr = propIdsByInv.map(() => '?').join(',');
                 const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
                   `SELECT DISTINCT cm.id
@@ -2746,11 +2746,7 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          searchOrConditions.push(searchClause);
-        }
-
-        if (searchOrConditions.length > 0) {
-          conditions.push(`(${searchOrConditions.join(' OR ')})`);
+          conditions.push(searchClause);
         }
       }
 
@@ -6961,6 +6957,19 @@ export class CampanasController {
         }
       }
 
+      // Caché 2 min (SHORT) — el WebSocket de órdenes de montaje invalida
+      // cuando se crean/eliminan reservas, así que el cache solo se queda
+      // viejo si nadie toca reservas. Reduce drásticamente el tiempo de
+      // re-apertura del modal.
+      const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_CAT(JSON.stringify({
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
       // PASO 1: Resolver fechas de la catorcena pedida (1 query corta).
       let inicioFiltro: Date | null = null;
       let finFiltro: Date | null = null;
@@ -7254,7 +7263,7 @@ export class CampanasController {
         return String(a.tipo_fila).localeCompare(String(b.tipo_fila));
       });
 
-      res.json({
+      const response = {
         success: true,
         data: serializeBigInt(result),
         filtroAplicado: {
@@ -7264,7 +7273,10 @@ export class CampanasController {
           yearFin,
         },
         catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+      res.json(response);
     } catch (error) {
       console.error('Error en getOrdenMontajeCAT:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener orden de montaje CAT';
@@ -7301,6 +7313,16 @@ export class CampanasController {
           if (!yearInicio) yearInicio = catActual.a_o;
           if (!yearFin) yearFin = catActual.a_o;
         }
+      }
+
+      // Caché 2 min (SHORT) — el WebSocket invalida en cambios reales.
+      const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_INVIAN(JSON.stringify({
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+      }));
+      const cached = cache.get<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
       }
 
       // PASO 1: Resolver fechas de la catorcena pedida (1 query)
@@ -7343,19 +7365,35 @@ export class CampanasController {
       const propuestaIdsStr = [...new Set(campsRows.map(c => String(c.id_propuesta)).filter(Boolean))];
       const campMap = new Map(campsRows.map(c => [String(c.id_propuesta), c]));
 
-      // PASO 3: Pre-fetch clientes, catorcenas y propuestas (tablas chiquitas en
-      // este recorte, queries rápidas con IN). Las usamos en JS para evitar
-      // JOINs costosos: cliente con OR (cliente.id OR cliente.CUIC mata el
-      // índice y dispara fullscan), subqueries correlacionadas contra
-      // catorcenas, y CAST en `sc.idquote = CAST(pr.id AS CHAR)`.
+      // PASO 3: Pre-fetch clientes (sólo los relevantes), catorcenas y
+      // propuestas. Las usamos en JS para evitar JOINs costosos: cliente con
+      // OR (cliente.id OR cliente.CUIC mata el índice y dispara fullscan),
+      // subqueries correlacionadas contra catorcenas, y CAST en
+      // `sc.idquote = CAST(pr.id AS CHAR)`.
+      //
+      // OPTIMIZACIÓN: antes traíamos TODA la tabla cliente (>50K rows). Ahora
+      // filtramos por los IDs/CUIC que aparecen en las campañas seleccionadas.
+      // El mismo lookup `id OR CUIC` se hace en JS contra el subset.
       const propuestaIdsNum = [...new Set(campsRows.map(c => Number(c.id_propuesta)).filter(Boolean))];
       const phPr = propuestaIdsNum.map(() => '?').join(',');
+
+      // cliente_id en `campania` puede contener el id real del cliente o el
+      // CUIC (depende de cómo se creó). Buscamos los dos posibles matches.
+      const cliKeys = [...new Set(campsRows.map(c => Number(c.cliente_id)).filter(Boolean))];
+      const cliPlaceholders = cliKeys.map(() => '?').join(',');
+      const cliClause = cliKeys.length > 0
+        ? `WHERE id IN (${cliPlaceholders}) OR CUIC IN (${cliPlaceholders})`
+        : 'WHERE 1=0'; // sin campañas → sin clientes
+
       const [clientesArr, catorcenasArr, propuestasArr] = await Promise.all([
-        prisma.$queryRawUnsafe<{ id: number; CUIC: string | null; T1_U_Cliente: string | null; T2_U_Marca: string | null; sap_database: string | null }[]>(
-          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, sap_database FROM cliente`
-        ),
+        cliKeys.length > 0
+          ? prisma.$queryRawUnsafe<{ id: number; CUIC: string | null; T1_U_Cliente: string | null; T2_U_Marca: string | null; sap_database: string | null }[]>(
+              `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, sap_database FROM cliente ${cliClause}`,
+              ...cliKeys, ...cliKeys
+            )
+          : Promise.resolve([]),
         prisma.$queryRawUnsafe<{ id: number; numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date }[]>(
-          `SELECT id, numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
+          `SELECT id, numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas ORDER BY fecha_inicio`
         ),
         // Vendedor = solicitud.nombre_usuario (el creador de la solicitud, que es
         // el asesor que vende esa campaña). Antes se usaba pr.asignado (la lista
@@ -7374,6 +7412,31 @@ export class CampanasController {
       const clienteByIdMap = new Map(clientesArr.map(c => [c.id, c]));
       const clienteByCuicMap = new Map(clientesArr.filter(c => c.CUIC).map(c => [String(c.CUIC), c]));
       const propuestaByIdMap = new Map(propuestasArr.map(p => [String(p.id), p]));
+
+      // Pre-procesar catorcenas: sort + bounds en epoch ms para hacer binary
+      // search O(log N) en lugar de `.find()` lineal por cada row. Con 500
+      // catorcenas y 5000 reservas, pasamos de 2.5M iteraciones a ~50K
+      // (5000 × log2(500) ≈ 5000 × 9).
+      const catorcenasSorted = catorcenasArr
+        .map(c => ({
+          ...c,
+          iniMs: (c.fecha_inicio instanceof Date ? c.fecha_inicio : new Date(c.fecha_inicio)).getTime(),
+          finMs: (c.fecha_fin instanceof Date ? c.fecha_fin : new Date(c.fecha_fin)).getTime(),
+        }))
+        .sort((a, b) => a.iniMs - b.iniMs);
+
+      // Lookup helper — binary search del rango que contiene `inicioMs`.
+      const findCatorcenaForMs = (ms: number) => {
+        let lo = 0, hi = catorcenasSorted.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1;
+          const c = catorcenasSorted[mid];
+          if (ms < c.iniMs) hi = mid - 1;
+          else if (ms > c.finMs) lo = mid + 1;
+          else return c;
+        }
+        return undefined;
+      };
 
       // PASO 4: Query principal — solo reservas de las propuestas filtradas.
       const ph = propuestaIdsStr.map(() => '?').join(',');
@@ -7420,11 +7483,8 @@ export class CampanasController {
         const cliente = (cliId ? clienteByIdMap.get(cliId) : undefined)
           || (cliId ? clienteByCuicMap.get(String(cliId)) : undefined);
         const inicio = r.inicio_periodo instanceof Date ? r.inicio_periodo : new Date(r.inicio_periodo);
-        const cat = catorcenasArr.find(c => {
-          const fIni = c.fecha_inicio instanceof Date ? c.fecha_inicio : new Date(c.fecha_inicio);
-          const fFin = c.fecha_fin instanceof Date ? c.fecha_fin : new Date(c.fecha_fin);
-          return inicio >= fIni && inicio <= fFin;
-        });
+        // Lookup O(log N) sobre catorcenasSorted (binary search).
+        const cat = findCatorcenaForMs(inicio.getTime());
 
         const articuloUp = String(r.articulo || '').toUpperCase();
         const operacion = articuloUp.startsWith('RT') ? 'RENTA'
@@ -7590,7 +7650,7 @@ export class CampanasController {
 
       const dataSerializable = serializeBigInt(enrichedData);
 
-      res.json({
+      const response = {
         success: true,
         data: dataSerializable,
         filtroAplicado: {
@@ -7599,7 +7659,10 @@ export class CampanasController {
           yearInicio,
           yearFin,
         },
-      });
+      };
+
+      cache.set(cacheKey, response, CACHE_TTL.SHORT);
+      res.json(response);
     } catch (error) {
       console.error('Error en getOrdenMontajeINVIAN:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener orden de montaje INVIAN';
