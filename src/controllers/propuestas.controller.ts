@@ -2191,7 +2191,9 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      // Tope alto: el desglose (versionario) muestra todo sin paginar.
+      // Hoy hay ~858 propuestas en prod; 5000 alcanza para años.
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 5000);
 
       const emptyPayload = {
         inventarios: [] as any[],
@@ -2202,8 +2204,10 @@ export class PropuestasController {
         limit,
       };
 
-      // Build WHERE (same as getAll — multi-term search, OR-combined per text term)
-      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
+      // Build WHERE — alineado con /propuestas/stats para que el KPI y el desglose
+      // muestren el mismo total. Exige sl.status='Atendida' y filtra ambos casos
+      // de 'Pendiente' (lower/Title).
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const params: any[] = [];
 
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }

@@ -7189,15 +7189,20 @@ export class CampanasController {
         const rsvCount = new Set(reservas.map(r => Number(r.rsv_id))).size;
         const scCaras = Number(sc.caras) || 0;
         const scBonif = Number(sc.bonificacion) || 0;
-        const delta_caras = rsvCount - (scCaras + scBonif);
+
+        const articuloUp = String(sc.articulo || '').toUpperCase();
+
+        // Para IM (Impresiones): no aplican reservas de inventario físico,
+        // siempre se considera completo (delta=0 → ✓ en UI).
+        const delta_caras = articuloUp.startsWith('IM')
+          ? 0
+          : rsvCount - (scCaras + scBonif);
 
         const sap_database = sc.sol_sap_database || cliente?.sap_database || null;
         const inicioDate = sc.inicio_periodo instanceof Date
           ? sc.inicio_periodo
           : (sc.inicio_periodo ? new Date(sc.inicio_periodo) : null);
         const cat = inicioDate ? findCatorcena(inicioDate) : null;
-
-        const articuloUp = String(sc.articulo || '').toUpperCase();
         const getNegociacion = (tipoFila: 'bonificacion' | 'renta'): string => {
           if (sc.cortesia === 1) return 'CORTESIA';
           if (articuloUp.startsWith('IN')) return 'INTERCAMBIO';
