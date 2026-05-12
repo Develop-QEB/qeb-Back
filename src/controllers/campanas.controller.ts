@@ -191,9 +191,12 @@ export class CampanasController {
             filterFechaFin = catFinData.fecha_fin;
           }
 
-          // 1) Rango de la campania debe traslapar con la catorcena filtrada (filtro rapido)
-          // 2) Y debe existir AL MENOS UNA cara (solicitudCaras) con periodo dentro del rango filtrado.
-          //    Esto excluye campanias cuyo rango anotado cubre la catorcena pero no tienen circuitos en ella.
+          // Rango de la campania debe traslapar con la catorcena filtrada.
+          // Nota: NO exigimos EXISTS solicitudCaras — campañas incompletas (sin caras
+          // reservadas) también deben aparecer al filtrar por una catorcena que cubren
+          // por fechas. El frontend ya las pinta en su rango via fallback de fechas
+          // cuando catorcenas_con_contenido es null. La inversión por catorcena queda
+          // en $0 para esas (sin caras = sin costo).
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -201,20 +204,8 @@ export class CampanasController {
             AND cm.fecha_fin >= (
               SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
-            AND EXISTS (
-              SELECT 1 FROM solicitudCaras sc_filt
-              WHERE sc_filt.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND sc_filt.inicio_periodo <= (
-                  SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-                )
-                AND sc_filt.fin_periodo >= (
-                  SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-                )
-            )
           `);
           params.push(
-            yearFin, catorcenaFin,
-            yearInicio, catorcenaInicio,
             yearFin, catorcenaFin,
             yearInicio, catorcenaInicio,
           );
