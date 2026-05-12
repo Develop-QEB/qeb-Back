@@ -430,25 +430,36 @@ export class PropuestasController {
       }
 
       if (search) {
-        const terms = search.trim().split(/\s+/);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+        // Cada tag (separado por '|') es una frase que REFINA la búsqueda.
+        // Semántica: cada frase debe matchear en al menos un campo (OR entre
+        // campos) y entre frases se hace AND. Así "walmart|bodega aurrera"
+        // sólo devuelve propuestas que toquen walmart Y bodega aurrera.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        const searchOrConditions: string[] = [];
-
+        // Pool de IDs numéricos: si hay varios, se vuelve un solo IN(...)
+        // (un mismo registro no puede ser id=123 y id=456 a la vez).
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
+        // Cada frase textual = AND adicional, con OR entre los campos.
         for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          searchOrConditions.push(`(pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`);
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-        }
-
-        if (searchOrConditions.length > 0) {
-          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
+          const sp = `%${term}%`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            sl.nombre_usuario LIKE ?
+          )`;
+          params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
 
@@ -1397,14 +1408,29 @@ export class PropuestasController {
       }
 
       if (search) {
-        const searchNum = parseInt(search);
-        if (!isNaN(searchNum) && String(searchNum) === search.trim()) {
-          whereConditions += ' AND pr.id = ?';
-          statsParams.push(searchNum);
-        } else {
-          const searchPattern = `%${search}%`;
-          whereConditions += ` AND (pr.descripcion LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?)`;
-          statsParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        // Mismo formato que getAll: AND entre tags, OR entre campos por tag.
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+        if (numericTerms.length > 0) {
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
+          statsParams.push(...numericTerms.map(t => parseInt(t)));
+        }
+        for (const term of textTerms) {
+          const sp = `%${term}%`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            sl.nombre_usuario LIKE ?
+          )`;
+          statsParams.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
 
@@ -2165,7 +2191,9 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
+      // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 1000);
 
       const emptyPayload = {
         inventarios: [] as any[],
@@ -2176,31 +2204,38 @@ export class PropuestasController {
         limit,
       };
 
-      // Build WHERE (same as getAll — multi-term search, OR-combined per text term)
-      let whereConditions = `pr.deleted_at IS NULL AND pr.status <> 'Sin solicitud activa' AND pr.status <> 'pendiente'`;
+      // Build WHERE — alineado con /propuestas/stats para que el KPI y el desglose
+      // muestren el mismo total. Exige sl.status='Atendida' y filtra ambos casos
+      // de 'Pendiente' (lower/Title).
+      let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const params: any[] = [];
 
       if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        const terms = search.trim().split(/\s+/).filter(Boolean);
-        const numericTerms = terms.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = terms.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-        const searchOrConditions: string[] = [];
+        // AND entre tags, OR entre campos por tag (alineado con getAll/getStats).
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
         if (numericTerms.length > 0) {
-          searchOrConditions.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
           params.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
           const sp = `%${term}%`;
-          searchOrConditions.push(
-            `(pr.descripcion LIKE ? OR ct.nombre_campania LIKE ? OR COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ? OR sl.nombre_usuario LIKE ? OR pr.asignado LIKE ?)`
-          );
-          params.push(sp, sp, sp, sp, sp, sp, sp);
-        }
-        if (searchOrConditions.length > 0) {
-          whereConditions += ` AND (${searchOrConditions.join(' OR ')})`;
+          whereConditions += ` AND (
+            pr.descripcion LIKE ? OR
+            ct.nombre_campania LIKE ? OR
+            COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
+            cl.T0_U_RazonSocial LIKE ? OR
+            cl.CUIC LIKE ? OR
+            sl.nombre_usuario LIKE ? OR
+            pr.asignado LIKE ? OR
+            pr.articulo LIKE ? OR
+            cm.nombre LIKE ?
+          )`;
+          params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -2222,22 +2257,42 @@ export class PropuestasController {
         params.push(...visibleIds);
       }
 
-      // 1. Get all matching propuesta IDs (paginated to keep IN-list bounded)
-      const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
-        SELECT DISTINCT pr.id FROM propuesta pr
-        LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
-        LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
-        LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
-        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-        WHERE ${whereConditions}
-        ORDER BY pr.id DESC
-      `, ...params);
-      const allPropIds = idsResult.map(r => Number(r.id));
+      // 1. Get matching propuesta IDs. Si viene ?propuestaIds=1,2,3 (hasta 50),
+      // se usa esa lista directamente (modo "detalle on-demand" para el desglose
+      // que carga propuestas individuales al expandir). Si no, query normal.
+      const propuestaIdsParam = req.query.propuestaIds as string | undefined;
+      let allPropIds: number[];
+      if (propuestaIdsParam) {
+        const requested = propuestaIdsParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0).slice(0, 50);
+        if (requested.length === 0) { res.json({ success: true, data: emptyPayload }); return; }
+        // Aplicar visibility filter sobre los IDs pedidos
+        if (userId && !hasFullVisibility(userRol)) {
+          const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
+          const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+          const visibleSet = new Set(visibleIds);
+          allPropIds = requested.filter(id => visibleSet.has(id));
+        } else {
+          allPropIds = requested;
+        }
+        if (allPropIds.length === 0) { res.json({ success: true, data: emptyPayload }); return; }
+      } else {
+        const idsResult = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+          SELECT DISTINCT pr.id FROM propuesta pr
+          LEFT JOIN solicitud sl ON sl.id = pr.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE ${whereConditions}
+          ORDER BY pr.id DESC
+        `, ...params);
+        allPropIds = idsResult.map(r => Number(r.id));
+      }
       const total = allPropIds.length;
       if (total === 0) { res.json({ success: true, data: emptyPayload }); return; }
 
-      const offset = (page - 1) * limit;
-      const propIds = allPropIds.slice(offset, offset + limit);
+      const exportLayoutFlag = req.query.exportLayout === 'true' || req.query.exportLayout === '1';
+      const offset = (propuestaIdsParam || exportLayoutFlag) ? 0 : (page - 1) * limit;
+      const propIds = (propuestaIdsParam || exportLayoutFlag) ? allPropIds : allPropIds.slice(offset, offset + limit);
       if (propIds.length === 0) { res.json({ success: true, data: { ...emptyPayload, total } }); return; }
       const phIds = propIds.map(() => '?').join(',');
 
@@ -2317,19 +2372,85 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
+      // Modo ligero: cuando ?lite=true, solo devuelve propuestasInfo. Esto evita
+      // las dos queries pesadas (inventarios + caras) que con muchos miles de
+      // reservas estaban saturando memoria y conexiones de DB (Hostinger pruebas
+      // capeaba a ~100 conexiones, los joins masivos las agotaban).
+      // El front del desglose usa lite=true por default y agrupa solo sobre
+      // propuestasInfo. Si en el futuro hace falta inventarios al expandir,
+      // se carga on-demand por propuesta.
+      const lite = req.query.lite === 'true' || req.query.lite === '1';
+      // exportLayout: replica el patrón del versionario de campañas. El back
+      // procesa TODOS los propuestaIds filtrados en batches secuenciales
+      // (30 a la vez) sin tope de 1000 propIds. Devuelve full data en una
+      // sola request — el front no tiene que hacer 16 round-trips.
+      const exportLayout = req.query.exportLayout === 'true' || req.query.exportLayout === '1';
+
       const QUERY_TIMEOUT = 60000;
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Versionario query timeout')), QUERY_TIMEOUT)
       );
 
-      const [propInfo, inventario, carasInfo] = await Promise.race([
-        Promise.all([
+      // Si hay filtro de rango catorcena, restringir invs/caras a ese rango.
+      // Aplica al flujo regular (lite=false) Y al exportLayout — así footer y
+      // export usan el mismo criterio: "propuestas con circuitos EN el rango".
+      const hasCatRange = !!(yearInicio && yearFin && catorcenaInicio && catorcenaFin);
+      const catRangeStart = hasCatRange ? parseInt(yearInicio) * 100 + parseInt(catorcenaInicio) : 0;
+      const catRangeEnd = hasCatRange ? parseInt(yearFin) * 100 + parseInt(catorcenaFin) : 999999;
+      const catWhereInv = hasCatRange
+        ? ` AND (cat.año * 100 + cat.numero_catorcena) BETWEEN ${catRangeStart} AND ${catRangeEnd}`
+        : '';
+      const filteredInvQuery = hasCatRange
+        ? invQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
+        : invQuery;
+      const filteredCarasQuery = hasCatRange
+        ? carasQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
+        : carasQuery;
+
+      let propInfo: any, inventario: any, carasInfo: any;
+      if (exportLayout) {
+        const injectCatFilterInv = (sql: string) => sql; // ya está filtrado arriba
+
+        // Batches de 30, secuenciales, para no saturar conexiones DB.
+        const BATCH_SIZE = 30;
+        const propInfoArr: any[] = [];
+        const inventarioArr: any[] = [];
+        const carasArr: any[] = [];
+        for (let i = 0; i < propIds.length; i += BATCH_SIZE) {
+          const batch = propIds.slice(i, i + BATCH_SIZE);
+          const batchPh = batch.map(() => '?').join(',');
+          const bPropQ = propInfoQuery.replace(`pr.id IN (${phIds})`, `pr.id IN (${batchPh})`);
+          const bInvQ = injectCatFilterInv(filteredInvQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const bCarQ = injectCatFilterInv(filteredCarasQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const [pi, inv, ci] = await Promise.all([
+            prisma.$queryRawUnsafe<any[]>(bPropQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bInvQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bCarQ, ...batch),
+          ]);
+          propInfoArr.push(...pi);
+          inventarioArr.push(...inv);
+          carasArr.push(...ci);
+        }
+        propInfo = propInfoArr;
+        inventario = inventarioArr;
+        carasInfo = carasArr;
+      } else if (lite) {
+        propInfo = await Promise.race([
           prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
-          prisma.$queryRawUnsafe(invQuery, ...propIds),
-          prisma.$queryRawUnsafe(carasQuery, ...propIds),
-        ]),
-        timeoutPromise as never,
-      ]);
+          timeoutPromise as never,
+        ]);
+        inventario = [];
+        carasInfo = [];
+      } else {
+        [propInfo, inventario, carasInfo] = await Promise.race([
+          Promise.all([
+            prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+            prisma.$queryRawUnsafe(filteredInvQuery, ...propIds),
+            prisma.$queryRawUnsafe(filteredCarasQuery, ...propIds),
+          ]),
+          timeoutPromise as never,
+        ]);
+      }
 
       const result = JSON.parse(JSON.stringify({
         inventarios: inventario,

@@ -408,21 +408,52 @@ export class SolicitudesController {
         where.status = status;
       }
 
-      // Search filter
+      // Search filter — semántica AND entre tags (cada tag refina), OR entre
+      // los campos de un mismo tag. Tags separados por '|' desde el frontend.
+      // Para cada tag textual se busca también en nombre_campania (vive en
+      // cotización) via subquery por tag.
       if (search) {
-        const orConditions: any[] = [
-          { razon_social: { contains: search } },
-          { descripcion: { contains: search } },
-          { marca_nombre: { contains: search } },
-          { asignado: { contains: search } },
-          { cuic: { contains: search } },
-          { nombre_usuario: { contains: search } },
-        ];
-        const searchAsInt = parseInt(search);
-        if (!isNaN(searchAsInt)) {
-          orConditions.push({ id: searchAsInt });
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
+        const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
+
+        const andConditions: any[] = [];
+
+        // Pool numérico: id IN (lista) como UNA condición AND.
+        if (numericPhrases.length > 0) {
+          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
-        where.OR = orConditions;
+
+        // Cada frase textual = AND adicional con OR interno (campos directos
+        // + ids de solicitudes cuyas cotizaciones contienen la frase).
+        for (const phrase of textPhrases) {
+          const phraseOr: any[] = [
+            { razon_social: { contains: phrase } },
+            { descripcion: { contains: phrase } },
+            { marca_nombre: { contains: phrase } },
+            { asignado: { contains: phrase } },
+            { cuic: { contains: phrase } },
+            { nombre_usuario: { contains: phrase } },
+          ];
+
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL AND ct.nombre_campania LIKE ?`,
+            `%${phrase}%`
+          );
+          if (rows.length > 0) {
+            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+          }
+
+          andConditions.push({ OR: phraseOr });
+        }
+
+        if (andConditions.length > 0) {
+          where.AND = andConditions;
+        }
       }
 
       // Year range and catorcena filter — filter by cotizacion period dates, not solicitud.fecha
@@ -786,6 +817,24 @@ export class SolicitudesController {
 
       const statusAnterior = solicitudAnterior.status;
 
+      // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
+      // autorización DG/DCM. Política: la solicitud no avanza a propuesta
+      // hasta que dirección apruebe (o rechace) los circuitos pendientes.
+      if (status === 'Aprobada' || status === 'Atendida') {
+        const auth = await verificarCarasPendientes(parseInt(id).toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar el estatus a "${status}" mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
+      }
+
       const solicitud = await prisma.solicitud.update({
         where: { id: parseInt(id) },
         data: { status },
@@ -1097,20 +1146,45 @@ export class SolicitudesController {
         where.status = status;
       }
 
+      // Search filter — mismo formato que getAll: AND entre tags, OR entre
+      // los campos por tag (incluyendo nombre_campania via subquery).
       if (search) {
-        const orConditions: any[] = [
-          { razon_social: { contains: search } },
-          { descripcion: { contains: search } },
-          { marca_nombre: { contains: search } },
-          { asignado: { contains: search } },
-          { cuic: { contains: search } },
-          { nombre_usuario: { contains: search } },
-        ];
-        const searchAsInt = parseInt(search);
-        if (!isNaN(searchAsInt)) {
-          orConditions.push({ id: searchAsInt });
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
+        const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
+
+        const andConditions: any[] = [];
+
+        if (numericPhrases.length > 0) {
+          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
-        where.OR = orConditions;
+
+        for (const phrase of textPhrases) {
+          const phraseOr: any[] = [
+            { razon_social: { contains: phrase } },
+            { descripcion: { contains: phrase } },
+            { marca_nombre: { contains: phrase } },
+            { asignado: { contains: phrase } },
+            { cuic: { contains: phrase } },
+            { nombre_usuario: { contains: phrase } },
+          ];
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             WHERE s.deleted_at IS NULL AND ct.nombre_campania LIKE ?`,
+            `%${phrase}%`
+          );
+          if (rows.length > 0) {
+            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+          }
+          andConditions.push({ OR: phraseOr });
+        }
+
+        if (andConditions.length > 0) {
+          where.AND = andConditions;
+        }
       }
 
       // Visibility filter
@@ -2424,6 +2498,23 @@ export class SolicitudesController {
         return;
       }
 
+      // Defensa en profundidad: aunque updateStatus ya bloquea Aprobada con pendientes,
+      // re-verificamos aquí por si la solicitud llegó a este estado por otra vía.
+      {
+        const auth = await verificarCarasPendientes(solicitud.id.toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede atender la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}).`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
+      }
+
       // Get propuesta
       const propuesta = await prisma.propuesta.findFirst({
         where: { solicitud_id: solicitud.id, deleted_at: null },
@@ -2620,6 +2711,29 @@ export class SolicitudesController {
           });
         }
       }, { timeout: 30000 });
+
+      // Re-crear tareas de Autorización a nivel propuesta si quedaron caras pendientes
+      // tras la conversión solicitud→propuesta. La tx anterior cerró todas las tareas
+      // del id_solicitud (incluyendo Autorización Pendiente sin aprobar), por lo que sin
+      // este bloque las caras quedarían en pendiente sin tarea visible para DG/DCM.
+      if (propuesta) {
+        try {
+          const autorizacion = await verificarCarasPendientes(propuesta.id.toString());
+          if (autorizacion.tienePendientes) {
+            await crearTareasAutorizacion(
+              solicitud.id,
+              propuesta.id,
+              userId,
+              userName,
+              autorizacion.pendientesDg,
+              autorizacion.pendientesDcm,
+              'propuesta'
+            );
+          }
+        } catch (err) {
+          console.error('[atender] Error replicando tareas de autorización a propuesta:', err);
+        }
+      }
 
       // Obtener catorcenas para el correo
       const cotizacionData = cotizacion || await prisma.cotizacion.findFirst({

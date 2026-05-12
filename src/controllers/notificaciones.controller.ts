@@ -871,10 +871,22 @@ export class NotificacionesController {
     try {
       const { id } = req.params;
 
-      const tarea = await prisma.tareas.update({
-        where: { id: parseInt(id) },
-        data: { estatus: 'Atendido' },
-      });
+      // Las tareas de Autorización DG/DCM no se cierran al "marcar como leída":
+      // su ciclo de vida lo gobierna aprobarCaras / rechazarSolicitud. Cerrarlas aquí
+      // dejaría caras pendientes y al director sin la tarea visible.
+      const tareaExistente = await prisma.tareas.findUnique({ where: { id: parseInt(id) } });
+      if (!tareaExistente) {
+        res.status(404).json({ success: false, error: 'Tarea no encontrada' });
+        return;
+      }
+      const esAutorizacion = !!tareaExistente.tipo && tareaExistente.tipo.includes('Autorización');
+
+      const tarea = esAutorizacion
+        ? tareaExistente
+        : await prisma.tareas.update({
+            where: { id: parseInt(id) },
+            data: { estatus: 'Atendido' },
+          });
 
       const notificacion = {
         id: tarea.id,
@@ -882,7 +894,8 @@ export class NotificacionesController {
         titulo: tarea.titulo || 'Sin título',
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
-        leida: true,
+        leida: !esAutorizacion,
+        requiere_accion: esAutorizacion,
         referencia_tipo: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
           ? tarea.contenido
           : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
@@ -893,8 +906,10 @@ export class NotificacionesController {
         estatus: tarea.estatus,
       };
 
-      // Emitir evento WebSocket para actualizar contador
-      emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { tareaId: tarea.id });
+      // Para autorizaciones no emitimos NOTIFICACION_LEIDA porque la tarea sigue activa
+      if (!esAutorizacion) {
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { tareaId: tarea.id });
+      }
 
       res.json({
         success: true,
@@ -913,8 +928,12 @@ export class NotificacionesController {
     try {
       const userId = req.user?.userId;
 
+      // Excluye tareas de Autorización: su cierre depende de aprobarCaras / rechazarSolicitud,
+      // no de "marcar como leída". Si se incluyen aquí, las caras quedan en pendiente y
+      // el director pierde la tarea de su bandeja.
       const where: Record<string, unknown> = {
         estatus: { not: 'Atendido' },
+        NOT: { tipo: { contains: 'Autorización' } },
       };
 
       if (userId) {
