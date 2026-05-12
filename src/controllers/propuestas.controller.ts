@@ -2191,9 +2191,9 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      // Tope alto: el desglose (versionario) muestra todo sin paginar.
-      // Hoy hay ~858 propuestas en prod; 5000 alcanza para años.
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 5000);
+      // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
+      // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 1000);
 
       const emptyPayload = {
         inventarios: [] as any[],
