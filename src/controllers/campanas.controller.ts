@@ -8043,6 +8043,55 @@ export class CampanasController {
           continue;
         }
 
+        // Fix dups PATSA-style: si ya existe reserva activa para este
+        // espacio + sc, NO crear otra. Antes este endpoint solo validaba contra
+        // otras campañas (getEspaciosBloqueados), no contra la misma sc.
+        // Eso permitía que dos llamadas seguidas (doble click, retry de red,
+        // o re-asignación tras quitar APS) crearan reservas duplicadas
+        // apuntando al mismo inv+sc — patrón PATSA-JAGUAR-PUMA, SALVO, NESPRESSO.
+        if (solicitudCaraId) {
+          const existingActiva = await prisma.reservas.findFirst({
+            where: {
+              inventario_id: espacioId,
+              solicitudCaras_id: solicitudCaraId,
+              deleted_at: null,
+            },
+          });
+          if (existingActiva) {
+            console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId} (rv=${existingActiva.id}), omitiendo`);
+            reservasOmitidas++;
+            continue;
+          }
+
+          // Si hay reserva soft-deleted previa con mismos datos, reactivarla
+          // en vez de crear nueva. Eso previene fantasmas y "filas huérfanas"
+          // del flujo quitar→regresar APS.
+          const softDeleted = await prisma.reservas.findFirst({
+            where: {
+              inventario_id: espacioId,
+              solicitudCaras_id: solicitudCaraId,
+              deleted_at: { not: null },
+            },
+            orderBy: { id: 'desc' },
+          });
+          if (softDeleted) {
+            await prisma.reservas.update({
+              where: { id: softDeleted.id },
+              data: {
+                deleted_at: null,
+                calendario_id: calendario.id,
+                cliente_id: clienteId || 0,
+                estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
+                estatus_original: '',
+                APS: null,
+              },
+            });
+            espaciosReservadosEnPeriodo.add(espacioId);
+            reservasCreadas++;
+            continue;
+          }
+        }
+
         // Determinar si necesita grupo completo
         let grupoCompletoId: number | null = null;
         if (agruparComoCompleto && reserva.tipo !== 'Bonificacion') {
