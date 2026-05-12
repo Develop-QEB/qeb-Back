@@ -6342,17 +6342,42 @@ export class CampanasController {
     try {
       const campanaId = parseInt(req.params.id);
       const { aps } = req.body as { aps: number[] };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       const current = await prisma.$queryRawUnsafe<any[]>(
         'SELECT posted_aps FROM campania WHERE id = ?', campanaId
       );
       const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
       const merged = Array.from(new Set([...existing, ...aps]));
+      // APS realmente nuevos (no estaban antes) — para no loggear no-ops.
+      const apsNuevos = (aps || []).filter(a => !existing.includes(a));
 
       await prisma.$queryRawUnsafe(
         'UPDATE campania SET posted_aps = ? WHERE id = ?',
         JSON.stringify(merged), campanaId
       );
+
+      // Registrar quién clickeó "POST" y qué APS marcó. Antes no se guardaba
+      // (no había manera de auditar quién posteó qué grupo de APS).
+      if (apsNuevos.length > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: campanaId,
+            accion: 'POST APS a SAP',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              campaniaId: campanaId,
+              apsPosteados: apsNuevos,
+              totalApsPosteados: apsNuevos.length,
+            }),
+          },
+        }).catch(err => console.error('Error guardando historial POST APS:', err));
+      }
+
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: merged });
       res.json({ success: true, posted_aps: merged });
     } catch (error) {
@@ -6365,6 +6390,8 @@ export class CampanasController {
     try {
       const campanaId = parseInt(req.params.id);
       const { aps } = req.body as { aps?: number[] };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       const current = await prisma.$queryRawUnsafe<any[]>(
         'SELECT posted_aps FROM campania WHERE id = ?', campanaId
@@ -6375,11 +6402,31 @@ export class CampanasController {
       const remaining = aps && aps.length > 0
         ? existing.filter(id => !aps.includes(id))
         : [];
+      const apsQuitados = existing.filter(a => !remaining.includes(a));
 
       await prisma.$queryRawUnsafe(
         'UPDATE campania SET posted_aps = ? WHERE id = ?',
         JSON.stringify(remaining), campanaId
       );
+
+      if (apsQuitados.length > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: campanaId,
+            accion: 'Cancelar POST APS',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              campaniaId: campanaId,
+              apsCancelados: apsQuitados,
+              totalApsCancelados: apsQuitados.length,
+            }),
+          },
+        }).catch(err => console.error('Error guardando historial cancel POST APS:', err));
+      }
+
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: remaining });
       res.json({ success: true, posted_aps: remaining });
     } catch (error) {
