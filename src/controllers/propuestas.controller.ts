@@ -466,6 +466,11 @@ export class PropuestasController {
       // Period filter — filter by cotizacion/campania dates
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
+      // Tablas derivadas para alinear el filtro de catorcena con el desglose
+      // y stats: una propuesta cuenta para Cat X si tiene caras que arrancan
+      // en el rango, o si no tiene caras y la campaña inicia en el rango.
+      let getAllExtraJoins = '';
+      const getAllJoinParams: any[] = [];
 
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
@@ -477,8 +482,26 @@ export class PropuestasController {
         if (catorcenasInicioData && catorcenasFinData) {
           filterFechaInicio = catorcenasInicioData.fecha_inicio;
           filterFechaFin = catorcenasFinData.fecha_fin;
-          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
-          params.push(filterFechaFin, filterFechaInicio);
+          getAllExtraJoins = `
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+              WHERE inicio_periodo BETWEEN ? AND ?
+            ) cir ON cir.propuesta_id = pr.id
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+            ) cany ON cany.propuesta_id = pr.id
+          `;
+          getAllJoinParams.push(filterFechaInicio, filterFechaFin);
+          whereConditions += `
+            AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?
+            AND (
+              cir.propuesta_id IS NOT NULL
+              OR (cany.propuesta_id IS NULL AND cm.fecha_inicio BETWEEN ? AND ?)
+            )
+          `;
+          params.push(filterFechaFin, filterFechaInicio, filterFechaInicio, filterFechaFin);
         }
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
@@ -511,6 +534,7 @@ export class PropuestasController {
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        ${getAllExtraJoins}
         WHERE ${whereConditions}
       `;
 
@@ -563,6 +587,7 @@ export class PropuestasController {
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+        ${getAllExtraJoins}
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -570,8 +595,8 @@ export class PropuestasController {
       `;
 
       const [propuestas, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset),
-        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params),
+        prisma.$queryRawUnsafe<any[]>(mainQuery, ...getAllJoinParams, ...params, limit, offset),
+        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...getAllJoinParams, ...params),
       ]);
       const total = Number(countResult[0]?.total || 0);
 
@@ -1434,14 +1459,45 @@ export class PropuestasController {
         }
       }
 
+      // Tablas derivadas (LEFT JOIN extra) cuando hay filtro de catorcena. Se
+      // computan una sola vez en vez de evaluar EXISTS por cada fila — pasa la
+      // query de O(N²) a O(N) cuando hay miles de propuestas.
+      let statsExtraJoins = '';
+      const statsJoinParams: any[] = [];
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const [catorcenasInicioData, catorcenasFinData] = await Promise.all([
           prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
           prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
         ]);
         if (catorcenasInicioData && catorcenasFinData) {
-          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
-          statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+          // Alineado con el desglose ([propuestas.controller.ts:2443] usa
+          // `sc.inicio_periodo BETWEEN start AND end`). Una propuesta cuenta
+          // para Cat X si:
+          // (a) tiene al menos una cara que ARRANCA dentro del rango, o
+          // (b) no tiene caras (incompleta) y su campaña inicia en el rango.
+          statsExtraJoins = `
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+              WHERE inicio_periodo BETWEEN ? AND ?
+            ) cir ON cir.propuesta_id = pr.id
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+            ) cany ON cany.propuesta_id = pr.id
+          `;
+          statsJoinParams.push(catorcenasInicioData.fecha_inicio, catorcenasFinData.fecha_fin);
+          whereConditions += `
+            AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?
+            AND (
+              cir.propuesta_id IS NOT NULL
+              OR (cany.propuesta_id IS NULL AND cm.fecha_inicio BETWEEN ? AND ?)
+            )
+          `;
+          statsParams.push(
+            catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio,
+            catorcenasInicioData.fecha_inicio, catorcenasFinData.fecha_fin,
+          );
         }
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
@@ -1471,9 +1527,10 @@ export class PropuestasController {
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        ${statsExtraJoins}
         WHERE ${whereConditions}
         GROUP BY pr.status
-      `, ...statsParams);
+      `, ...statsJoinParams, ...statsParams);
 
       const byStatus: Record<string, number> = {};
       let total = 0;
