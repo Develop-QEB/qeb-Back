@@ -8,7 +8,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
-import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
@@ -466,6 +466,11 @@ export class PropuestasController {
       // Period filter — filter by cotizacion/campania dates
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
+      // Tablas derivadas para alinear el filtro de catorcena con el desglose
+      // y stats: una propuesta cuenta para Cat X si tiene caras que arrancan
+      // en el rango, o si no tiene caras y la campaña inicia en el rango.
+      let getAllExtraJoins = '';
+      const getAllJoinParams: any[] = [];
 
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const catorcenasInicioData = await prisma.catorcenas.findFirst({
@@ -477,8 +482,26 @@ export class PropuestasController {
         if (catorcenasInicioData && catorcenasFinData) {
           filterFechaInicio = catorcenasInicioData.fecha_inicio;
           filterFechaFin = catorcenasFinData.fecha_fin;
-          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
-          params.push(filterFechaFin, filterFechaInicio);
+          getAllExtraJoins = `
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+              WHERE inicio_periodo BETWEEN ? AND ?
+            ) cir ON cir.propuesta_id = pr.id
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+            ) cany ON cany.propuesta_id = pr.id
+          `;
+          getAllJoinParams.push(filterFechaInicio, filterFechaFin);
+          whereConditions += `
+            AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?
+            AND (
+              cir.propuesta_id IS NOT NULL
+              OR (cany.propuesta_id IS NULL AND cm.fecha_inicio BETWEEN ? AND ?)
+            )
+          `;
+          params.push(filterFechaFin, filterFechaInicio, filterFechaInicio, filterFechaFin);
         }
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
@@ -511,6 +534,7 @@ export class PropuestasController {
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        ${getAllExtraJoins}
         WHERE ${whereConditions}
       `;
 
@@ -563,6 +587,7 @@ export class PropuestasController {
         LEFT JOIN catorcenas cat_inicio ON cm.fecha_inicio BETWEEN cat_inicio.fecha_inicio AND cat_inicio.fecha_fin
         LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+        ${getAllExtraJoins}
         WHERE ${whereConditions}
         GROUP BY pr.id
         ORDER BY pr.id DESC
@@ -570,8 +595,8 @@ export class PropuestasController {
       `;
 
       const [propuestas, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<any[]>(mainQuery, ...params, limit, offset),
-        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...params),
+        prisma.$queryRawUnsafe<any[]>(mainQuery, ...getAllJoinParams, ...params, limit, offset),
+        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...getAllJoinParams, ...params),
       ]);
       const total = Number(countResult[0]?.total || 0);
 
@@ -1434,14 +1459,45 @@ export class PropuestasController {
         }
       }
 
+      // Tablas derivadas (LEFT JOIN extra) cuando hay filtro de catorcena. Se
+      // computan una sola vez en vez de evaluar EXISTS por cada fila — pasa la
+      // query de O(N²) a O(N) cuando hay miles de propuestas.
+      let statsExtraJoins = '';
+      const statsJoinParams: any[] = [];
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
         const [catorcenasInicioData, catorcenasFinData] = await Promise.all([
           prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
           prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
         ]);
         if (catorcenasInicioData && catorcenasFinData) {
-          whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
-          statsParams.push(catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio);
+          // Alineado con el desglose ([propuestas.controller.ts:2443] usa
+          // `sc.inicio_periodo BETWEEN start AND end`). Una propuesta cuenta
+          // para Cat X si:
+          // (a) tiene al menos una cara que ARRANCA dentro del rango, o
+          // (b) no tiene caras (incompleta) y su campaña inicia en el rango.
+          statsExtraJoins = `
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+              WHERE inicio_periodo BETWEEN ? AND ?
+            ) cir ON cir.propuesta_id = pr.id
+            LEFT JOIN (
+              SELECT DISTINCT CAST(idquote AS UNSIGNED) AS propuesta_id
+              FROM solicitudCaras
+            ) cany ON cany.propuesta_id = pr.id
+          `;
+          statsJoinParams.push(catorcenasInicioData.fecha_inicio, catorcenasFinData.fecha_fin);
+          whereConditions += `
+            AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?
+            AND (
+              cir.propuesta_id IS NOT NULL
+              OR (cany.propuesta_id IS NULL AND cm.fecha_inicio BETWEEN ? AND ?)
+            )
+          `;
+          statsParams.push(
+            catorcenasFinData.fecha_fin, catorcenasInicioData.fecha_inicio,
+            catorcenasInicioData.fecha_inicio, catorcenasFinData.fecha_fin,
+          );
         }
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
@@ -1471,9 +1527,10 @@ export class PropuestasController {
         LEFT JOIN cliente cl ON cl.id = pr.cliente_id OR (cl.CUIC = pr.cliente_id AND (sl.sap_database IS NULL OR cl.sap_database = sl.sap_database))
         LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+        ${statsExtraJoins}
         WHERE ${whereConditions}
         GROUP BY pr.status
-      `, ...statsParams);
+      `, ...statsJoinParams, ...statsParams);
 
       const byStatus: Record<string, number> = {};
       let total = 0;
@@ -2199,6 +2256,7 @@ export class PropuestasController {
         inventarios: [] as any[],
         propuestasInfo: [] as any[],
         carasInfo: [] as any[],
+        resumenPorCatorcena: [] as any[],
         total: 0,
         page,
         limit,
@@ -2353,11 +2411,34 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
+      // 4b. Resumen ligero por (propuesta, catorcena) — barato y siempre
+      // disponible. Sirve para que el front muestre los badges
+      // (Circuitos/Caras/Bonif/Tarifa/Inversión) a nivel propuesta antes de
+      // expandir, ya filtrados por la catorcena del bucket. La inversión por
+      // catorcena se calcula sumando sc.costo de las caras de esa catorcena.
+      const resumenCatorcenaQuery = `
+        SELECT
+          ct.id_propuesta AS propuesta_id,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COUNT(*) AS circuitos_count,
+          COALESCE(SUM(sc.caras + sc.bonificacion), 0) AS caras_total,
+          COALESCE(SUM(sc.bonificacion), 0) AS bonif_total,
+          MAX(sc.tarifa_publica) AS tarifa_representativa,
+          COALESCE(SUM(sc.costo), 0) AS inversion_catorcena
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE ct.id_propuesta IN (${phIds})
+        GROUP BY ct.id_propuesta, cat.numero_catorcena, cat.año
+      `;
+
       // 4. Caras info per propuesta (join through cotizacion + LEFT JOIN reservas to avoid correlated subquery)
       const carasQuery = `
         SELECT
           ct.id_propuesta AS propuesta_id,
           sc.id AS sc_id, sc.articulo, sc.ciudad, sc.formato,
+          sc.tarifa_publica,
           sc.caras AS caras_solicitadas, sc.bonificacion,
           (sc.caras + sc.bonificacion) AS caras_esperadas,
           COUNT(r2.id) AS reservas_count,
@@ -2368,7 +2449,7 @@ export class PropuestasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
         GROUP BY ct.id_propuesta, sc.id, sc.articulo, sc.ciudad, sc.formato,
-                 sc.caras, sc.bonificacion, cat.numero_catorcena, cat.año
+                 sc.tarifa_publica, sc.caras, sc.bonificacion, cat.numero_catorcena, cat.año
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
@@ -2394,20 +2475,39 @@ export class PropuestasController {
       // Si hay filtro de rango catorcena, restringir invs/caras a ese rango.
       // Aplica al flujo regular (lite=false) Y al exportLayout — así footer y
       // export usan el mismo criterio: "propuestas con circuitos EN el rango".
+      //
+      // Optimización: en lugar de `(cat.año * 100 + cat.numero_catorcena) BETWEEN ...`
+      // (expresión computada, NO usa índice), resolvemos las fechas reales
+      // del rango y usamos `sc.inicio_periodo BETWEEN fecha_ini AND fecha_fin`,
+      // que SÍ usa índice y reduce tiempo ~50-70%.
       const hasCatRange = !!(yearInicio && yearFin && catorcenaInicio && catorcenaFin);
-      const catRangeStart = hasCatRange ? parseInt(yearInicio) * 100 + parseInt(catorcenaInicio) : 0;
-      const catRangeEnd = hasCatRange ? parseInt(yearFin) * 100 + parseInt(catorcenaFin) : 999999;
-      const catWhereInv = hasCatRange
-        ? ` AND (cat.año * 100 + cat.numero_catorcena) BETWEEN ${catRangeStart} AND ${catRangeEnd}`
-        : '';
-      const filteredInvQuery = hasCatRange
+      let catWhereInv = '';
+      if (hasCatRange) {
+        const catRows = await prisma.$queryRawUnsafe<{ inicio: Date | string | null; fin: Date | string | null }[]>(`
+          SELECT
+            (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS inicio,
+            (SELECT fecha_fin    FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1) AS fin
+        `, parseInt(yearInicio), parseInt(catorcenaInicio), parseInt(yearFin), parseInt(catorcenaFin));
+        const r = catRows[0];
+        if (r?.inicio && r?.fin) {
+          const fmt = (d: Date | string): string => {
+            const dt = d instanceof Date ? d : new Date(d);
+            const yy = dt.getUTCFullYear();
+            const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(dt.getUTCDate()).padStart(2, '0');
+            return `${yy}-${mm}-${dd}`;
+          };
+          catWhereInv = ` AND sc.inicio_periodo BETWEEN '${fmt(r.inicio)}' AND '${fmt(r.fin)}'`;
+        }
+      }
+      const filteredInvQuery = catWhereInv
         ? invQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
         : invQuery;
-      const filteredCarasQuery = hasCatRange
+      const filteredCarasQuery = catWhereInv
         ? carasQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
         : carasQuery;
 
-      let propInfo: any, inventario: any, carasInfo: any;
+      let propInfo: any, inventario: any, carasInfo: any, resumenCatorcena: any;
       if (exportLayout) {
         const injectCatFilterInv = (sql: string) => sql; // ya está filtrado arriba
 
@@ -2416,37 +2516,46 @@ export class PropuestasController {
         const propInfoArr: any[] = [];
         const inventarioArr: any[] = [];
         const carasArr: any[] = [];
+        const resumenArr: any[] = [];
         for (let i = 0; i < propIds.length; i += BATCH_SIZE) {
           const batch = propIds.slice(i, i + BATCH_SIZE);
           const batchPh = batch.map(() => '?').join(',');
           const bPropQ = propInfoQuery.replace(`pr.id IN (${phIds})`, `pr.id IN (${batchPh})`);
           const bInvQ = injectCatFilterInv(filteredInvQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
           const bCarQ = injectCatFilterInv(filteredCarasQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
-          const [pi, inv, ci] = await Promise.all([
+          const bResQ = resumenCatorcenaQuery.replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const [pi, inv, ci, rc] = await Promise.all([
             prisma.$queryRawUnsafe<any[]>(bPropQ, ...batch),
             prisma.$queryRawUnsafe<any[]>(bInvQ, ...batch),
             prisma.$queryRawUnsafe<any[]>(bCarQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bResQ, ...batch),
           ]);
           propInfoArr.push(...pi);
           inventarioArr.push(...inv);
           carasArr.push(...ci);
+          resumenArr.push(...rc);
         }
         propInfo = propInfoArr;
         inventario = inventarioArr;
         carasInfo = carasArr;
+        resumenCatorcena = resumenArr;
       } else if (lite) {
-        propInfo = await Promise.race([
-          prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+        [propInfo, resumenCatorcena] = await Promise.race([
+          Promise.all([
+            prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+            prisma.$queryRawUnsafe(resumenCatorcenaQuery, ...propIds),
+          ]),
           timeoutPromise as never,
         ]);
         inventario = [];
         carasInfo = [];
       } else {
-        [propInfo, inventario, carasInfo] = await Promise.race([
+        [propInfo, inventario, carasInfo, resumenCatorcena] = await Promise.race([
           Promise.all([
             prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
             prisma.$queryRawUnsafe(filteredInvQuery, ...propIds),
             prisma.$queryRawUnsafe(filteredCarasQuery, ...propIds),
+            prisma.$queryRawUnsafe(resumenCatorcenaQuery, ...propIds),
           ]),
           timeoutPromise as never,
         ]);
@@ -2456,6 +2565,7 @@ export class PropuestasController {
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
+        resumenPorCatorcena: resumenCatorcena,
         total,
         page,
         limit,
@@ -2919,23 +3029,30 @@ export class PropuestasController {
             continue;
           }
 
-          const created = await prisma.reservas.create({
-            data: {
-              inventario_id: espacioId,
-              calendario_id: calendario.id,
-              cliente_id: clienteId,
-              solicitudCaras_id: solicitudCaraId,
-              estatus,
-              estatus_original: estatus,
-              arte_aprobado: 'Pendiente',
-              comentario_rechazo: '',
-              fecha_testigo: new Date(),
-              imagen_testigo: '',
-              instalado: false,
-              tarea: '',
-              grupo_completo_id: parseInt(grupoId),
-            },
-          });
+          // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
+          // de conflictos para evitar doble-booking en concurrencia (3 usuarios
+          // reservando el mismo espacio al mismo tiempo).
+          const lockResult = await createReservaConLock({
+            inventario_id: espacioId,
+            calendario_id: calendario.id,
+            cliente_id: clienteId,
+            solicitudCaras_id: solicitudCaraId,
+            estatus,
+            estatus_original: estatus,
+            arte_aprobado: 'Pendiente',
+            comentario_rechazo: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            grupo_completo_id: parseInt(grupoId),
+          }, fechaIni, fechaFinDate, proposalCaraIds);
+          if (!lockResult.ok) {
+            console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
+            reservasProcesadas++;
+            continue;
+          }
+          const created = lockResult.reserva;
 
           // Marcar espacio como usado para evitar duplicados en este request
           espaciosReservadosEnPeriodo.add(espacioId);
@@ -2988,23 +3105,27 @@ export class PropuestasController {
           continue;
         }
 
-        const created = await prisma.reservas.create({
-          data: {
-            inventario_id: espacioId,
-            calendario_id: calendario.id,
-            cliente_id: clienteId,
-            solicitudCaras_id: solicitudCaraId,
-            estatus,
-            estatus_original: estatus,
-            arte_aprobado: 'Pendiente',
-            comentario_rechazo: '',
-            fecha_testigo: new Date(),
-            imagen_testigo: '',
-            instalado: false,
-            tarea: '',
-            grupo_completo_id: null,
-          },
-        });
+        const lockResult = await createReservaConLock({
+          inventario_id: espacioId,
+          calendario_id: calendario.id,
+          cliente_id: clienteId,
+          solicitudCaras_id: solicitudCaraId,
+          estatus,
+          estatus_original: estatus,
+          arte_aprobado: 'Pendiente',
+          comentario_rechazo: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: null,
+        }, fechaIni, fechaFinDate, proposalCaraIds);
+        if (!lockResult.ok) {
+          console.warn(`[Race] espacio ${espacioId} fue reservado por otro usuario concurrentemente`);
+          reservasProcesadas++;
+          continue;
+        }
+        const created = lockResult.reserva;
 
         // Marcar espacio como usado para evitar duplicados en este request
         espaciosReservadosEnPeriodo.add(espacioId);
@@ -3176,15 +3297,15 @@ export class PropuestasController {
         where: { id: propuestaId, deleted_at: null },
       }) : null;
 
-      // Obtener info de reservas antes de eliminar para historial
+      // Obtener info de reservas antes de eliminar para historial + emit liberación
       const reservasInfo = await prisma.reservas.findMany({
         where: { id: { in: reservaIds } },
-        select: { id: true, solicitudCaras_id: true },
+        select: { id: true, solicitudCaras_id: true, inventario_id: true },
       });
       const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
       const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: caraIds as number[] } },
-        select: { id: true, articulo: true, formato: true },
+        select: { id: true, articulo: true, formato: true, inicio_periodo: true, fin_periodo: true },
       }) : [];
 
       // Soft delete reservas
@@ -3192,6 +3313,33 @@ export class PropuestasController {
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Emitir INVENTARIO_LIBERADO por cada espacio liberado (para que los
+      // buscadores en vivo lo agreguen a sus listas de disponibles).
+      const carasInfoMap = new Map(carasInfo.map(c => [c.id, c]));
+      const espaciosLiberados = [...new Set(reservasInfo.map(r => Number(r.inventario_id)).filter(e => e > 0))];
+      if (espaciosLiberados.length > 0) {
+        const invParents = await prisma.$queryRawUnsafe<{ id: number; inv_id: number | null }[]>(
+          `SELECT id, inventario_id AS inv_id FROM espacio_inventario WHERE id IN (${espaciosLiberados.map(() => '?').join(',')})`,
+          ...espaciosLiberados
+        );
+        const invIdByEspacio = new Map(invParents.map(p => [p.id, p.inv_id]));
+        for (const r of reservasInfo) {
+          const espacioId = Number(r.inventario_id);
+          if (!espacioId) continue;
+          const cara = r.solicitudCaras_id ? carasInfoMap.get(r.solicitudCaras_id) : null;
+          try {
+            emitToAll(SOCKET_EVENTS.INVENTARIO_LIBERADO, {
+              espacioId,
+              inventarioId: invIdByEspacio.get(espacioId) ?? null,
+              fechaInicio: cara?.inicio_periodo?.toISOString?.() ?? null,
+              fechaFin: cara?.fin_periodo?.toISOString?.() ?? null,
+            });
+          } catch (emitErr) {
+            console.error('Error emitiendo INVENTARIO_LIBERADO:', emitErr);
+          }
+        }
+      }
 
       // Registrar en historial
       if (propuestaId) {
@@ -3414,7 +3562,7 @@ export class PropuestasController {
       if (espaciosBloqueados.has(espacio.id)) {
         res.status(409).json({
           success: false,
-          error: 'Este inventario ya está reservado por otra campaña en el mismo período',
+          error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
         });
         return;
       }
@@ -3427,8 +3575,40 @@ export class PropuestasController {
 
       const estatus = (tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
 
-      const newReserva = await prisma.reservas.create({
-        data: {
+      // Fix flujo "quitar→regresar": antes de crear nueva reserva, buscar
+      // si existe una soft-deleted con mismos datos (inv+sc) y reactivarla.
+      // Antes este path creaba SIEMPRE una reserva nueva con id incremental,
+      // dejando fantasmas en BD cuando el usuario hacía toggle clic repetido.
+      const reservaPrevia = await prisma.reservas.findFirst({
+        where: {
+          inventario_id: espacio.id,
+          solicitudCaras_id: parseInt(solicitudCaraId),
+          deleted_at: { not: null },
+        },
+        orderBy: { id: 'desc' },
+      });
+
+      let newReserva: { id: number };
+      if (reservaPrevia) {
+        newReserva = await prisma.reservas.update({
+          where: { id: reservaPrevia.id },
+          data: {
+            deleted_at: null,
+            calendario_id: calendario.id,
+            cliente_id: clienteId,
+            estatus,
+            estatus_original: estatus,
+            arte_aprobado: 'Pendiente',
+            comentario_rechazo: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            APS: null,
+          },
+        });
+      } else {
+        const lockResult = await createReservaConLock({
           inventario_id: espacio.id,
           calendario_id: calendario.id,
           cliente_id: clienteId,
@@ -3442,8 +3622,16 @@ export class PropuestasController {
           instalado: false,
           tarea: '',
           grupo_completo_id: null,
-        },
-      });
+        }, new Date(fechaInicio), new Date(fechaFin), proposalCaraIdsToggle);
+        if (!lockResult.ok) {
+          res.status(409).json({
+            success: false,
+            error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
+          });
+          return;
+        }
+        newReserva = lockResult.reserva;
+      }
 
       // Simple implementation for "completo" logic if needed immediately:
       // If user selected a "Completo" item in frontend, frontend sends one request.

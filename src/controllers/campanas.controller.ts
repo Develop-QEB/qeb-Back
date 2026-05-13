@@ -11,7 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
-import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
@@ -5181,8 +5181,25 @@ export class CampanasController {
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
-          asignado: (tipo === 'Impresión') ? (responsableNombre || null) : (asignado || responsableNombre || null),
-          id_asignado: (tipo === 'Impresión') ? String(responsableId) : (id_asignado || String(responsableId)),
+          // Para Revisión de artes nunca fallbackear al creador — debe venir
+          // un diseñador del equipo. Si llega vacío es un error del front;
+          // dejamos NULL para que sea visible y no se autoasigne en silencio.
+          asignado: (tipo === 'Impresión')
+            ? (responsableNombre || null)
+            : (tipo === 'Revision de artes')
+              ? (asignado || null)
+              : (asignado || responsableNombre || null),
+          // Normalizar id_asignado eliminando espacios para que el filtro
+          // idAsignadoMatch del controlador de notificaciones sí matchee con
+          // contains/startsWith/endsWith por coma sin espacio.
+          id_asignado: ((): string | null => {
+            const raw = (tipo === 'Impresión')
+              ? String(responsableId)
+              : (tipo === 'Revision de artes')
+                ? (id_asignado || null)
+                : (id_asignado || String(responsableId));
+            return raw ? String(raw).replace(/\s+/g, '') : raw;
+          })(),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
@@ -6342,17 +6359,55 @@ export class CampanasController {
     try {
       const campanaId = parseInt(req.params.id);
       const { aps } = req.body as { aps: number[] };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       const current = await prisma.$queryRawUnsafe<any[]>(
         'SELECT posted_aps FROM campania WHERE id = ?', campanaId
       );
       const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
       const merged = Array.from(new Set([...existing, ...aps]));
+      // APS realmente nuevos (no estaban antes) — para no loggear no-ops.
+      const apsNuevos = (aps || []).filter(a => !existing.includes(a));
 
       await prisma.$queryRawUnsafe(
         'UPDATE campania SET posted_aps = ? WHERE id = ?',
         JSON.stringify(merged), campanaId
       );
+
+      // Registrar quién clickeó "POST" y qué APS marcó. ref_id usa propuesta_id
+      // (vía cotizacion) porque la pestaña "Historial" de la campaña filtra
+      // por ese id — si usamos campanaId, las entradas no se muestran.
+      if (apsNuevos.length > 0) {
+        const camp = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: { cotizacion_id: true },
+        });
+        let propuestaId: number | null = null;
+        if (camp?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({
+            where: { id: camp.cotizacion_id },
+            select: { id_propuesta: true },
+          });
+          propuestaId = cot?.id_propuesta ?? null;
+        }
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: propuestaId ?? campanaId,
+            accion: 'POST APS a SAP',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              campaniaId: campanaId,
+              apsPosteados: apsNuevos,
+              totalApsPosteados: apsNuevos.length,
+            }),
+          },
+        }).catch(err => console.error('Error guardando historial POST APS:', err));
+      }
+
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: merged });
       res.json({ success: true, posted_aps: merged });
     } catch (error) {
@@ -6365,6 +6420,8 @@ export class CampanasController {
     try {
       const campanaId = parseInt(req.params.id);
       const { aps } = req.body as { aps?: number[] };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
 
       const current = await prisma.$queryRawUnsafe<any[]>(
         'SELECT posted_aps FROM campania WHERE id = ?', campanaId
@@ -6375,11 +6432,45 @@ export class CampanasController {
       const remaining = aps && aps.length > 0
         ? existing.filter(id => !aps.includes(id))
         : [];
+      const apsQuitados = existing.filter(a => !remaining.includes(a));
 
       await prisma.$queryRawUnsafe(
         'UPDATE campania SET posted_aps = ? WHERE id = ?',
         JSON.stringify(remaining), campanaId
       );
+
+      if (apsQuitados.length > 0) {
+        // ref_id = propuesta_id (igual que el resto del historial de campañas;
+        // el tab Historial filtra por ese id).
+        const camp = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: { cotizacion_id: true },
+        });
+        let propuestaId: number | null = null;
+        if (camp?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({
+            where: { id: camp.cotizacion_id },
+            select: { id_propuesta: true },
+          });
+          propuestaId = cot?.id_propuesta ?? null;
+        }
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: propuestaId ?? campanaId,
+            accion: 'Cancelar POST APS',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              campaniaId: campanaId,
+              apsCancelados: apsQuitados,
+              totalApsCancelados: apsQuitados.length,
+            }),
+          },
+        }).catch(err => console.error('Error guardando historial cancel POST APS:', err));
+      }
+
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: remaining });
       res.json({ success: true, posted_aps: remaining });
     } catch (error) {
@@ -8043,6 +8134,55 @@ export class CampanasController {
           continue;
         }
 
+        // Fix dups PATSA-style: si ya existe reserva activa para este
+        // espacio + sc, NO crear otra. Antes este endpoint solo validaba contra
+        // otras campañas (getEspaciosBloqueados), no contra la misma sc.
+        // Eso permitía que dos llamadas seguidas (doble click, retry de red,
+        // o re-asignación tras quitar APS) crearan reservas duplicadas
+        // apuntando al mismo inv+sc — patrón PATSA-JAGUAR-PUMA, SALVO, NESPRESSO.
+        if (solicitudCaraId) {
+          const existingActiva = await prisma.reservas.findFirst({
+            where: {
+              inventario_id: espacioId,
+              solicitudCaras_id: solicitudCaraId,
+              deleted_at: null,
+            },
+          });
+          if (existingActiva) {
+            console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId} (rv=${existingActiva.id}), omitiendo`);
+            reservasOmitidas++;
+            continue;
+          }
+
+          // Si hay reserva soft-deleted previa con mismos datos, reactivarla
+          // en vez de crear nueva. Eso previene fantasmas y "filas huérfanas"
+          // del flujo quitar→regresar APS.
+          const softDeleted = await prisma.reservas.findFirst({
+            where: {
+              inventario_id: espacioId,
+              solicitudCaras_id: solicitudCaraId,
+              deleted_at: { not: null },
+            },
+            orderBy: { id: 'desc' },
+          });
+          if (softDeleted) {
+            await prisma.reservas.update({
+              where: { id: softDeleted.id },
+              data: {
+                deleted_at: null,
+                calendario_id: calendario.id,
+                cliente_id: clienteId || 0,
+                estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
+                estatus_original: '',
+                APS: null,
+              },
+            });
+            espaciosReservadosEnPeriodo.add(espacioId);
+            reservasCreadas++;
+            continue;
+          }
+        }
+
         // Determinar si necesita grupo completo
         let grupoCompletoId: number | null = null;
         if (agruparComoCompleto && reserva.tipo !== 'Bonificacion') {
@@ -8056,24 +8196,28 @@ export class CampanasController {
           grupoCompletoId = currentGroupId;
         }
 
-        // Crear la reserva
-        await prisma.reservas.create({
-          data: {
-            solicitudCaras_id: solicitudCaraId,
-            inventario_id: espacioId,
-            calendario_id: calendario.id,
-            cliente_id: clienteId || 0,
-            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
-            arte_aprobado: '',
-            comentario_rechazo: '',
-            estatus_original: '',
-            fecha_testigo: new Date(),
-            imagen_testigo: '',
-            instalado: false,
-            tarea: '',
-            grupo_completo_id: grupoCompletoId,
-          },
-        });
+        // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
+        // de conflictos para evitar doble-booking concurrente.
+        const lockResult = await createReservaConLock({
+          solicitudCaras_id: solicitudCaraId,
+          inventario_id: espacioId,
+          calendario_id: calendario.id,
+          cliente_id: clienteId || 0,
+          estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
+          arte_aprobado: '',
+          comentario_rechazo: '',
+          estatus_original: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: grupoCompletoId,
+        }, fechaIni, fechaFinDate);
+        if (!lockResult.ok) {
+          console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
+          reservasOmitidas++;
+          continue;
+        }
 
         // Marcar espacio como usado para evitar duplicados en este mismo request
         espaciosReservadosEnPeriodo.add(espacioId);
@@ -8109,7 +8253,7 @@ export class CampanasController {
         return;
       }
 
-      // Obtener info de reservas antes de eliminar para historial
+      // Obtener info de reservas antes de eliminar para historial + emit liberación
       const reservasInfo = await prisma.reservas.findMany({
         where: { id: { in: reservaIds } },
         select: { id: true, solicitudCaras_id: true, inventario_id: true, estatus: true },
@@ -8117,7 +8261,7 @@ export class CampanasController {
       const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
       const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: caraIds as number[] } },
-        select: { id: true, idquote: true, articulo: true, formato: true },
+        select: { id: true, idquote: true, articulo: true, formato: true, inicio_periodo: true, fin_periodo: true },
       }) : [];
 
       // Soft delete reservas
@@ -8125,6 +8269,32 @@ export class CampanasController {
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Emitir INVENTARIO_LIBERADO por cada espacio liberado
+      const carasInfoMap = new Map(carasInfo.map(c => [c.id, c]));
+      const espaciosLiberados = [...new Set(reservasInfo.map(r => Number(r.inventario_id)).filter(e => e > 0))];
+      if (espaciosLiberados.length > 0) {
+        const invParents = await prisma.$queryRawUnsafe<{ id: number; inv_id: number | null }[]>(
+          `SELECT id, inventario_id AS inv_id FROM espacio_inventario WHERE id IN (${espaciosLiberados.map(() => '?').join(',')})`,
+          ...espaciosLiberados
+        );
+        const invIdByEspacio = new Map(invParents.map(p => [p.id, p.inv_id]));
+        for (const r of reservasInfo) {
+          const espacioId = Number(r.inventario_id);
+          if (!espacioId) continue;
+          const cara = r.solicitudCaras_id ? carasInfoMap.get(r.solicitudCaras_id) : null;
+          try {
+            emitToAll(SOCKET_EVENTS.INVENTARIO_LIBERADO, {
+              espacioId,
+              inventarioId: invIdByEspacio.get(espacioId) ?? null,
+              fechaInicio: cara?.inicio_periodo?.toISOString?.() ?? null,
+              fechaFin: cara?.fin_periodo?.toISOString?.() ?? null,
+            });
+          } catch (emitErr) {
+            console.error('Error emitiendo INVENTARIO_LIBERADO:', emitErr);
+          }
+        }
+      }
 
       // Registrar en historial
       const campanaId = parseInt(req.params.id);

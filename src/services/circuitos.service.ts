@@ -178,9 +178,29 @@ export async function autoReservarCircuitoSiAplica(
   if (prefijo === 'BF' || prefijo === 'CF' || prefijo === 'CT' || params.esBf) estatus = 'Bonificado';
   else estatus = 'Vendido';
 
-  // 8. Crear las reservas en batch
+  // 8. Crear las reservas en batch. Anti-doble-booking concurrente:
+  //    SELECT ... FOR UPDATE sobre cada espacio antes de insertar serializa
+  //    intentos simultáneos sobre el mismo espacio. Si entre el check
+  //    de conflictos y el INSERT otro usuario tomó el espacio, re-check
+  //    detecta y aborta (lanza error que el caller debe manejar).
   const now = new Date();
   for (const r of aReservar) {
+    // Lock de fila sobre el espacio
+    await tx.$executeRawUnsafe('SELECT id FROM espacio_inventario WHERE id = ? FOR UPDATE', r.espacio_id);
+    // Re-check con período: ¿alguien más insertó una reserva activa en este
+    // espacio en el período pedido mientras esperábamos el lock?
+    const dup = await tx.$queryRawUnsafe<{ c: bigint }[]>(
+      `SELECT COUNT(*) c FROM reservas rv
+         INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
+         WHERE rv.inventario_id = ? AND rv.deleted_at IS NULL
+           AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+           AND sc.inicio_periodo <= ?
+           AND sc.fin_periodo >= ?`,
+      r.espacio_id, params.fechaFin, params.fechaInicio
+    );
+    if (Number(dup[0].c) > 0) {
+      throw new Error(`Conflicto de reserva: espacio ${r.espacio_id} ya está ocupado en el período`);
+    }
     await tx.reservas.create({
       data: {
         inventario_id: r.espacio_id, // Nota: reservas.inventario_id = espacio_inventario.id
