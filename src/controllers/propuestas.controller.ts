@@ -3723,34 +3723,20 @@ export class PropuestasController {
       let salesperson_code_final: number | undefined = salesperson_code != null ? Number(salesperson_code) : undefined;
       let sap_database_final: string | undefined = sap_database;
       if (cliente_id !== undefined) {
-        let clienteRow = await prisma.cliente.findFirst({
+        const clienteRow = await prisma.cliente.findFirst({
           where: { id: Number(cliente_id) },
           select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
-        if (!clienteRow) {
-          const cuicNum = Number(cuic ?? cliente_id);
-          if (Number.isFinite(cuicNum)) {
-            clienteRow = await prisma.cliente.findFirst({
-              where: {
-                CUIC: cuicNum,
-                T0_U_RazonSocial: { not: null },
-                ...(sap_database ? { sap_database } : {}),
-              },
-              select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
-            });
-          }
-        }
+        // No fallback por CUIC (CUIC se duplica). El front resuelve a cliente.id antes.
         if (clienteRow) {
           cliente_id_final = clienteRow.id;
           card_code_final = card_code_final ?? clienteRow.card_code ?? undefined;
           salesperson_code_final = salesperson_code_final ?? clienteRow.salesperson_code ?? undefined;
           sap_database_final = sap_database_final ?? clienteRow.sap_database ?? undefined;
         } else {
-          // cliente_id mandado no existe ni como id ni como CUIC. Rechazar para
-          // no guardar el CUIC silencioso (causa raíz del bug 317 campañas dañadas).
           res.status(400).json({
             success: false,
-            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente.`,
           });
           return;
         }
