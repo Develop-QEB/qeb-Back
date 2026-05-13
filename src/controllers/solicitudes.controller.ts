@@ -1858,31 +1858,19 @@ export class SolicitudesController {
           select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
       }
-      if (!clienteRow && cuic) {
-        const cuicNum = Number(cuic);
-        if (Number.isFinite(cuicNum)) {
-          clienteRow = await prisma.cliente.findFirst({
-            where: {
-              CUIC: cuicNum,
-              T0_U_RazonSocial: { not: null },
-              ...(sap_database ? { sap_database } : {}),
-            },
-            select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
-          });
-        }
-      }
+      // NO hacemos fallback por CUIC: CUIC se repite entre filas duplicadas de
+      // cliente (mismo CUIC, distintas sap_database). Esa búsqueda escogía un
+      // cliente aleatorio y causó 317 desalineaciones en prod. El front ahora
+      // resuelve a cliente.id antes de mandar (clientesService.resolveByCuic).
       if (clienteRow) {
         cliente_id_final = clienteRow.id;
         card_code_final = clienteRow.card_code ?? card_code_final;
         salesperson_code_final = clienteRow.salesperson_code ?? salesperson_code_final;
         sap_database_final = clienteRow.sap_database ?? sap_database_final;
       } else if (cliente_id) {
-        // cliente_id mandado por el front NO existe como cliente.id NI matchea CUIC.
-        // Antes se guardaba el CUIC silencioso (eso causó 317 campañas dañadas en prod).
-        // Rechazar para que el front mande el cliente.id correcto.
         res.status(400).json({
           success: false,
-          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente.`,
         });
         return;
       }
@@ -2996,30 +2984,16 @@ export class SolicitudesController {
           select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
       }
-      if (!clienteRowUpd && cuic) {
-        const cuicNum = Number(cuic);
-        if (Number.isFinite(cuicNum)) {
-          clienteRowUpd = await prisma.cliente.findFirst({
-            where: {
-              CUIC: cuicNum,
-              T0_U_RazonSocial: { not: null },
-              ...(sap_database_upd ? { sap_database: sap_database_upd } : {}),
-            },
-            select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
-          });
-        }
-      }
+      // No hacemos fallback por CUIC (puede duplicarse). El front resuelve a cliente.id antes.
       if (clienteRowUpd) {
         cliente_id_upd = clienteRowUpd.id;
         card_code_upd = clienteRowUpd.card_code ?? card_code_upd;
         salesperson_code_upd = clienteRowUpd.salesperson_code ?? salesperson_code_upd;
         sap_database_upd = clienteRowUpd.sap_database ?? sap_database_upd;
       } else if (cliente_id && Number(cliente_id) !== solicitud.cliente_id) {
-        // cliente_id mandado por el front NO existe como cliente.id NI matchea CUIC.
-        // Antes se guardaba el CUIC silencioso. Ahora rechaza.
         res.status(400).json({
           success: false,
-          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente.`,
         });
         return;
       }

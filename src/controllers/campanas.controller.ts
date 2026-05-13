@@ -1187,31 +1187,17 @@ export class CampanasController {
       // (el modal usa SAPCuicItem que sólo tiene CUIC). Resolvemos al cliente.id real.
       let cliente_id_final: number | null = cliente_id !== undefined ? Number(cliente_id) : null;
       if (cliente_id !== undefined) {
-        const idCandidato = Number(cliente_id);
-        let clienteRow = await prisma.cliente.findFirst({
-          where: { id: idCandidato },
+        const clienteRow = await prisma.cliente.findFirst({
+          where: { id: Number(cliente_id) },
           select: { id: true },
         });
-        if (!clienteRow) {
-          const cuicNum = Number(cuic ?? cliente_id);
-          if (Number.isFinite(cuicNum)) {
-            clienteRow = await prisma.cliente.findFirst({
-              where: {
-                CUIC: cuicNum,
-                T0_U_RazonSocial: { not: null },
-                ...(sap_database ? { sap_database } : {}),
-              },
-              select: { id: true },
-            });
-          }
-        }
+        // No fallback por CUIC (puede duplicarse). El front resuelve antes.
         if (clienteRow) {
           cliente_id_final = clienteRow.id;
         } else {
-          // cliente_id mandado no existe ni como id ni como CUIC. Rechazar.
           res.status(400).json({
             success: false,
-            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente.`,
           });
           return;
         }
