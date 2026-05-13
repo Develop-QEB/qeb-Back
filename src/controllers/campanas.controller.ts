@@ -1303,6 +1303,9 @@ export class CampanasController {
           data: {
             ...(fechaInicio && { fecha_inicio: fechaInicio }),
             ...(fechaFin && { fecha_fin: fechaFin }),
+            // Espejar nombre en cotizacion.nombre_campania para que el modal de
+            // propuestas (que lee de cotizacion) no muestre el valor viejo.
+            ...(nombre !== undefined && { nombre_campania: nombre }),
           },
         });
 
