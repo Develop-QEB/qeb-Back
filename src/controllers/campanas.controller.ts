@@ -6358,13 +6358,26 @@ export class CampanasController {
         JSON.stringify(merged), campanaId
       );
 
-      // Registrar quién clickeó "POST" y qué APS marcó. Antes no se guardaba
-      // (no había manera de auditar quién posteó qué grupo de APS).
+      // Registrar quién clickeó "POST" y qué APS marcó. ref_id usa propuesta_id
+      // (vía cotizacion) porque la pestaña "Historial" de la campaña filtra
+      // por ese id — si usamos campanaId, las entradas no se muestran.
       if (apsNuevos.length > 0) {
+        const camp = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: { cotizacion_id: true },
+        });
+        let propuestaId: number | null = null;
+        if (camp?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({
+            where: { id: camp.cotizacion_id },
+            select: { id_propuesta: true },
+          });
+          propuestaId = cot?.id_propuesta ?? null;
+        }
         await prisma.historial.create({
           data: {
             tipo: 'Campaña',
-            ref_id: campanaId,
+            ref_id: propuestaId ?? campanaId,
             accion: 'POST APS a SAP',
             fecha_hora: new Date(),
             detalles: JSON.stringify({
@@ -6410,10 +6423,24 @@ export class CampanasController {
       );
 
       if (apsQuitados.length > 0) {
+        // ref_id = propuesta_id (igual que el resto del historial de campañas;
+        // el tab Historial filtra por ese id).
+        const camp = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: { cotizacion_id: true },
+        });
+        let propuestaId: number | null = null;
+        if (camp?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({
+            where: { id: camp.cotizacion_id },
+            select: { id_propuesta: true },
+          });
+          propuestaId = cot?.id_propuesta ?? null;
+        }
         await prisma.historial.create({
           data: {
             tipo: 'Campaña',
-            ref_id: campanaId,
+            ref_id: propuestaId ?? campanaId,
             accion: 'Cancelar POST APS',
             fecha_hora: new Date(),
             detalles: JSON.stringify({
