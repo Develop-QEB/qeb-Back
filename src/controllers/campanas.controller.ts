@@ -1205,7 +1205,16 @@ export class CampanasController {
             });
           }
         }
-        if (clienteRow) cliente_id_final = clienteRow.id;
+        if (clienteRow) {
+          cliente_id_final = clienteRow.id;
+        } else {
+          // cliente_id mandado no existe ni como id ni como CUIC. Rechazar.
+          res.status(400).json({
+            success: false,
+            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+          });
+          return;
+        }
       }
 
       // Obtener fechas según tipo_periodo de la cotización (catorcena vs mensual)

@@ -3688,6 +3688,14 @@ export class PropuestasController {
           card_code_final = card_code_final ?? clienteRow.card_code ?? undefined;
           salesperson_code_final = salesperson_code_final ?? clienteRow.salesperson_code ?? undefined;
           sap_database_final = sap_database_final ?? clienteRow.sap_database ?? undefined;
+        } else {
+          // cliente_id mandado no existe ni como id ni como CUIC. Rechazar para
+          // no guardar el CUIC silencioso (causa raíz del bug 317 campañas dañadas).
+          res.status(400).json({
+            success: false,
+            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+          });
+          return;
         }
       }
 

@@ -1876,6 +1876,15 @@ export class SolicitudesController {
         card_code_final = clienteRow.card_code ?? card_code_final;
         salesperson_code_final = clienteRow.salesperson_code ?? salesperson_code_final;
         sap_database_final = clienteRow.sap_database ?? sap_database_final;
+      } else if (cliente_id) {
+        // cliente_id mandado por el front NO existe como cliente.id NI matchea CUIC.
+        // Antes se guardaba el CUIC silencioso (eso causó 317 campañas dañadas en prod).
+        // Rechazar para que el front mande el cliente.id correcto.
+        res.status(400).json({
+          success: false,
+          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+        });
+        return;
       }
 
       // Use transaction for complex creation with extended timeout
@@ -1953,7 +1962,10 @@ export class SolicitudesController {
             fecha_fin: new Date(fecha_fin),
             frontal: caras.reduce((acc: number, c: { caras_flujo: number }) => acc + (c.caras_flujo || 0), 0),
             cruzada: caras.reduce((acc: number, c: { caras_contraflujo: number }) => acc + (c.caras_contraflujo || 0), 0),
-            nivel_socioeconomico: caras.map((c: { nivel_socioeconomico: string }) => c.nivel_socioeconomico).join(','),
+            // Deduplicar NSE — antes concatenaba 1 por cada cara y propuestas con
+            // muchas caras pasaban el límite → error P2000. Columna ya es TEXT
+            // pero seguimos dedupeando para no inflar la BD con valores redundantes.
+            nivel_socioeconomico: [...new Set(caras.map((c: { nivel_socioeconomico: string }) => (c.nivel_socioeconomico || '').trim()).filter(Boolean))].join(','),
             observaciones: notas || '',
             bonificacion: totalBonificacion,
             descuento: 0,
@@ -3002,6 +3014,14 @@ export class SolicitudesController {
         card_code_upd = clienteRowUpd.card_code ?? card_code_upd;
         salesperson_code_upd = clienteRowUpd.salesperson_code ?? salesperson_code_upd;
         sap_database_upd = clienteRowUpd.sap_database ?? sap_database_upd;
+      } else if (cliente_id && Number(cliente_id) !== solicitud.cliente_id) {
+        // cliente_id mandado por el front NO existe como cliente.id NI matchea CUIC.
+        // Antes se guardaba el CUIC silencioso. Ahora rechaza.
+        res.status(400).json({
+          success: false,
+          error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente, no un CUIC.`,
+        });
+        return;
       }
 
       // Get existing propuesta
@@ -3079,7 +3099,10 @@ export class SolicitudesController {
               fecha_fin: new Date(fecha_fin),
               frontal: caras.reduce((acc: number, c: { caras_flujo: number }) => acc + (c.caras_flujo || 0), 0),
               cruzada: caras.reduce((acc: number, c: { caras_contraflujo: number }) => acc + (c.caras_contraflujo || 0), 0),
-              nivel_socioeconomico: caras.map((c: { nivel_socioeconomico: string }) => c.nivel_socioeconomico).join(','),
+              // Deduplicar NSE — antes concatenaba 1 por cada cara y propuestas con
+            // muchas caras pasaban el límite → error P2000. Columna ya es TEXT
+            // pero seguimos dedupeando para no inflar la BD con valores redundantes.
+            nivel_socioeconomico: [...new Set(caras.map((c: { nivel_socioeconomico: string }) => (c.nivel_socioeconomico || '').trim()).filter(Boolean))].join(','),
               observaciones: notas || '',
               bonificacion: totalBonificacion,
               precio: totalInversion,
