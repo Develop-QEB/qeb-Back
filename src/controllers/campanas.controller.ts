@@ -5190,8 +5190,25 @@ export class CampanasController {
           fecha_fin: fechaFinFinal,
           id_responsable: responsableId,
           responsable: responsableNombre || null,
-          asignado: (tipo === 'Impresión') ? (responsableNombre || null) : (asignado || responsableNombre || null),
-          id_asignado: (tipo === 'Impresión') ? String(responsableId) : (id_asignado || String(responsableId)),
+          // Para Revisión de artes nunca fallbackear al creador — debe venir
+          // un diseñador del equipo. Si llega vacío es un error del front;
+          // dejamos NULL para que sea visible y no se autoasigne en silencio.
+          asignado: (tipo === 'Impresión')
+            ? (responsableNombre || null)
+            : (tipo === 'Revision de artes')
+              ? (asignado || null)
+              : (asignado || responsableNombre || null),
+          // Normalizar id_asignado eliminando espacios para que el filtro
+          // idAsignadoMatch del controlador de notificaciones sí matchee con
+          // contains/startsWith/endsWith por coma sin espacio.
+          id_asignado: ((): string | null => {
+            const raw = (tipo === 'Impresión')
+              ? String(responsableId)
+              : (tipo === 'Revision de artes')
+                ? (id_asignado || null)
+                : (id_asignado || String(responsableId));
+            return raw ? String(raw).replace(/\s+/g, '') : raw;
+          })(),
           id_solicitud: solicitudId,
           id_propuesta: propuestaId,
           campania_id: campanaId,
