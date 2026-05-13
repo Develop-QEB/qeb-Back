@@ -3803,6 +3803,18 @@ export class PropuestasController {
           where: { id_propuesta: parseInt(id) },
           data: { nombre_campania },
         });
+        // Espejar en campania.nombre: el listado de propuestas y el de
+        // campañas leen cm.nombre, no ct.nombre_campania.
+        const cotForCampania = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: parseInt(id) },
+          select: { id: true },
+        });
+        if (cotForCampania) {
+          await prisma.campania.updateMany({
+            where: { cotizacion_id: cotForCampania.id },
+            data: { nombre: nombre_campania },
+          });
+        }
       }
 
       // Update campania dates if provided
