@@ -11,7 +11,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
-import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
@@ -8152,24 +8152,28 @@ export class CampanasController {
           grupoCompletoId = currentGroupId;
         }
 
-        // Crear la reserva
-        await prisma.reservas.create({
-          data: {
-            solicitudCaras_id: solicitudCaraId,
-            inventario_id: espacioId,
-            calendario_id: calendario.id,
-            cliente_id: clienteId || 0,
-            estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
-            arte_aprobado: '',
-            comentario_rechazo: '',
-            estatus_original: '',
-            fecha_testigo: new Date(),
-            imagen_testigo: '',
-            instalado: false,
-            tarea: '',
-            grupo_completo_id: grupoCompletoId,
-          },
-        });
+        // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
+        // de conflictos para evitar doble-booking concurrente.
+        const lockResult = await createReservaConLock({
+          solicitudCaras_id: solicitudCaraId,
+          inventario_id: espacioId,
+          calendario_id: calendario.id,
+          cliente_id: clienteId || 0,
+          estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
+          arte_aprobado: '',
+          comentario_rechazo: '',
+          estatus_original: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: grupoCompletoId,
+        }, fechaIni, fechaFinDate);
+        if (!lockResult.ok) {
+          console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
+          reservasOmitidas++;
+          continue;
+        }
 
         // Marcar espacio como usado para evitar duplicados en este mismo request
         espaciosReservadosEnPeriodo.add(espacioId);
@@ -8205,7 +8209,7 @@ export class CampanasController {
         return;
       }
 
-      // Obtener info de reservas antes de eliminar para historial
+      // Obtener info de reservas antes de eliminar para historial + emit liberación
       const reservasInfo = await prisma.reservas.findMany({
         where: { id: { in: reservaIds } },
         select: { id: true, solicitudCaras_id: true, inventario_id: true, estatus: true },
@@ -8213,7 +8217,7 @@ export class CampanasController {
       const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
       const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: caraIds as number[] } },
-        select: { id: true, idquote: true, articulo: true, formato: true },
+        select: { id: true, idquote: true, articulo: true, formato: true, inicio_periodo: true, fin_periodo: true },
       }) : [];
 
       // Soft delete reservas
@@ -8221,6 +8225,32 @@ export class CampanasController {
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Emitir INVENTARIO_LIBERADO por cada espacio liberado
+      const carasInfoMap = new Map(carasInfo.map(c => [c.id, c]));
+      const espaciosLiberados = [...new Set(reservasInfo.map(r => Number(r.inventario_id)).filter(e => e > 0))];
+      if (espaciosLiberados.length > 0) {
+        const invParents = await prisma.$queryRawUnsafe<{ id: number; inv_id: number | null }[]>(
+          `SELECT id, inventario_id AS inv_id FROM espacio_inventario WHERE id IN (${espaciosLiberados.map(() => '?').join(',')})`,
+          ...espaciosLiberados
+        );
+        const invIdByEspacio = new Map(invParents.map(p => [p.id, p.inv_id]));
+        for (const r of reservasInfo) {
+          const espacioId = Number(r.inventario_id);
+          if (!espacioId) continue;
+          const cara = r.solicitudCaras_id ? carasInfoMap.get(r.solicitudCaras_id) : null;
+          try {
+            emitToAll(SOCKET_EVENTS.INVENTARIO_LIBERADO, {
+              espacioId,
+              inventarioId: invIdByEspacio.get(espacioId) ?? null,
+              fechaInicio: cara?.inicio_periodo?.toISOString?.() ?? null,
+              fechaFin: cara?.fin_periodo?.toISOString?.() ?? null,
+            });
+          } catch (emitErr) {
+            console.error('Error emitiendo INVENTARIO_LIBERADO:', emitErr);
+          }
+        }
+      }
 
       // Registrar en historial
       const campanaId = parseInt(req.params.id);

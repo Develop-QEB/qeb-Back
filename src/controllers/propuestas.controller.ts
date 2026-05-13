@@ -8,7 +8,7 @@ import {
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
-import { getEspaciosBloqueados } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
@@ -2938,23 +2938,30 @@ export class PropuestasController {
             continue;
           }
 
-          const created = await prisma.reservas.create({
-            data: {
-              inventario_id: espacioId,
-              calendario_id: calendario.id,
-              cliente_id: clienteId,
-              solicitudCaras_id: solicitudCaraId,
-              estatus,
-              estatus_original: estatus,
-              arte_aprobado: 'Pendiente',
-              comentario_rechazo: '',
-              fecha_testigo: new Date(),
-              imagen_testigo: '',
-              instalado: false,
-              tarea: '',
-              grupo_completo_id: parseInt(grupoId),
-            },
-          });
+          // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
+          // de conflictos para evitar doble-booking en concurrencia (3 usuarios
+          // reservando el mismo espacio al mismo tiempo).
+          const lockResult = await createReservaConLock({
+            inventario_id: espacioId,
+            calendario_id: calendario.id,
+            cliente_id: clienteId,
+            solicitudCaras_id: solicitudCaraId,
+            estatus,
+            estatus_original: estatus,
+            arte_aprobado: 'Pendiente',
+            comentario_rechazo: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            grupo_completo_id: parseInt(grupoId),
+          }, fechaIni, fechaFinDate, proposalCaraIds);
+          if (!lockResult.ok) {
+            console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
+            reservasProcesadas++;
+            continue;
+          }
+          const created = lockResult.reserva;
 
           // Marcar espacio como usado para evitar duplicados en este request
           espaciosReservadosEnPeriodo.add(espacioId);
@@ -3007,23 +3014,27 @@ export class PropuestasController {
           continue;
         }
 
-        const created = await prisma.reservas.create({
-          data: {
-            inventario_id: espacioId,
-            calendario_id: calendario.id,
-            cliente_id: clienteId,
-            solicitudCaras_id: solicitudCaraId,
-            estatus,
-            estatus_original: estatus,
-            arte_aprobado: 'Pendiente',
-            comentario_rechazo: '',
-            fecha_testigo: new Date(),
-            imagen_testigo: '',
-            instalado: false,
-            tarea: '',
-            grupo_completo_id: null,
-          },
-        });
+        const lockResult = await createReservaConLock({
+          inventario_id: espacioId,
+          calendario_id: calendario.id,
+          cliente_id: clienteId,
+          solicitudCaras_id: solicitudCaraId,
+          estatus,
+          estatus_original: estatus,
+          arte_aprobado: 'Pendiente',
+          comentario_rechazo: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: null,
+        }, fechaIni, fechaFinDate, proposalCaraIds);
+        if (!lockResult.ok) {
+          console.warn(`[Race] espacio ${espacioId} fue reservado por otro usuario concurrentemente`);
+          reservasProcesadas++;
+          continue;
+        }
+        const created = lockResult.reserva;
 
         // Marcar espacio como usado para evitar duplicados en este request
         espaciosReservadosEnPeriodo.add(espacioId);
@@ -3195,15 +3206,15 @@ export class PropuestasController {
         where: { id: propuestaId, deleted_at: null },
       }) : null;
 
-      // Obtener info de reservas antes de eliminar para historial
+      // Obtener info de reservas antes de eliminar para historial + emit liberación
       const reservasInfo = await prisma.reservas.findMany({
         where: { id: { in: reservaIds } },
-        select: { id: true, solicitudCaras_id: true },
+        select: { id: true, solicitudCaras_id: true, inventario_id: true },
       });
       const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
       const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: caraIds as number[] } },
-        select: { id: true, articulo: true, formato: true },
+        select: { id: true, articulo: true, formato: true, inicio_periodo: true, fin_periodo: true },
       }) : [];
 
       // Soft delete reservas
@@ -3211,6 +3222,33 @@ export class PropuestasController {
         where: { id: { in: reservaIds } },
         data: { deleted_at: new Date() },
       });
+
+      // Emitir INVENTARIO_LIBERADO por cada espacio liberado (para que los
+      // buscadores en vivo lo agreguen a sus listas de disponibles).
+      const carasInfoMap = new Map(carasInfo.map(c => [c.id, c]));
+      const espaciosLiberados = [...new Set(reservasInfo.map(r => Number(r.inventario_id)).filter(e => e > 0))];
+      if (espaciosLiberados.length > 0) {
+        const invParents = await prisma.$queryRawUnsafe<{ id: number; inv_id: number | null }[]>(
+          `SELECT id, inventario_id AS inv_id FROM espacio_inventario WHERE id IN (${espaciosLiberados.map(() => '?').join(',')})`,
+          ...espaciosLiberados
+        );
+        const invIdByEspacio = new Map(invParents.map(p => [p.id, p.inv_id]));
+        for (const r of reservasInfo) {
+          const espacioId = Number(r.inventario_id);
+          if (!espacioId) continue;
+          const cara = r.solicitudCaras_id ? carasInfoMap.get(r.solicitudCaras_id) : null;
+          try {
+            emitToAll(SOCKET_EVENTS.INVENTARIO_LIBERADO, {
+              espacioId,
+              inventarioId: invIdByEspacio.get(espacioId) ?? null,
+              fechaInicio: cara?.inicio_periodo?.toISOString?.() ?? null,
+              fechaFin: cara?.fin_periodo?.toISOString?.() ?? null,
+            });
+          } catch (emitErr) {
+            console.error('Error emitiendo INVENTARIO_LIBERADO:', emitErr);
+          }
+        }
+      }
 
       // Registrar en historial
       if (propuestaId) {
@@ -3433,7 +3471,7 @@ export class PropuestasController {
       if (espaciosBloqueados.has(espacio.id)) {
         res.status(409).json({
           success: false,
-          error: 'Este inventario ya está reservado por otra campaña en el mismo período',
+          error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
         });
         return;
       }
@@ -3459,41 +3497,50 @@ export class PropuestasController {
         orderBy: { id: 'desc' },
       });
 
-      const newReserva = reservaPrevia
-        ? await prisma.reservas.update({
-            where: { id: reservaPrevia.id },
-            data: {
-              deleted_at: null,
-              calendario_id: calendario.id,
-              cliente_id: clienteId,
-              estatus,
-              estatus_original: estatus,
-              arte_aprobado: 'Pendiente',
-              comentario_rechazo: '',
-              fecha_testigo: new Date(),
-              imagen_testigo: '',
-              instalado: false,
-              tarea: '',
-              APS: null,
-            },
-          })
-        : await prisma.reservas.create({
-            data: {
-              inventario_id: espacio.id,
-              calendario_id: calendario.id,
-              cliente_id: clienteId,
-              solicitudCaras_id: solicitudCaraId,
-              estatus,
-              estatus_original: estatus,
-              arte_aprobado: 'Pendiente',
-              comentario_rechazo: '',
-              fecha_testigo: new Date(),
-              imagen_testigo: '',
-              instalado: false,
-              tarea: '',
-              grupo_completo_id: null,
-            },
+      let newReserva: { id: number };
+      if (reservaPrevia) {
+        newReserva = await prisma.reservas.update({
+          where: { id: reservaPrevia.id },
+          data: {
+            deleted_at: null,
+            calendario_id: calendario.id,
+            cliente_id: clienteId,
+            estatus,
+            estatus_original: estatus,
+            arte_aprobado: 'Pendiente',
+            comentario_rechazo: '',
+            fecha_testigo: new Date(),
+            imagen_testigo: '',
+            instalado: false,
+            tarea: '',
+            APS: null,
+          },
+        });
+      } else {
+        const lockResult = await createReservaConLock({
+          inventario_id: espacio.id,
+          calendario_id: calendario.id,
+          cliente_id: clienteId,
+          solicitudCaras_id: solicitudCaraId,
+          estatus,
+          estatus_original: estatus,
+          arte_aprobado: 'Pendiente',
+          comentario_rechazo: '',
+          fecha_testigo: new Date(),
+          imagen_testigo: '',
+          instalado: false,
+          tarea: '',
+          grupo_completo_id: null,
+        }, new Date(fechaInicio), new Date(fechaFin), proposalCaraIdsToggle);
+        if (!lockResult.ok) {
+          res.status(409).json({
+            success: false,
+            error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
           });
+          return;
+        }
+        newReserva = lockResult.reserva;
+      }
 
       // Simple implementation for "completo" logic if needed immediately:
       // If user selected a "Completo" item in frontend, frontend sends one request.

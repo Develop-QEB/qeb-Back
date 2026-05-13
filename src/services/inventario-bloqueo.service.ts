@@ -29,6 +29,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../utils/prisma';
+import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 // Estatus que IMPIDEN reusar un espacio físico tradicional en el mismo período.
 // IMPORTANTE: alinear con `getDisponibles` en inventarios.controller.ts — si
@@ -107,4 +108,97 @@ export async function getEspaciosBloqueados(
   return new Set(
     espacioIdsExistentes.filter(id => !digitalEspacioIds.has(id))
   );
+}
+
+/**
+ * Crea una reserva con protección anti-doble-booking concurrente.
+ *
+ * Antes el flujo era: leer espaciosBloqueados → check in-memory → INSERT.
+ * Eso permitía que 3 usuarios simultáneos pasaran el check al mismo tiempo
+ * (cada uno con su snapshot) y los 3 inserts triunfaran → triple booking.
+ *
+ * Ahora: dentro de una transacción se hace `SELECT ... FOR UPDATE` sobre
+ * el `espacio_inventario` específico — esto serializa intentos concurrentes
+ * sobre el mismo espacio. Después se re-chequea si alguien ya tomó el
+ * espacio para el período pedido; si no, INSERT. Si sí, retorna OCCUPIED.
+ *
+ * Digital se considera infinito (no chequea conflicto).
+ */
+export async function createReservaConLock(
+  data: Prisma.reservasUncheckedCreateInput,
+  fechaInicio: Date,
+  fechaFin: Date,
+  excludeCaraIds?: number[],
+): Promise<{ ok: true; reserva: { id: number } } | { ok: false; reason: 'OCCUPIED' }> {
+  const espacioId = Number(data.inventario_id);
+  try {
+    const reserva = await defaultPrisma.$transaction(async (tx) => {
+      // Lock de fila sobre el espacio. Concurrentes en mismo espacio esperan.
+      await tx.$executeRawUnsafe('SELECT id FROM espacio_inventario WHERE id = ? FOR UPDATE', espacioId);
+
+      // Si el inventario es Digital, no aplica conflicto (es infinito).
+      const invRow = await tx.$queryRawUnsafe<{ td: string | null }[]>(
+        `SELECT i.tradicional_digital AS td
+         FROM espacio_inventario ei
+         INNER JOIN inventarios i ON i.id = ei.inventario_id
+         WHERE ei.id = ? LIMIT 1`,
+        espacioId
+      );
+      const isDigital = invRow[0]?.td === 'Digital';
+
+      if (!isDigital) {
+        const excludeFilter = excludeCaraIds && excludeCaraIds.length > 0
+          ? `AND rv.solicitudCaras_id NOT IN (${excludeCaraIds.map(() => '?').join(',')})`
+          : '';
+        const conflict = await tx.$queryRawUnsafe<{ c: bigint }[]>(
+          `SELECT COUNT(*) c FROM reservas rv
+           INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
+           WHERE rv.inventario_id = ?
+             AND rv.deleted_at IS NULL
+             AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+             AND sc.inicio_periodo <= ?
+             AND sc.fin_periodo >= ?
+             ${excludeFilter}`,
+          espacioId, fechaFin, fechaInicio, ...(excludeCaraIds || [])
+        );
+        if (Number(conflict[0].c) > 0) {
+          throw new Error('ESPACIO_OCUPADO');
+        }
+      }
+
+      const created = await tx.reservas.create({ data, select: { id: true } });
+
+      // Para el evento socket: obtener el inventarios.id padre del espacio.
+      const invParentRow = await tx.$queryRawUnsafe<{ inv_id: number | null }[]>(
+        `SELECT inventario_id AS inv_id FROM espacio_inventario WHERE id = ? LIMIT 1`,
+        espacioId
+      );
+
+      return {
+        reserva: created,
+        invId: invParentRow[0]?.inv_id ?? null,
+      };
+    }, { timeout: 10000 });
+
+    // Emitir evento real-time para que otros buscadores de inventario en
+    // vivo quiten este espacio de su listado de disponibles.
+    // Se hace fuera de la transacción para no bloquear el commit.
+    try {
+      emitToAll(SOCKET_EVENTS.INVENTARIO_OCUPADO, {
+        espacioId,
+        inventarioId: reserva.invId,
+        fechaInicio: fechaInicio.toISOString(),
+        fechaFin: fechaFin.toISOString(),
+      });
+    } catch (emitErr) {
+      console.error('Error emitiendo INVENTARIO_OCUPADO:', emitErr);
+    }
+
+    return { ok: true, reserva: reserva.reserva };
+  } catch (err) {
+    if ((err as Error).message === 'ESPACIO_OCUPADO') {
+      return { ok: false, reason: 'OCCUPIED' };
+    }
+    throw err;
+  }
 }

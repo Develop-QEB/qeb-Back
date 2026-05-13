@@ -250,6 +250,10 @@ export const SOCKET_EVENTS = {
   INVENTARIO_ACTUALIZADO: 'inventario:actualizado',
   INVENTARIO_CREADO: 'inventario:creado',
   INVENTARIO_ELIMINADO: 'inventario:eliminado',
+  // Real-time: cuando alguien reserva/libera un espacio, los demás
+  // usuarios con buscadores de inventario abiertos ven el cambio en vivo.
+  INVENTARIO_OCUPADO: 'inventario:ocupado',
+  INVENTARIO_LIBERADO: 'inventario:liberado',
 
   // Reservas y Propuestas
   RESERVA_CREADA: 'reserva:creada',
