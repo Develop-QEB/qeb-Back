@@ -2199,6 +2199,7 @@ export class PropuestasController {
         inventarios: [] as any[],
         propuestasInfo: [] as any[],
         carasInfo: [] as any[],
+        resumenPorCatorcena: [] as any[],
         total: 0,
         page,
         limit,
@@ -2353,11 +2354,34 @@ export class PropuestasController {
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
+      // 4b. Resumen ligero por (propuesta, catorcena) — barato y siempre
+      // disponible. Sirve para que el front muestre los badges
+      // (Circuitos/Caras/Bonif/Tarifa/Inversión) a nivel propuesta antes de
+      // expandir, ya filtrados por la catorcena del bucket. La inversión por
+      // catorcena se calcula sumando sc.costo de las caras de esa catorcena.
+      const resumenCatorcenaQuery = `
+        SELECT
+          ct.id_propuesta AS propuesta_id,
+          cat.numero_catorcena,
+          cat.año AS anio_catorcena,
+          COUNT(*) AS circuitos_count,
+          COALESCE(SUM(sc.caras + sc.bonificacion), 0) AS caras_total,
+          COALESCE(SUM(sc.bonificacion), 0) AS bonif_total,
+          MAX(sc.tarifa_publica) AS tarifa_representativa,
+          COALESCE(SUM(sc.costo), 0) AS inversion_catorcena
+        FROM solicitudCaras sc
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE ct.id_propuesta IN (${phIds})
+        GROUP BY ct.id_propuesta, cat.numero_catorcena, cat.año
+      `;
+
       // 4. Caras info per propuesta (join through cotizacion + LEFT JOIN reservas to avoid correlated subquery)
       const carasQuery = `
         SELECT
           ct.id_propuesta AS propuesta_id,
           sc.id AS sc_id, sc.articulo, sc.ciudad, sc.formato,
+          sc.tarifa_publica,
           sc.caras AS caras_solicitadas, sc.bonificacion,
           (sc.caras + sc.bonificacion) AS caras_esperadas,
           COUNT(r2.id) AS reservas_count,
@@ -2368,7 +2392,7 @@ export class PropuestasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
         GROUP BY ct.id_propuesta, sc.id, sc.articulo, sc.ciudad, sc.formato,
-                 sc.caras, sc.bonificacion, cat.numero_catorcena, cat.año
+                 sc.tarifa_publica, sc.caras, sc.bonificacion, cat.numero_catorcena, cat.año
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
@@ -2426,7 +2450,7 @@ export class PropuestasController {
         ? carasQuery.replace(`WHERE ct.id_propuesta IN (${phIds})`, `WHERE ct.id_propuesta IN (${phIds})${catWhereInv}`)
         : carasQuery;
 
-      let propInfo: any, inventario: any, carasInfo: any;
+      let propInfo: any, inventario: any, carasInfo: any, resumenCatorcena: any;
       if (exportLayout) {
         const injectCatFilterInv = (sql: string) => sql; // ya está filtrado arriba
 
@@ -2435,37 +2459,46 @@ export class PropuestasController {
         const propInfoArr: any[] = [];
         const inventarioArr: any[] = [];
         const carasArr: any[] = [];
+        const resumenArr: any[] = [];
         for (let i = 0; i < propIds.length; i += BATCH_SIZE) {
           const batch = propIds.slice(i, i + BATCH_SIZE);
           const batchPh = batch.map(() => '?').join(',');
           const bPropQ = propInfoQuery.replace(`pr.id IN (${phIds})`, `pr.id IN (${batchPh})`);
           const bInvQ = injectCatFilterInv(filteredInvQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
           const bCarQ = injectCatFilterInv(filteredCarasQuery).replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
-          const [pi, inv, ci] = await Promise.all([
+          const bResQ = resumenCatorcenaQuery.replace(`ct.id_propuesta IN (${phIds})`, `ct.id_propuesta IN (${batchPh})`);
+          const [pi, inv, ci, rc] = await Promise.all([
             prisma.$queryRawUnsafe<any[]>(bPropQ, ...batch),
             prisma.$queryRawUnsafe<any[]>(bInvQ, ...batch),
             prisma.$queryRawUnsafe<any[]>(bCarQ, ...batch),
+            prisma.$queryRawUnsafe<any[]>(bResQ, ...batch),
           ]);
           propInfoArr.push(...pi);
           inventarioArr.push(...inv);
           carasArr.push(...ci);
+          resumenArr.push(...rc);
         }
         propInfo = propInfoArr;
         inventario = inventarioArr;
         carasInfo = carasArr;
+        resumenCatorcena = resumenArr;
       } else if (lite) {
-        propInfo = await Promise.race([
-          prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+        [propInfo, resumenCatorcena] = await Promise.race([
+          Promise.all([
+            prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
+            prisma.$queryRawUnsafe(resumenCatorcenaQuery, ...propIds),
+          ]),
           timeoutPromise as never,
         ]);
         inventario = [];
         carasInfo = [];
       } else {
-        [propInfo, inventario, carasInfo] = await Promise.race([
+        [propInfo, inventario, carasInfo, resumenCatorcena] = await Promise.race([
           Promise.all([
             prisma.$queryRawUnsafe(propInfoQuery, ...propIds),
             prisma.$queryRawUnsafe(filteredInvQuery, ...propIds),
             prisma.$queryRawUnsafe(filteredCarasQuery, ...propIds),
+            prisma.$queryRawUnsafe(resumenCatorcenaQuery, ...propIds),
           ]),
           timeoutPromise as never,
         ]);
@@ -2475,6 +2508,7 @@ export class PropuestasController {
         inventarios: inventario,
         propuestasInfo: propInfo,
         carasInfo: carasInfo,
+        resumenPorCatorcena: resumenCatorcena,
         total,
         page,
         limit,
