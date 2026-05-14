@@ -1166,6 +1166,17 @@ export class CampanasController {
         marca_nombre,
         asesor,
         sap_database,
+        // Campos derivados del cliente que el front puede mandar (opcionales).
+        // Si no vienen, se rellenan desde la tabla `cliente` con el cliente_id resuelto.
+        card_code,
+        salesperson_code,
+        unidad_negocio,
+        marca_id,
+        producto_id,
+        producto_nombre,
+        agencia,
+        categoria_id,
+        categoria_nombre,
       } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
@@ -1183,17 +1194,27 @@ export class CampanasController {
         return;
       }
 
-      // Remapeo cliente_id: el front a veces manda CUIC en lugar del id interno
-      // (el modal usa SAPCuicItem que sólo tiene CUIC). Resolvemos al cliente.id real.
+      // Resolver cliente_id y derivar card_code/salesperson_code/sap_database desde la
+      // tabla `cliente` cuando viene un cliente_id (caso: usuario cambia CUIC en la
+      // campaña). Sin esto, solicitud.card_code se quedaba con el card_code del
+      // cliente anterior — y el post a SAP terminaba mandando el cardcode mal.
+      // Mismo patrón que propuestas.controller (línea ~3725).
       let cliente_id_final: number | null = cliente_id !== undefined ? Number(cliente_id) : null;
+      let card_code_final: string | null = card_code ?? null;
+      let salesperson_code_final: number | null = salesperson_code != null ? Number(salesperson_code) : null;
+      let sap_database_final: string | null = sap_database ?? null;
+      let clienteRow: { id: number; card_code: string | null; salesperson_code: number | null; sap_database: string | null } | null = null;
       if (cliente_id !== undefined) {
-        const clienteRow = await prisma.cliente.findFirst({
+        clienteRow = await prisma.cliente.findFirst({
           where: { id: Number(cliente_id) },
-          select: { id: true },
+          select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
         // No fallback por CUIC (puede duplicarse). El front resuelve antes.
         if (clienteRow) {
           cliente_id_final = clienteRow.id;
+          card_code_final = card_code_final ?? clienteRow.card_code ?? null;
+          salesperson_code_final = salesperson_code_final ?? clienteRow.salesperson_code ?? null;
+          sap_database_final = sap_database_final ?? clienteRow.sap_database ?? null;
         } else {
           res.status(400).json({
             success: false,
@@ -1253,7 +1274,10 @@ export class CampanasController {
             where: { id: cotizacion.id_propuesta },
           });
 
-          // 1. Actualizar solicitud
+          // 1. Actualizar solicitud — incluye TODOS los campos derivados del cliente
+          // cuando cambia el cliente_id. Antes solo se escribían cuic/razon_social/marca/
+          // asesor/sap_database y card_code/salesperson_code quedaban con valores
+          // del cliente anterior → cardcodes mal en SAP.
           if (propuesta?.solicitud_id) {
             await prisma.solicitud.update({
               where: { id: propuesta.solicitud_id },
@@ -1265,7 +1289,17 @@ export class CampanasController {
                 ...(razon_social !== undefined && { razon_social }),
                 ...(marca_nombre !== undefined && { marca_nombre }),
                 ...(asesor !== undefined && { asesor }),
-                ...(sap_database !== undefined && { sap_database }),
+                ...(sap_database_final !== null && { sap_database: sap_database_final }),
+                ...(cliente_id_final !== null && { cliente_id: cliente_id_final }),
+                ...(card_code_final !== null && { card_code: card_code_final }),
+                ...(salesperson_code_final !== null && { salesperson_code: salesperson_code_final }),
+                ...(unidad_negocio !== undefined && { unidad_negocio }),
+                ...(marca_id !== undefined && { marca_id }),
+                ...(producto_id !== undefined && { producto_id }),
+                ...(producto_nombre !== undefined && { producto_nombre }),
+                ...(agencia !== undefined && { agencia }),
+                ...(categoria_id !== undefined && { categoria_id }),
+                ...(categoria_nombre !== undefined && { categoria_nombre }),
               },
             });
           }
@@ -1283,7 +1317,8 @@ export class CampanasController {
           });
         }
 
-        // 3. Actualizar cotizacion
+        // 3. Actualizar cotizacion — incluye clientes_id cuando cambia el cliente,
+        // para que el cliente_id del cliente nuevo se refleje en TODA la cadena.
         await prisma.cotizacion.update({
           where: { id: cotizacionId },
           data: {
@@ -1292,6 +1327,7 @@ export class CampanasController {
             // Espejar nombre en cotizacion.nombre_campania para que el modal de
             // propuestas (que lee de cotizacion) no muestre el valor viejo.
             ...(nombre !== undefined && { nombre_campania: nombre }),
+            ...(cliente_id_final !== null && { clientes_id: cliente_id_final }),
           },
         });
 
