@@ -525,6 +525,11 @@ export async function crearTareasAutorizacion(
   const usuariosDcm = await prisma.usuario.findMany({
     where: {
       deleted_at: null,
+      // El rol 'Gerente Comercial' tiene los mismos permisos de visualización
+      // que 'Director Comercial' pero NO debe recibir tareas de autorización
+      // DCM. Lo excluimos aquí explícitamente para que el match por área no
+      // lo barra (si su area está como 'Dirección Comercial').
+      NOT: { user_role: 'Gerente Comercial' },
       OR: [
         { puesto: 'DCM' },
         { puesto: 'Director Comercial' },
