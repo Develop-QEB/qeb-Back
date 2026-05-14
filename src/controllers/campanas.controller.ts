@@ -5596,15 +5596,30 @@ export class CampanasController {
         }
       }
 
-      // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
-      if ((tipo === 'Revision de artes' || tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
+      // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta).
+      // Para tareas de Diseño (Revisión/Corrección) tambien CC al Coordinador de Diseño.
+      const EMAIL_TIPOS_ASIGNADO = ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección', 'Instalación', 'Impresión'];
+      const DISENO_TIPOS = ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'];
+      if (EMAIL_TIPOS_ASIGNADO.includes(tipo || '') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
           prisma.usuario.findUnique({
             where: { id: asignadoIdNum },
             select: { correo_electronico: true, nombre: true },
-          }).then(usuarioAsignado => {
+          }).then(async usuarioAsignado => {
             if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
+              // Coordinador(es) de Diseño en CC para tareas de Diseño (no duplicar si es creador o asignado)
+              let ccEmails: string[] = [];
+              if (DISENO_TIPOS.includes(tipo || '')) {
+                const coordinadores = await prisma.usuario.findMany({
+                  where: { user_role: 'Coordinador de Diseño', deleted_at: null },
+                  select: { id: true, correo_electronico: true },
+                });
+                ccEmails = coordinadores
+                  .filter(c => !!c.correo_electronico)
+                  .filter(c => c.id !== responsableId && c.id !== asignadoIdNum)
+                  .map(c => c.correo_electronico as string);
+              }
               const htmlBody = `
               <!DOCTYPE html>
               <html>
@@ -5722,19 +5737,23 @@ export class CampanasController {
               transporter.sendMail({
                 from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
                 to: usuarioAsignado.correo_electronico,
+                cc: ccEmails.length > 0 ? ccEmails : undefined,
                 subject: `Nueva tarea: ${titulo || tipo}`,
                 html: htmlBody,
               }).then(() => {
-                console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico);
-                // Guardar en correos_enviados
-                prisma.correos_enviados.create({
-                  data: {
-                    remitente: 'no-reply@qeb.mx',
-                    destinatario: usuarioAsignado.correo_electronico,
-                    asunto: `Nueva tarea: ${titulo || tipo}`,
-                    cuerpo: htmlBody,
-                  },
-                }).catch(err => console.error('Error guardando correo enviado:', err));
+                console.log('Correo de tarea enviado a:', usuarioAsignado.correo_electronico, ccEmails.length > 0 ? `(cc: ${ccEmails.join(', ')})` : '');
+                // Guardar en correos_enviados (un registro por destinatario)
+                const allRecipients = [usuarioAsignado.correo_electronico, ...ccEmails];
+                for (const dest of allRecipients) {
+                  prisma.correos_enviados.create({
+                    data: {
+                      remitente: 'no-reply@qeb.mx',
+                      destinatario: dest,
+                      asunto: `Nueva tarea: ${titulo || tipo}`,
+                      cuerpo: htmlBody,
+                    },
+                  }).catch(err => console.error('Error guardando correo enviado:', err));
+                }
               }).catch(emailError => {
                 console.error('Error enviando correo de tarea:', emailError);
               });
@@ -5758,6 +5777,8 @@ export class CampanasController {
   async updateTarea(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id, tareaId } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
       const {
         titulo,
         descripcion,
@@ -5770,6 +5791,19 @@ export class CampanasController {
         evidencia,
         archivo_testigo,
       } = req.body;
+
+      // Snapshot del id_asignado previo para detectar cambios en tareas de Diseño
+      const tareaPrevia = await prisma.tareas.findUnique({
+        where: { id: parseInt(tareaId) },
+        select: {
+          tipo: true,
+          titulo: true,
+          id_asignado: true,
+          campania_id: true,
+          id_propuesta: true,
+          id_solicitud: true,
+        },
+      });
 
       const updateData: Record<string, unknown> = {};
       if (titulo !== undefined) updateData.titulo = titulo;
@@ -5807,6 +5841,86 @@ export class CampanasController {
         where: { id: parseInt(tareaId) },
         data: updateData,
       });
+
+      // Notificar cambios de asignado en tareas de Diseño (Revisión/Corrección):
+      // al nuevo asignado le llega una notificación de "te asignaron", al anterior
+      // le llega "tu tarea fue reasignada" y la tarea desaparece de su bandeja porque
+      // el filtro de notificaciones empareja id_asignado.
+      const TIPOS_DISENO = ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'];
+      const tareaEsDiseno = tareaPrevia && TIPOS_DISENO.includes(tareaPrevia.tipo || '');
+      if (id_asignado !== undefined && tareaEsDiseno) {
+        const parseIds = (raw: string | null | undefined) => new Set(
+          String(raw || '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(s => s.length > 0 && !isNaN(parseInt(s)))
+            .map(s => parseInt(s)),
+        );
+        const idsAntes = parseIds(tareaPrevia?.id_asignado);
+        const idsAhora = parseIds(typeof id_asignado === 'string' ? id_asignado : String(id_asignado));
+        const removidos = [...idsAntes].filter(uid => !idsAhora.has(uid));
+        const agregados = [...idsAhora].filter(uid => !idsAntes.has(uid));
+
+        if (removidos.length > 0 || agregados.length > 0) {
+          let nombreCampana = 'Campaña';
+          if (tareaPrevia?.campania_id) {
+            const camp = await prisma.campania.findUnique({
+              where: { id: tareaPrevia.campania_id },
+              select: { nombre: true },
+            });
+            nombreCampana = camp?.nombre || 'Campaña';
+          }
+
+          const tituloTarea = tareaPrevia?.titulo || tarea.titulo || 'Tarea de Diseño';
+          const tipoLabel = (tareaPrevia?.tipo || '').toLowerCase().includes('correc')
+            ? 'Corrección'
+            : 'Revisión de artes';
+          const now = new Date();
+          const fechaFinNotif = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+          for (const uidRemovido of removidos) {
+            if (userId && uidRemovido === userId) continue;
+            await prisma.tareas.create({
+              data: {
+                titulo: `Tarea de Diseño reasignada - ${nombreCampana}`,
+                descripcion: `${userName} reasignó la tarea "${tituloTarea}" (${tipoLabel}) a otro diseñador.`,
+                tipo: 'Notificación',
+                estatus: 'Pendiente',
+                id_responsable: uidRemovido,
+                responsable: '',
+                id_solicitud: tareaPrevia?.id_solicitud || '',
+                id_propuesta: tareaPrevia?.id_propuesta || '',
+                campania_id: tareaPrevia?.campania_id || null,
+                fecha_inicio: now,
+                fecha_fin: fechaFinNotif,
+                asignado: userName,
+                id_asignado: userId ? userId.toString() : '',
+              },
+            });
+          }
+
+          for (const uidAgregado of agregados) {
+            if (userId && uidAgregado === userId) continue;
+            await prisma.tareas.create({
+              data: {
+                titulo: `Te asignaron una tarea de Diseño - ${nombreCampana}`,
+                descripcion: `${userName} te asignó la tarea "${tituloTarea}" (${tipoLabel}).`,
+                tipo: 'Notificación',
+                estatus: 'Pendiente',
+                id_responsable: uidAgregado,
+                responsable: '',
+                id_solicitud: tareaPrevia?.id_solicitud || '',
+                id_propuesta: tareaPrevia?.id_propuesta || '',
+                campania_id: tareaPrevia?.campania_id || null,
+                fecha_inicio: now,
+                fecha_fin: fechaFinNotif,
+                asignado: userName,
+                id_asignado: userId ? userId.toString() : '',
+              },
+            });
+          }
+        }
+      }
 
       // Si es una tarea de Programación que se completa y tiene orden padre, auto-finalizar la orden
       if (tarea.tipo === 'Programación' && estatus === 'Completado' && tarea.evidencia) {
