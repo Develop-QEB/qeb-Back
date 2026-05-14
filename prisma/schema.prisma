@@ -164,12 +164,12 @@ model cotizacion {
   fecha_fin            DateTime  @db.Date
   frontal              Int
   cruzada              Int
-  nivel_socioeconomico String?   @db.VarChar(500)
-  observaciones        String    @db.VarChar(255)
+  nivel_socioeconomico String?   @db.Text
+  observaciones        String    @db.Text
   bonificacion         Float
   descuento            Float
   precio               Decimal?  @db.Decimal(10, 2)
-  contacto             String    @db.VarChar(255)
+  contacto             String    @db.Text
   status               String    @default("Pendiente") @db.VarChar(255)
   id_propuesta         Int
   fecha_expiracion     DateTime? @db.Date

@@ -82,6 +82,35 @@ export class NotificacionesController {
         where.OR = orConditions;
       }
 
+      // Diseñadores solo deben ver tareas/notificaciones relacionadas a Diseño:
+      // tareas de Revisión/Corrección y notificaciones de artes (aprobados,
+      // rechazados, reasignacion). Filtra el ruido de "Campaña nueva",
+      // "APS asignado", "Seguimiento Campaña", etc.
+      if (userRole === 'Diseñadores') {
+        const disenoWhitelist = {
+          OR: [
+            { tipo: { in: ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'] } },
+            {
+              AND: [
+                { tipo: 'Notificación' },
+                {
+                  OR: [
+                    { titulo: { startsWith: 'Artes aprobados' } },
+                    { titulo: { startsWith: 'Artes rechazados' } },
+                    { titulo: { startsWith: 'Te asignaron una tarea de Diseño' } },
+                    { titulo: { startsWith: 'Tarea de Diseño reasignada' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        };
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
+          disenoWhitelist,
+        ];
+      }
+
       if (tipo) {
         where.tipo = tipo;
       }
@@ -1025,6 +1054,32 @@ export class NotificacionesController {
         }
 
         where.OR = orConditions;
+      }
+
+      // Diseñadores: solo cuentan tareas de Diseño (mismo whitelist que getAll)
+      if (userRole === 'Diseñadores') {
+        const disenoWhitelist = {
+          OR: [
+            { tipo: { in: ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'] } },
+            {
+              AND: [
+                { tipo: 'Notificación' },
+                {
+                  OR: [
+                    { titulo: { startsWith: 'Artes aprobados' } },
+                    { titulo: { startsWith: 'Artes rechazados' } },
+                    { titulo: { startsWith: 'Te asignaron una tarea de Diseño' } },
+                    { titulo: { startsWith: 'Tarea de Diseño reasignada' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        };
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
+          disenoWhitelist,
+        ];
       }
 
       const [total, activas, porTipo, porEstatus] = await Promise.all([

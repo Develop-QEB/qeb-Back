@@ -13,6 +13,7 @@ router.get('/filter-options', clientesController.getFilterOptions.bind(clientesC
 router.get('/sap', clientesController.getSAPClientes.bind(clientesController));
 router.get('/sap/:database', clientesController.getSAPClientesByDatabase.bind(clientesController));
 router.get('/cuics', clientesController.getAllCUICs.bind(clientesController));
+router.get('/resolve', clientesController.resolveByCuic.bind(clientesController));
 router.post('/', clientesController.create.bind(clientesController));
 router.get('/:id', clientesController.getById.bind(clientesController));
 router.delete('/:id', clientesController.delete.bind(clientesController));

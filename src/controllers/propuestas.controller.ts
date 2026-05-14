@@ -1788,6 +1788,18 @@ export class PropuestasController {
           data: { estatus: 'Atendido' },
         });
 
+        // Cerrar tareas de Autorización como 'Atendido' (no 'Aprobada'):
+        // el filtro del UI de tareas activas excluye 'Atendido/Cancelado/Rechazado'
+        // pero NO 'Aprobada', asi que las Autorizaciones colgadas seguian
+        // apareciendo como pendientes despues de aprobar la propuesta.
+        await tx.tareas.updateMany({
+          where: {
+            id_propuesta: String(propuestaId),
+            tipo: { contains: 'Autorización' },
+          },
+          data: { estatus: 'Atendido' },
+        });
+
         // 3. Update propuesta
         await tx.propuesta.update({
           where: { id: propuestaId },
@@ -1957,31 +1969,8 @@ export class PropuestasController {
           }
         }
 
-        // Crear notificación "Campaña nueva" para Diseñadores
-        const usuariosDisenoDB = await tx.usuario.findMany({
-          where: { user_role: 'Diseñadores', deleted_at: null },
-          select: { id: true, nombre: true }
-        });
-
-        for (const disenador of usuariosDisenoDB) {
-          await tx.tareas.create({
-            data: {
-              tipo: 'Notificación',
-              titulo: `Campaña nueva - ${campania.nombre}`,
-              descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
-              estatus: 'Pendiente',
-              id_responsable: disenador.id,
-              responsable: disenador.nombre,
-              asignado: disenador.nombre,
-              id_asignado: disenador.id.toString(),
-              id_solicitud: String(propuesta.solicitud_id),
-              id_propuesta: String(propuestaId),
-              campania_id: campania.id,
-              fecha_inicio: new Date(),
-              fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
-            },
-          });
-        }
+        // Diseñadores ya no reciben notificacion "Campaña nueva" — solo deben ver
+        // tareas/notificaciones relacionadas a Diseño (Revisión, Corrección, etc.).
       }
 
         // 6. Add historial entries
@@ -2092,34 +2081,8 @@ export class PropuestasController {
           }
         }
 
-        // Enviar correos a Diseñadores (Campaña nueva)
-        const usuariosDiseno = await prisma.usuario.findMany({
-          where: {
-            user_role: 'Diseñadores',
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
-
-        for (const disenador of usuariosDiseno) {
-          if (disenador.correo_electronico) {
-            enviarCorreoTarea(
-              propuesta.solicitud_id || 0,
-              campania.nombre,
-              `Campaña nueva: ${campania.nombre}`,
-              cotizacion?.fecha_fin || new Date(),
-              disenador.correo_electronico,
-              disenador.nombre,
-              {
-                cliente: solicitud?.razon_social || undefined,
-                creador: req.user?.nombre || 'Usuario',
-                periodoInicio: periodoInicioStr,
-                periodoFin: periodoFinStr,
-                idCampania: campania.id,
-              }
-            ).catch(err => console.error('Error enviando correo a diseño:', err));
-          }
-        }
+        // Diseñadores ya no reciben correo "Campaña nueva" — solo deben recibir
+        // correos relacionados a tareas de Diseño (Revisión, Corrección).
 
         // Enviar notificaciones a asignados (excluyendo Analistas)
         const asignadosPropuesta = propuesta.id_asignado 
@@ -3723,28 +3686,22 @@ export class PropuestasController {
       let salesperson_code_final: number | undefined = salesperson_code != null ? Number(salesperson_code) : undefined;
       let sap_database_final: string | undefined = sap_database;
       if (cliente_id !== undefined) {
-        let clienteRow = await prisma.cliente.findFirst({
+        const clienteRow = await prisma.cliente.findFirst({
           where: { id: Number(cliente_id) },
           select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
         });
-        if (!clienteRow) {
-          const cuicNum = Number(cuic ?? cliente_id);
-          if (Number.isFinite(cuicNum)) {
-            clienteRow = await prisma.cliente.findFirst({
-              where: {
-                CUIC: cuicNum,
-                T0_U_RazonSocial: { not: null },
-                ...(sap_database ? { sap_database } : {}),
-              },
-              select: { id: true, card_code: true, salesperson_code: true, sap_database: true },
-            });
-          }
-        }
+        // No fallback por CUIC (CUIC se duplica). El front resuelve a cliente.id antes.
         if (clienteRow) {
           cliente_id_final = clienteRow.id;
           card_code_final = card_code_final ?? clienteRow.card_code ?? undefined;
           salesperson_code_final = salesperson_code_final ?? clienteRow.salesperson_code ?? undefined;
           sap_database_final = sap_database_final ?? clienteRow.sap_database ?? undefined;
+        } else {
+          res.status(400).json({
+            success: false,
+            error: `cliente_id inválido (${cliente_id}). Debe ser un cliente.id existente.`,
+          });
+          return;
         }
       }
 
@@ -3795,6 +3752,18 @@ export class PropuestasController {
           where: { id_propuesta: parseInt(id) },
           data: { nombre_campania },
         });
+        // Espejar en campania.nombre: el listado de propuestas y el de
+        // campañas leen cm.nombre, no ct.nombre_campania.
+        const cotForCampania = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: parseInt(id) },
+          select: { id: true },
+        });
+        if (cotForCampania) {
+          await prisma.campania.updateMany({
+            where: { cotizacion_id: cotForCampania.id },
+            data: { nombre: nombre_campania },
+          });
+        }
       }
 
       // Update campania dates if provided

@@ -325,6 +325,46 @@ export class ClientesController {
     }
   }
 
+  /**
+   * Resuelve un `cliente.id` (PK local) a partir del CUIC + sap_database opcional.
+   * El front muchas veces solo tiene el SAPCuicItem (CUIC), pero los endpoints de
+   * solicitud/propuesta/campaña esperan `cliente.id` (PK), no CUIC (puede duplicarse).
+   * Este endpoint hace el lookup local: prefiere match exacto por sap_database,
+   * fallback al primer cliente con ese CUIC.
+   */
+  async resolveByCuic(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const cuicRaw = req.query.cuic as string;
+      const sapDatabase = req.query.sap_database as string | undefined;
+      const cuicNum = parseInt(cuicRaw);
+      if (!cuicRaw || isNaN(cuicNum)) {
+        res.status(400).json({ success: false, error: 'cuic requerido' });
+        return;
+      }
+      let cliente = null;
+      if (sapDatabase) {
+        cliente = await prisma.cliente.findFirst({
+          where: { CUIC: cuicNum, sap_database: sapDatabase, T0_U_RazonSocial: { not: null } },
+          select: { id: true, CUIC: true, sap_database: true, T0_U_RazonSocial: true, T0_U_Cliente: true, card_code: true, salesperson_code: true },
+        });
+      }
+      if (!cliente) {
+        cliente = await prisma.cliente.findFirst({
+          where: { CUIC: cuicNum, T0_U_RazonSocial: { not: null } },
+          select: { id: true, CUIC: true, sap_database: true, T0_U_RazonSocial: true, T0_U_Cliente: true, card_code: true, salesperson_code: true },
+        });
+      }
+      if (!cliente) {
+        res.status(404).json({ success: false, error: `Ningún cliente local con CUIC=${cuicNum}` });
+        return;
+      }
+      res.json({ success: true, data: cliente });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error resolviendo cliente por CUIC';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async getAllCUICs(_req: AuthRequest, res: Response): Promise<void> {
     try {
       const cuics = await prisma.cliente.findMany({
