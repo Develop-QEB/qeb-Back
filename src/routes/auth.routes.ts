@@ -1,9 +1,8 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
 import { body } from 'express-validator';
 import { authController } from '../controllers/auth.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { uploadProfilePhoto } from '../middleware/upload.middleware';
-import prisma from '../utils/prisma';
 
 const router = Router();
 
@@ -52,25 +51,5 @@ router.post('/logout', authMiddleware, authController.logout.bind(authController
 
 router.post('/forgot-password', (req, res) => authController.forgotPassword(req, res));
 router.post('/reset-password',  (req, res) => authController.resetPassword(req, res));
-
-// PÚBLICO — usado por el front para mostrar el modal de mantenimiento mediante polling.
-// NO requiere auth y NO está bloqueado por el authMiddleware (debe poder responder
-// aunque el back esté en modo restringido).
-router.get('/maintenance-status', async (_req: Request, res: Response) => {
-  try {
-    const row = await prisma.system_settings.findFirst({ where: { id: 1 } });
-    res.json({
-      success: true,
-      data: {
-        acceso_restringido: row?.acceso_restringido ?? 0,
-        roles_permitidos: row?.roles_permitidos ?? '',
-        motivo: row?.motivo ?? null,
-      },
-    });
-  } catch {
-    // Fail-open: si la tabla no existe o falla, responde como "no restringido".
-    res.json({ success: true, data: { acceso_restringido: 0, roles_permitidos: '', motivo: null } });
-  }
-});
 
 export default router;

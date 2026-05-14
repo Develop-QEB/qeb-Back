@@ -65,11 +65,6 @@ export class AuthController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al iniciar sesión';
-      const code = (error as Error & { code?: string })?.code;
-      if (code === 'MAINTENANCE') {
-        res.status(503).json({ success: false, error: message, code: 'MAINTENANCE' });
-        return;
-      }
       res.status(401).json({
         success: false,
         error: message,

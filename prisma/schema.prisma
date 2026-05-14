@@ -411,17 +411,6 @@ model version {
   fecha  DateTime @db.Date
 }
 
-// Kill-switch global. Una sola fila (id=1). Cuando acceso_restringido=1, el
-// authMiddleware bloquea con 503 a todo usuario cuyo rol NO esté en
-// roles_permitidos (CSV). Cache 30s en memoria para no pegarle a la BD por request.
-model system_settings {
-  id                 Int       @id @default(autoincrement())
-  acceso_restringido Int       @default(0) @db.TinyInt
-  roles_permitidos   String    @default("") @db.VarChar(500)
-  motivo             String?   @db.VarChar(500)
-  updated_at         DateTime  @default(now()) @db.Timestamp(0)
-}
-
 model equipo {
   id          Int              @id @default(autoincrement())
   nombre      String           @db.VarChar(255)
