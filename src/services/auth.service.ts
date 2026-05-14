@@ -72,6 +72,15 @@ export class AuthService {
       throw new Error('Credenciales invalidas');
     }
 
+    // Kill-switch: bloquear login si el rol no está en la whitelist de mantenimiento.
+    const { isRoleBlockedByMaintenance } = await import('../middleware/auth.middleware');
+    const m = await isRoleBlockedByMaintenance(user.user_role);
+    if (m.blocked) {
+      const err = new Error(m.motivo || 'QEB en mantenimiento. Acceso temporalmente restringido.');
+      (err as Error & { code?: string }).code = 'MAINTENANCE';
+      throw err;
+    }
+
     // Obtener los equipos del usuario
     const userTeams = await prisma.usuario_equipo.findMany({
       where: {
