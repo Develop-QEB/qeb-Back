@@ -100,7 +100,7 @@ app.use('/api', (req, res, next) => {
 });
 // Guard de mantenimiento programado. Salta /auth/* (login/refresh/logout/etc)
 // y /public/* (vista de propuesta para clientes). Bloquea el resto si el rol
-// del JWT no es Administrador, DEV o de Trafico.
+// del JWT no es DEV o de Trafico.
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) {
     next();
