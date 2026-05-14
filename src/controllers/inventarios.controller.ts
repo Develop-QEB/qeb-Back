@@ -931,6 +931,7 @@ export class InventariosController {
           sc.inicio_periodo,
           sc.fin_periodo,
           sc.tipo as tipo_medio,
+          sc.articulo,
           CAST(sc.idquote AS UNSIGNED) as propuesta_id,
           cm.id as campana_id,
           cm.nombre as campana_nombre,
