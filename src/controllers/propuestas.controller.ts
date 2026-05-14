@@ -1969,31 +1969,8 @@ export class PropuestasController {
           }
         }
 
-        // Crear notificación "Campaña nueva" para Diseñadores
-        const usuariosDisenoDB = await tx.usuario.findMany({
-          where: { user_role: 'Diseñadores', deleted_at: null },
-          select: { id: true, nombre: true }
-        });
-
-        for (const disenador of usuariosDisenoDB) {
-          await tx.tareas.create({
-            data: {
-              tipo: 'Notificación',
-              titulo: `Campaña nueva - ${campania.nombre}`,
-              descripcion: `Campaña aprobada: ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Período: ${cotizacion?.fecha_inicio ? new Date(cotizacion.fecha_inicio).toLocaleDateString() : ''} - ${cotizacion?.fecha_fin ? new Date(cotizacion.fecha_fin).toLocaleDateString() : ''}`,
-              estatus: 'Pendiente',
-              id_responsable: disenador.id,
-              responsable: disenador.nombre,
-              asignado: disenador.nombre,
-              id_asignado: disenador.id.toString(),
-              id_solicitud: String(propuesta.solicitud_id),
-              id_propuesta: String(propuestaId),
-              campania_id: campania.id,
-              fecha_inicio: new Date(),
-              fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
-            },
-          });
-        }
+        // Diseñadores ya no reciben notificacion "Campaña nueva" — solo deben ver
+        // tareas/notificaciones relacionadas a Diseño (Revisión, Corrección, etc.).
       }
 
         // 6. Add historial entries
@@ -2104,34 +2081,8 @@ export class PropuestasController {
           }
         }
 
-        // Enviar correos a Diseñadores (Campaña nueva)
-        const usuariosDiseno = await prisma.usuario.findMany({
-          where: {
-            user_role: 'Diseñadores',
-            deleted_at: null
-          },
-          select: { id: true, nombre: true, correo_electronico: true }
-        });
-
-        for (const disenador of usuariosDiseno) {
-          if (disenador.correo_electronico) {
-            enviarCorreoTarea(
-              propuesta.solicitud_id || 0,
-              campania.nombre,
-              `Campaña nueva: ${campania.nombre}`,
-              cotizacion?.fecha_fin || new Date(),
-              disenador.correo_electronico,
-              disenador.nombre,
-              {
-                cliente: solicitud?.razon_social || undefined,
-                creador: req.user?.nombre || 'Usuario',
-                periodoInicio: periodoInicioStr,
-                periodoFin: periodoFinStr,
-                idCampania: campania.id,
-              }
-            ).catch(err => console.error('Error enviando correo a diseño:', err));
-          }
-        }
+        // Diseñadores ya no reciben correo "Campaña nueva" — solo deben recibir
+        // correos relacionados a tareas de Diseño (Revisión, Corrección).
 
         // Enviar notificaciones a asignados (excluyendo Analistas)
         const asignadosPropuesta = propuesta.id_asignado 
