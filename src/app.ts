@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import path from 'path';
 import routes from './routes';
 import { errorMiddleware, notFoundMiddleware } from './middleware/error.middleware';
+import { maintenanceGuard } from './middleware/maintenance.middleware';
 
 const app = express();
 
@@ -96,6 +97,16 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   next();
+});
+// Guard de mantenimiento programado. Salta /auth/* (login/refresh/logout/etc)
+// y /public/* (vista de propuesta para clientes). Bloquea el resto si el rol
+// del JWT no es Administrador, DEV o de Trafico.
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) {
+    next();
+    return;
+  }
+  maintenanceGuard(req, res, next);
 });
 app.use('/api', routes);
 

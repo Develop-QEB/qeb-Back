@@ -8147,6 +8147,76 @@ export class CampanasController {
         success: true,
         data: comentario,
       });
+
+      // Notificar a los participantes de la tarea (id_responsable + id_asignado),
+      // excluyendo al autor. No bloquea la respuesta — corre post-res.
+      try {
+        const tareaIdNum = parseInt(tareaId);
+        const tarea = await prisma.tareas.findUnique({
+          where: { id: tareaIdNum },
+          select: {
+            id: true,
+            titulo: true,
+            tipo: true,
+            id_responsable: true,
+            id_asignado: true,
+            campania_id: true,
+            id_propuesta: true,
+            id_solicitud: true,
+            ids_reservas: true,
+          },
+        });
+        if (tarea) {
+          const userIds = new Set<number>();
+          if (tarea.id_responsable && tarea.id_responsable !== userId) {
+            userIds.add(tarea.id_responsable);
+          }
+          if (tarea.id_asignado) {
+            for (const idStr of tarea.id_asignado.split(',')) {
+              const id = parseInt(idStr.trim());
+              if (!isNaN(id) && id !== userId) userIds.add(id);
+            }
+          }
+          if (userIds.size > 0) {
+            const snippet = contenido.trim().length > 160
+              ? contenido.trim().slice(0, 157) + '...'
+              : contenido.trim();
+            const tituloNotif = `Nuevo comentario en ${tarea.titulo || `tarea #${tarea.id}`}`;
+            const now = new Date();
+            const fechaFin = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+            for (const destId of userIds) {
+              const creada = await prisma.tareas.create({
+                data: {
+                  titulo: tituloNotif,
+                  descripcion: `${userName}: ${snippet}`,
+                  tipo: 'Notificación',
+                  estatus: 'Pendiente',
+                  id_responsable: destId,
+                  responsable: '',
+                  id_solicitud: tarea.id_solicitud || '',
+                  id_propuesta: tarea.id_propuesta || '',
+                  campania_id: tarea.campania_id,
+                  ids_reservas: tarea.ids_reservas || null,
+                  fecha_inicio: now,
+                  fecha_fin: fechaFin,
+                  asignado: userName,
+                  id_asignado: String(userId),
+                },
+              });
+              emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+                tareaId: creada.id,
+                tipo: 'Notificación',
+                origen: 'comentario',
+                campaniaId: tarea.campania_id,
+                tareaOrigenId: tarea.id,
+              });
+              emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: creada.id });
+            }
+          }
+        }
+      } catch (notifErr) {
+        console.error('addComentarioRevisionArte - error creando notificaciones (no bloqueante):', notifErr);
+      }
     } catch (error) {
       console.error('Error en addComentarioRevisionArte:', error);
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
