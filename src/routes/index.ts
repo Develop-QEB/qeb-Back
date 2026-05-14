@@ -19,6 +19,7 @@ import chatbotRoutes from './chatbot.routes';
 import circuitosRoutes from './circuitos.routes';
 import analisisOcupacionRoutes from './analisis-ocupacion.routes';
 import historialRoutes from './historial.routes';
+import auditReservasRoutes from './audit-reservas.routes';
 
 import publicRoutes from './public.routes';
 
@@ -45,5 +46,6 @@ router.use('/chatbot', chatbotRoutes);
 router.use('/circuitos', circuitosRoutes);
 router.use('/analisis-ocupacion', analisisOcupacionRoutes);
 router.use('/historial', historialRoutes);
+router.use('/audit-reservas', auditReservasRoutes);
 
 export default router;
