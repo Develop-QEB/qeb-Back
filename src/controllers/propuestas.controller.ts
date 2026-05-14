@@ -1788,6 +1788,18 @@ export class PropuestasController {
           data: { estatus: 'Atendido' },
         });
 
+        // Cerrar tareas de Autorización como 'Atendido' (no 'Aprobada'):
+        // el filtro del UI de tareas activas excluye 'Atendido/Cancelado/Rechazado'
+        // pero NO 'Aprobada', asi que las Autorizaciones colgadas seguian
+        // apareciendo como pendientes despues de aprobar la propuesta.
+        await tx.tareas.updateMany({
+          where: {
+            id_propuesta: String(propuestaId),
+            tipo: { contains: 'Autorización' },
+          },
+          data: { estatus: 'Atendido' },
+        });
+
         // 3. Update propuesta
         await tx.propuesta.update({
           where: { id: propuestaId },
