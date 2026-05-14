@@ -4602,9 +4602,11 @@ export class CampanasController {
 
       // Registrar en historial
       const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: CAMPANIA_SAFE_SELECT });
+      let propuestaIdStr = '';
       if (campana?.cotizacion_id) {
         const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
         if (cotizacion?.id_propuesta) {
+          propuestaIdStr = cotizacion.id_propuesta.toString();
           await prisma.historial.create({
             data: {
               tipo: 'Arte',
@@ -4614,6 +4616,80 @@ export class CampanasController {
               detalles: `${userName} ${status === 'Aprobado' ? 'aprobó' : 'rechazó'} arte de ${reservaIds.length} reserva(s)${comentarioRechazo ? ': ' + comentarioRechazo : ''}`,
             },
           });
+        }
+      }
+
+      // Si es aprobación, notificar al creador (responsable) de la tarea de Revision de artes.
+      // Misma lógica que rechazo pero sin rotar roles: la tarea Revision sigue como está
+      // y solo se crea una Notificación al diseñador para avisarle "tu arte fue aprobado".
+      if (status === 'Aprobado') {
+        console.log('updateArteStatus(Aprobado) - Buscando tareas de Revision de artes para notificar al creador...');
+        const tareasRevisionAprob = await prisma.$queryRawUnsafe<{
+          id: number;
+          ids_reservas: string;
+          id_responsable: number;
+          responsable: string | null;
+          estatus: string | null;
+        }[]>(`
+          SELECT id, ids_reservas, id_responsable, responsable, estatus
+          FROM tareas
+          WHERE campania_id = ?
+          AND tipo IN ('Revision de artes', 'Revisión de artes')
+          AND ids_reservas IS NOT NULL
+          AND ids_reservas != ''
+          AND (estatus IS NULL OR estatus NOT IN ('Atendido', 'Completado', 'Cancelado', 'Rechazado', 'Finalizada'))
+        `, campanaId);
+        console.log('updateArteStatus(Aprobado) - Tareas Revision encontradas:', tareasRevisionAprob.length, tareasRevisionAprob);
+
+        const nombreCampana = campana?.nombre || 'Campaña';
+        const responsablesNotificados = new Set<number>();
+
+        for (const tarea of tareasRevisionAprob) {
+          const tareaReservaIds = tarea.ids_reservas
+            .replace(/\*/g, ',')
+            .split(',')
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+          const tieneReservasAprobadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
+          if (!tieneReservasAprobadas) {
+            console.log(`updateArteStatus(Aprobado) - Tarea ${tarea.id} no incluye las reservas aprobadas, skip`);
+            continue;
+          }
+          if (!tarea.id_responsable) {
+            console.log(`updateArteStatus(Aprobado) - Tarea ${tarea.id} sin id_responsable, skip`);
+            continue;
+          }
+          if (userId && tarea.id_responsable === userId) {
+            console.log(`updateArteStatus(Aprobado) - Tarea ${tarea.id} id_responsable === userId (no auto-notifica), skip`);
+            continue;
+          }
+          if (responsablesNotificados.has(tarea.id_responsable)) continue;
+          responsablesNotificados.add(tarea.id_responsable);
+
+          const now = new Date();
+          const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+          const creada = await prisma.tareas.create({
+            data: {
+              titulo: `Artes aprobados - ${nombreCampana}`,
+              descripcion: `${userName} aprobó arte de ${reservaIds.length} reserva(s)`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: tarea.id_responsable,
+              responsable: '',
+              id_solicitud: '',
+              id_propuesta: propuestaIdStr,
+              campania_id: campanaId,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              asignado: userName,
+              id_asignado: userId ? userId.toString() : '',
+            },
+          });
+          console.log(`updateArteStatus(Aprobado) - Notificación creada id=${creada.id} para id_responsable=${tarea.id_responsable} (${tarea.responsable || 'sin nombre'})`);
+        }
+        if (responsablesNotificados.size === 0) {
+          console.log('updateArteStatus(Aprobado) - NINGUNA notificación creada. Revisar logs anteriores para la razón.');
         }
       }
 
@@ -4633,13 +4709,15 @@ export class CampanasController {
           SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
           FROM tareas
           WHERE campania_id = ?
-          AND tipo = 'Revision de artes'
+          AND tipo IN ('Revision de artes', 'Revisión de artes')
           AND ids_reservas IS NOT NULL
           AND ids_reservas != ''
-          AND estatus = 'Activo'
+          AND (estatus IS NULL OR estatus NOT IN ('Atendido', 'Completado', 'Cancelado', 'Rechazado', 'Finalizada'))
         `, campanaId);
 
         console.log('updateArteStatus - Tareas encontradas:', tareasRevision.length, tareasRevision);
+
+        const responsablesAnalistas = new Map<number, string | null>();
 
         // Encontrar la tarea que contiene alguna de las reservas rechazadas
         for (const tarea of tareasRevision) {
@@ -4652,6 +4730,11 @@ export class CampanasController {
           const tieneReservasRechazadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
 
           if (tieneReservasRechazadas) {
+            // Guardar el creador ORIGINAL (analista) antes de rotar para la notificacion
+            if (tarea.id_responsable) {
+              responsablesAnalistas.set(tarea.id_responsable, tarea.responsable);
+            }
+
             // Rotar: el asignado original se vuelve creador, el creador original se vuelve asignado
             const nuevoResponsable = tarea.asignado;
             const nuevoIdResponsable = tarea.id_asignado ? parseInt(tarea.id_asignado) : tarea.id_responsable;
@@ -4670,6 +4753,32 @@ export class CampanasController {
 
             console.log(`Tarea ${tarea.id} - Roles rotados: Creador ahora es ${nuevoResponsable}, Asignado ahora es ${nuevoAsignado}`);
           }
+        }
+
+        // Notificar al creador original (analista) de la Revision
+        const nombreCampana = campana?.nombre || 'Campaña';
+        const motivoTxt = comentarioRechazo ? `: ${comentarioRechazo}` : '';
+        for (const [responsableId] of responsablesAnalistas) {
+          if (userId && responsableId === userId) continue;
+          const now = new Date();
+          const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+          await prisma.tareas.create({
+            data: {
+              titulo: `Artes rechazados - ${nombreCampana}`,
+              descripcion: `${userName} rechazó arte de ${reservaIds.length} reserva(s)${motivoTxt}`,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              responsable: '',
+              id_solicitud: '',
+              id_propuesta: propuestaIdStr,
+              campania_id: campanaId,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              asignado: userName,
+              id_asignado: userId ? userId.toString() : '',
+            },
+          });
         }
       }
 
@@ -5084,7 +5193,7 @@ export class CampanasController {
         }
       }
 
-      if (tipo === 'Revision de artes' || tipo === 'Correccion') {
+      if (tipo === 'Revision de artes' || tipo === 'Revisión de artes' || tipo === 'Correccion' || tipo === 'Corrección') {
         if (!ids_reservas) {
           res.status(400).json({
             success: false,
@@ -5127,8 +5236,9 @@ export class CampanasController {
       fechaFinFinal.setDate(fechaFinFinal.getDate() + 7);
       let estatusFinal = 'Pendiente';
 
-      // Para Revision de artes, Impresión, Re-impresión y Programación, estatus siempre es Activo
-      if (tipo === 'Revision de artes' || tipo === 'Impresión' || tipo === 'Re-impresión' || tipo === 'Programación') {
+      // Para Revision de artes, Impresión, Re-impresión y Programación, estatus siempre es Activo.
+      // Acepta 'Revisión de artes' (con tilde, como manda el front) y 'Revision de artes'.
+      if (tipo === 'Revision de artes' || tipo === 'Revisión de artes' || tipo === 'Impresión' || tipo === 'Re-impresión' || tipo === 'Programación') {
         estatusFinal = 'Activo';
       }
 
@@ -5254,13 +5364,13 @@ export class CampanasController {
           const placeholders = reservaIdArray.map(() => '?').join(',');
           // Determinar valor de tarea según tipo
           let tareaValue = tipo || 'Producción';
-          if (tipo === 'Revision de artes') {
+          if (tipo === 'Revision de artes' || tipo === 'Revisión de artes') {
             tareaValue = 'En revisión';
           } else if (tipo === 'Impresión') {
             tareaValue = 'Pedido Solicitado';
           } else if (tipo === 'Recepción') {
             tareaValue = 'Por Recibir';
-          } else if (tipo === 'Correccion') {
+          } else if (tipo === 'Correccion' || tipo === 'Corrección') {
             tareaValue = 'En corrección';
           } else if (tipo === 'Testigo') {
             tareaValue = 'Pendiente testigo';
@@ -5487,7 +5597,7 @@ export class CampanasController {
       }
 
       // Enviar correo al asignado de forma asíncrona (no bloquea la respuesta)
-      if ((tipo === 'Revision de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
+      if ((tipo === 'Revision de artes' || tipo === 'Revisión de artes' || tipo === 'Instalación' || tipo === 'Impresión') && id_asignado) {
         const asignadoIdNum = parseInt(id_asignado);
         if (!isNaN(asignadoIdNum)) {
           prisma.usuario.findUnique({
