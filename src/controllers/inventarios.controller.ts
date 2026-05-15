@@ -928,6 +928,15 @@ export class InventariosController {
           rsv.fecha_reserva,
           rsv.instalado,
           rsv.APS,
+          rsv.grupo_completo_id,
+          CASE
+            WHEN rsv.APS IS NOT NULL
+              AND cm.posted_aps IS NOT NULL
+              AND cm.posted_aps <> ''
+              AND cm.posted_aps REGEXP CONCAT('(^|[^0-9])', CAST(rsv.APS AS CHAR), '([^0-9]|$)')
+            THEN 1
+            ELSE 0
+          END AS posted,
           sc.inicio_periodo,
           sc.fin_periodo,
           sc.tipo as tipo_medio,
