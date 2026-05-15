@@ -188,12 +188,20 @@ model espacio_inventario {
 }
 
 model historial {
-  id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  tipo       String   @db.VarChar(255)
-  ref_id     Int
-  accion     String   @db.VarChar(255)
-  fecha_hora DateTime @default(now()) @db.Timestamp(0)
-  detalles   String?  @db.Text
+  id                       BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  tipo                     String    @db.VarChar(255)
+  ref_id                   Int
+  accion                   String    @db.VarChar(255)
+  fecha_hora               DateTime  @default(now()) @db.Timestamp(0)
+  detalles                 String?   @db.Text
+  usuario_id               Int?
+  fecha_entrega            DateTime? @db.DateTime(0)
+  recordar_dias_antes      Int?
+  recordatorio_enviado_at  DateTime? @db.DateTime(0)
+  tarea_recordatorio_id    Int?
+
+  @@index([fecha_entrega, recordatorio_enviado_at], map: "idx_recordatorios_pendientes")
+  @@index([usuario_id], map: "idx_historial_usuario")
 }
 
 model historial_comentarios {
@@ -636,6 +644,27 @@ model analisis_ocupacion {
 
   @@index([usuario_id])
   @@map("analisis_ocupacion")
+}
+
+model auditoria_reorganizacion_ocupacion {
+  id                    Int      @id @default(autoincrement())
+  usuario_id            Int
+  usuario_nombre        String   @db.VarChar(255)
+  campana_id            Int
+  solicitud_caras_id    Int
+  catorcena_numero      Int
+  catorcena_anio        Int
+  reservas_creadas      Int      @default(0)
+  reservas_sustituidas  Int      @default(0)
+  reservas_liberadas    Int      @default(0)
+  payload_json          String   @db.LongText
+  fecha_hora            DateTime @default(now()) @db.DateTime(0)
+
+  @@index([campana_id], map: "idx_aro_campana")
+  @@index([solicitud_caras_id], map: "idx_aro_solicitud_caras")
+  @@index([usuario_id], map: "idx_aro_usuario")
+  @@index([fecha_hora], map: "idx_aro_fecha")
+  @@map("auditoria_reorganizacion_ocupacion")
 }
 
 enum proveedores_estado {

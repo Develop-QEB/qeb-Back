@@ -191,12 +191,44 @@ export class HistorialController {
 
   async addNota(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { ref_id, tipo, nota } = req.body;
+      const {
+        ref_id,
+        tipo,
+        nota,
+        fecha_entrega,
+        recordar_dias_antes,
+      } = req.body as {
+        ref_id?: number;
+        tipo: string;
+        nota: string;
+        fecha_entrega?: string | null;
+        recordar_dias_antes?: number | null;
+      };
+      const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
 
       if (!nota || !tipo) {
         res.status(400).json({ success: false, error: 'nota y tipo son requeridos' });
         return;
+      }
+
+      // Validacion del recordatorio
+      let fechaEntregaDate: Date | null = null;
+      let recordarDiasAntes: number | null = null;
+      if (fecha_entrega) {
+        fechaEntregaDate = new Date(fecha_entrega);
+        if (isNaN(fechaEntregaDate.getTime())) {
+          res.status(400).json({ success: false, error: 'fecha_entrega invalida' });
+          return;
+        }
+        if (recordar_dias_antes != null) {
+          const dias = Number(recordar_dias_antes);
+          if (!Number.isInteger(dias) || dias < 0 || dias > 365) {
+            res.status(400).json({ success: false, error: 'recordar_dias_antes debe ser entre 0 y 365' });
+            return;
+          }
+          recordarDiasAntes = dias;
+        }
       }
 
       const entry = await prisma.historial.create({
@@ -205,6 +237,9 @@ export class HistorialController {
           ref_id: ref_id || 0,
           accion: 'Acción registrada',
           detalles: `${userName}: ${nota}`,
+          usuario_id: userId || null,
+          fecha_entrega: fechaEntregaDate,
+          recordar_dias_antes: recordarDiasAntes,
         },
       });
 
