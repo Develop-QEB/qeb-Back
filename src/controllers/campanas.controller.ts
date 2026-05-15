@@ -7364,6 +7364,7 @@ export class CampanasController {
         sol_nombre_usuario: string | null;
         unidad_negocio: string | null;
         sol_sap_database: string | null;
+        sc_ciudad: string | null;
       };
 
       const scRows = await prisma.$queryRawUnsafe<ScRow[]>(`
@@ -7388,7 +7389,8 @@ export class CampanasController {
           ct.descuento,
           sol.nombre_usuario AS sol_nombre_usuario,
           sol.unidad_negocio,
-          sol.sap_database AS sol_sap_database
+          sol.sap_database AS sol_sap_database,
+          sc.ciudad AS sc_ciudad
         FROM campania cm
           INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
           INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
@@ -7431,7 +7433,19 @@ export class CampanasController {
       };
       type CatRow = { numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date };
 
-      const [reservasArr, clientesArr, catorcenasArr] = await Promise.all([
+      // Municipios únicos del primer segmento de sc.ciudad — fuente del
+      // fallback de plaza cuando el sc aún no tiene reservas (o cuando
+      // inventarios.plaza venía null en la reserva). Mismo patrón que ya se
+      // usa en otros endpoints del controlador (líneas 1834, 2077, 2436, 2486,
+      // 2923): COALESCE(plaza_de_reserva, plaza_canonica_por_municipio, sc.ciudad).
+      const municipiosBuscados = [...new Set(
+        scRows
+          .map(s => String(s.sc_ciudad || '').split(',')[0].trim())
+          .filter(Boolean)
+      )];
+      const phMun = municipiosBuscados.map(() => '?').join(',');
+
+      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr] = await Promise.all([
         prisma.$queryRawUnsafe<ResRow[]>(
           `SELECT
              rsv.id AS rsv_id,
@@ -7452,7 +7466,22 @@ export class CampanasController {
         prisma.$queryRawUnsafe<CatRow[]>(
           `SELECT numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
         ),
+        municipiosBuscados.length > 0
+          ? prisma.$queryRawUnsafe<{ municipio: string; plaza: string }[]>(
+              `SELECT DISTINCT municipio, plaza FROM inventarios
+               WHERE municipio IN (${phMun}) AND plaza IS NOT NULL
+               ORDER BY municipio, plaza`,
+              ...municipiosBuscados
+            )
+          : Promise.resolve([]),
       ]);
+
+      // municipio → plaza canónica (toma la primera por orden alfabético, igual
+      // que el LIMIT 1 del patrón SQL original).
+      const plazaByMunicipio = new Map<string, string>();
+      for (const r of plazaMunicipioArr) {
+        if (!plazaByMunicipio.has(r.municipio)) plazaByMunicipio.set(r.municipio, r.plaza);
+      }
 
       // Index reservas por solicitudCaras_id
       const reservasBySc = new Map<number, ResRow[]>();
@@ -7524,9 +7553,17 @@ export class CampanasController {
         const apsList = [...new Set(apsValues)].sort((a, b) => Number(a) - Number(b));
         const aps_especifico = apsList.length > 0 ? apsList.join(', ') : null;
 
-        // MIN(inv.plaza)
+        // Cascada de plaza:
+        //   1) MIN(inv.plaza) de las reservas confirmadas (más fidedigna).
+        //   2) inventarios.plaza canónica por municipio de sc.ciudad (cuando
+        //      el sc aún no tiene reservas o inv.plaza venía null).
+        //   3) sc.ciudad raw — último recurso para no devolver null al UI,
+        //      ya que el front mostraba "-" y confundía al usuario.
         const plazas = reservas.map(r => r.plaza).filter((v): v is string => !!v);
-        const plaza = plazas.length > 0 ? plazas.slice().sort()[0] : null;
+        const plazaFromReservas = plazas.length > 0 ? plazas.slice().sort()[0] : null;
+        const firstCiudad = String(sc.sc_ciudad || '').split(',')[0].trim();
+        const plazaFromCiudad = firstCiudad ? plazaByMunicipio.get(firstCiudad) : undefined;
+        const plaza = plazaFromReservas || plazaFromCiudad || sc.sc_ciudad || null;
 
         // COALESCE(MIN(inv.tradicional_digital), sc.tipo)
         const tds = reservas.map(r => r.tradicional_digital).filter((v): v is string => !!v);
