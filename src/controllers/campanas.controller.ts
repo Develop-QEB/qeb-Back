@@ -7445,7 +7445,11 @@ export class CampanasController {
       )];
       const phMun = municipiosBuscados.map(() => '?').join(',');
 
-      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr] = await Promise.all([
+      // Campañas únicas presentes en scRows → para traer posted_aps/posted_to_sap
+      const campaniaIdsCat = [...new Set(scRows.map(s => Number(s.campania_id)).filter(Boolean))];
+      const phCamp = campaniaIdsCat.map(() => '?').join(',');
+
+      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr, postedRows] = await Promise.all([
         prisma.$queryRawUnsafe<ResRow[]>(
           `SELECT
              rsv.id AS rsv_id,
@@ -7474,6 +7478,13 @@ export class CampanasController {
               ...municipiosBuscados
             )
           : Promise.resolve([]),
+        // posted_aps/posted_to_sap por campaña — columna puede no existir en prod
+        campaniaIdsCat.length > 0
+          ? prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null; posted_to_sap: number | null }[]>(
+              `SELECT id, posted_aps, posted_to_sap FROM campania WHERE id IN (${phCamp})`,
+              ...campaniaIdsCat
+            ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])
+          : Promise.resolve([] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[]),
       ]);
 
       // municipio → plaza canónica (toma la primera por orden alfabético, igual
@@ -7481,6 +7492,19 @@ export class CampanasController {
       const plazaByMunicipio = new Map<string, string>();
       for (const r of plazaMunicipioArr) {
         if (!plazaByMunicipio.has(r.municipio)) plazaByMunicipio.set(r.municipio, r.plaza);
+      }
+
+      // campania_id → { posted_to_sap, postedApsSet } (mismo OR que CampanaDetailPage)
+      const postedByCampana = new Map<number, { all: boolean; apsSet: Set<number> }>();
+      for (const r of postedRows) {
+        let apsSet = new Set<number>();
+        try {
+          if (r.posted_aps) {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) apsSet = new Set(arr.map((a: any) => Number(a)).filter(n => !isNaN(n)));
+          }
+        } catch { /* JSON inválido — ignorar */ }
+        postedByCampana.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
       }
 
       // Index reservas por solicitudCaras_id
@@ -7596,6 +7620,17 @@ export class CampanasController {
           return tipoFila === 'bonificacion' ? 'BONIFICACION' : 'RENTA';
         };
 
+        // posted: la fila se considera "con POST" solo si TODOS sus APS están
+        // posteados (posted_to_sap=1 marca la campaña entera; en otro caso
+        // requerimos que cada APS de las reservas esté en posted_aps). Si la
+        // fila tiene APS mixtos (parte posteada, parte no) cuenta como "Sin POST"
+        // porque sigue habiendo pendientes.
+        const postedInfo = postedByCampana.get(Number(sc.campania_id));
+        const posted = !!postedInfo && (
+          postedInfo.all ||
+          (apsList.length > 0 && apsList.every(a => postedInfo.apsSet.has(Number(a))))
+        );
+
         const base = {
           plaza,
           tipo: sc.formato,
@@ -7618,6 +7653,7 @@ export class CampanasController {
           campania_id: Number(sc.campania_id),
           grupo_id: Number(sc.sc_id),
           tradicional_digital,
+          posted,
         };
 
         if (scBonif > 0) {
@@ -7754,6 +7790,27 @@ export class CampanasController {
 
       const propuestaIdsStr = [...new Set(campsRows.map(c => String(c.id_propuesta)).filter(Boolean))];
       const campMap = new Map(campsRows.map(c => [String(c.id_propuesta), c]));
+
+      // posted_aps/posted_to_sap por campaña — columna puede no existir en prod
+      const campIdsInvian = [...new Set(campsRows.map(c => Number(c.id)).filter(Boolean))];
+      const phCampInvian = campIdsInvian.map(() => '?').join(',');
+      const postedRowsInvian = campIdsInvian.length > 0
+        ? await prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null; posted_to_sap: number | null }[]>(
+            `SELECT id, posted_aps, posted_to_sap FROM campania WHERE id IN (${phCampInvian})`,
+            ...campIdsInvian
+          ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])
+        : [];
+      const postedByCampanaInvian = new Map<number, { all: boolean; apsSet: Set<number> }>();
+      for (const r of postedRowsInvian) {
+        let apsSet = new Set<number>();
+        try {
+          if (r.posted_aps) {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) apsSet = new Set(arr.map((a: any) => Number(a)).filter(n => !isNaN(n)));
+          }
+        } catch { /* JSON inválido — ignorar */ }
+        postedByCampanaInvian.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
 
       // PASO 3: Pre-fetch clientes (sólo los relevantes), catorcenas y
       // propuestas. Las usamos en JS para evitar JOINs costosos: cliente con
@@ -7896,6 +7953,12 @@ export class CampanasController {
         const inicioYear = inicio.getFullYear();
         const finSegmento = `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
 
+        // posted: mismo criterio que CAT — campaña con posted_to_sap=1 o el rsv_aps
+        // de esta fila incluido en posted_aps.
+        const postedInfoI = camp?.id != null ? postedByCampanaInvian.get(Number(camp.id)) : undefined;
+        const apsRowNum = r.rsv_aps != null ? Number(r.rsv_aps) : null;
+        const posted = !!postedInfoI && (postedInfoI.all || (apsRowNum != null && postedInfoI.apsSet.has(apsRowNum)));
+
         return {
           Campania: camp?.nombre || null,
           Anunciante: cliente?.T1_U_Cliente || null,
@@ -7927,6 +7990,7 @@ export class CampanasController {
           cortesia: r.cortesia,
           numero_articulo: r.articulo,
           cto: r.cto || null,
+          posted,
         };
       });
 
