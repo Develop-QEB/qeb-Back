@@ -4553,7 +4553,10 @@ export class CampanasController {
       let updateFields: string;
       let updateParams: (string | number)[];
 
-      if (status === 'Rechazado') {
+      // 'Rechazado' y 'Pendiente' guardan el motivo en comentario_rechazo
+      // (la columna de BD se llama así por legado; no se expone al usuario
+      // con ese nombre — se renderea como motivo del estado actual).
+      if (status === 'Rechazado' || status === 'Pendiente') {
         if (comentarioRechazo) {
           updateFields = `arte_aprobado = ?, comentario_rechazo = ?`;
           updateParams = [status, comentarioRechazo, ...reservaIds];
@@ -4562,7 +4565,7 @@ export class CampanasController {
           updateParams = [status, ...reservaIds];
         }
       } else {
-        // 'Aprobado' o 'Pendiente'
+        // 'Aprobado'
         updateFields = `arte_aprobado = ?`;
         updateParams = [status, ...reservaIds];
       }
@@ -4581,7 +4584,7 @@ export class CampanasController {
         const grupoPlaceholders = grupoIds.map(() => '?').join(',');
         let grupoParams: (string | number)[];
 
-        if (status === 'Rechazado') {
+        if (status === 'Rechazado' || status === 'Pendiente') {
           if (comentarioRechazo) {
             grupoParams = [status, comentarioRechazo, ...grupoIds];
           } else {
@@ -4611,9 +4614,9 @@ export class CampanasController {
             data: {
               tipo: 'Arte',
               ref_id: cotizacion.id_propuesta,
-              accion: status === 'Aprobado' ? 'Aprobación' : 'Rechazo',
+              accion: status === 'Aprobado' ? 'Aprobación' : status === 'Pendiente' ? 'Pendiente' : 'Rechazo',
               fecha_hora: new Date(),
-              detalles: `${userName} ${status === 'Aprobado' ? 'aprobó' : 'rechazó'} arte de ${reservaIds.length} reserva(s)${comentarioRechazo ? ': ' + comentarioRechazo : ''}`,
+              detalles: `${userName} ${status === 'Aprobado' ? 'aprobó' : status === 'Pendiente' ? 'marcó como pendiente' : 'rechazó'} arte de ${reservaIds.length} reserva(s)${comentarioRechazo ? ': ' + comentarioRechazo : ''}`,
             },
           });
         }
@@ -4693,10 +4696,15 @@ export class CampanasController {
         }
       }
 
-      // Si es rechazo, intercambiar creador y asignado en la tarea de Revision de artes
+      // Si es rechazo o pendiente, intercambiar creador y asignado en la tarea
+      // de Revision de artes. Pendiente es un caso espejo de Rechazo: misma
+      // rotación, misma notificación, misma creación de Corrección, pero
+      // textualmente "Pendiente" no "Rechazado" en mensajes al usuario.
       console.log('updateArteStatus - Status:', status, '- CampanaId:', campanaId);
-      if (status === 'Rechazado') {
-        console.log('updateArteStatus - Buscando tareas de Revision de artes para rotar roles...');
+      if (status === 'Rechazado' || status === 'Pendiente') {
+        const accionLabel = status === 'Rechazado' ? 'rechazó' : 'marcó como pendiente';
+        const tituloLabel = status === 'Rechazado' ? 'rechazados' : 'pendientes';
+        console.log(`updateArteStatus(${status}) - Buscando tareas de Revision de artes para rotar roles...`);
         // Buscar la tarea de Revision de artes que contiene estas reservas
         const tareasRevision = await prisma.$queryRawUnsafe<{
           id: number;
@@ -4715,11 +4723,11 @@ export class CampanasController {
           AND (estatus IS NULL OR estatus NOT IN ('Atendido', 'Completado', 'Cancelado', 'Rechazado', 'Finalizada'))
         `, campanaId);
 
-        console.log('updateArteStatus - Tareas encontradas:', tareasRevision.length, tareasRevision);
+        console.log(`updateArteStatus(${status}) - Tareas encontradas:`, tareasRevision.length, tareasRevision);
 
         const responsablesAnalistas = new Map<number, string | null>();
 
-        // Encontrar la tarea que contiene alguna de las reservas rechazadas
+        // Encontrar la tarea que contiene alguna de las reservas afectadas
         for (const tarea of tareasRevision) {
           const tareaReservaIds = tarea.ids_reservas
             .replace(/\*/g, ',')
@@ -4727,9 +4735,9 @@ export class CampanasController {
             .map(id => parseInt(id.trim()))
             .filter(id => !isNaN(id));
 
-          const tieneReservasRechazadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
+          const tieneReservasAfectadas = reservaIds.some(rId => tareaReservaIds.includes(rId));
 
-          if (tieneReservasRechazadas) {
+          if (tieneReservasAfectadas) {
             // Guardar el creador ORIGINAL (analista) antes de rotar para la notificacion
             if (tarea.id_responsable) {
               responsablesAnalistas.set(tarea.id_responsable, tarea.responsable);
@@ -4751,7 +4759,7 @@ export class CampanasController {
               },
             });
 
-            console.log(`Tarea ${tarea.id} - Roles rotados: Creador ahora es ${nuevoResponsable}, Asignado ahora es ${nuevoAsignado}`);
+            console.log(`Tarea ${tarea.id} - Roles rotados (${status}): Creador ahora es ${nuevoResponsable}, Asignado ahora es ${nuevoAsignado}`);
           }
         }
 
@@ -4764,8 +4772,8 @@ export class CampanasController {
           const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
           await prisma.tareas.create({
             data: {
-              titulo: `Artes rechazados - ${nombreCampana}`,
-              descripcion: `${userName} rechazó arte de ${reservaIds.length} reserva(s)${motivoTxt}`,
+              titulo: `Artes ${tituloLabel} - ${nombreCampana}`,
+              descripcion: `${userName} ${accionLabel} arte de ${reservaIds.length} reserva(s)${motivoTxt}`,
               tipo: 'Notificación',
               estatus: 'Pendiente',
               id_responsable: responsableId,

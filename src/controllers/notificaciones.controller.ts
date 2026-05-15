@@ -953,6 +953,39 @@ export class NotificacionesController {
     }
   }
 
+  // Bulk update de estatus para una lista de IDs. Mucho más rápido que N
+  // requests individuales — 1 sola query UPDATE con WHERE id IN (...).
+  async bulkUpdateEstatus(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { ids, estatus } = req.body as { ids?: number[]; estatus?: string };
+      if (!Array.isArray(ids) || ids.length === 0) {
+        res.status(400).json({ success: false, error: 'ids debe ser un array no vacío' });
+        return;
+      }
+      if (!estatus || typeof estatus !== 'string') {
+        res.status(400).json({ success: false, error: 'estatus es requerido' });
+        return;
+      }
+      const idsLimpios = ids.map(n => Number(n)).filter(n => !isNaN(n) && n > 0);
+      if (idsLimpios.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay IDs válidos' });
+        return;
+      }
+
+      const result = await prisma.tareas.updateMany({
+        where: { id: { in: idsLimpios } },
+        data: { estatus },
+      });
+
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { ids: idsLimpios, estatus });
+
+      res.json({ success: true, affected: result.count });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al actualizar bulk';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async marcarTodasLeidas(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
