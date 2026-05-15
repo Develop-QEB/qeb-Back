@@ -9,6 +9,7 @@ router.use(authMiddleware);
 // Stats y operaciones globales
 router.get('/stats', notificacionesController.getStats.bind(notificacionesController));
 router.patch('/leer-todas', notificacionesController.marcarTodasLeidas.bind(notificacionesController));
+router.patch('/bulk-estatus', notificacionesController.bulkUpdateEstatus.bind(notificacionesController));
 
 // Depuración de tareas de autorización resueltas
 router.post('/autorizacion/depurar', notificacionesController.depurarAutorizaciones.bind(notificacionesController));
