@@ -5,6 +5,7 @@ import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
+import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -103,6 +104,15 @@ async function main() {
     // Soft-deletea las que NO tienen APS y loguea las que SÍ para revisión manual
     // (no se borran automáticamente porque su APS ya está en SAP como documento).
     programarDiario(3, 'ZombiMonitor 03:00', async () => { await detectarYLimpiarZombis(); });
+
+    // Recordatorios de historial (Acciones Manuales con fecha programada).
+    // Cada dia a las 8am CDMX revisa entradas listas para notificar segun
+    // fecha_entrega - recordar_dias_antes y crea tareas de tipo "Recordatorio".
+    programarDiario(8, 'Recordatorios 08:00', async () => { await enviarRecordatoriosPendientes(); });
+    // Tambien dispara al arrancar para procesar pendientes acumulados (idempotente).
+    enviarRecordatoriosPendientes().catch((err: unknown) => {
+      console.error('[Recordatorios] Error en ejecucion inicial:', err);
+    });
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
     console.log('[DB] Server running without DB — requests will retry on demand.');
