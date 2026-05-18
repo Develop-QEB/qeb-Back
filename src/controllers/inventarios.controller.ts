@@ -1610,7 +1610,7 @@ export class InventariosController {
 
   async bulkCheck(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { codigos } = req.body;
+      const { codigos, expandir } = req.body;
       if (!Array.isArray(codigos) || codigos.length === 0) {
         res.status(400).json({ success: false, error: 'Se requiere un array de codigos' });
         return;
@@ -1622,7 +1622,16 @@ export class InventariosController {
         select: { id: true, codigo_unico: true, estatus: true },
       });
 
-      const existingMap = new Map(existing.map(e => [e.codigo_unico, e]));
+      // Un codigo_unico puede tener varios registros (p.ej. cara Tradicional + Digital).
+      // Por defecto se conserva uno (compat. con importación CSV); con `expandir`
+      // se devuelven TODOS para que el análisis de ocupación muestre ambas caras.
+      const byCodigo = new Map<string, typeof existing>();
+      for (const e of existing) {
+        const k = e.codigo_unico ?? '';
+        const arr = byCodigo.get(k);
+        if (arr) arr.push(e);
+        else byCodigo.set(k, [e]);
+      }
 
       // Compute estatus_real for found items
       const invIds = existing.map(e => e.id);
@@ -1680,28 +1689,34 @@ export class InventariosController {
       const ocupados: Array<{ codigo_unico: string | null; estatus: string | null; estatus_real: string; id: number; campana?: string }> = [];
 
       for (const codigo of codigos) {
-        const inv = existingMap.get(codigo);
-        if (!inv) {
+        const invs = byCodigo.get(codigo);
+        if (!invs || invs.length === 0) {
           nuevos.push(codigo);
           continue;
         }
 
-        // Compute estatus_real
-        const reservaEstatus = reservedMap[inv.id];
-        let estatus_real = inv.estatus || 'Disponible';
-        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
-          if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
-          else if (reservaEstatus) estatus_real = 'Reservado';
-          else estatus_real = 'Disponible';
-        }
+        // Sin `expandir`: un registro por codigo (el último, igual que el Map previo).
+        // Con `expandir`: todos los registros del codigo (Tradicional + Digital, etc.).
+        const targets = expandir ? invs : [invs[invs.length - 1]];
 
-        const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
-          inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento';
+        for (const inv of targets) {
+          // Compute estatus_real
+          const reservaEstatus = reservedMap[inv.id];
+          let estatus_real = inv.estatus || 'Disponible';
+          if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+            if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
+            else if (reservaEstatus) estatus_real = 'Reservado';
+            else estatus_real = 'Disponible';
+          }
 
-        if (isOcupado) {
-          ocupados.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id, campana: campanaMap[inv.id] || undefined });
-        } else {
-          sobreescribibles.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id });
+          const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
+            inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento';
+
+          if (isOcupado) {
+            ocupados.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id, campana: campanaMap[inv.id] || undefined });
+          } else {
+            sobreescribibles.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id });
+          }
         }
       }
 
