@@ -873,6 +873,18 @@ export class PropuestasController {
         `;
         const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
 
+        // tipo_periodo de la propuesta. Mensual = Gran Formato / Mi Macro:
+        // solo Flujo, SIN Contraflujo. El front (AssignInventarioModal
+        // getCaraCompletionStatus) ya colapsa caras_flujo+caras_contraflujo → Flujo
+        // cuando es mensual; el backend debe hacer lo mismo o bloquea el pase a
+        // ventas de caras 100% reservadas (caso 80545: MMC VIDRIOS EXTERIOR,
+        // 8/8 reservado pero guardado como cf=4/cc=4 → 8≠4).
+        const cotPeriodo = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: propuestaId },
+          select: { tipo_periodo: true },
+        });
+        const esMensual = cotPeriodo?.tipo_periodo === 'mensual';
+
         const reservasIncompletas = caras.some(cara => {
           // Artículos de impresión (IM) no requieren reservas — siempre completos
           const articulo = (cara.articulo || '').toUpperCase();
@@ -881,20 +893,18 @@ export class PropuestasController {
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
-          const flujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
-          const contraflujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
-          const flujoRequerido = Number(cara.caras_flujo) || 0;
-          const contraflujoRequerido = Number(cara.caras_contraflujo) || 0;
+          const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
+          const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
+          const rawFlujoRequerido = Number(cara.caras_flujo) || 0;
+          const rawContraRequerido = Number(cara.caras_contraflujo) || 0;
           const bonificacionRequerido = Number(cara.bonificacion) || 0;
 
-          // Fallback totalMatch: inventario tipo MMC/Mi Macro y otros especiales
-          // tienen tipo_de_cara='Flujo' en TODAS sus caras (no parten en Flujo/
-          // Contraflujo real). El split estricto los marca incompletos aunque estén
-          // 100% reservados. Mismo criterio que el front de campañas: si el total de
-          // reservas activas cubre el total requerido (caras + bonif), está completa.
-          const totalReservado = caraReservas.length;
-          const totalRequerido = (Number(cara.caras) || 0) + bonificacionRequerido;
-          if (totalRequerido > 0 && totalReservado >= totalRequerido) return false;
+          // Mensual: todo cuenta como Flujo, sin Contraflujo (mismo criterio que el
+          // front). Catorcenal: split exacto Flujo/Contraflujo como siempre.
+          const flujoReservado = esMensual ? rawFlujoReservado + rawContraReservado : rawFlujoReservado;
+          const contraflujoReservado = esMensual ? 0 : rawContraReservado;
+          const flujoRequerido = esMensual ? rawFlujoRequerido + rawContraRequerido : rawFlujoRequerido;
+          const contraflujoRequerido = esMensual ? 0 : rawContraRequerido;
 
           return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
         });
