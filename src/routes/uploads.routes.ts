@@ -15,6 +15,51 @@ const sanitizeFilename = (filename: string): string => {
     .replace(/^_|_$/g, '');
 };
 
+// Tama\u00f1o m\u00ednimo razonable para una imagen real (un placeholder de OneDrive
+// "solo en l\u00ednea" o un archivo corrupto suele pesar < 1KB).
+const MIN_IMAGE_BYTES = 1024;
+
+/**
+ * Valida que el buffer de una imagen sea realmente una imagen (firma/magic bytes)
+ * y no un archivo vac\u00edo/corrupto (ej. placeholder de OneDrive Files On-Demand).
+ * Devuelve un mensaje de error si es inv\u00e1lido, o null si est\u00e1 OK.
+ * Solo aplica a mimetypes image/*; otros tipos pasan sin validar firma.
+ */
+const validateImageBuffer = (
+  buffer: Buffer,
+  mimetype: string,
+  originalName: string,
+): string | null => {
+  if (!mimetype.startsWith('image/')) return null;
+
+  if (buffer.length < MIN_IMAGE_BYTES) {
+    return `El archivo "${originalName}" parece estar vac\u00edo o incompleto (${buffer.length} bytes). ` +
+      `Si est\u00e1 en OneDrive, aseg\u00farate de que est\u00e9 descargado en tu equipo ` +
+      `(clic derecho \u2192 "Conservar siempre en este dispositivo") o c\u00f3pialo a una carpeta local y vuelve a subirlo.`;
+  }
+
+  const b = buffer;
+  const isJpeg = b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+  const isPng =
+    b.length > 8 &&
+    b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+    b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a;
+  const isGif =
+    b.length > 4 &&
+    b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38; // "GIF8"
+  const isWebp =
+    b.length > 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && // "RIFF"
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50; // "WEBP"
+
+  if (!isJpeg && !isPng && !isGif && !isWebp) {
+    return `El archivo "${originalName}" no es una imagen v\u00e1lida (contenido corrupto o no es JPG/PNG/GIF/WEBP). ` +
+      `Si proviene de OneDrive, desc\u00e1rgalo localmente antes de subirlo y vuelve a intentarlo.`;
+  }
+
+  return null;
+};
+
 // Configurar multer en memoria para subir directo a Spaces.
 const storageMemory = multer.memoryStorage();
 
@@ -88,6 +133,16 @@ router.post('/arte', authMiddleware, uploadArte.single('file'), async (req: Requ
       return;
     }
 
+    const arteValidationError = validateImageBuffer(
+      req.file.buffer,
+      req.file.mimetype,
+      req.file.originalname,
+    );
+    if (arteValidationError) {
+      res.status(400).json({ success: false, error: arteValidationError });
+      return;
+    }
+
     // Organizar por tipo de contenido según mimetype
     const isPdf = req.file.mimetype === 'application/pdf';
     const isVideo = req.file.mimetype.startsWith('video/');
@@ -146,6 +201,16 @@ router.post('/testigo', authMiddleware, uploadTestigo.single('file'), async (req
       return;
     }
 
+    const testigoValidationError = validateImageBuffer(
+      req.file.buffer,
+      req.file.mimetype,
+      req.file.originalname,
+    );
+    if (testigoValidationError) {
+      res.status(400).json({ success: false, error: testigoValidationError });
+      return;
+    }
+
     const uploaded = await uploadBufferToSpaces(req.file.buffer, {
       folder: 'testigos',
       originalName: sanitizeFilename(req.file.originalname),
@@ -188,6 +253,16 @@ router.post('/general', authMiddleware, uploadArte.single('file'), async (req: R
 
     if (!req.file.buffer) {
       res.status(400).json({ success: false, error: 'Archivo invalido: no se recibio buffer' });
+      return;
+    }
+
+    const generalValidationError = validateImageBuffer(
+      req.file.buffer,
+      req.file.mimetype,
+      req.file.originalname,
+    );
+    if (generalValidationError) {
+      res.status(400).json({ success: false, error: generalValidationError });
       return;
     }
 
