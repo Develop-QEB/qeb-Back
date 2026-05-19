@@ -886,6 +886,16 @@ export class PropuestasController {
           const flujoRequerido = Number(cara.caras_flujo) || 0;
           const contraflujoRequerido = Number(cara.caras_contraflujo) || 0;
           const bonificacionRequerido = Number(cara.bonificacion) || 0;
+
+          // Fallback totalMatch: inventario tipo MMC/Mi Macro y otros especiales
+          // tienen tipo_de_cara='Flujo' en TODAS sus caras (no parten en Flujo/
+          // Contraflujo real). El split estricto los marca incompletos aunque estén
+          // 100% reservados. Mismo criterio que el front de campañas: si el total de
+          // reservas activas cubre el total requerido (caras + bonif), está completa.
+          const totalReservado = caraReservas.length;
+          const totalRequerido = (Number(cara.caras) || 0) + bonificacionRequerido;
+          if (totalRequerido > 0 && totalReservado >= totalRequerido) return false;
+
           return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
         });
 
