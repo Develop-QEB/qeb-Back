@@ -399,6 +399,11 @@ export class SolicitudesController {
       const sortOrder = (req.query.sortOrder as string) || 'desc';
       const groupBy = req.query.groupBy as string;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      // Filtros por historial: rango de fecha de cambio de estatus / creacion
+      const cambioEstatusDesde = req.query.cambioEstatusDesde as string;
+      const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
+      const creacionDesde = req.query.creacionDesde as string;
+      const creacionHasta = req.query.creacionHasta as string;
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -525,6 +530,33 @@ export class SolicitudesController {
         } else {
           where.id = { in: [] };
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Usa la tabla historial: tipo='Solicitud', filtrando por accion y fecha_hora.
+      // Se combina como AND adicional (interseccion) con el resto de filtros.
+      const addHistorialIdFilter = (ids: number[]) => {
+        if (!Array.isArray(where.AND)) where.AND = where.AND ? [where.AND] : [];
+        (where.AND as any[]).push({ id: { in: ids } });
+      };
+      const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+        const qp: any[] = [];
+        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+      if (creacionDesde || creacionHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
+        const qp: any[] = [];
+        if (creacionDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(creacionDesde)); }
+        if (creacionHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(creacionHasta)); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
       }
 
       // Visibility filter: non-leadership roles only see their own records
