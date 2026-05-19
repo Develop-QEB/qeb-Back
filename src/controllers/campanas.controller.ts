@@ -84,10 +84,15 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const cambioEstatusDesde = req.query.cambioEstatusDesde as string;
+      const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
+      const creacionDesde = req.query.creacionDesde as string;
+      const creacionHasta = req.query.creacionHasta as string;
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
-        u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+        u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -173,6 +178,24 @@ export class CampanasController {
           searchClause += ')';
           conditions.push(searchClause);
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        sub += `)`;
+        conditions.push(sub);
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(creacionDesde); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        conditions.push(sub);
       }
 
       // Year/catorcena filters - overlap logic (campaign active during selected period)

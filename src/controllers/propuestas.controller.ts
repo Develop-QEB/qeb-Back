@@ -398,10 +398,15 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const cambioEstatusDesde = req.query.cambioEstatusDesde as string;
+      const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
+      const creacionDesde = req.query.creacionDesde as string;
+      const creacionHasta = req.query.creacionHasta as string;
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
-        u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+        u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -461,6 +466,24 @@ export class PropuestasController {
           )`;
           params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // EXISTS contra historial con tipo='Propuesta'. fecha hasta = fin de dia.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(new Date(creacionDesde)); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
       }
 
       // Period filter — filter by cotizacion/campania dates
