@@ -10,6 +10,7 @@ import {
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
+import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -4028,6 +4029,14 @@ export class PropuestasController {
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
 
+      // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
+      // (split de bonificadas es front-only — corrige y autocura CT-DIG).
+      // Usa valores efectivos (nuevo si viene, si no el actual).
+      const effArtUp = articulo ?? currentCara.articulo;
+      const effCarasUp = caras !== undefined && caras !== null ? caras : currentCara.caras;
+      const effBonifUp = bonificacion !== undefined && bonificacion !== null ? bonificacion : currentCara.bonificacion;
+      const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any);
+
       const updatedCara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
         data: {
@@ -4035,16 +4044,16 @@ export class PropuestasController {
           estados,
           tipo,
           flujo,
-          bonificacion: bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined,
-          caras: caras !== undefined && caras !== null ? parseInt(caras) : undefined,
+          bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
+          caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
           nivel_socioeconomico,
           formato,
           costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
           tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
           inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
           fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
-          caras_flujo: caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined,
-          caras_contraflujo: caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined,
+          caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
+          caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
           articulo,
           descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
           grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
@@ -4263,6 +4272,9 @@ export class PropuestasController {
         articulo: articulo || null
       }, userId);
 
+      // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
+      // (split de bonificadas es front-only — corrige CT-DIG).
+      const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion);
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4270,16 +4282,16 @@ export class PropuestasController {
           estados,
           tipo: tipo || 'Tradicional',
           flujo,
-          bonificacion: bonificacion ? parseFloat(bonificacion) : 0,
-          caras: caras ? parseInt(caras) : 0,
+          bonificacion: bonifOvCrP ? bonifOvCrP.bonificacion : (bonificacion ? parseFloat(bonificacion) : 0),
+          caras: bonifOvCrP ? bonifOvCrP.caras : (caras ? parseInt(caras) : 0),
           nivel_socioeconomico: nivel_socioeconomico || '',
           formato: formato || '',
           costo: costo ? parseFloat(costo) : 0,
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
           inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
           fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
-          caras_flujo: caras_flujo ? parseInt(caras_flujo) : 0,
-          caras_contraflujo: caras_contraflujo ? parseInt(caras_contraflujo) : 0,
+          caras_flujo: bonifOvCrP ? bonifOvCrP.caras_flujo : (caras_flujo ? parseInt(caras_flujo) : 0),
+          caras_contraflujo: bonifOvCrP ? bonifOvCrP.caras_contraflujo : (caras_contraflujo ? parseInt(caras_contraflujo) : 0),
           articulo,
           descuento: descuento ? parseFloat(descuento) : 0,
           grupo_rt_bf: grupoRtBfCreate ? parseInt(grupoRtBfCreate) : null,
@@ -4497,6 +4509,12 @@ export class PropuestasController {
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }
 
+          // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
+          const effArtBk = data.articulo ?? currentCara?.articulo;
+          const effCarasBk = data.caras !== undefined && data.caras !== null ? data.caras : currentCara?.caras;
+          const effBonifBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
+          const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any);
+
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
             data: {
@@ -4504,16 +4522,16 @@ export class PropuestasController {
               estados: data.estados,
               tipo: data.tipo,
               flujo: data.flujo,
-              bonificacion: data.bonificacion !== undefined && data.bonificacion !== null ? parseFloat(data.bonificacion) : undefined,
-              caras: data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined,
+              bonificacion: bonifOvBk ? bonifOvBk.bonificacion : (data.bonificacion !== undefined && data.bonificacion !== null ? parseFloat(data.bonificacion) : undefined),
+              caras: bonifOvBk ? bonifOvBk.caras : (data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined),
               nivel_socioeconomico: data.nivel_socioeconomico,
               formato: data.formato,
               costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
               tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
               inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
               fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
-              caras_flujo: data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined,
-              caras_contraflujo: data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined,
+              caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined),
+              caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined),
               articulo: data.articulo,
               descuento: data.descuento !== undefined && data.descuento !== null ? parseFloat(data.descuento) : undefined,
               grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,

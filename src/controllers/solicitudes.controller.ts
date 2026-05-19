@@ -10,6 +10,7 @@ import {
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
+import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
 import nodemailer from 'nodemailer';
@@ -2088,6 +2089,12 @@ export class SolicitudesController {
             articulo: cara.articulo || null
           }, userId);
 
+          // BF/CF/CT: el conteo total va a bonificacion; caras/flujo/contra = 0
+          // (el split de bonificadas es front-only). Corrige CT-DIG que metía
+          // el conteo en caras_flujo/caras_contraflujo.
+          const artEfectivo = cara.articulo || articulo;
+          const bonifOv = bonifCaraOverride(artEfectivo, cara.caras, cara.bonificacion);
+
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
               idquote: propuesta.id.toString(),
@@ -2095,16 +2102,16 @@ export class SolicitudesController {
               estados: cara.estado,
               tipo: cara.tipo || 'Tradicional',
               flujo: cara.flujo || 'Ambos',
-              bonificacion: cara.bonificacion || 0,
-              caras: cara.caras,
+              bonificacion: bonifOv ? bonifOv.bonificacion : (cara.bonificacion || 0),
+              caras: bonifOv ? bonifOv.caras : cara.caras,
               nivel_socioeconomico: cara.nivel_socioeconomico,
               formato: cara.formato,
               costo: cara.costo,
               tarifa_publica: cara.tarifa_publica || 0,
               inicio_periodo: new Date(cara.inicio_periodo),
               fin_periodo: new Date(cara.fin_periodo),
-              caras_flujo: cara.caras_flujo || 0,
-              caras_contraflujo: cara.caras_contraflujo || 0,
+              caras_flujo: bonifOv ? bonifOv.caras_flujo : (cara.caras_flujo || 0),
+              caras_contraflujo: bonifOv ? bonifOv.caras_contraflujo : (cara.caras_contraflujo || 0),
               articulo: cara.articulo || articulo,
               descuento: cara.descuento || 0,
               autorizacion_dg: estadoResult.autorizacion_dg,
@@ -3191,6 +3198,8 @@ export class SolicitudesController {
               autorizacion_dcm = estadoResult.autorizacion_dcm;
             }
 
+            // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
+            const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion);
             const createdCara = await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
@@ -3198,16 +3207,16 @@ export class SolicitudesController {
                 estados: cara.estado,
                 tipo: cara.tipo || 'Tradicional',
                 flujo: cara.flujo || 'Ambos',
-                bonificacion: cara.bonificacion || 0,
-                caras: cara.caras,
+                bonificacion: bonifOvUpd ? bonifOvUpd.bonificacion : (cara.bonificacion || 0),
+                caras: bonifOvUpd ? bonifOvUpd.caras : cara.caras,
                 nivel_socioeconomico: cara.nivel_socioeconomico,
                 formato: cara.formato,
                 costo: cara.costo,
                 tarifa_publica: cara.tarifa_publica || 0,
                 inicio_periodo: new Date(cara.inicio_periodo),
                 fin_periodo: new Date(cara.fin_periodo),
-                caras_flujo: cara.caras_flujo || 0,
-                caras_contraflujo: cara.caras_contraflujo || 0,
+                caras_flujo: bonifOvUpd ? bonifOvUpd.caras_flujo : (cara.caras_flujo || 0),
+                caras_contraflujo: bonifOvUpd ? bonifOvUpd.caras_contraflujo : (cara.caras_contraflujo || 0),
                 articulo: cara.articulo || articulo,
                 descuento: cara.descuento || 0,
                 autorizacion_dg,

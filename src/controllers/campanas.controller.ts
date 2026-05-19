@@ -13,6 +13,7 @@ import {
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
+import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
@@ -8878,19 +8879,26 @@ export class CampanasController {
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
 
+      // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
+      // (split de bonificadas es front-only — corrige y autocura CT-DIG).
+      const effArtCm = data.articulo ?? currentCaraFull?.articulo;
+      const effCarasCm = data.caras !== undefined && data.caras !== null ? data.caras : currentCaraFull?.caras;
+      const effBonifCm = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCaraFull?.bonificacion;
+      const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any);
+
       const updateData: any = {
         ciudad: data.ciudad,
         estados: data.estados,
         tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
-        bonificacion: data.bonificacion,
-        caras: data.caras,
+        bonificacion: bonifOvCm ? bonifOvCm.bonificacion : data.bonificacion,
+        caras: bonifOvCm ? bonifOvCm.caras : data.caras,
         nivel_socioeconomico: data.nivel_socioeconomico,
         formato: data.formato,
         costo: data.costo,
         tarifa_publica: data.tarifa_publica,
-        caras_flujo: data.caras_flujo,
-        caras_contraflujo: data.caras_contraflujo,
+        caras_flujo: bonifOvCm ? bonifOvCm.caras_flujo : data.caras_flujo,
+        caras_contraflujo: bonifOvCm ? bonifOvCm.caras_contraflujo : data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
         autorizacion_dg,
@@ -9121,20 +9129,24 @@ export class CampanasController {
         articulo: data.articulo || null
       }, userId);
 
+      // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
+      // (split de bonificadas es front-only — corrige CT-DIG al crear).
+      const bonifOvCmCr = bonifCaraOverride(data.articulo, data.caras, data.bonificacion);
+
       const createData: any = {
         idquote: String(cotizacion.id_propuesta),
         ciudad: data.ciudad,
         estados: data.estados,
         tipo: data.tipo || 'Tradicional',
         flujo: data.flujo,
-        bonificacion: data.bonificacion,
-        caras: data.caras,
+        bonificacion: bonifOvCmCr ? bonifOvCmCr.bonificacion : data.bonificacion,
+        caras: bonifOvCmCr ? bonifOvCmCr.caras : data.caras,
         nivel_socioeconomico: data.nivel_socioeconomico,
         formato: data.formato,
         costo: data.costo,
         tarifa_publica: data.tarifa_publica,
-        caras_flujo: data.caras_flujo,
-        caras_contraflujo: data.caras_contraflujo,
+        caras_flujo: bonifOvCmCr ? bonifOvCmCr.caras_flujo : data.caras_flujo,
+        caras_contraflujo: bonifOvCmCr ? bonifOvCmCr.caras_contraflujo : data.caras_contraflujo,
         articulo: data.articulo,
         descuento: data.descuento,
         autorizacion_dg: estadoResult.autorizacion_dg,
@@ -9313,19 +9325,25 @@ export class CampanasController {
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }
 
+          // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
+          const effArtCmBk = data.articulo ?? currentCara?.articulo;
+          const effCarasCmBk = data.caras !== undefined && data.caras !== null ? data.caras : currentCara?.caras;
+          const effBonifCmBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
+          const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any);
+
           const updateData: any = {
             ciudad: data.ciudad,
             estados: data.estados,
             tipo: data.tipo || 'Tradicional',
             flujo: data.flujo,
-            bonificacion: data.bonificacion,
-            caras: data.caras,
+            bonificacion: bonifOvCmBk ? bonifOvCmBk.bonificacion : data.bonificacion,
+            caras: bonifOvCmBk ? bonifOvCmBk.caras : data.caras,
             nivel_socioeconomico: data.nivel_socioeconomico,
             formato: data.formato,
             costo: data.costo,
             tarifa_publica: data.tarifa_publica,
-            caras_flujo: data.caras_flujo,
-            caras_contraflujo: data.caras_contraflujo,
+            caras_flujo: bonifOvCmBk ? bonifOvCmBk.caras_flujo : data.caras_flujo,
+            caras_contraflujo: bonifOvCmBk ? bonifOvCmBk.caras_contraflujo : data.caras_contraflujo,
             articulo: data.articulo,
             descuento: data.descuento,
             autorizacion_dg,
