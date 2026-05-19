@@ -20,6 +20,7 @@ import circuitosRoutes from './circuitos.routes';
 import analisisOcupacionRoutes from './analisis-ocupacion.routes';
 import historialRoutes from './historial.routes';
 import auditReservasRoutes from './audit-reservas.routes';
+import reorganizarOcupacionRoutes from './reorganizar-ocupacion.routes';
 
 import publicRoutes from './public.routes';
 
@@ -47,5 +48,6 @@ router.use('/circuitos', circuitosRoutes);
 router.use('/analisis-ocupacion', analisisOcupacionRoutes);
 router.use('/historial', historialRoutes);
 router.use('/audit-reservas', auditReservasRoutes);
+router.use('/reorganizar-ocupacion', reorganizarOcupacionRoutes);
 
 export default router;
