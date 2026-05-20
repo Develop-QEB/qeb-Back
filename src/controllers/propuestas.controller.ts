@@ -403,11 +403,12 @@ export class PropuestasController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -425,7 +426,16 @@ export class PropuestasController {
         whereConditions += ` AND sl.status = 'Atendida'`;
       }
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
+      // gana excludeRechazadas (siempre se ocultan).
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          whereConditions += ` AND pr.status = ?`;
+          params.push(status);
+        }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
         whereConditions += ` AND pr.status = ?`;
         params.push(status);
       }
@@ -1450,12 +1460,13 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
-        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1466,7 +1477,13 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const statsParams: any[] = [];
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          whereConditions += ` AND pr.status = ?`;
+          statsParams.push(status);
+        }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
         whereConditions += ` AND pr.status = ?`;
         statsParams.push(status);
       }
@@ -2254,6 +2271,7 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2275,7 +2293,12 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const params: any[] = [];
 
-      if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') { whereConditions += ` AND pr.status = ?`; params.push(status); }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
+        whereConditions += ` AND pr.status = ?`; params.push(status);
+      }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
         // AND entre tags, OR entre campos por tag (alineado con getAll/getStats).

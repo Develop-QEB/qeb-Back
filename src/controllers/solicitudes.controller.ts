@@ -405,12 +405,22 @@ export class SolicitudesController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = {
         deleted_at: null,
       };
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico (Aprobada, Pendiente, etc.) se respeta. Si pide Rechazada
+      // con excludeRechazadas=true, gana excludeRechazadas (siempre se ocultan).
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          where.status = status;
+        } else {
+          where.status = { not: 'Rechazada' };
+        }
+      } else if (status) {
         where.status = status;
       }
 
@@ -1172,10 +1182,17 @@ export class SolicitudesController {
       const catorcenaFin = req.query.catorcenaFin as string;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = { deleted_at: null };
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          where.status = status;
+        } else {
+          where.status = { not: 'Rechazada' };
+        }
+      } else if (status) {
         where.status = status;
       }
 

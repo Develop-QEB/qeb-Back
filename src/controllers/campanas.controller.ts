@@ -89,11 +89,12 @@ export class CampanasController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -107,11 +108,22 @@ export class CampanasController {
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
+      // gana excludeRechazadas (siempre se ocultan). Inactivas se siguen ocultando
+      // cuando no hay status explícito.
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status != 'Rechazada'");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
-        // Si no se especifica status, excluir las inactivas (propuestas aún no aprobadas)
         conditions.push("cm.status != 'inactiva'");
       }
 
@@ -1512,12 +1524,13 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
-        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1528,7 +1541,15 @@ export class CampanasController {
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status != 'Rechazada'");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
@@ -2719,6 +2740,7 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Build WHERE conditions (same as getAll)
       const conditions: string[] = ['cm.id IS NOT NULL'];
@@ -2726,7 +2748,15 @@ export class CampanasController {
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status != 'Rechazada'");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
