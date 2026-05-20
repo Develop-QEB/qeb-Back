@@ -602,13 +602,13 @@ export class CampanasController {
                  INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                  WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                    AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
+                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc2.articulo, '') NOT LIKE '%-QR'
                 ) as cnt,
                 (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                  FROM solicitudCaras sc3
                  INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                  WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
+                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc3.articulo, '') NOT LIKE '%-QR'
                 ) as caras_esperadas`,
               solicitudId, campana.fecha_fin,
               solicitudId, campana.fecha_fin
@@ -634,7 +634,7 @@ export class CampanasController {
               FROM solicitudCaras sc
               INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
               WHERE sc.idquote = ?
-                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
+                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR'
               ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
               solicitudId
             )
