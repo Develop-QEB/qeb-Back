@@ -61,7 +61,11 @@ export class DashboardController {
       const tipoClause = multiClause(tipos);
       if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
 
-      // Obtener todos los inventarios que cumplen los filtros
+      // Obtener todos los inventarios que cumplen los filtros.
+      // Los Inactivos son "fantasmas" — quedan en el catálogo pero NO cuentan
+      // en KPIs, mapa, distribuciones ni gráficas. Solo se ven en el listado
+      // admin de /api/inventarios cuando se filtra explícitamente por estatus.
+      inventarioWhere.estatus = { not: 'Inactivo' };
       const inventariosBase = await prisma.inventarios.findMany({
         where: inventarioWhere,
         select: {

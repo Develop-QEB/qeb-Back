@@ -154,7 +154,7 @@ export class InventariosController {
       const dataWithRealStatus = inventarios.map(inv => {
         const reservaEstatus = reservedMap[inv.id];
         let estatus_real = inv.estatus || 'Activo';
-        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento' && inv.estatus !== 'Inactivo') {
           if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
           else if (reservaEstatus) estatus_real = 'Reservado';
           else estatus_real = 'Activo';
@@ -199,7 +199,9 @@ export class InventariosController {
       if (estatus) {
         where.estatus = estatus;
       } else {
-        where.estatus = { not: 'Bloqueado' };
+        // Excluir Inactivos (fantasmas) y Bloqueados del mapa por default.
+        // Si quieren verlos hay que filtrar explícitamente por ?estatus=Inactivo.
+        where.estatus = { notIn: ['Bloqueado', 'Inactivo'] };
       }
 
       if (plaza) {
@@ -461,10 +463,13 @@ export class InventariosController {
       console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
 
       // Build where clause for inventarios
+      // Excluye Bloqueado (mandado a reparar) e Inactivo (fantasmas archivados).
+      // Si en el futuro se agrega otro estatus para "no disponible", también va aquí
+      // y en `getEspaciosBloqueados` (inventario-bloqueo.service.ts) — ver comentario ahí.
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
-        estatus: { not: 'Bloqueado' },
+        estatus: { notIn: ['Bloqueado', 'Inactivo'] },
       };
 
       // Filter by city (municipio) - puede ser múltiples ciudades separadas por coma
@@ -1528,14 +1533,15 @@ export class InventariosController {
           // In overwrite list - check if occupied
           const reservaEstatus = reservedMap[existingItem.id];
           let estatus_real = existingItem.estatus || 'Disponible';
-          if (existingItem.estatus !== 'Bloqueado' && existingItem.estatus !== 'Mantenimiento') {
+          if (existingItem.estatus !== 'Bloqueado' && existingItem.estatus !== 'Mantenimiento' && existingItem.estatus !== 'Inactivo') {
             if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
             else if (reservaEstatus) estatus_real = 'Reservado';
             else estatus_real = 'Disponible';
           }
 
           const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
-            existingItem.estatus === 'Bloqueado' || existingItem.estatus === 'Mantenimiento';
+            existingItem.estatus === 'Bloqueado' || existingItem.estatus === 'Mantenimiento' ||
+            existingItem.estatus === 'Inactivo';
 
           if (isOcupado) {
             duplicados_ocupados++;
@@ -1703,14 +1709,15 @@ export class InventariosController {
           // Compute estatus_real
           const reservaEstatus = reservedMap[inv.id];
           let estatus_real = inv.estatus || 'Disponible';
-          if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento') {
+          if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento' && inv.estatus !== 'Inactivo') {
             if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
             else if (reservaEstatus) estatus_real = 'Reservado';
             else estatus_real = 'Disponible';
           }
 
           const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
-            inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento';
+            inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento' ||
+            inv.estatus === 'Inactivo';
 
           if (isOcupado) {
             ocupados.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id, campana: campanaMap[inv.id] || undefined });
