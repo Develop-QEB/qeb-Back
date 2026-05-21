@@ -113,13 +113,13 @@ export class CampanasController {
       // gana excludeRechazadas (siempre se ocultan). Inactivas se siguen ocultando
       // cuando no hay status explícito.
       if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
           conditions.push('cm.status = ?');
           params.push(status);
         } else {
           conditions.push("cm.status != 'inactiva'");
         }
-        conditions.push("cm.status != 'Rechazada'");
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
@@ -1547,13 +1547,13 @@ export class CampanasController {
       const params: (string | number)[] = [];
 
       if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
           conditions.push('cm.status = ?');
           params.push(status);
         } else {
           conditions.push("cm.status != 'inactiva'");
         }
-        conditions.push("cm.status != 'Rechazada'");
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
@@ -2759,13 +2759,13 @@ export class CampanasController {
       let filterFechaFin: Date | null = null;
 
       if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
           conditions.push('cm.status = ?');
           params.push(status);
         } else {
           conditions.push("cm.status != 'inactiva'");
         }
-        conditions.push("cm.status != 'Rechazada'");
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
