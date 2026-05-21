@@ -105,6 +105,10 @@ async function main() {
     // (no se borran automáticamente porque su APS ya está en SAP como documento).
     programarDiario(3, 'ZombiMonitor 03:00', async () => { await detectarYLimpiarZombis(); });
 
+    // Depurar tareas de autorización + reparar huérfanos (caras pendientes
+    // sin tarea visible para DG/DCM). 4am CDMX, antes de que el equipo abra.
+    programarDiario(4, 'DepurarAutorizaciones 04:00', async () => { await depurarTareasAutorizacionResueltas(); });
+
     // Recordatorios de historial (Acciones Manuales con fecha programada).
     // Cada dia a las 8am CDMX revisa entradas listas para notificar segun
     // fecha_entrega - recordar_dias_antes y crea tareas de tipo "Recordatorio".
