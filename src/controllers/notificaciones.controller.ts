@@ -84,8 +84,10 @@ export class NotificacionesController {
 
       // Diseñadores solo deben ver tareas/notificaciones relacionadas a Diseño:
       // tareas de Revisión/Corrección y notificaciones de artes (aprobados,
-      // rechazados, reasignacion). Filtra el ruido de "Campaña nueva",
-      // "APS asignado", "Seguimiento Campaña", etc.
+      // rechazados, pendientes, reasignacion, comentarios). Filtra el ruido de
+      // "Campaña nueva", "APS asignado", "Seguimiento Campaña", etc.
+      // Se usa `contains` con palabras clave para tolerar variantes de titulo
+      // (singular/plural, con/sin acentos, "Arte" vs "Artes", etc.).
       if (userRole === 'Diseñadores') {
         const disenoWhitelist = {
           OR: [
@@ -95,10 +97,20 @@ export class NotificacionesController {
                 { tipo: 'Notificación' },
                 {
                   OR: [
-                    { titulo: { startsWith: 'Artes aprobados' } },
-                    { titulo: { startsWith: 'Artes rechazados' } },
-                    { titulo: { startsWith: 'Te asignaron una tarea de Diseño' } },
-                    { titulo: { startsWith: 'Tarea de Diseño reasignada' } },
+                    { titulo: { contains: 'arte' } },
+                    { titulo: { contains: 'Arte' } },
+                    { titulo: { contains: 'revisi' } },     // revision / revisión
+                    { titulo: { contains: 'Revisi' } },
+                    { titulo: { contains: 'rechaz' } },     // rechazo / rechazado / rechazados
+                    { titulo: { contains: 'Rechaz' } },
+                    { titulo: { contains: 'aprob' } },      // aprobado / aprobación / aprobada
+                    { titulo: { contains: 'Aprob' } },
+                    { titulo: { contains: 'correcc' } },    // corrección / corrigió
+                    { titulo: { contains: 'Correcc' } },
+                    { titulo: { contains: 'pendiente' } },
+                    { titulo: { contains: 'Pendiente' } },
+                    { titulo: { contains: 'Diseño' } },
+                    { titulo: { contains: 'Diseno' } },
                   ],
                 },
               ],
@@ -1089,7 +1101,8 @@ export class NotificacionesController {
         where.OR = orConditions;
       }
 
-      // Diseñadores: solo cuentan tareas de Diseño (mismo whitelist que getAll)
+      // Diseñadores: solo cuentan tareas de Diseño (mismo whitelist que getAll).
+      // Se usa `contains` con palabras clave para tolerar variantes de titulo.
       if (userRole === 'Diseñadores') {
         const disenoWhitelist = {
           OR: [
@@ -1099,10 +1112,20 @@ export class NotificacionesController {
                 { tipo: 'Notificación' },
                 {
                   OR: [
-                    { titulo: { startsWith: 'Artes aprobados' } },
-                    { titulo: { startsWith: 'Artes rechazados' } },
-                    { titulo: { startsWith: 'Te asignaron una tarea de Diseño' } },
-                    { titulo: { startsWith: 'Tarea de Diseño reasignada' } },
+                    { titulo: { contains: 'arte' } },
+                    { titulo: { contains: 'Arte' } },
+                    { titulo: { contains: 'revisi' } },
+                    { titulo: { contains: 'Revisi' } },
+                    { titulo: { contains: 'rechaz' } },
+                    { titulo: { contains: 'Rechaz' } },
+                    { titulo: { contains: 'aprob' } },
+                    { titulo: { contains: 'Aprob' } },
+                    { titulo: { contains: 'correcc' } },
+                    { titulo: { contains: 'Correcc' } },
+                    { titulo: { contains: 'pendiente' } },
+                    { titulo: { contains: 'Pendiente' } },
+                    { titulo: { contains: 'Diseño' } },
+                    { titulo: { contains: 'Diseno' } },
                   ],
                 },
               ],
