@@ -3981,7 +3981,6 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const {
         ciudad,
         estados,
@@ -4031,10 +4030,9 @@ export class PropuestasController {
       // Comparación de decimales con toFixed(2) para evitar falsos positivos por
       // precisión float (ej. 120 * 3327.28 = 399273.59999999997 en JS) que disparaban
       // recalc cuando el usuario solo cambiaba NSE.
-      // Admin/DEV: nunca recalcular auth — sus ediciones preservan el estado actual.
       const decimalEq = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-      const authFieldsChanged = !isAdminOrDev && (
+      const authFieldsChanged = (
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
         (bonificacion !== undefined && !decimalEq(bonificacion, currentCara.bonificacion)) ||
         (tarifa_publica !== undefined && !decimalEq(tarifa_publica, currentCara.tarifa_publica)) ||
@@ -4469,7 +4467,6 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -4506,10 +4503,9 @@ export class PropuestasController {
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
-          // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
           const decimalEqP = (a: unknown, b: unknown) =>
             parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-          const authFieldsChanged = !isAdminOrDev && currentCara && (
+          const authFieldsChanged = currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
             (data.bonificacion !== undefined && !decimalEqP(data.bonificacion, currentCara.bonificacion)) ||
             (data.tarifa_publica !== undefined && !decimalEqP(data.tarifa_publica, currentCara.tarifa_publica)) ||
