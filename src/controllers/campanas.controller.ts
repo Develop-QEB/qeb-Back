@@ -133,21 +133,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -189,7 +190,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
@@ -1562,21 +1567,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -1618,7 +1624,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
@@ -2769,21 +2779,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -2825,7 +2836,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
