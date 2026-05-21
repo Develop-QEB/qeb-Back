@@ -10,6 +10,8 @@ interface CaraSnapshot {
   autorizacion_dcm: string | null;
   articulo: string | null;
   ciudad: string | null;
+  tipo: string | null;
+  formato: string | null;
 }
 
 const TRACKED_FIELDS: Record<string, string> = {
@@ -19,6 +21,8 @@ const TRACKED_FIELDS: Record<string, string> = {
   tarifa_publica: 'Tarifa pública',
   autorizacion_dg: 'Autorización DG',
   autorizacion_dcm: 'Autorización DCM',
+  tipo: 'Tipo',
+  formato: 'Formato',
 };
 
 function formatValue(field: string, value: unknown): string {
@@ -43,6 +47,8 @@ export async function snapshotCaras(caraIds: number[]): Promise<Map<number, Cara
       autorizacion_dcm: true,
       articulo: true,
       ciudad: true,
+      tipo: true,
+      formato: true,
     },
   });
   const map = new Map<number, CaraSnapshot>();
@@ -57,6 +63,8 @@ export async function snapshotCaras(caraIds: number[]): Promise<Map<number, Cara
       autorizacion_dcm: c.autorizacion_dcm,
       articulo: c.articulo,
       ciudad: c.ciudad,
+      tipo: c.tipo,
+      formato: c.formato,
     });
   }
   return map;
@@ -83,7 +91,8 @@ export async function registrarCambiosCaras(
       const newVal = (after as unknown as Record<string, unknown>)[field];
       const oldNum = oldVal !== null && oldVal !== undefined ? Number(oldVal) : null;
       const newNum = newVal !== null && newVal !== undefined ? Number(newVal) : null;
-      const isNumeric = field !== 'autorizacion_dg' && field !== 'autorizacion_dcm';
+      const STRING_FIELDS = new Set(['autorizacion_dg', 'autorizacion_dcm', 'tipo', 'formato']);
+      const isNumeric = !STRING_FIELDS.has(field);
 
       const changed = isNumeric
         ? oldNum !== newNum

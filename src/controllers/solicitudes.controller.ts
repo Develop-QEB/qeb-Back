@@ -1861,6 +1861,22 @@ export class SolicitudesController {
         });
         return;
       }
+
+      // Validar tipo (Digital/Tradicional) en cada cara — sin esto el back
+      // defaulteaba a 'Tradicional' silenciosamente y se reportaron bugs
+      // del tipo "se cambió de Digital a Tradicional al reactivar".
+      if (Array.isArray(caras)) {
+        for (let i = 0; i < caras.length; i++) {
+          const c = caras[i];
+          if (!c.tipo || (c.tipo !== 'Digital' && c.tipo !== 'Tradicional')) {
+            res.status(400).json({
+              success: false,
+              error: `Cara #${i + 1} (artículo ${c.articulo || 's/d'}): el campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional'`,
+            });
+            return;
+          }
+        }
+      }
       if (Array.isArray(caras) && caras.length > 0) {
         for (let i = 0; i < caras.length; i++) {
           const c = caras[i];
@@ -2117,7 +2133,7 @@ export class SolicitudesController {
               idquote: propuesta.id.toString(),
               ciudad: cara.ciudad,
               estados: cara.estado,
-              tipo: cara.tipo || 'Tradicional',
+              tipo: cara.tipo, // validado al inicio del handler (Digital/Tradicional)
               flujo: cara.flujo || 'Ambos',
               bonificacion: bonifOv ? bonifOv.bonificacion : (cara.bonificacion || 0),
               caras: bonifOv ? bonifOv.caras : cara.caras,
@@ -3001,6 +3017,16 @@ export class SolicitudesController {
             });
             return;
           }
+          // Validar tipo — sin esto el back defaulteaba a 'Tradicional' al
+          // re-crear caras tras un rechazo y se reportaron casos de cambio
+          // silencioso Digital→Tradicional (campaña 70739).
+          if (!c.tipo || (c.tipo !== 'Digital' && c.tipo !== 'Tradicional')) {
+            res.status(400).json({
+              success: false,
+              error: `La cara ${i + 1} (${c.articulo || 'sin articulo'}): el campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional'`,
+            });
+            return;
+          }
         }
       }
 
@@ -3222,7 +3248,7 @@ export class SolicitudesController {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
                 estados: cara.estado,
-                tipo: cara.tipo || 'Tradicional',
+                tipo: cara.tipo, // validado al inicio del handler (Digital/Tradicional)
                 flujo: cara.flujo || 'Ambos',
                 bonificacion: bonifOvUpd ? bonifOvUpd.bonificacion : (cara.bonificacion || 0),
                 caras: bonifOvUpd ? bonifOvUpd.caras : cara.caras,

@@ -4290,6 +4290,17 @@ export class PropuestasController {
         return;
       }
 
+      // Validar tipo (Digital/Tradicional). Sin esto el back defaulteaba
+      // silenciosamente a 'Tradicional' cuando el front omitia el campo
+      // (caso 70739: caras Digital cambiaban a Tradicional al re-crear).
+      if (!tipo || (tipo !== 'Digital' && tipo !== 'Tradicional')) {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${tipo === undefined ? 'undefined' : `'${tipo}'`})`,
+        });
+        return;
+      }
+
       // Calculate authorization state — use BF pair's bonificacion for RT rows
       const artUpperCrP = (articulo || '').toUpperCase();
       const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
@@ -4321,7 +4332,7 @@ export class PropuestasController {
           idquote: id, // Link to propuesta
           ciudad,
           estados,
-          tipo: tipo || 'Tradicional',
+          tipo, // validado al inicio del handler (Digital/Tradicional)
           flujo,
           bonificacion: bonifOvCrP ? bonifOvCrP.bonificacion : (bonificacion ? parseFloat(bonificacion) : 0),
           caras: bonifOvCrP ? bonifOvCrP.caras : (caras ? parseInt(caras) : 0),

@@ -8914,10 +8914,24 @@ export class CampanasController {
       const effBonifCm = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCaraFull?.bonificacion;
       const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any);
 
+      // En update: si el front no manda tipo, preservar el actual de BD
+      // (NO defaultear a 'Tradicional' — eso era el bug del caso 70739).
+      // Si manda tipo, debe ser Digital o Tradicional explicito.
+      if (data.tipo !== undefined && data.tipo !== '' && data.tipo !== 'Digital' && data.tipo !== 'Tradicional') {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' debe ser 'Digital' o 'Tradicional' (recibido: '${data.tipo}')`,
+        });
+        return;
+      }
+      const tipoFinal = (data.tipo === undefined || data.tipo === '' || data.tipo === null)
+        ? currentCaraFull?.tipo
+        : data.tipo;
+
       const updateData: any = {
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo || 'Tradicional',
+        tipo: tipoFinal,
         flujo: data.flujo,
         bonificacion: bonifOvCm ? bonifOvCm.bonificacion : data.bonificacion,
         caras: bonifOvCm ? bonifOvCm.caras : data.caras,
@@ -9106,6 +9120,16 @@ export class CampanasController {
         return;
       }
 
+      // Validar tipo (Digital/Tradicional). Sin esto el back defaulteaba
+      // silenciosamente a 'Tradicional' (caso 70739).
+      if (!data.tipo || (data.tipo !== 'Digital' && data.tipo !== 'Tradicional')) {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${data.tipo === undefined ? 'undefined' : `'${data.tipo}'`})`,
+        });
+        return;
+      }
+
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -9165,7 +9189,7 @@ export class CampanasController {
         idquote: String(cotizacion.id_propuesta),
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo || 'Tradicional',
+        tipo: data.tipo, // validado al inicio del handler (Digital/Tradicional)
         flujo: data.flujo,
         bonificacion: bonifOvCmCr ? bonifOvCmCr.bonificacion : data.bonificacion,
         caras: bonifOvCmCr ? bonifOvCmCr.caras : data.caras,
@@ -9357,10 +9381,19 @@ export class CampanasController {
           const effBonifCmBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
           const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any);
 
+          // En bulk update: preservar tipo actual si el front no lo manda.
+          // NO defaultear a 'Tradicional'. Si manda valor, validar.
+          if (data.tipo !== undefined && data.tipo !== '' && data.tipo !== 'Digital' && data.tipo !== 'Tradicional') {
+            throw new Error(`Cara ${caraId}: el campo 'tipo' debe ser 'Digital' o 'Tradicional' (recibido: '${data.tipo}')`);
+          }
+          const tipoFinalBulk = (data.tipo === undefined || data.tipo === '' || data.tipo === null)
+            ? currentCara?.tipo
+            : data.tipo;
+
           const updateData: any = {
             ciudad: data.ciudad,
             estados: data.estados,
-            tipo: data.tipo || 'Tradicional',
+            tipo: tipoFinalBulk,
             flujo: data.flujo,
             bonificacion: bonifOvCmBk ? bonifOvCmBk.bonificacion : data.bonificacion,
             caras: bonifOvCmBk ? bonifOvCmBk.caras : data.caras,
