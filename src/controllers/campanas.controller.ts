@@ -89,11 +89,12 @@ export class CampanasController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -107,11 +108,22 @@ export class CampanasController {
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
+      // gana excludeRechazadas (siempre se ocultan). Inactivas se siguen ocultando
+      // cuando no hay status explícito.
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
-        // Si no se especifica status, excluir las inactivas (propuestas aún no aprobadas)
         conditions.push("cm.status != 'inactiva'");
       }
 
@@ -121,21 +133,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -177,7 +190,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
@@ -590,13 +607,13 @@ export class CampanasController {
                  INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                  WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                    AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%'
+                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc2.articulo, '') NOT LIKE '%-QR'
                 ) as cnt,
                 (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                  FROM solicitudCaras sc3
                  INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                  WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%'
+                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc3.articulo, '') NOT LIKE '%-QR'
                 ) as caras_esperadas`,
               solicitudId, campana.fecha_fin,
               solicitudId, campana.fecha_fin
@@ -622,7 +639,7 @@ export class CampanasController {
               FROM solicitudCaras sc
               INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
               WHERE sc.idquote = ?
-                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%'
+                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR'
               ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
               solicitudId
             )
@@ -1512,12 +1529,13 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
-        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1528,7 +1546,15 @@ export class CampanasController {
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
@@ -1541,21 +1567,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -1597,7 +1624,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
@@ -2719,6 +2750,7 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Build WHERE conditions (same as getAll)
       const conditions: string[] = ['cm.id IS NOT NULL'];
@@ -2726,7 +2758,15 @@ export class CampanasController {
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
+          conditions.push('cm.status = ?');
+          params.push(status);
+        } else {
+          conditions.push("cm.status != 'inactiva'");
+        }
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
+      } else if (status) {
         conditions.push('cm.status = ?');
         params.push(status);
       } else {
@@ -2739,21 +2779,22 @@ export class CampanasController {
       }
 
       if (search) {
-        // Tokenización por '|' (no espacios) + AND entre tags: cada tag
-        // refina los resultados. Mismo patrón que solicitudes/propuestas.
+        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
+        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
+        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool numérico: una sola cláusula AND (cm.id IN o ct.id_propuesta IN).
+        const orClauses: string[] = [];
+
         if (numericTerms.length > 0) {
-          conditions.push(`(cm.id IN (${numericTerms.map(() => '?').join(',')}) OR ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')}))`);
-          params.push(...numericTerms.map(t => parseInt(t)), ...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
+          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
+          params.push(...numericTerms.map(t => parseInt(t)));
         }
 
-        // Cada frase textual = AND adicional, con OR entre los campos.
-        // Se preserva la búsqueda por codigo_unico de inventarios (pre-query)
-        // para términos largos, igual que antes.
         for (const term of textTerms) {
           const searchPattern = `%${term}%`;
           let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
@@ -2795,7 +2836,11 @@ export class CampanasController {
             }
           }
           searchClause += ')';
-          conditions.push(searchClause);
+          orClauses.push(searchClause);
+        }
+
+        if (orClauses.length > 0) {
+          conditions.push(`(${orClauses.join(' OR ')})`);
         }
       }
 
@@ -8803,7 +8848,6 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
 
       // Validar fechas obligatorias si vienen en el payload.
       if ('inicio_periodo' in data && !data.inicio_periodo) {
@@ -8838,10 +8882,9 @@ export class CampanasController {
       // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE).
       // toFixed(2) en decimales evita falsos positivos por precisión float (ej.
       // 120 * 3327.28 = 399273.59999999997 en JS).
-      // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
       const decimalEqC = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-      const authFieldsChanged = !isAdminOrDev && currentCaraFull && (
+      const authFieldsChanged = currentCaraFull && (
         (data.caras !== undefined && parseInt(data.caras) !== currentCaraFull.caras) ||
         (data.bonificacion !== undefined && !decimalEqC(data.bonificacion, currentCaraFull.bonificacion)) ||
         (data.tarifa_publica !== undefined && !decimalEqC(data.tarifa_publica, currentCaraFull.tarifa_publica)) ||
@@ -8886,10 +8929,24 @@ export class CampanasController {
       const effBonifCm = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCaraFull?.bonificacion;
       const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any);
 
+      // En update: si el front no manda tipo, preservar el actual de BD
+      // (NO defaultear a 'Tradicional' — eso era el bug del caso 70739).
+      // Si manda tipo, debe ser Digital o Tradicional explicito.
+      if (data.tipo !== undefined && data.tipo !== '' && data.tipo !== 'Digital' && data.tipo !== 'Tradicional') {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' debe ser 'Digital' o 'Tradicional' (recibido: '${data.tipo}')`,
+        });
+        return;
+      }
+      const tipoFinal = (data.tipo === undefined || data.tipo === '' || data.tipo === null)
+        ? currentCaraFull?.tipo
+        : data.tipo;
+
       const updateData: any = {
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo || 'Tradicional',
+        tipo: tipoFinal,
         flujo: data.flujo,
         bonificacion: bonifOvCm ? bonifOvCm.bonificacion : data.bonificacion,
         caras: bonifOvCm ? bonifOvCm.caras : data.caras,
@@ -9078,6 +9135,16 @@ export class CampanasController {
         return;
       }
 
+      // Validar tipo (Digital/Tradicional). Sin esto el back defaulteaba
+      // silenciosamente a 'Tradicional' (caso 70739).
+      if (!data.tipo || (data.tipo !== 'Digital' && data.tipo !== 'Tradicional')) {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${data.tipo === undefined ? 'undefined' : `'${data.tipo}'`})`,
+        });
+        return;
+      }
+
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -9137,7 +9204,7 @@ export class CampanasController {
         idquote: String(cotizacion.id_propuesta),
         ciudad: data.ciudad,
         estados: data.estados,
-        tipo: data.tipo || 'Tradicional',
+        tipo: data.tipo, // validado al inicio del handler (Digital/Tradicional)
         flujo: data.flujo,
         bonificacion: bonifOvCmCr ? bonifOvCmCr.bonificacion : data.bonificacion,
         caras: bonifOvCmCr ? bonifOvCmCr.caras : data.caras,
@@ -9242,7 +9309,6 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -9279,10 +9345,9 @@ export class CampanasController {
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
-          // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
           const decimalEqB = (a: unknown, b: unknown) =>
             parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-          const authFieldsChanged = !isAdminOrDev && currentCara && (
+          const authFieldsChanged = currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
             (data.bonificacion !== undefined && !decimalEqB(data.bonificacion, currentCara.bonificacion)) ||
             (data.tarifa_publica !== undefined && !decimalEqB(data.tarifa_publica, currentCara.tarifa_publica)) ||
@@ -9331,10 +9396,19 @@ export class CampanasController {
           const effBonifCmBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
           const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any);
 
+          // En bulk update: preservar tipo actual si el front no lo manda.
+          // NO defaultear a 'Tradicional'. Si manda valor, validar.
+          if (data.tipo !== undefined && data.tipo !== '' && data.tipo !== 'Digital' && data.tipo !== 'Tradicional') {
+            throw new Error(`Cara ${caraId}: el campo 'tipo' debe ser 'Digital' o 'Tradicional' (recibido: '${data.tipo}')`);
+          }
+          const tipoFinalBulk = (data.tipo === undefined || data.tipo === '' || data.tipo === null)
+            ? currentCara?.tipo
+            : data.tipo;
+
           const updateData: any = {
             ciudad: data.ciudad,
             estados: data.estados,
-            tipo: data.tipo || 'Tradicional',
+            tipo: tipoFinalBulk,
             flujo: data.flujo,
             bonificacion: bonifOvCmBk ? bonifOvCmBk.bonificacion : data.bonificacion,
             caras: bonifOvCmBk ? bonifOvCmBk.caras : data.caras,

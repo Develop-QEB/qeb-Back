@@ -403,11 +403,12 @@ export class PropuestasController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -425,7 +426,16 @@ export class PropuestasController {
         whereConditions += ` AND sl.status = 'Atendida'`;
       }
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
+      // gana excludeRechazadas (siempre se ocultan).
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          whereConditions += ` AND pr.status = ?`;
+          params.push(status);
+        }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
         whereConditions += ` AND pr.status = ?`;
         params.push(status);
       }
@@ -436,25 +446,22 @@ export class PropuestasController {
       }
 
       if (search) {
-        // Cada tag (separado por '|') es una frase que REFINA la búsqueda.
-        // Semántica: cada frase debe matchear en al menos un campo (OR entre
-        // campos) y entre frases se hace AND. Así "walmart|bodega aurrera"
-        // sólo devuelve propuestas que toquen walmart Y bodega aurrera.
+        // Cada tag (separado por '|') aporta condiciones OR. Semántica OR
+        // entre tags y entre campos: "paramount|bbva" devuelve propuestas que
+        // toquen paramount O bbva. Permite al usuario sumar clientes/términos
+        // en una sola consulta.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
-        // Pool de IDs numéricos: si hay varios, se vuelve un solo IN(...)
-        // (un mismo registro no puede ser id=123 y id=456 a la vez).
+        const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
+          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
-
-        // Cada frase textual = AND adicional, con OR entre los campos.
         for (const term of textTerms) {
           const sp = `%${term}%`;
-          whereConditions += ` AND (
+          orClauses.push(`(
             pr.descripcion LIKE ? OR
             COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
             cl.T0_U_RazonSocial LIKE ? OR
@@ -464,8 +471,11 @@ export class PropuestasController {
             cm.nombre LIKE ? OR
             ct.nombre_campania LIKE ? OR
             sl.nombre_usuario LIKE ?
-          )`;
+          )`);
           params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
+        }
+        if (orClauses.length > 0) {
+          whereConditions += ` AND (${orClauses.join(' OR ')})`;
         }
       }
 
@@ -1450,12 +1460,13 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
-        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1466,7 +1477,13 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const statsParams: any[] = [];
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          whereConditions += ` AND pr.status = ?`;
+          statsParams.push(status);
+        }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
         whereConditions += ` AND pr.status = ?`;
         statsParams.push(status);
       }
@@ -1477,18 +1494,19 @@ export class PropuestasController {
       }
 
       if (search) {
-        // Mismo formato que getAll: AND entre tags, OR entre campos por tag.
+        // Mismo formato que getAll: OR entre tags, OR entre campos por tag.
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
+        const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
+          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
           statsParams.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
           const sp = `%${term}%`;
-          whereConditions += ` AND (
+          orClauses.push(`(
             pr.descripcion LIKE ? OR
             COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
             cl.T0_U_RazonSocial LIKE ? OR
@@ -1498,8 +1516,11 @@ export class PropuestasController {
             cm.nombre LIKE ? OR
             ct.nombre_campania LIKE ? OR
             sl.nombre_usuario LIKE ?
-          )`;
+          )`);
           statsParams.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
+        }
+        if (orClauses.length > 0) {
+          whereConditions += ` AND (${orClauses.join(' OR ')})`;
         }
       }
 
@@ -2254,6 +2275,7 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2275,21 +2297,27 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const params: any[] = [];
 
-      if (status) { whereConditions += ` AND pr.status = ?`; params.push(status); }
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') { whereConditions += ` AND pr.status = ?`; params.push(status); }
+        whereConditions += ` AND pr.status <> 'Rechazada'`;
+      } else if (status) {
+        whereConditions += ` AND pr.status = ?`; params.push(status);
+      }
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
-        // AND entre tags, OR entre campos por tag (alineado con getAll/getStats).
+        // OR entre tags, OR entre campos por tag (alineado con getAll/getStats).
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
         const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
 
+        const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          whereConditions += ` AND pr.id IN (${numericTerms.map(() => '?').join(',')})`;
+          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
           const sp = `%${term}%`;
-          whereConditions += ` AND (
+          orClauses.push(`(
             pr.descripcion LIKE ? OR
             ct.nombre_campania LIKE ? OR
             COALESCE(sl.marca_nombre, cl.T2_U_Marca) LIKE ? OR
@@ -2299,8 +2327,11 @@ export class PropuestasController {
             pr.asignado LIKE ? OR
             pr.articulo LIKE ? OR
             cm.nombre LIKE ?
-          )`;
+          )`);
           params.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
+        }
+        if (orClauses.length > 0) {
+          whereConditions += ` AND (${orClauses.join(' OR ')})`;
         }
       }
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -3958,7 +3989,6 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const {
         ciudad,
         estados,
@@ -4008,10 +4038,9 @@ export class PropuestasController {
       // Comparación de decimales con toFixed(2) para evitar falsos positivos por
       // precisión float (ej. 120 * 3327.28 = 399273.59999999997 en JS) que disparaban
       // recalc cuando el usuario solo cambiaba NSE.
-      // Admin/DEV: nunca recalcular auth — sus ediciones preservan el estado actual.
       const decimalEq = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-      const authFieldsChanged = !isAdminOrDev && (
+      const authFieldsChanged = (
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
         (bonificacion !== undefined && !decimalEq(bonificacion, currentCara.bonificacion)) ||
         (tarifa_publica !== undefined && !decimalEq(tarifa_publica, currentCara.tarifa_publica)) ||
@@ -4269,6 +4298,17 @@ export class PropuestasController {
         return;
       }
 
+      // Validar tipo (Digital/Tradicional). Sin esto el back defaulteaba
+      // silenciosamente a 'Tradicional' cuando el front omitia el campo
+      // (caso 70739: caras Digital cambiaban a Tradicional al re-crear).
+      if (!tipo || (tipo !== 'Digital' && tipo !== 'Tradicional')) {
+        res.status(400).json({
+          success: false,
+          error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${tipo === undefined ? 'undefined' : `'${tipo}'`})`,
+        });
+        return;
+      }
+
       // Calculate authorization state — use BF pair's bonificacion for RT rows
       const artUpperCrP = (articulo || '').toUpperCase();
       const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
@@ -4300,7 +4340,7 @@ export class PropuestasController {
           idquote: id, // Link to propuesta
           ciudad,
           estados,
-          tipo: tipo || 'Tradicional',
+          tipo, // validado al inicio del handler (Digital/Tradicional)
           flujo,
           bonificacion: bonifOvCrP ? bonifOvCrP.bonificacion : (bonificacion ? parseFloat(bonificacion) : 0),
           caras: bonifOvCrP ? bonifOvCrP.caras : (caras ? parseInt(caras) : 0),
@@ -4446,7 +4486,6 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
-      const isAdminOrDev = userRol === 'Administrador' || userRol === 'DEV';
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -4483,10 +4522,9 @@ export class PropuestasController {
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
-          // Admin/DEV: nunca recalc — sus ediciones preservan el estado de auth.
           const decimalEqP = (a: unknown, b: unknown) =>
             parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-          const authFieldsChanged = !isAdminOrDev && currentCara && (
+          const authFieldsChanged = currentCara && (
             (data.caras !== undefined && parseInt(data.caras) !== currentCara.caras) ||
             (data.bonificacion !== undefined && !decimalEqP(data.bonificacion, currentCara.bonificacion)) ||
             (data.tarifa_publica !== undefined && !decimalEqP(data.tarifa_publica, currentCara.tarifa_publica)) ||

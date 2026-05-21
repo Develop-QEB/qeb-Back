@@ -552,11 +552,16 @@ export async function crearTareasAutorizacion(
   const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   fechaFin.setDate(fechaFin.getDate() + 7); // 7 días para aprobar
 
-  // Verificar si ya existen tareas abiertas para evitar duplicados
+  // Guard de duplicados: mira id_solicitud, id_propuesta Y campania_id (OR).
+  // Cubre tareas creadas con cualquier origen para evitar duplicar si el
+  // mismo registro ya tiene una tarea Autorización abierta en otro nivel.
   const tareasExistentes = await prisma.tareas.findMany({
     where: {
-      id_solicitud: solicitudId.toString(),
-      ...(propuestaId ? { id_propuesta: propuestaId.toString() } : {}),
+      OR: [
+        { id_solicitud: solicitudId.toString() },
+        ...(propuestaId ? [{ id_propuesta: propuestaId.toString() }] : []),
+        ...(campaniaId ? [{ campania_id: campaniaId }] : []),
+      ],
       tipo: { contains: 'Autorización' },
       estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
     },
@@ -566,106 +571,144 @@ export async function crearTareasAutorizacion(
   const existeTareaDg = tareasExistentes.some(t => t.tipo === 'Autorización DG');
   const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM');
 
-  // DG contamina: si hay al menos 1 DG pendiente, TODO pasa a DG
+  // Pre-calcular escalación DG+DCM → DG ANTES de la transacción
   const carasEscaladasDcmADg: number[] = [];
   if (pendientesDg.length > 0 && pendientesDcm.length > 0) {
     console.log('[crearTareasAutorizacion] Mixta DG+DCM → todo va a DG');
     carasEscaladasDcmADg.push(...pendientesDcm);
     pendientesDg.push(...pendientesDcm.filter(id => !pendientesDg.includes(id)));
-    // Actualizar en BD: por propuesta o por solicitud
-    if (propuestaId) {
-      await prisma.solicitudCaras.updateMany({
-        where: { idquote: propuestaId.toString(), autorizacion_dcm: 'pendiente' },
-        data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
-      });
-    } else {
-      await prisma.solicitudCaras.updateMany({
-        where: { id: { in: pendientesDcm.map(Number).filter(n => !isNaN(n)) }, autorizacion_dcm: 'pendiente' },
-        data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
+    pendientesDcm.length = 0;
+  }
+
+  // === TRANSACCIÓN ATÓMICA ===
+  // Todo el side-effect (updateMany de escalación, historial, snapshot, tareas)
+  // va dentro de una sola transacción para evitar estados parciales como el caso
+  // de la solicitud 80737: historial escrito pero tarea no creada por un parpadeo
+  // de red intermedio. Si algo falla, NADA se persiste.
+  const result = await prisma.$transaction(async (tx) => {
+    // 1. Si hubo escalación DG+DCM, aplicar UPDATE de caras
+    if (carasEscaladasDcmADg.length > 0) {
+      if (propuestaId) {
+        await tx.solicitudCaras.updateMany({
+          where: { idquote: propuestaId.toString(), autorizacion_dcm: 'pendiente' },
+          data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
+        });
+      } else {
+        await tx.solicitudCaras.updateMany({
+          where: { id: { in: carasEscaladasDcmADg.map(Number).filter(n => !isNaN(n)) }, autorizacion_dcm: 'pendiente' },
+          data: { autorizacion_dg: 'pendiente', autorizacion_dcm: 'aprobado' },
+        });
+      }
+
+      // Historial de escalación
+      const refIdEscalacion = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
+      await tx.historial.create({
+        data: {
+          tipo: `autorizacion_solicitud_${origen}`,
+          ref_id: refIdEscalacion,
+          accion: `${carasEscaladasDcmADg.length} circuito(s) DCM escalado(s) a DG por mezcla DG+DCM`,
+          detalles: JSON.stringify({
+            usuario: responsableNombre,
+            origen,
+            solicitudId,
+            propuestaId,
+            campaniaId: campaniaId || null,
+            motivo: 'mezcla_dg_dcm',
+            carasEscaladasIds: carasEscaladasDcmADg,
+          }),
+        },
       });
     }
-    pendientesDcm.length = 0;
 
-    // Bug B fix: registrar la escalación DCM → DG en historial para trazabilidad
-    const refIdEscalacion = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
-    await prisma.historial.create({
-      data: {
-        tipo: `autorizacion_solicitud_${origen}`,
-        ref_id: refIdEscalacion,
-        accion: `${carasEscaladasDcmADg.length} circuito(s) DCM escalado(s) a DG por mezcla DG+DCM`,
-        detalles: JSON.stringify({
-          usuario: responsableNombre,
-          origen,
-          solicitudId,
-          propuestaId,
-          campaniaId: campaniaId || null,
-          motivo: 'mezcla_dg_dcm',
-          carasEscaladasIds: carasEscaladasDcmADg,
-        }),
-      },
-    });
-  }
+    // 2. Snapshot de caras + historial de solicitud de autorización
+    const allCaraIds = [...new Set([...pendientesDg, ...pendientesDcm])];
+    if (allCaraIds.length > 0) {
+      const carasSnapshot = await tx.solicitudCaras.findMany({
+        where: { id: { in: allCaraIds.map(Number).filter(n => !isNaN(n)) } },
+        select: {
+          id: true, articulo: true, ciudad: true, formato: true, tipo: true,
+          caras: true, bonificacion: true, costo: true, tarifa_publica: true,
+          caras_flujo: true, caras_contraflujo: true,
+          autorizacion_dg: true, autorizacion_dcm: true,
+        },
+      });
+      const refId = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
+      const dirLabel = pendientesDg.length > 0 ? 'DG' : 'DCM';
+      const totalCircuitos = pendientesDg.length + pendientesDcm.length;
+      await tx.historial.create({
+        data: {
+          tipo: `autorizacion_solicitud_${origen}`,
+          ref_id: refId,
+          accion: `${responsableNombre} solicitó autorización ${dirLabel} — ${totalCircuitos} circuito(s)`,
+          detalles: JSON.stringify({
+            usuario: responsableNombre,
+            origen,
+            solicitudId,
+            propuestaId,
+            campaniaId: campaniaId || null,
+            direccion: dirLabel,
+            pendientesDg: pendientesDg.length,
+            pendientesDcm: pendientesDcm.length,
+            caras: carasSnapshot,
+          }),
+        },
+      });
+    }
 
-  // Guardar snapshot de caras para historial (antes/después en ediciones)
-  const allCaraIds = [...new Set([...pendientesDg, ...pendientesDcm])];
-  if (allCaraIds.length > 0) {
-    const carasSnapshot = await prisma.solicitudCaras.findMany({
-      where: { id: { in: allCaraIds.map(Number).filter(n => !isNaN(n)) } },
-      select: {
-        id: true, articulo: true, ciudad: true, formato: true, tipo: true,
-        caras: true, bonificacion: true, costo: true, tarifa_publica: true,
-        caras_flujo: true, caras_contraflujo: true,
-        autorizacion_dg: true, autorizacion_dcm: true,
-      },
-    });
-    const refId = origen === 'campana' ? (campaniaId || solicitudId) : (propuestaId || solicitudId);
-    // Bug A fix: etiqueta dinámica DG vs DCM según lo que realmente quedó pendiente
-    // (tras la regla de contaminación DG+DCM, solo uno de los dos arrays tiene elementos)
-    const dirLabel = pendientesDg.length > 0 ? 'DG' : 'DCM';
-    const totalCircuitos = pendientesDg.length + pendientesDcm.length;
-    await prisma.historial.create({
-      data: {
-        tipo: `autorizacion_solicitud_${origen}`,
-        ref_id: refId,
-        accion: `${responsableNombre} solicitó autorización ${dirLabel} — ${totalCircuitos} circuito(s)`,
-        detalles: JSON.stringify({
-          usuario: responsableNombre,
-          origen,
-          solicitudId,
-          propuestaId,
-          campaniaId: campaniaId || null,
-          direccion: dirLabel,
-          pendientesDg: pendientesDg.length,
-          pendientesDcm: pendientesDcm.length,
-          caras: carasSnapshot,
-        }),
-      },
-    });
-  }
+    // 3. Tarea DG
+    let tareaDgId: number | null = null;
+    if (pendientesDg.length > 0 && usuariosDg.length > 0 && !existeTareaDg) {
+      const tareaDg = await tx.tareas.create({
+        data: {
+          tipo: 'Autorización DG',
+          titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+          descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
+          estatus: 'Pendiente',
+          id_responsable: responsableId,
+          responsable: responsableNombre,
+          id_solicitud: solicitudId.toString(),
+          id_propuesta: propuestaId?.toString() || null,
+          campania_id: campaniaId || null,
+          contenido: origen,
+          id_asignado: usuariosDg.map(u => u.id).join(','),
+          asignado: usuariosDg.map(u => u.nombre).join(', '),
+          fecha_fin: fechaFin
+        }
+      });
+      tareaDgId = tareaDg.id;
+    }
 
-  // Crear tarea para DG si hay pendientes y no existe ya una tarea
-  if (pendientesDg.length > 0 && usuariosDg.length > 0 && !existeTareaDg) {
-    const tareaDg = await prisma.tareas.create({
-      data: {
-        tipo: 'Autorización DG',
-        titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `Se requiere autorización de Dirección General para ${pendientesDg.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
-        estatus: 'Pendiente',
-        id_responsable: responsableId,
-        responsable: responsableNombre,
-        id_solicitud: solicitudId.toString(),
-        id_propuesta: propuestaId?.toString() || null,
-        campania_id: campaniaId || null,
-        contenido: origen,
-        id_asignado: usuariosDg.map(u => u.id).join(','),
-        asignado: usuariosDg.map(u => u.nombre).join(', '),
-        fecha_fin: fechaFin
-      }
-    });
+    // 4. Tarea DCM
+    let tareaDcmId: number | null = null;
+    if (pendientesDcm.length > 0 && usuariosDcm.length > 0 && !existeTareaDcm) {
+      const tareaDcm = await tx.tareas.create({
+        data: {
+          tipo: 'Autorización DCM',
+          titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
+          descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
+          estatus: 'Pendiente',
+          id_responsable: responsableId,
+          responsable: responsableNombre,
+          id_solicitud: solicitudId.toString(),
+          id_propuesta: propuestaId?.toString() || null,
+          campania_id: campaniaId || null,
+          contenido: origen,
+          id_asignado: usuariosDcm.map(u => u.id).join(','),
+          asignado: usuariosDcm.map(u => u.nombre).join(', '),
+          fecha_fin: fechaFin
+        }
+      });
+      tareaDcmId = tareaDcm.id;
+    }
 
-    // Emitir notificación y tarea creada via WebSocket
+    return { tareaDgId, tareaDcmId };
+  }, { timeout: 30000 });
+
+  // === EMITIR SOCKETS DESPUÉS DEL COMMIT ===
+  // Solo notificamos si el INSERT realmente persistió (tx exitosa).
+  if (result.tareaDgId) {
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-      tareaId: tareaDg.id,
+      tareaId: result.tareaDgId,
       tipo: 'Autorización DG',
       origen,
       solicitudId,
@@ -673,40 +716,17 @@ export async function crearTareasAutorizacion(
       campaniaId: campaniaId || null
     });
     emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
-      tareaId: tareaDg.id,
+      tareaId: result.tareaDgId,
       tipo: 'Autorización DG',
       origen,
       solicitudId,
       propuestaId,
       campaniaId: campaniaId || null
     });
-
-    // Correos a directores se envían en resumen diario (9am y 4pm) vía enviarResumenAutorizacionesPendientes()
   }
-
-  // Crear tarea para DCM si hay pendientes y no existe ya una tarea
-  if (pendientesDcm.length > 0 && usuariosDcm.length > 0 && !existeTareaDcm) {
-    const tareaDcm = await prisma.tareas.create({
-      data: {
-        tipo: 'Autorización DCM',
-        titulo: `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`,
-        estatus: 'Pendiente',
-        id_responsable: responsableId,
-        responsable: responsableNombre,
-        id_solicitud: solicitudId.toString(),
-        id_propuesta: propuestaId?.toString() || null,
-        campania_id: campaniaId || null,
-        contenido: origen,
-        id_asignado: usuariosDcm.map(u => u.id).join(','),
-        asignado: usuariosDcm.map(u => u.nombre).join(', '),
-        fecha_fin: fechaFin
-      }
-    });
-
-    // Emitir notificación y tarea creada via WebSocket
+  if (result.tareaDcmId) {
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-      tareaId: tareaDcm.id,
+      tareaId: result.tareaDcmId,
       tipo: 'Autorización DCM',
       origen,
       solicitudId,
@@ -714,15 +734,13 @@ export async function crearTareasAutorizacion(
       campaniaId: campaniaId || null
     });
     emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
-      tareaId: tareaDcm.id,
+      tareaId: result.tareaDcmId,
       tipo: 'Autorización DCM',
       origen,
       solicitudId,
       propuestaId,
       campaniaId: campaniaId || null
     });
-
-    // Correos a directores se envían en resumen diario (9am y 4pm) vía enviarResumenAutorizacionesPendientes()
   }
 }
 
@@ -1268,6 +1286,120 @@ export async function depurarTareasAutorizacionResueltas(): Promise<number> {
     }
   }
 
-  console.log(`[DepurarAutorizaciones] ${finalizadas} de ${tareasAbiertas.length} tareas finalizadas`);
+  // === REPARAR HUÉRFANOS ===
+  // Caras pendientes DG/DCM cuyo dueño (solicitud/propuesta/campaña) no tiene
+  // tarea Autorización abierta. Cubre el caso del 80737: la creación original
+  // de la tarea reventó a mitad y nadie se enteró. Esto la genera por nosotros.
+  let huerfanosReparados = 0;
+  try {
+    const groups: Array<{ idquote: string; pdg: any; pdcm: any }> = await prisma.$queryRawUnsafe(`
+      SELECT idquote,
+             SUM(CASE WHEN autorizacion_dg = 'pendiente' THEN 1 ELSE 0 END) AS pdg,
+             SUM(CASE WHEN autorizacion_dcm = 'pendiente' THEN 1 ELSE 0 END) AS pdcm
+      FROM solicitudCaras
+      WHERE idquote IS NOT NULL
+        AND (autorizacion_dg = 'pendiente' OR autorizacion_dcm = 'pendiente')
+      GROUP BY idquote
+    `);
+
+    for (const g of groups) {
+      const idNum = parseInt(g.idquote);
+      if (isNaN(idNum)) continue;
+      const pdg = Number(g.pdg);
+      const pdcm = Number(g.pdcm);
+      if (pdg === 0 && pdcm === 0) continue;
+
+      // Resolver nivel: ¿propuesta activa? ¿solicitud directa?
+      let solicitudIdH: number | null = null;
+      let propuestaIdH: number | null = null;
+      let campaniaIdH: number | null = null;
+
+      const prop = await prisma.propuesta.findFirst({
+        where: { id: idNum, deleted_at: null },
+        select: { id: true, solicitud_id: true },
+      });
+
+      if (prop) {
+        propuestaIdH = prop.id;
+        solicitudIdH = prop.solicitud_id;
+        const camp: any[] = await prisma.$queryRawUnsafe(`
+          SELECT cm.id FROM cotizacion ct
+          JOIN campania cm ON cm.cotizacion_id = ct.id
+          WHERE ct.id_propuesta = ${idNum}
+          LIMIT 1
+        `);
+        if (camp[0]) campaniaIdH = Number(camp[0].id);
+      } else {
+        const sol = await prisma.solicitud.findFirst({
+          where: { id: idNum, deleted_at: null },
+          select: { id: true },
+        });
+        if (sol) solicitudIdH = sol.id;
+      }
+
+      if (!solicitudIdH && !propuestaIdH && !campaniaIdH) continue;
+
+      // ¿Ya existe tarea Autorización abierta apuntando a este registro?
+      const existeTarea = await prisma.tareas.findFirst({
+        where: {
+          tipo: { contains: 'Autorización' },
+          estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          OR: [
+            ...(solicitudIdH ? [{ id_solicitud: solicitudIdH.toString() }] : []),
+            ...(propuestaIdH ? [{ id_propuesta: propuestaIdH.toString() }] : []),
+            ...(campaniaIdH ? [{ campania_id: campaniaIdH }] : []),
+          ],
+        },
+        select: { id: true },
+      });
+      if (existeTarea) continue;
+
+      // Huérfano confirmado: reparar
+      const pendientes: any[] = await prisma.$queryRawUnsafe(`
+        SELECT id, autorizacion_dg, autorizacion_dcm FROM solicitudCaras
+        WHERE idquote = '${idNum}'
+          AND (autorizacion_dg = 'pendiente' OR autorizacion_dcm = 'pendiente')
+      `);
+      const pendDg = pendientes.filter(c => c.autorizacion_dg === 'pendiente').map(c => Number(c.id));
+      const pendDcm = pendientes.filter(c => c.autorizacion_dcm === 'pendiente').map(c => Number(c.id));
+
+      const origenH: 'solicitud' | 'propuesta' | 'campana' = campaniaIdH ? 'campana' : propuestaIdH ? 'propuesta' : 'solicitud';
+
+      // Resolver creador real desde la solicitud (fallback Sistema=1)
+      let responsableIdH = 1;
+      let responsableNombreH = 'Sistema (reparación automática)';
+      if (solicitudIdH) {
+        const sol = await prisma.solicitud.findUnique({
+          where: { id: solicitudIdH },
+          select: { usuario_id: true, nombre_usuario: true },
+        });
+        if (sol?.usuario_id) {
+          responsableIdH = sol.usuario_id;
+          responsableNombreH = sol.nombre_usuario || responsableNombreH;
+        }
+      }
+
+      try {
+        console.warn(`[DepurarAutorizaciones] Huérfano detectado idquote=${idNum} pdg=${pdg} pdcm=${pdcm} origen=${origenH}; reparando...`);
+        await crearTareasAutorizacion(
+          solicitudIdH!,
+          propuestaIdH,
+          responsableIdH,
+          responsableNombreH,
+          pendDg,
+          pendDcm,
+          origenH,
+          campaniaIdH || undefined,
+        );
+        huerfanosReparados++;
+      } catch (err) {
+        console.error(`[DepurarAutorizaciones] Error reparando huérfano idquote=${idNum}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[DepurarAutorizaciones] Error en deteccion de huérfanos:', err);
+  }
+
+  console.log(`[DepurarAutorizaciones] ${finalizadas} de ${tareasAbiertas.length} tareas finalizadas; ${huerfanosReparados} huérfanos reparados`);
   return finalizadas;
 }

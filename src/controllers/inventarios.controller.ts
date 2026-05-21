@@ -30,19 +30,25 @@ export class InventariosController {
       const where: Record<string, unknown> = {};
 
       if (search) {
-        const searchNum = parseInt(search);
-        const orConditions: Record<string, unknown>[] = [
-          { codigo_unico: { contains: search } },
-          { ubicacion: { contains: search } },
-          { municipio: { contains: search } },
-        ];
-
-        // Si es un número, también buscar por ID
-        if (!isNaN(searchNum)) {
-          orConditions.push({ id: searchNum });
+        // Cada tag (separado por '|') aporta condiciones OR. Inventarios usa
+        // semántica OR entre tags porque típicamente el usuario quiere ver una
+        // lista de códigos específicos (INV-001|INV-002 → ambos visibles).
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const orConditions: Record<string, unknown>[] = [];
+        for (const phrase of phrases) {
+          orConditions.push(
+            { codigo_unico: { contains: phrase } },
+            { ubicacion: { contains: phrase } },
+            { municipio: { contains: phrase } },
+          );
+          const phraseNum = parseInt(phrase);
+          if (!isNaN(phraseNum) && String(phraseNum) === phrase) {
+            orConditions.push({ id: phraseNum });
+          }
         }
-
-        where.OR = orConditions;
+        if (orConditions.length > 0) {
+          where.OR = orConditions;
+        }
       }
 
       if (tipo) {
@@ -283,16 +289,22 @@ export class InventariosController {
       // Build Prisma where filter — same logic as getAll
       const where: Record<string, unknown> = {};
       if (search) {
-        const searchNum = parseInt(search);
-        const orConditions: Record<string, unknown>[] = [
-          { codigo_unico: { contains: search } },
-          { ubicacion: { contains: search } },
-          { municipio: { contains: search } },
-        ];
-        if (!isNaN(searchNum)) {
-          orConditions.push({ id: searchNum });
+        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+        const orConditions: Record<string, unknown>[] = [];
+        for (const phrase of phrases) {
+          orConditions.push(
+            { codigo_unico: { contains: phrase } },
+            { ubicacion: { contains: phrase } },
+            { municipio: { contains: phrase } },
+          );
+          const phraseNum = parseInt(phrase);
+          if (!isNaN(phraseNum) && String(phraseNum) === phrase) {
+            orConditions.push({ id: phraseNum });
+          }
         }
-        where.OR = orConditions;
+        if (orConditions.length > 0) {
+          where.OR = orConditions;
+        }
       }
       if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
@@ -1851,14 +1863,22 @@ export class InventariosController {
         where.id = { in: ids };
       } else {
         if (search) {
-          const searchNum = parseInt(search);
-          const orConditions: Record<string, unknown>[] = [
-            { codigo_unico: { contains: search } },
-            { ubicacion: { contains: search } },
-            { municipio: { contains: search } },
-          ];
-          if (!isNaN(searchNum)) orConditions.push({ id: searchNum });
-          where.OR = orConditions;
+          const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+          const orConditions: Record<string, unknown>[] = [];
+          for (const phrase of phrases) {
+            orConditions.push(
+              { codigo_unico: { contains: phrase } },
+              { ubicacion: { contains: phrase } },
+              { municipio: { contains: phrase } },
+            );
+            const phraseNum = parseInt(phrase);
+            if (!isNaN(phraseNum) && String(phraseNum) === phrase) {
+              orConditions.push({ id: phraseNum });
+            }
+          }
+          if (orConditions.length > 0) {
+            where.OR = orConditions;
+          }
         }
         if (tipo) where.mueble = tipo;
         if (estatus) where.estatus = estatus;

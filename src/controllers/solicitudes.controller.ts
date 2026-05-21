@@ -405,42 +405,50 @@ export class SolicitudesController {
       const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
       const creacionDesde = req.query.creacionDesde as string;
       const creacionHasta = req.query.creacionHasta as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = {
         deleted_at: null,
       };
 
-      if (status) {
+      // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
+      // específico (Aprobada, Pendiente, etc.) se respeta. Si pide Rechazada
+      // con excludeRechazadas=true, gana excludeRechazadas (siempre se ocultan).
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          where.status = status;
+        } else {
+          where.status = { not: 'Rechazada' };
+        }
+      } else if (status) {
         where.status = status;
       }
 
-      // Search filter — semántica AND entre tags (cada tag refina), OR entre
-      // los campos de un mismo tag. Tags separados por '|' desde el frontend.
-      // Para cada tag textual se busca también en nombre_campania (vive en
+      // Search filter — semántica OR entre tags y OR entre campos. Permite
+      // sumar términos (ej. "walmart|paramount" devuelve ambos clientes).
+      // Para tags textuales se busca también en nombre_campania (vive en
       // cotización) via subquery por tag.
       if (search) {
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
         const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
 
-        const andConditions: any[] = [];
+        const orConditions: any[] = [];
 
-        // Pool numérico: id IN (lista) como UNA condición AND.
+        // Pool numérico: id IN (lista) como una sola condición OR.
         if (numericPhrases.length > 0) {
-          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
+          orConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
 
-        // Cada frase textual = AND adicional con OR interno (campos directos
-        // + ids de solicitudes cuyas cotizaciones contienen la frase).
         for (const phrase of textPhrases) {
-          const phraseOr: any[] = [
+          orConditions.push(
             { razon_social: { contains: phrase } },
             { descripcion: { contains: phrase } },
             { marca_nombre: { contains: phrase } },
             { asignado: { contains: phrase } },
             { cuic: { contains: phrase } },
             { nombre_usuario: { contains: phrase } },
-          ];
+          );
 
           const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `SELECT DISTINCT s.id
@@ -451,14 +459,12 @@ export class SolicitudesController {
             `%${phrase}%`
           );
           if (rows.length > 0) {
-            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+            orConditions.push({ id: { in: rows.map(r => Number(r.id)) } });
           }
-
-          andConditions.push({ OR: phraseOr });
         }
 
-        if (andConditions.length > 0) {
-          where.AND = andConditions;
+        if (orConditions.length > 0) {
+          where.OR = orConditions;
         }
       }
 
@@ -1172,35 +1178,42 @@ export class SolicitudesController {
       const catorcenaFin = req.query.catorcenaFin as string;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = { deleted_at: null };
 
-      if (status) {
+      if (excludeRechazadas) {
+        if (status && status !== 'Rechazada') {
+          where.status = status;
+        } else {
+          where.status = { not: 'Rechazada' };
+        }
+      } else if (status) {
         where.status = status;
       }
 
-      // Search filter — mismo formato que getAll: AND entre tags, OR entre
+      // Search filter — mismo formato que getAll: OR entre tags, OR entre
       // los campos por tag (incluyendo nombre_campania via subquery).
       if (search) {
         const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
         const textPhrases = phrases.filter(p => isNaN(parseInt(p)) || String(parseInt(p)) !== p);
         const numericPhrases = phrases.filter(p => !isNaN(parseInt(p)) && String(parseInt(p)) === p);
 
-        const andConditions: any[] = [];
+        const orConditions: any[] = [];
 
         if (numericPhrases.length > 0) {
-          andConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
+          orConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
         }
 
         for (const phrase of textPhrases) {
-          const phraseOr: any[] = [
+          orConditions.push(
             { razon_social: { contains: phrase } },
             { descripcion: { contains: phrase } },
             { marca_nombre: { contains: phrase } },
             { asignado: { contains: phrase } },
             { cuic: { contains: phrase } },
             { nombre_usuario: { contains: phrase } },
-          ];
+          );
           const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `SELECT DISTINCT s.id
              FROM solicitud s
@@ -1210,13 +1223,12 @@ export class SolicitudesController {
             `%${phrase}%`
           );
           if (rows.length > 0) {
-            phraseOr.push({ id: { in: rows.map(r => Number(r.id)) } });
+            orConditions.push({ id: { in: rows.map(r => Number(r.id)) } });
           }
-          andConditions.push({ OR: phraseOr });
         }
 
-        if (andConditions.length > 0) {
-          where.AND = andConditions;
+        if (orConditions.length > 0) {
+          where.OR = orConditions;
         }
       }
 
@@ -1844,6 +1856,22 @@ export class SolicitudesController {
         });
         return;
       }
+
+      // Validar tipo (Digital/Tradicional) en cada cara — sin esto el back
+      // defaulteaba a 'Tradicional' silenciosamente y se reportaron bugs
+      // del tipo "se cambió de Digital a Tradicional al reactivar".
+      if (Array.isArray(caras)) {
+        for (let i = 0; i < caras.length; i++) {
+          const c = caras[i];
+          if (!c.tipo || (c.tipo !== 'Digital' && c.tipo !== 'Tradicional')) {
+            res.status(400).json({
+              success: false,
+              error: `Cara #${i + 1} (artículo ${c.articulo || 's/d'}): el campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional'`,
+            });
+            return;
+          }
+        }
+      }
       if (Array.isArray(caras) && caras.length > 0) {
         for (let i = 0; i < caras.length; i++) {
           const c = caras[i];
@@ -2100,7 +2128,7 @@ export class SolicitudesController {
               idquote: propuesta.id.toString(),
               ciudad: cara.ciudad,
               estados: cara.estado,
-              tipo: cara.tipo || 'Tradicional',
+              tipo: cara.tipo, // validado al inicio del handler (Digital/Tradicional)
               flujo: cara.flujo || 'Ambos',
               bonificacion: bonifOv ? bonifOv.bonificacion : (cara.bonificacion || 0),
               caras: bonifOv ? bonifOv.caras : cara.caras,
@@ -2984,6 +3012,16 @@ export class SolicitudesController {
             });
             return;
           }
+          // Validar tipo — sin esto el back defaulteaba a 'Tradicional' al
+          // re-crear caras tras un rechazo y se reportaron casos de cambio
+          // silencioso Digital→Tradicional (campaña 70739).
+          if (!c.tipo || (c.tipo !== 'Digital' && c.tipo !== 'Tradicional')) {
+            res.status(400).json({
+              success: false,
+              error: `La cara ${i + 1} (${c.articulo || 'sin articulo'}): el campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional'`,
+            });
+            return;
+          }
         }
       }
 
@@ -3205,7 +3243,7 @@ export class SolicitudesController {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
                 estados: cara.estado,
-                tipo: cara.tipo || 'Tradicional',
+                tipo: cara.tipo, // validado al inicio del handler (Digital/Tradicional)
                 flujo: cara.flujo || 'Ambos',
                 bonificacion: bonifOvUpd ? bonifOvUpd.bonificacion : (cara.bonificacion || 0),
                 caras: bonifOvUpd ? bonifOvUpd.caras : cara.caras,
