@@ -435,9 +435,25 @@ export class SolicitudesController {
 
         const orConditions: any[] = [];
 
-        // Pool numérico: id IN (lista) como una sola condición OR.
+        // Pool numérico: matchear por sol.id natural Y por campania.id asociado.
+        // El front muestra cm.id en la columna ID del listing, así que si el user
+        // teclea ese número debe encontrar la fila aunque sol.id sea distinto
+        // (caso del desfase de IDs: 68 cams donde sol.id ≠ cm.id).
         if (numericPhrases.length > 0) {
           orConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
+
+          const camRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+             WHERE s.deleted_at IS NULL AND cm.id IN (${numericPhrases.map(() => '?').join(',')})`,
+            ...numericPhrases.map(p => parseInt(p))
+          );
+          if (camRows.length > 0) {
+            orConditions.push({ id: { in: camRows.map(r => Number(r.id)) } });
+          }
         }
 
         for (const phrase of textPhrases) {

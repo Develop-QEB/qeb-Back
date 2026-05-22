@@ -456,7 +456,11 @@ export class PropuestasController {
 
         const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          // Matchear por pr.id natural Y por cm.id asociado. El listado muestra
+          // cm.id en la columna ID, así que el user debe poder buscar por ese
+          // número aunque pr.id sea distinto (caso desfase de IDs).
+          orClauses.push(`(pr.id IN (${numericTerms.map(() => '?').join(',')}) OR cm.id IN (${numericTerms.map(() => '?').join(',')}))`);
+          params.push(...numericTerms.map(t => parseInt(t)));
           params.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
@@ -1501,7 +1505,9 @@ export class PropuestasController {
 
         const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          // Matchear por pr.id natural Y por cm.id asociado (caso desfase de IDs).
+          orClauses.push(`(pr.id IN (${numericTerms.map(() => '?').join(',')}) OR cm.id IN (${numericTerms.map(() => '?').join(',')}))`);
+          statsParams.push(...numericTerms.map(t => parseInt(t)));
           statsParams.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
@@ -2312,7 +2318,9 @@ export class PropuestasController {
 
         const orClauses: string[] = [];
         if (numericTerms.length > 0) {
-          orClauses.push(`pr.id IN (${numericTerms.map(() => '?').join(',')})`);
+          // Matchear por pr.id natural Y por cm.id asociado (caso desfase de IDs).
+          orClauses.push(`(pr.id IN (${numericTerms.map(() => '?').join(',')}) OR cm.id IN (${numericTerms.map(() => '?').join(',')}))`);
+          params.push(...numericTerms.map(t => parseInt(t)));
           params.push(...numericTerms.map(t => parseInt(t)));
         }
         for (const term of textTerms) {
