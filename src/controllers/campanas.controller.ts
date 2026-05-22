@@ -232,18 +232,12 @@ export class CampanasController {
             filterFechaFin = catFinData.fecha_fin;
           }
 
-          // Regla de negocio (Jos, multi-confirmada): cuando se filtra por una catorcena,
-          // SOLO deben aparecer campañas que tengan AL MENOS UN circuito (solicitudCaras)
-          // cuyo periodo se traslape con esa catorcena. Una campaña cuyas fechas globales
-          // cubren la catorcena pero no tiene caras en ella (o no tiene caras en absoluto)
-          // NO debe aparecer — se ve vacia y confunde a los asesores.
-          //
-          // OJO: este EXISTS fue removido en commit 5ecd004 (11-may, "adjust campaign
-          // filtering logic to include incomplete campaigns without faces") porque se
-          // querian mostrar las campañas en construccion sin caras. Pero Jos volvio a
-          // pedir el comportamiento original. Si necesitas mostrar campañas vacias en
-          // un caso especifico, agrega un toggle/param explicito en vez de quitar el
-          // EXISTS — no lo revertas en silencio.
+          // Rango de la campania debe traslapar con la catorcena filtrada.
+          // Nota: NO exigimos EXISTS solicitudCaras — campañas incompletas (sin caras
+          // reservadas) también deben aparecer al filtrar por una catorcena que cubren
+          // por fechas. El frontend ya las pinta en su rango via fallback de fechas
+          // cuando catorcenas_con_contenido es null. La inversión por catorcena queda
+          // en $0 para esas (sin caras = sin costo).
           conditions.push(`
             cm.fecha_inicio <= (
               SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
@@ -251,20 +245,8 @@ export class CampanasController {
             AND cm.fecha_fin >= (
               SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
             )
-            AND EXISTS (
-              SELECT 1 FROM solicitudCaras sc_filt
-              WHERE sc_filt.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND sc_filt.inicio_periodo <= (
-                  SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-                )
-                AND sc_filt.fin_periodo >= (
-                  SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1
-                )
-            )
           `);
           params.push(
-            yearFin, catorcenaFin,
-            yearInicio, catorcenaInicio,
             yearFin, catorcenaFin,
             yearInicio, catorcenaInicio,
           );
@@ -2872,19 +2854,11 @@ export class CampanasController {
             filterFechaInicio = catIniExport.fecha_inicio;
             filterFechaFin = catFinExport.fecha_fin;
           }
-          // Misma regla de Jos que en getAll: solo campañas con AL MENOS UN circuito
-          // (solicitudCaras) cuyo periodo traslape con la catorcena filtrada.
           conditions.push(`
             cm.fecha_inicio <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
             AND cm.fecha_fin >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-            AND EXISTS (
-              SELECT 1 FROM solicitudCaras sc_filt
-              WHERE sc_filt.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-                AND sc_filt.inicio_periodo <= (SELECT fecha_fin FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-                AND sc_filt.fin_periodo >= (SELECT fecha_inicio FROM catorcenas WHERE año = ? AND numero_catorcena = ? LIMIT 1)
-            )
           `);
-          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio, yearFin, catorcenaFin, yearInicio, catorcenaInicio);
+          params.push(yearFin, catorcenaFin, yearInicio, catorcenaInicio);
         } else {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
