@@ -3522,7 +3522,7 @@ export class CampanasController {
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
-          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
           MIN(inv.tradicional_digital) AS tradicional_digital,
 
           CASE
@@ -3726,7 +3726,7 @@ export class CampanasController {
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
           MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
-          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
           MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
             WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
@@ -3821,7 +3821,7 @@ export class CampanasController {
           MIN(inv.municipio) AS municipio,
           MIN(inv.ancho) AS ancho,
           MIN(inv.alto) AS alto,
-          MIN(inv.tarifa_publica) AS tarifa_publica,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
           MIN(inv.tradicional_digital) AS tradicional_digital,
           CASE
             WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
