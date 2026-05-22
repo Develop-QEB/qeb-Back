@@ -435,9 +435,25 @@ export class SolicitudesController {
 
         const orConditions: any[] = [];
 
-        // Pool numérico: id IN (lista) como una sola condición OR.
+        // Pool numérico: matchear por sol.id natural Y por campania.id asociado.
+        // El front muestra cm.id en la columna ID del listing, así que si el user
+        // teclea ese número debe encontrar la fila aunque sol.id sea distinto
+        // (caso del desfase de IDs: 68 cams donde sol.id ≠ cm.id).
         if (numericPhrases.length > 0) {
           orConditions.push({ id: { in: numericPhrases.map(p => parseInt(p)) } });
+
+          const camRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id
+             FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+             INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+             WHERE s.deleted_at IS NULL AND cm.id IN (${numericPhrases.map(() => '?').join(',')})`,
+            ...numericPhrases.map(p => parseInt(p))
+          );
+          if (camRows.length > 0) {
+            orConditions.push({ id: { in: camRows.map(r => Number(r.id)) } });
+          }
         }
 
         for (const phrase of textPhrases) {
@@ -631,10 +647,12 @@ export class SolicitudesController {
             cat_ini.año as anio_inicio,
             cat_fin.numero_catorcena as catorcena_fin,
             cat_fin.año as anio_fin,
+            cm.id as campania_id,
             GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') as formatos
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
           LEFT JOIN catorcenas cat_ini ON ct.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
           LEFT JOIN catorcenas cat_fin ON ct.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
@@ -657,6 +675,11 @@ export class SolicitudesController {
             catorcena_fin: extra?.catorcena_fin ? Number(extra.catorcena_fin) : null,
             anio_fin: extra?.anio_fin ? Number(extra.anio_fin) : null,
             formatos: extra?.formatos || null,
+            // cm.id de la campaña asociada (puede ser null si la solicitud no
+            // ha llegado a campaña aún o si no hay cotización). El front lo
+            // usa como ID público mostrado en el listing — front muestra
+            // `campania_id || id` con fallback al PK natural.
+            campania_id: extra?.campania_id ? Number(extra.campania_id) : null,
           };
         });
 

@@ -322,6 +322,96 @@ router.get('/proxy-image', authMiddleware, async (req: Request, res: Response) =
   }
 });
 
+// Link preview: extrae Open Graph (og:image, og:title, og:description) y favicon
+// de una URL externa para mostrar una vista previa en el front (artes
+// pendientes/rechazo). Llamado desde el front porque hacerlo desde el navegador
+// chocaria con CORS y, ademas, queremos timeout/limites controlados.
+router.get('/link-preview', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const url = String(req.query.url || '').trim();
+    if (!url) {
+      res.status(400).json({ success: false, error: 'Falta parametro url' });
+      return;
+    }
+    // Solo http/https para evitar SSRF a esquemas raros (file://, gopher://, etc.)
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { res.status(400).json({ success: false, error: 'URL invalida' }); return; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      res.status(400).json({ success: false, error: 'Solo se permiten URLs http(s)' });
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    let html = '';
+    let contentType = '';
+    try {
+      const upstream = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; QEBLinkPreviewBot/1.0)',
+          'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        },
+        redirect: 'follow',
+      });
+      contentType = upstream.headers.get('content-type') || '';
+      if (!upstream.ok) {
+        res.json({ success: true, data: { url, title: null, description: null, image: null, contentType, status: upstream.status } });
+        return;
+      }
+      // Si la URL es directamente una imagen, devolverla como image y listo
+      if (contentType.startsWith('image/')) {
+        res.json({ success: true, data: { url, title: null, description: null, image: url, contentType } });
+        return;
+      }
+      // Limitar bytes leidos a ~300KB para no chupar paginas enormes
+      const ab = await upstream.arrayBuffer();
+      const buf = Buffer.from(ab).slice(0, 300 * 1024);
+      html = buf.toString('utf-8');
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const meta = (prop: string) => {
+      // Acepta name= o property= en cualquier orden y comillas simples/dobles
+      const re = new RegExp(`<meta[^>]+(?:property|name)\\s*=\\s*["']${prop}["'][^>]*>`, 'i');
+      const tag = html.match(re)?.[0];
+      if (!tag) return null;
+      const c = tag.match(/content\s*=\s*["']([^"']+)["']/i);
+      return c?.[1] || null;
+    };
+    const titleTag = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || null;
+    const ogImage = meta('og:image') || meta('twitter:image') || null;
+    const ogTitle = meta('og:title') || titleTag;
+    const ogDesc = meta('og:description') || meta('description') || null;
+
+    // Resolver imagen relativa contra la URL origen
+    let image = ogImage;
+    if (image && !/^https?:\/\//i.test(image)) {
+      try { image = new URL(image, parsed.href).href; } catch { /* ignore */ }
+    }
+    // Favicon fallback
+    const favicon = `${parsed.protocol}//${parsed.host}/favicon.ico`;
+
+    res.setHeader('Cache-Control', 'public, max-age=600');
+    res.json({
+      success: true,
+      data: {
+        url,
+        title: ogTitle ? String(ogTitle).trim().slice(0, 250) : null,
+        description: ogDesc ? String(ogDesc).trim().slice(0, 500) : null,
+        image: image || null,
+        favicon,
+        host: parsed.host,
+      },
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Error al obtener preview';
+    // Timeout u otros — devolver 200 con data vacia para que el front no rompa el render.
+    res.json({ success: true, data: { url: String(req.query.url || ''), title: null, description: null, image: null, error: msg } });
+  }
+});
+
 // Middleware para manejar errores de multer
 router.use((err: Error, _req: Request, res: Response, next: Function) => {
   if (err instanceof multer.MulterError) {

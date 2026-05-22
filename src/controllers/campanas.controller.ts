@@ -143,9 +143,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
@@ -1577,9 +1580,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
@@ -2789,9 +2795,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
@@ -2915,7 +2924,7 @@ export class CampanasController {
           COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
           cl.CUIC AS cuic,
           COALESCE(pr.inversion, 0) AS inversion,
-          ct.id_propuesta AS aps_global,
+          cm.id AS aps_global,
           s.nombre_usuario AS vendedor,
           COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
           pr.descripcion,
@@ -2980,7 +2989,7 @@ export class CampanasController {
           COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
           cl.CUIC AS cuic,
           COALESCE(pr.inversion, 0) AS inversion,
-          ct.id_propuesta AS aps_global,
+          cm.id AS aps_global,
           s.nombre_usuario AS vendedor,
           COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
           pr.descripcion,
@@ -3049,7 +3058,7 @@ export class CampanasController {
           COALESCE(cl.T2_U_Marca, cl.T0_U_Cliente, cl.T0_U_RazonSocial, '') AS anunciante,
           cl.CUIC AS cuic,
           COALESCE(pr.inversion, 0) AS inversion,
-          ct.id_propuesta AS aps_global,
+          cm.id AS aps_global,
           s.nombre_usuario AS vendedor,
           COALESCE(ct.tipo_periodo, 'catorcena') AS tipo_periodo,
           pr.descripcion,
