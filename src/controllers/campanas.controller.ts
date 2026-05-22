@@ -143,9 +143,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
@@ -1577,9 +1580,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
@@ -2789,9 +2795,12 @@ export class CampanasController {
         const orClauses: string[] = [];
 
         if (numericTerms.length > 0) {
+          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
+          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
+          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
+          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
+          // id propuesta, debe usar la pantalla de Propuestas.
           orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-          orClauses.push(`ct.id_propuesta IN (${numericTerms.map(() => '?').join(',')})`);
           params.push(...numericTerms.map(t => parseInt(t)));
         }
 
