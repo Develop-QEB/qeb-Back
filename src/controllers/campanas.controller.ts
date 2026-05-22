@@ -8075,6 +8075,11 @@ export class CampanasController {
           Anunciante: cliente?.T1_U_Cliente || null,
           Operacion: operacion,
           CodigoContrato: r.rsv_aps || null,
+          // idquote (APS Global / id de campania) — no se muestra en la tabla,
+          // pero entra al haystack del buscador para poder filtrar por id de
+          // campania (ej. 80614) aunque la columna no esté visible.
+          idquote: r.idquote ? Number(r.idquote) : null,
+          campania_id: camp?.id ?? null,
           PrecioPorCara: precioPorCara,
           Vendedor: propuestaByIdMap.get(String(r.idquote))?.nombre_usuario || null,
           Descripcion: null,
