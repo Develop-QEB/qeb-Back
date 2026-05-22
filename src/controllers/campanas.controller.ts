@@ -2072,6 +2072,7 @@ export class CampanasController {
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.estatus) as estatus_inventario,
           MAX(rsv.archivo) as archivo,
+          MAX(at_grp.artes_detalle) as artes_detalle,
           MAX(rsv.estatus) as estatus_reserva,
           MAX(rsv.calendario_id) as calendario_id,
           MAX(rsv.APS) as aps,
@@ -2096,6 +2097,16 @@ export class CampanasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN (
+            SELECT id_reserva,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                     ) AS CHAR
+                   ) as artes_detalle
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
@@ -2438,6 +2449,7 @@ export class CampanasController {
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.estatus) as estatus_inventario,
           MAX(rsv.archivo) as archivo,
+          MAX(at_grp.artes_detalle) as artes_detalle,
           MAX(rsv.estatus) as estatus_reserva,
           MAX(rsv.calendario_id) as calendario_id,
           MAX(rsv.APS) as aps,
@@ -2464,6 +2476,16 @@ export class CampanasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN (
+            SELECT id_reserva,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                     ) AS CHAR
+                   ) as artes_detalle
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
           cm.id IN (${placeholders})
           AND rsv.APS IS NOT NULL
