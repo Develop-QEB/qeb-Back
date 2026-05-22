@@ -3739,7 +3739,15 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      console.log('Fetching inventario sin arte for campana:', campanaId);
+      // Si se pasa ?includeWithoutAps=true, devolvemos tambien items que aun
+      // no tienen APS asignado (para el preview de Versionario Artes, donde
+      // queremos mostrar tambien circuitos pendientes de asignacion APS).
+      const includeWithoutAps = String(req.query.includeWithoutAps || '').toLowerCase() === 'true';
+      console.log('Fetching inventario sin arte for campana:', campanaId, '| includeWithoutAps:', includeWithoutAps);
+
+      const apsFilter = includeWithoutAps ? '' : `
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0`;
 
       const query = `
         SELECT
@@ -3800,9 +3808,7 @@ export class CampanasController {
           AND sc.inicio_periodo <= cm.fecha_fin
           AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.archivo IS NULL
-          AND imDig.id_reserva IS NULL
-          AND rsv.APS IS NOT NULL
-          AND rsv.APS > 0
+          AND imDig.id_reserva IS NULL${apsFilter}
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
