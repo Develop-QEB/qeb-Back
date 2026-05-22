@@ -193,7 +193,9 @@ model historial {
   ref_id                   Int
   accion                   String    @db.VarChar(255)
   fecha_hora               DateTime  @default(now()) @db.Timestamp(0)
-  detalles                 String?   @db.Text
+  // MediumText (16MB) en vez de Text (64KB) — fotografías de caras de
+  // campañas grandes (300+ circuitos) excedían el límite y la tx revertía.
+  detalles                 String?   @db.MediumText
   usuario_id               Int?
   fecha_entrega            DateTime? @db.DateTime(0)
   recordar_dias_antes      Int?
