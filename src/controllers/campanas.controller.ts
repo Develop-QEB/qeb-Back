@@ -2072,6 +2072,7 @@ export class CampanasController {
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.estatus) as estatus_inventario,
           MAX(rsv.archivo) as archivo,
+          MAX(at_grp.artes_detalle) as artes_detalle,
           MAX(rsv.estatus) as estatus_reserva,
           MAX(rsv.calendario_id) as calendario_id,
           MAX(rsv.APS) as aps,
@@ -2096,6 +2097,16 @@ export class CampanasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN (
+            SELECT id_reserva,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                     ) AS CHAR
+                   ) as artes_detalle
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
           cm.id = ?
           AND rsv.APS IS NOT NULL
@@ -2438,6 +2449,7 @@ export class CampanasController {
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.estatus) as estatus_inventario,
           MAX(rsv.archivo) as archivo,
+          MAX(at_grp.artes_detalle) as artes_detalle,
           MAX(rsv.estatus) as estatus_reserva,
           MAX(rsv.calendario_id) as calendario_id,
           MAX(rsv.APS) as aps,
@@ -2464,6 +2476,16 @@ export class CampanasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN (
+            SELECT id_reserva,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                     ) AS CHAR
+                   ) as artes_detalle
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
           cm.id IN (${placeholders})
           AND rsv.APS IS NOT NULL
@@ -3543,6 +3565,7 @@ export class CampanasController {
 
           MAX(rsv.archivo) AS archivo,
           MAX(at_grp.artes_all) AS artes_multiples,
+          MAX(at_grp.artes_detalle) AS artes_detalle,
 
           GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
 
@@ -3583,7 +3606,17 @@ export class CampanasController {
           LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
           LEFT JOIN (
-            SELECT id_reserva, GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all
+            SELECT id_reserva,
+                   GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT(
+                         'archivo', archivo,
+                         'nota', COALESCE(nota, ''),
+                         'spot', spot
+                       )
+                     ) AS CHAR
+                   ) as artes_detalle
             FROM artes_tradicionales
             GROUP BY id_reserva
           ) at_grp ON at_grp.id_reserva = rsv.id
@@ -3706,7 +3739,15 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      console.log('Fetching inventario sin arte for campana:', campanaId);
+      // Si se pasa ?includeWithoutAps=true, devolvemos tambien items que aun
+      // no tienen APS asignado (para el preview de Versionario Artes, donde
+      // queremos mostrar tambien circuitos pendientes de asignacion APS).
+      const includeWithoutAps = String(req.query.includeWithoutAps || '').toLowerCase() === 'true';
+      console.log('Fetching inventario sin arte for campana:', campanaId, '| includeWithoutAps:', includeWithoutAps);
+
+      const apsFilter = includeWithoutAps ? '' : `
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0`;
 
       const query = `
         SELECT
@@ -3767,9 +3808,7 @@ export class CampanasController {
           AND sc.inicio_periodo <= cm.fecha_fin
           AND sc.fin_periodo >= cm.fecha_inicio
           AND rsv.archivo IS NULL
-          AND imDig.id_reserva IS NULL
-          AND rsv.APS IS NOT NULL
-          AND rsv.APS > 0
+          AND imDig.id_reserva IS NULL${apsFilter}
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
         ORDER BY MIN(rsv.id) DESC
       `;
@@ -8042,6 +8081,11 @@ export class CampanasController {
           Anunciante: cliente?.T1_U_Cliente || null,
           Operacion: operacion,
           CodigoContrato: r.rsv_aps || null,
+          // idquote (APS Global / id de campania) — no se muestra en la tabla,
+          // pero entra al haystack del buscador para poder filtrar por id de
+          // campania (ej. 80614) aunque la columna no esté visible.
+          idquote: r.idquote ? Number(r.idquote) : null,
+          campania_id: camp?.id ?? null,
           PrecioPorCara: precioPorCara,
           Vendedor: propuestaByIdMap.get(String(r.idquote))?.nombre_usuario || null,
           Descripcion: null,
