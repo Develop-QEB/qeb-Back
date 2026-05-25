@@ -8980,7 +8980,9 @@ export class CampanasController {
       const effArtCm = data.articulo ?? currentCaraFull?.articulo;
       const effCarasCm = data.caras !== undefined && data.caras !== null ? data.caras : currentCaraFull?.caras;
       const effBonifCm = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCaraFull?.bonificacion;
-      const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any);
+      const effCfCm = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCaraFull?.caras_flujo;
+      const effCcCm = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCaraFull?.caras_contraflujo;
+      const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any, effCfCm as any, effCcCm as any);
 
       // En update: si el front no manda tipo, preservar el actual de BD
       // (NO defaultear a 'Tradicional' — eso era el bug del caso 70739).
@@ -9251,7 +9253,7 @@ export class CampanasController {
 
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG al crear).
-      const bonifOvCmCr = bonifCaraOverride(data.articulo, data.caras, data.bonificacion);
+      const bonifOvCmCr = bonifCaraOverride(data.articulo, data.caras, data.bonificacion, data.caras_flujo, data.caras_contraflujo);
 
       const createData: any = {
         idquote: String(cotizacion.id_propuesta),
@@ -9447,7 +9449,9 @@ export class CampanasController {
           const effArtCmBk = data.articulo ?? currentCara?.articulo;
           const effCarasCmBk = data.caras !== undefined && data.caras !== null ? data.caras : currentCara?.caras;
           const effBonifCmBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
-          const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any);
+          const effCfCmBk = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCara?.caras_flujo;
+          const effCcCmBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
+          const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any, effCfCmBk as any, effCcCmBk as any);
 
           // En bulk update: preservar tipo actual si el front no lo manda.
           // NO defaultear a 'Tradicional'. Si manda valor, validar.

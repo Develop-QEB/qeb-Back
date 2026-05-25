@@ -4092,7 +4092,9 @@ export class PropuestasController {
       const effArtUp = articulo ?? currentCara.articulo;
       const effCarasUp = caras !== undefined && caras !== null ? caras : currentCara.caras;
       const effBonifUp = bonificacion !== undefined && bonificacion !== null ? bonificacion : currentCara.bonificacion;
-      const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any);
+      const effCfUp = caras_flujo !== undefined && caras_flujo !== null ? caras_flujo : currentCara.caras_flujo;
+      const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
+      const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
       const updatedCara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -4342,7 +4344,7 @@ export class PropuestasController {
 
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG).
-      const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion);
+      const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion, caras_flujo, caras_contraflujo);
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4579,7 +4581,9 @@ export class PropuestasController {
           const effArtBk = data.articulo ?? currentCara?.articulo;
           const effCarasBk = data.caras !== undefined && data.caras !== null ? data.caras : currentCara?.caras;
           const effBonifBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
-          const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any);
+          const effCfBk = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCara?.caras_flujo;
+          const effCcBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
+          const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any, effCfBk as any, effCcBk as any);
 
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },

@@ -2144,7 +2144,7 @@ export class SolicitudesController {
           // (el split de bonificadas es front-only). Corrige CT-DIG que metía
           // el conteo en caras_flujo/caras_contraflujo.
           const artEfectivo = cara.articulo || articulo;
-          const bonifOv = bonifCaraOverride(artEfectivo, cara.caras, cara.bonificacion);
+          const bonifOv = bonifCaraOverride(artEfectivo, cara.caras, cara.bonificacion, cara.caras_flujo, cara.caras_contraflujo);
 
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
@@ -3260,7 +3260,7 @@ export class SolicitudesController {
             }
 
             // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
-            const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion);
+            const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion, cara.caras_flujo, cara.caras_contraflujo);
             const createdCara = await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
