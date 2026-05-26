@@ -947,32 +947,20 @@ export class PropuestasController {
       cache.deletePattern('propuestas:list:');
       cache.deletePattern('campanas:list:');
 
-      // Si se descarta o rechaza, liberar todas las reservas (soft delete).
-      // Si se rechaza, además eliminar todos los grupos/circuitos (caras) de la propuesta.
-      if (status === 'Descartada' || status === 'Rechazada') {
+      // Si la propuesta pasa a un status "negativo" (Rechazada/Cancelada/Descartada),
+      // liberar todas las reservas activas asociadas (soft-delete).
+      // NO se eliminan SC ni se tocan otras tablas — solo reservas.
+      if (status === 'Rechazada' || status === 'Cancelada' || status === 'Descartada') {
         const caras = await prisma.solicitudCaras.findMany({
           where: { idquote: String(propuestaId) },
         });
         const caraIds = caras.map(c => c.id);
         if (caraIds.length > 0) {
-          if (status === 'Rechazada') {
-            const [liberadas, eliminadas] = await prisma.$transaction([
-              prisma.reservas.updateMany({
-                where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
-                data: { deleted_at: new Date() },
-              }),
-              prisma.solicitudCaras.deleteMany({
-                where: { id: { in: caraIds } },
-              }),
-            ]);
-            console.log(`[Rechazada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
-          } else {
-            const liberadas = await prisma.reservas.updateMany({
-              where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
-              data: { deleted_at: new Date() },
-            });
-            console.log(`[Descartada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
-          }
+          const liberadas = await prisma.reservas.updateMany({
+            where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+            data: { deleted_at: new Date() },
+          });
+          console.log(`[Propuesta #${propuestaId} → ${status}] ${liberadas.count} reservas liberadas (soft-delete)`);
         }
 
         // Finalizar tareas de autorización pendientes asociadas a esta propuesta

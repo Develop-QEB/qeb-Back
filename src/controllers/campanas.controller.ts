@@ -877,8 +877,9 @@ export class CampanasController {
         data: { status },
       });
 
-      // Si se rechaza o cancela, liberar reservas + eliminar grupos/circuitos
-      // (caras). El bloqueo por APS arriba garantiza que solo se ejecuta antes
+      // Si se rechaza o cancela, liberar reservas (soft-delete).
+      // NO se eliminan SC ni otras tablas — solo reservas.
+      // El bloqueo por APS arriba garantiza que solo se ejecuta antes
       // de comprometer inventario.
       if (STATUS_LIBERA.includes(status) && campana.cotizacion_id) {
         const cotizacionData = await prisma.cotizacion.findUnique({
@@ -891,31 +892,24 @@ export class CampanasController {
           });
           if (caras.length > 0) {
             const carasIds = caras.map(c => c.id);
-            const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: carasIds }, deleted_at: null } });
-            const [liberadas, eliminadas] = await prisma.$transaction([
-              prisma.reservas.updateMany({
-                where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
-                data: { deleted_at: new Date() },
-              }),
-              prisma.solicitudCaras.deleteMany({
-                where: { id: { in: carasIds } },
-              }),
-            ]);
-            console.log(`[${status}] Campaña #${campanaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
+            const liberadas = await prisma.reservas.updateMany({
+              where: { solicitudCaras_id: { in: carasIds }, deleted_at: null },
+              data: { deleted_at: new Date() },
+            });
+            console.log(`[Campaña #${campanaId} → ${status}] ${liberadas.count} reservas liberadas (soft-delete)`);
 
             await prisma.historial.create({
               data: {
                 tipo: 'Campaña',
                 ref_id: cotizacionData.id_propuesta,
-                accion: 'Eliminación de reservas',
+                accion: 'Liberación de reservas',
                 fecha_hora: new Date(),
                 detalles: JSON.stringify({
                   usuario: req.user?.nombre || 'Usuario',
                   origen: 'campaña',
                   motivo: `${status} de campaña`,
-                  reservas_eliminadas: reservasCount,
-                  circuitos_eliminados: caras.length,
-                  circuitos: caras.map(c => ({ articulo: c.articulo, formato: c.formato })),
+                  reservas_liberadas: liberadas.count,
+                  circuitos_afectados: caras.length,
                 }),
               },
             });
