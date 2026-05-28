@@ -226,17 +226,23 @@ model imagenes_digitales {
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
   archivo_data       String?  @db.LongText
+  // Nombre manual del arte capturado por el usuario en el modal de carga.
+  // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
+  nombre_arte        String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_id_reserva")
 }
 
 model artes_tradicionales {
-  id         Int      @id @default(autoincrement())
-  id_reserva Int
-  archivo    String   @db.VarChar(255)
-  nota       String   @db.Text
-  spot       Int      @default(1)
-  created_at DateTime @default(now()) @db.DateTime(0)
+  id          Int      @id @default(autoincrement())
+  id_reserva  Int
+  archivo     String   @db.VarChar(255)
+  nota        String   @db.Text
+  spot        Int      @default(1)
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  // Nombre manual del arte capturado por el usuario en el modal de carga.
+  // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
+  nombre_arte String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_at_id_reserva")
 }
