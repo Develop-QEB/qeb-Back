@@ -4224,7 +4224,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -4247,12 +4247,13 @@ export class CampanasController {
         // Guardar la referencia
         savedFiles.push(archivoData);
 
+        const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, uniqueFilename, archivoData, spot);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal);
         }
       }
 
@@ -4355,7 +4356,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -4378,12 +4379,13 @@ export class CampanasController {
         // Guardar la referencia
         savedFiles.push(archivoData);
 
+        const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '')
-          `, reservaId, uniqueFilename, archivoData, spot);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal);
         }
       }
 
@@ -4464,9 +4466,11 @@ export class CampanasController {
         spot: number;
         fecha_testigo: Date;
         imagen_testigo: string;
+        nombre_arte: string | null;
       }[]>(`
         SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
-               comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
+               comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo,
+               MAX(nombre_arte) as nombre_arte
         FROM imagenes_digitales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
@@ -4485,6 +4489,7 @@ export class CampanasController {
           respuesta: img.respuesta,
           spot: img.spot,
           tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
+          nombre_arte: img.nombre_arte || null,
         })),
       });
     } catch (error) {
@@ -7242,12 +7247,25 @@ export class CampanasController {
     try {
       const { id } = req.params;
 
+      // Devolvemos por cada URL única: nombre archivo, conteo, nombre_arte (manual),
+      // nota y estatus (arte_aprobado más común de las reservas que la usan).
+      // nombre_arte y nota vienen de artes_tradicionales (priorizado) y luego imagenes_digitales.
       const query = `
-        SELECT url, nombre, SUM(uso_count) as uso_count FROM (
+        SELECT
+          url,
+          MIN(nombre) as nombre,
+          SUM(uso_count) as uso_count,
+          MAX(nombre_arte) as nombre_arte,
+          MAX(nota) as nota,
+          MAX(estatus) as estatus
+        FROM (
           SELECT DISTINCT
             r.archivo as url,
             SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
-            COUNT(*) as uso_count
+            COUNT(*) as uso_count,
+            NULL as nombre_arte,
+            NULL as nota,
+            MAX(r.arte_aprobado) as estatus
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -7261,7 +7279,10 @@ export class CampanasController {
           SELECT DISTINCT
             at2.archivo as url,
             SUBSTRING_INDEX(at2.archivo, '/', -1) as nombre,
-            COUNT(*) as uso_count
+            COUNT(*) as uso_count,
+            MAX(at2.nombre_arte) as nombre_arte,
+            MAX(at2.nota) as nota,
+            MAX(r2.arte_aprobado) as estatus
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
@@ -7269,18 +7290,36 @@ export class CampanasController {
           JOIN campania cm2 ON cm2.cotizacion_id = ct2.id
           WHERE cm2.id = ?
           GROUP BY at2.archivo
+          UNION ALL
+          SELECT DISTINCT
+            imd.archivo as url,
+            SUBSTRING_INDEX(imd.archivo, '/', -1) as nombre,
+            COUNT(*) as uso_count,
+            MAX(imd.nombre_arte) as nombre_arte,
+            MAX(imd.comentario) as nota,
+            MAX(r3.arte_aprobado) as estatus
+          FROM imagenes_digitales imd
+          JOIN reservas r3 ON r3.id = imd.id_reserva
+          JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
+          JOIN cotizacion ct3 ON sc3.idquote = ct3.id_propuesta
+          JOIN campania cm3 ON cm3.cotizacion_id = ct3.id
+          WHERE cm3.id = ?
+          GROUP BY imd.archivo
         ) combined
-        GROUP BY url, nombre
+        GROUP BY url
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint }[]>(query, parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus: string | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
         nombre: arte.nombre || `Arte ${index + 1}`,
         url: arte.url,
         usos: Number(arte.uso_count),
+        nombre_arte: arte.nombre_arte || null,
+        nota: arte.nota || null,
+        estatus: arte.estatus || null,
       }));
 
       res.json({
@@ -9725,7 +9764,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -9735,14 +9774,15 @@ export class CampanasController {
         );
         savedFiles.push(archivoFinal);
 
+        const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         for (const reservaId of allReservaIds) {
           const pairKey = `${reservaId}:${archivoFinal}`;
           if (insertedPairs.has(pairKey)) continue;
           insertedPairs.add(pairKey);
           await prisma.$executeRawUnsafe(`
-            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot)
-            VALUES (?, ?, ?, ?)
-          `, reservaId, archivoFinal, nota.trim(), spot || 1);
+            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte)
+            VALUES (?, ?, ?, ?, ?)
+          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal);
         }
       }
 
@@ -9820,8 +9860,10 @@ export class CampanasController {
         nota: string;
         spot: number;
         created_at: Date;
+        nombre_arte: string | null;
       }[]>(`
-        SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot, MIN(created_at) as created_at
+        SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot,
+               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte
         FROM artes_tradicionales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, nota, spot
@@ -9838,6 +9880,7 @@ export class CampanasController {
             nota: a.nota,
             spot: a.spot,
             createdAt: a.created_at,
+            nombre_arte: a.nombre_arte || null,
           })),
         });
         return;
