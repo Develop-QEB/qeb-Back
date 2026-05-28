@@ -2095,7 +2095,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -2474,7 +2474,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -3607,7 +3607,8 @@ export class CampanasController {
                        JSON_OBJECT(
                          'archivo', archivo,
                          'nota', COALESCE(nota, ''),
-                         'spot', spot
+                         'spot', spot,
+                         'nombre_arte', nombre_arte
                        )
                      ) AS CHAR
                    ) as artes_detalle
