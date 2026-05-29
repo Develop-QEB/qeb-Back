@@ -111,6 +111,7 @@ model campania {
   fecha_aprobacion DateTime? @db.DateTime(0)
   posted_to_sap    Int?      @default(0) @db.TinyInt
   posted_aps       String?   @db.Text
+  prefactura_aps   String?   @db.Text
 
   @@index([cotizacion_id], map: "idx_cotizacion_id")
   @@index([id, fecha_inicio, fecha_fin], map: "idx_campania_fechas")

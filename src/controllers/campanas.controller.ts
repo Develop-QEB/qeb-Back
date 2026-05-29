@@ -677,10 +677,10 @@ export class CampanasController {
       // Antes eran 4 round-trips secuenciales (postedAps → clienteInicial →
       // cotizacion → catorcenaData); ahora es 1.
       const [postedApsRaw, clienteInicial, cotizacion, catorcenaData] = await Promise.all([
-        // postedAps — columna puede no existir en producción
-        prisma.$queryRawUnsafe<{ posted_aps: string | null }[]>(
-          `SELECT posted_aps FROM campania WHERE id = ?`, campanaId
-        ).catch(() => [] as { posted_aps: string | null }[]),
+        // postedAps + prefactura_aps — columnas pueden no existir en producción
+        prisma.$queryRawUnsafe<{ posted_aps: string | null; prefactura_aps: string | null }[]>(
+          `SELECT posted_aps, prefactura_aps FROM campania WHERE id = ?`, campanaId
+        ).catch(() => [] as { posted_aps: string | null; prefactura_aps: string | null }[]),
         // cliente inicial por id
         prisma.cliente.findUnique({ where: { id: campana.cliente_id } }),
         // cotizacion (sólo si campana tiene cotizacion_id)
@@ -706,11 +706,17 @@ export class CampanasController {
         `,
       ]);
 
-      // Parsear postedAps (intencionalmente best-effort)
+      // Parsear postedAps + prefacturaAps (intencionalmente best-effort)
       let postedAps: string[] = [];
+      let prefacturaAps: number[] = [];
       try {
         if (postedApsRaw[0]?.posted_aps) {
           postedAps = JSON.parse(postedApsRaw[0].posted_aps);
+        }
+      } catch { /* JSON inválido o columna inexistente */ }
+      try {
+        if (postedApsRaw[0]?.prefactura_aps) {
+          prefacturaAps = JSON.parse(postedApsRaw[0].prefactura_aps);
         }
       } catch { /* JSON inválido o columna inexistente */ }
 
@@ -946,6 +952,7 @@ export class CampanasController {
         IMU: solicitud?.IMU ?? 0,
         posted_to_sap: (campana as any).posted_to_sap ? true : false,
         posted_aps: postedAps,
+        prefactura_aps: prefacturaAps,
         // Reservas count para detectar campañas incompletas
         reservas_count: reservasCount,
         reservas_count_ultima_cat: reservasCountUltimaCat,
@@ -7163,9 +7170,108 @@ export class CampanasController {
     }
   }
 
+  // Cancela la etiqueta Pre Factura de uno o más APS de la campaña. A
+  // diferencia de unmarkPostedAPS (que solo quita el badge), aquí también
+  // se eliminan los APS de las reservas — pasan a Sin APS — para que se
+  // les pueda asignar después un APS real. La decisión del producto fue
+  // "que no haya tanto show" y forzar reasignación con número distinto.
+  async cancelPrefactura(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { aps } = req.body as { aps: number[] };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!aps || aps.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de aps' });
+        return;
+      }
+
+      const current = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT prefactura_aps FROM campania WHERE id = ?', campanaId
+      );
+      const existing: number[] = JSON.parse(current[0]?.prefactura_aps || '[]');
+      const remaining = existing.filter(id => !aps.includes(id));
+      const apsQuitados = existing.filter(a => !remaining.includes(a));
+
+      // Quitar de prefactura_aps
+      await prisma.$queryRawUnsafe(
+        'UPDATE campania SET prefactura_aps = ? WHERE id = ?',
+        JSON.stringify(remaining), campanaId
+      );
+
+      // Acotar a las reservas de la campaña (no afectar otras campañas que
+      // por casualidad tengan el mismo número de APS — el contador es global).
+      const scIds = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+        SELECT sc.id FROM solicitudCaras sc
+        INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+        INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ?
+      `, campanaId);
+      const scIdsForCampaign = scIds.map(r => r.id);
+
+      let reservasAfectadas = 0;
+      if (apsQuitados.length > 0 && scIdsForCampaign.length > 0) {
+        const scPlaceholders = scIdsForCampaign.map(() => '?').join(',');
+        const apsPlaceholders = apsQuitados.map(() => '?').join(',');
+        const result = await prisma.$executeRawUnsafe(
+          `UPDATE reservas SET APS = NULL
+           WHERE APS IN (${apsPlaceholders})
+             AND solicitudCaras_id IN (${scPlaceholders})`,
+          ...apsQuitados, ...scIdsForCampaign
+        );
+        reservasAfectadas = Number(result) || 0;
+      }
+
+      if (apsQuitados.length > 0) {
+        const camp = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: { cotizacion_id: true },
+        });
+        let propuestaId: number | null = null;
+        if (camp?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({
+            where: { id: camp.cotizacion_id },
+            select: { id_propuesta: true },
+          });
+          propuestaId = cot?.id_propuesta ?? null;
+        }
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: propuestaId ?? campanaId,
+            accion: 'Cancelar APS Pre Factura',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              campaniaId: campanaId,
+              apsCancelados: apsQuitados,
+              reservasRegresadasASinAPS: reservasAfectadas,
+            }),
+          },
+        }).catch(err => console.error('Error guardando historial cancel Pre Factura:', err));
+      }
+
+      emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, {
+        campanaId,
+        prefactura_aps: remaining,
+      });
+      res.json({ success: true, prefactura_aps: remaining, reservas_afectadas: reservasAfectadas });
+    } catch (error) {
+      console.error('Error en cancelPrefactura:', error);
+      res.status(500).json({ success: false, error: 'Error al cancelar Pre Factura' });
+    }
+  }
+
   async assignAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { inventarioIds, campanaId, solicitudCarasIds, rsvIds } = req.body;
+      // `prefactura` viene del endpoint /assign-aps-prefactura: además de
+      // generar el APS, lo agrega al JSON `campania.prefactura_aps` para que
+      // el botón POST a SAP quede deshabilitado en el front (y se pueda
+      // "Cancelar POST" → que en realidad llama a cancelPrefactura y devuelve
+      // las reservas a Sin APS).
+      const { inventarioIds, campanaId, solicitudCarasIds, rsvIds, prefactura } = req.body;
       const userId = req.user?.userId || 0;
       const userName = req.user?.nombre || 'Usuario';
 
@@ -7357,8 +7463,28 @@ export class CampanasController {
       }
 
       const nombreCampana = campana?.nombre || 'Campaña';
-      const tituloNotificacion = `APS #${newAPS} asignado - ${nombreCampana}`;
-      const descripcionNotificacion = `${userName} asignó APS #${newAPS} a ${totalItems} ubicación(es)`;
+      const tipoLabel = prefactura ? 'APS Pre Factura' : 'APS';
+      const tituloNotificacion = `${tipoLabel} #${newAPS} asignado - ${nombreCampana}`;
+      const descripcionNotificacion = `${userName} asignó ${tipoLabel} #${newAPS} a ${totalItems} ubicación(es)`;
+
+      // Pre Factura: registrar el APS en el JSON de la campaña para que el
+      // front bloquee el botón POST a SAP. El front muestra el badge "PRE
+      // FACTURA" leyendo este mismo campo desde el payload de campaña.
+      if (prefactura) {
+        const currentPF = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT prefactura_aps FROM campania WHERE id = ?', parseInt(String(campanaId))
+        );
+        const existingPF: number[] = JSON.parse(currentPF[0]?.prefactura_aps || '[]');
+        const mergedPF = Array.from(new Set([...existingPF, newAPS]));
+        await prisma.$queryRawUnsafe(
+          'UPDATE campania SET prefactura_aps = ? WHERE id = ?',
+          JSON.stringify(mergedPF), parseInt(String(campanaId))
+        );
+        emitToCampana(parseInt(String(campanaId)), SOCKET_EVENTS.CAMPANA_APS_POSTED, {
+          campanaId: parseInt(String(campanaId)),
+          prefactura_aps: mergedPF,
+        });
+      }
 
       // Recopilar involucrados
       const involucrados = new Set<number>();
@@ -7405,9 +7531,9 @@ export class CampanasController {
           data: {
             tipo: 'Campaña',
             ref_id: propuesta.id,
-            accion: 'Asignación APS',
+            accion: prefactura ? 'Asignación APS Pre Factura' : 'Asignación APS',
             fecha_hora: now,
-            detalles: `${userName} asignó APS #${newAPS} a ${totalItems} ubicación(es)`,
+            detalles: `${userName} asignó ${tipoLabel} #${newAPS} a ${totalItems} ubicación(es)`,
           },
         });
       }

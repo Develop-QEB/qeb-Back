@@ -56,6 +56,15 @@ router.post('/:id/unmark-posted-aps', campanasController.unmarkPostedAPS.bind(ca
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
 router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));
 
+// APS Pre Factura — sibling de assign-aps: además de generar el APS lo
+// etiqueta como "Pre Factura" (bloquea POST a SAP). cancel-prefactura
+// quita la etiqueta y regresa las reservas a Sin APS.
+router.post('/:id/assign-aps-prefactura', (req, res) => {
+  req.body.prefactura = true;
+  return campanasController.assignAPS(req as any, res);
+});
+router.post('/:id/cancel-prefactura', campanasController.cancelPrefactura.bind(campanasController));
+
 // Gestión de Artes
 router.get('/:id/artes-existentes', campanasController.getArtesExistentes.bind(campanasController));
 router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bind(campanasController));
