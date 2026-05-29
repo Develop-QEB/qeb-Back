@@ -503,9 +503,33 @@ export async function crearTareasAutorizacion(
     campaniaId
   });
 
-  // Determinar etiqueta e ID para título/descripción según origen
-  const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
-  const idOrigen = origen === 'campana' ? campaniaId : origen === 'propuesta' ? propuestaId : solicitudId;
+  // Determinar etiqueta e ID para título/descripción.
+  // Mario pidió que SIEMPRE se use el id de la campaña asociada (no el id
+  // de la propuesta/solicitud), porque hay 74 propuestas desalineadas donde
+  // propuesta.id != campania.id (offset +10) — el usuario ve un id que no
+  // coincide con la campaña. Si no hay campaña aún (solicitud sin atender),
+  // fallback al comportamiento anterior.
+  let campaniaIdResuelto: number | null = campaniaId ?? null;
+  if (!campaniaIdResuelto && propuestaId) {
+    const cot = await prisma.cotizacion.findFirst({
+      where: { id_propuesta: propuestaId },
+      select: { id: true },
+    });
+    if (cot) {
+      const cm = await prisma.campania.findFirst({
+        where: { cotizacion_id: cot.id },
+        select: { id: true },
+        orderBy: { id: 'desc' },
+      });
+      if (cm) campaniaIdResuelto = cm.id;
+    }
+  }
+  const etiquetaOrigen = campaniaIdResuelto != null
+    ? 'Campaña'
+    : (origen === 'propuesta' ? 'Propuesta' : 'Solicitud');
+  const idOrigen = campaniaIdResuelto != null
+    ? campaniaIdResuelto
+    : (origen === 'campana' ? campaniaId : origen === 'propuesta' ? propuestaId : solicitudId);
 
   // Obtener usuarios DG y DCM (buscar por puesto, role o area con múltiples variantes)
   const usuariosDg = await prisma.usuario.findMany({
