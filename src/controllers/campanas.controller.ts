@@ -73,6 +73,168 @@ const ensureStoredFileUrl = async (
   return uploaded.secure_url;
 };
 
+/**
+ * Marca un conjunto de reservas como instaladas y deja una tarea de Instalación
+ * (estatus "Completado") que las cubre. Se usa cuando se asigna un arte de la
+ * biblioteca que ya está marcado como Instalado en otra(s) reserva(s):
+ * el inventario destino entra directo al sub-tab "Instaladas" de Validar Instalación.
+ *
+ * Detalles:
+ *   - Expande grupos completos (grupo_completo_id) para mantener consistencia.
+ *   - Quita las reservas afectadas de cualquier Instalación abierta
+ *     (Pendiente/Activo/En proceso) y elimina la tarea si queda vacía,
+ *     para evitar que la reserva aparezca a la vez en "Por Instalar" e "Instaladas".
+ *   - Crea una nueva tarea de Instalación "Completado" con todas las reservas
+ *     afectadas y registra historial + WebSocket.
+ */
+const markReservasComoInstaladas = async (params: {
+  campanaId: number;
+  reservaIds: number[];
+  userId?: number;
+  userName: string;
+}): Promise<void> => {
+  const { campanaId, userName } = params;
+  const reservaIdsBase = params.reservaIds.filter(n => Number.isFinite(n));
+  if (reservaIdsBase.length === 0) return;
+
+  // Expandir a grupo_completo_id
+  const placeholdersBase = reservaIdsBase.map(() => '?').join(',');
+  const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(
+    `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholdersBase}) AND grupo_completo_id IS NOT NULL`,
+    ...reservaIdsBase
+  );
+  const grupoIds = grupos.map(g => g.grupo_completo_id).filter(g => g != null);
+
+  let allAffectedReservaIds = [...reservaIdsBase];
+  if (grupoIds.length > 0) {
+    const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+    const grupoReservas = await prisma.$queryRawUnsafe<{ id: number }[]>(
+      `SELECT id FROM reservas WHERE grupo_completo_id IN (${grupoPlaceholders})`,
+      ...grupoIds
+    );
+    allAffectedReservaIds = [...new Set([...allAffectedReservaIds, ...grupoReservas.map(r => r.id)])];
+  }
+
+  if (allAffectedReservaIds.length === 0) return;
+
+  // 1) Marcar reservas como instaladas
+  const placeholdersAll = allAffectedReservaIds.map(() => '?').join(',');
+  await prisma.$executeRawUnsafe(
+    `UPDATE reservas SET instalado = 1, estatus = 'Instalado' WHERE id IN (${placeholdersAll})`,
+    ...allAffectedReservaIds
+  );
+
+  // 2) Limpiar de Instalaciones abiertas (Pendiente/Activo/En proceso) para no
+  //    dejar la reserva tanto en "Por Instalar" como en "Instaladas".
+  const tareasAbiertas = await prisma.tareas.findMany({
+    where: {
+      campania_id: campanaId,
+      tipo: 'Instalación',
+      estatus: { in: ['Pendiente', 'Activo', 'En proceso'] },
+    },
+    select: { id: true, ids_reservas: true },
+  });
+
+  const affectedSet = new Set(allAffectedReservaIds);
+  for (const t of tareasAbiertas) {
+    const ids = (t.ids_reservas || '')
+      .replace(/\*/g, ',')
+      .split(',')
+      .map(s => parseInt(s.trim()))
+      .filter(n => !isNaN(n));
+    if (ids.length === 0) continue;
+    const remaining = ids.filter(n => !affectedSet.has(n));
+    if (remaining.length === ids.length) continue;
+    if (remaining.length === 0) {
+      await prisma.tareas.delete({ where: { id: t.id } });
+    } else {
+      await prisma.tareas.update({
+        where: { id: t.id },
+        data: { ids_reservas: remaining.join(',') },
+      });
+    }
+  }
+
+  // 3) Resolver id_solicitud / id_propuesta para la nueva tarea + historial
+  let idSolicitud = '';
+  let idPropuesta = '';
+  let propuestaIdNum: number | null = null;
+  const campana = await prisma.campania.findUnique({
+    where: { id: campanaId },
+    select: CAMPANIA_SAFE_SELECT,
+  });
+  if (campana?.cotizacion_id) {
+    const cotizacion = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+    if (cotizacion?.id_propuesta) {
+      propuestaIdNum = cotizacion.id_propuesta;
+      idPropuesta = String(cotizacion.id_propuesta);
+      const propuesta = await prisma.propuesta.findUnique({ where: { id: cotizacion.id_propuesta } });
+      if (propuesta?.solicitud_id) {
+        idSolicitud = String(propuesta.solicitud_id);
+      }
+    }
+  }
+
+  // 4) Crear nueva Instalación Completada con TODAS las reservas afectadas
+  const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const nuevaInstalacion = await prisma.tareas.create({
+    data: {
+      titulo: 'Instalación previa (arte de biblioteca)',
+      descripcion: 'Inventario marcado como instalado al asignar un arte de la biblioteca que ya estaba instalado en otro inventario.',
+      tipo: 'Instalación',
+      estatus: 'Completado',
+      fecha_inicio: ahora,
+      fecha_fin: ahora,
+      id_responsable: params.userId || 0,
+      responsable: userName,
+      asignado: null,
+      id_asignado: null,
+      id_solicitud: idSolicitud,
+      id_propuesta: idPropuesta,
+      campania_id: campanaId,
+      ids_reservas: allAffectedReservaIds.join(','),
+      listado_inventario: allAffectedReservaIds.join(','),
+      evidencia: JSON.stringify({
+        origen: 'arte_biblioteca_instalado',
+        cantidad: allAffectedReservaIds.length,
+      }),
+    },
+  });
+
+  // 5) Historial
+  if (propuestaIdNum) {
+    try {
+      await prisma.historial.create({
+        data: {
+          tipo: 'Instalación',
+          ref_id: propuestaIdNum,
+          accion: 'Validación',
+          fecha_hora: new Date(),
+          detalles: `${userName} marcó ${allAffectedReservaIds.length} reserva(s) como instaladas al asignar arte de biblioteca con estatus Instalado`,
+        },
+      });
+    } catch (errHist) {
+      console.error('historial markReservasComoInstaladas:', errHist);
+    }
+  }
+
+  // 6) Sockets
+  emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+    tareaId: nuevaInstalacion.id,
+    campanaId,
+    tipo: 'Instalación',
+    titulo: nuevaInstalacion.titulo,
+  });
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
+    tareaId: nuevaInstalacion.id,
+    tipo: 'Instalación',
+  });
+
+  console.log(
+    `markReservasComoInstaladas: campana=${campanaId}, reservas=${allAffectedReservaIds.length}, tareaInstalacion=${nuevaInstalacion.id}`
+  );
+};
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -3933,7 +4095,7 @@ export class CampanasController {
   async assignArte(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivo } = req.body;
+      const { reservaIds, archivo, markInstalado } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4144,11 +4306,29 @@ export class CampanasController {
         }
       }
 
+      // Si el arte asignado venía de la biblioteca con estatus Instalado, marcar
+      // el inventario destino como instalado y dejarlo en "Instaladas" de Validar
+      // Instalación. Se hace después de persistir el archivo para no romper la
+      // respuesta principal si esto falla.
+      if (markInstalado === true) {
+        try {
+          await markReservasComoInstaladas({
+            campanaId,
+            reservaIds: reservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
+            userId,
+            userName,
+          });
+        } catch (errMark) {
+          console.error('assignArte: markReservasComoInstaladas falló:', errMark);
+        }
+      }
+
       res.json({
         success: true,
         data: {
           message: `Arte asignado a ${reservaIds.length} reserva(s)`,
           affected: reservaIds.length,
+          marked_instalado: markInstalado === true,
         },
       });
 
@@ -4175,7 +4355,7 @@ export class CampanasController {
   async assignArteDigital(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos } = req.body;
+      const { reservaIds, archivos, markInstalado } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4284,12 +4464,28 @@ export class CampanasController {
         }
       }
 
+      // Auto-instalación cuando se asigna arte digital de biblioteca ya instalado
+      // en otro inventario (ver assignArte para detalles del flujo).
+      if (markInstalado === true) {
+        try {
+          await markReservasComoInstaladas({
+            campanaId,
+            reservaIds: allReservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
+            userId,
+            userName,
+          });
+        } catch (errMark) {
+          console.error('assignArteDigital: markReservasComoInstaladas falló:', errMark);
+        }
+      }
+
       res.json({
         success: true,
         data: {
           message: `Arte digital asignado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
           affected: allReservaIds.length,
           files: savedFiles,
+          marked_instalado: markInstalado === true,
         },
       });
 
@@ -7354,7 +7550,10 @@ export class CampanasController {
       const { id } = req.params;
 
       // Devolvemos por cada URL única: nombre archivo, conteo, nombre_arte (manual),
-      // nota y estatus (arte_aprobado más común de las reservas que la usan).
+      // nota, estatus (arte_aprobado más común) y tiene_instalado (true si CUALQUIER
+      // reserva que use este arte está marcada como instalada — sirve para mostrar el
+      // badge "Instalado" en la biblioteca y disparar el flujo de auto-instalación al
+      // re-asignar este arte a nuevo inventario).
       // nombre_arte y nota vienen de artes_tradicionales (priorizado) y luego imagenes_digitales.
       const query = `
         SELECT
@@ -7363,7 +7562,8 @@ export class CampanasController {
           SUM(uso_count) as uso_count,
           MAX(nombre_arte) as nombre_arte,
           MAX(nota) as nota,
-          MAX(estatus) as estatus
+          MAX(estatus) as estatus,
+          MAX(tiene_instalado) as tiene_instalado
         FROM (
           SELECT DISTINCT
             r.archivo as url,
@@ -7371,7 +7571,8 @@ export class CampanasController {
             COUNT(*) as uso_count,
             NULL as nombre_arte,
             NULL as nota,
-            MAX(r.arte_aprobado) as estatus
+            MAX(r.arte_aprobado) as estatus,
+            MAX(CASE WHEN r.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -7388,7 +7589,8 @@ export class CampanasController {
             COUNT(*) as uso_count,
             MAX(at2.nombre_arte) as nombre_arte,
             MAX(at2.nota) as nota,
-            MAX(r2.arte_aprobado) as estatus
+            MAX(r2.arte_aprobado) as estatus,
+            MAX(CASE WHEN r2.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
@@ -7403,7 +7605,8 @@ export class CampanasController {
             COUNT(*) as uso_count,
             MAX(imd.nombre_arte) as nombre_arte,
             MAX(imd.comentario) as nota,
-            MAX(r3.arte_aprobado) as estatus
+            MAX(r3.arte_aprobado) as estatus,
+            MAX(CASE WHEN r3.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
           FROM imagenes_digitales imd
           JOIN reservas r3 ON r3.id = imd.id_reserva
           JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
@@ -7416,7 +7619,7 @@ export class CampanasController {
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus: string | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -7426,6 +7629,7 @@ export class CampanasController {
         nombre_arte: arte.nombre_arte || null,
         nota: arte.nota || null,
         estatus: arte.estatus || null,
+        tiene_instalado: Number(arte.tiene_instalado || 0) === 1,
       }));
 
       res.json({
@@ -9820,7 +10024,8 @@ export class CampanasController {
   async assignArteTradicional(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos } = req.body;
+      const { reservaIds, archivos, markInstalado } = req.body;
+      const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
 
@@ -9918,12 +10123,28 @@ export class CampanasController {
         }
       }
 
+      // Auto-instalación cuando alguno de los artes tradicionales venía de
+      // biblioteca ya instalado en otro inventario.
+      if (markInstalado === true) {
+        try {
+          await markReservasComoInstaladas({
+            campanaId,
+            reservaIds: allReservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
+            userId,
+            userName,
+          });
+        } catch (errMark) {
+          console.error('assignArteTradicional: markReservasComoInstaladas falló:', errMark);
+        }
+      }
+
       res.json({
         success: true,
         data: {
           message: `Arte tradicional asignado: ${archivos.length} archivo(s) a ${allReservaIds.length} reserva(s)`,
           affected: allReservaIds.length,
           files: savedFiles,
+          marked_instalado: markInstalado === true,
         },
       });
 
