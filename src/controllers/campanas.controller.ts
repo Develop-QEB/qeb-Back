@@ -6110,6 +6110,111 @@ export class CampanasController {
         }
       }
 
+      // [Auto-Instalación] Si una Recepción pasa a Atendido/Completado, crear automáticamente
+      // una tarea de Instalación (Pendiente) para los ids_reservas que aún no tengan tarea
+      // de Instalación / Orden de Instalación. Aplica al flujo normal Impresión→Recepción
+      // y al flujo "Cliente imprime" (que sólo crea Recepción). Las Recepciones de tipo
+      // "Faltantes" se ignoran porque representan inventario aún no recibido.
+      if (
+        tarea.tipo === 'Recepción' &&
+        (estatus === 'Atendido' || estatus === 'Completado') &&
+        tarea.campania_id
+      ) {
+        try {
+          let esRecepcionFaltantes = false;
+          if (tarea.evidencia) {
+            try {
+              const ev = JSON.parse(tarea.evidencia);
+              esRecepcionFaltantes = ev?.tipo === 'recepcion_faltantes';
+            } catch {}
+          }
+
+          const idsReservasRaw = tarea.ids_reservas || '';
+          const reservaIdsArray = idsReservasRaw
+            .split(',')
+            .map((s: string) => parseInt(s.trim()))
+            .filter((n: number) => !isNaN(n));
+
+          if (!esRecepcionFaltantes && reservaIdsArray.length > 0) {
+            // Reservas que ya están cubiertas por una Instalación u Orden de Instalación
+            const tareasInstalacionExistentes = await prisma.tareas.findMany({
+              where: {
+                campania_id: tarea.campania_id,
+                tipo: { in: ['Instalación', 'Orden de Instalación'] },
+              },
+              select: { id: true, ids_reservas: true },
+            });
+
+            const idsCubiertos = new Set<number>();
+            tareasInstalacionExistentes.forEach(t => {
+              (t.ids_reservas || '')
+                .split(',')
+                .map((s: string) => parseInt(s.trim()))
+                .filter((n: number) => !isNaN(n))
+                .forEach(n => idsCubiertos.add(n));
+            });
+
+            const idsSinInstalacion = reservaIdsArray.filter((n: number) => !idsCubiertos.has(n));
+
+            if (idsSinInstalacion.length > 0) {
+              const ahoraInst = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+              const fechaFinDefault = new Date(ahoraInst.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+              const tituloInst = tarea.titulo
+                ? tarea.titulo.replace(/^Recepción\s*-\s*/i, 'Instalación - ')
+                : 'Instalación';
+
+              const tareaInstalacion = await prisma.tareas.create({
+                data: {
+                  titulo: tituloInst,
+                  descripcion: tarea.descripcion || null,
+                  tipo: 'Instalación',
+                  estatus: 'Pendiente',
+                  fecha_inicio: ahoraInst,
+                  fecha_fin: fechaFinDefault,
+                  id_responsable: req.user?.userId || 0,
+                  responsable: req.user?.nombre || '',
+                  asignado: null,
+                  id_asignado: null,
+                  id_solicitud: tarea.id_solicitud || '',
+                  id_propuesta: tarea.id_propuesta || '',
+                  campania_id: tarea.campania_id,
+                  ids_reservas: idsSinInstalacion.join(','),
+                  listado_inventario: tarea.listado_inventario || idsSinInstalacion.join(','),
+                  evidencia: JSON.stringify({ origen: 'auto_from_recepcion', recepcion_id: tarea.id }),
+                },
+              });
+
+              // Marcar reservas como "Pendiente instalación"
+              const placeholdersInst = idsSinInstalacion.map(() => '?').join(',');
+              await prisma.$executeRawUnsafe(
+                `UPDATE reservas SET tarea = ? WHERE id IN (${placeholdersInst})`,
+                'Pendiente instalación',
+                ...idsSinInstalacion
+              );
+
+              emitToCampana(tarea.campania_id, SOCKET_EVENTS.TAREA_CREADA, {
+                tareaId: tareaInstalacion.id,
+                campanaId: tarea.campania_id,
+                tipo: 'Instalación',
+                titulo: tareaInstalacion.titulo,
+              });
+              emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaInstalacion.id, tipo: 'Instalación' });
+
+              console.log(
+                `Auto-Instalación creada (id=${tareaInstalacion.id}) desde Recepción ${tarea.id}: ${idsSinInstalacion.length} reservas`
+              );
+            } else {
+              console.log(
+                `Recepción ${tarea.id} atendida: todas las reservas ya tienen Instalación/Orden, no se autocrea.`
+              );
+            }
+          }
+        } catch (errAutoInst) {
+          console.error('Error auto-creando Instalación desde Recepción:', errAutoInst);
+        }
+      }
+
       // Si es tarea de ajuste y se finaliza, verificar si todas las hermanas ya están finalizadas
       if (
         ['Atendido', 'Completado', 'Finalizada'].includes(tarea.estatus || '') &&
