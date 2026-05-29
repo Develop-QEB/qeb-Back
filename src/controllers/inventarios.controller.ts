@@ -581,6 +581,9 @@ export class InventariosController {
           sentido: true,
           isla: true,
           mueble_isla: true,
+          mundialista: true,
+          mueble_chico: true,
+          isla_vip: true,
         },
       });
 
