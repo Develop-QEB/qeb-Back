@@ -1208,6 +1208,8 @@ export class NotificacionesController {
       const isArtReviewTask = GESTION_ARTES_TIPOS.includes(tarea.tipo || '');
       const userName = req.user?.nombre || 'Usuario';
 
+      let responsePayload: any = null;
+
       if (isArtReviewTask) {
         // Para tareas de Revisión de artes / Corrección: insertar en comentarios_revision_artes
         // Obtener nombre del usuario desde la BD
@@ -1230,64 +1232,66 @@ export class NotificacionesController {
           LIMIT 1
         `;
 
-        res.status(201).json({
-          success: true,
-          data: {
-            id: comentario.id,
-            autor_id: comentario.autor_id,
-            autor_nombre: comentario.autor_nombre,
-            contenido: comentario.contenido,
-            fecha: comentario.fecha,
-            tarea_id: comentario.tarea_id,
-          },
-        });
+        responsePayload = {
+          id: comentario.id,
+          autor_id: comentario.autor_id,
+          autor_nombre: comentario.autor_nombre,
+          contenido: comentario.contenido,
+          fecha: comentario.fecha,
+          tarea_id: comentario.tarea_id,
+        };
       } else {
         // Para otras tareas: insertar en tabla comentarios con solicitud_id
-        const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
+        const sIdLocal = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
 
         const comentario = await prisma.comentarios.create({
           data: {
             autor_id: userId,
             comentario: contenido,
             creado_en: new Date(),
-            solicitud_id: solicitudId,
+            solicitud_id: sIdLocal,
             campania_id: tarea.campania_id || 0,
             origen: 'tarea',
           },
         });
 
-        res.status(201).json({
-          success: true,
-          data: {
-            id: comentario.id,
-            autor_id: comentario.autor_id,
-            contenido: comentario.comentario,
-            fecha: comentario.creado_en,
-            solicitud_id: comentario.solicitud_id,
-          },
-        });
+        responsePayload = {
+          id: comentario.id,
+          autor_id: comentario.autor_id,
+          contenido: comentario.comentario,
+          fecha: comentario.creado_en,
+          solicitud_id: comentario.solicitud_id,
+        };
       }
 
-      // Crear notificaciones para todos los involucrados (excepto el autor)
+      // [BUG-FIX] Crear notificaciones ANTES del res.json para que errores se
+      // reporten correctamente. Antes el res.json se enviaba primero y los
+      // creates de notificaciones podian fallar silentemente al chocar con el
+      // catch global (que intentaba reenviar headers ya enviados).
+      // Cada notificacion va en su propio try/catch para que un fallo en una
+      // no rompa las demas — antes una falla cortaba todo el for.
       const tituloTarea = tarea.titulo || 'Tarea';
       const tituloNotificacion = `Nuevo comentario en tarea: ${tituloTarea}`;
       const descripcionNotificacion = `${userName} comentó: ${contenido.substring(0, 100)}${contenido.length > 100 ? '...' : ''}`;
       const solicitudId = tarea.id_solicitud ? parseInt(tarea.id_solicitud) : 0;
 
       // Obtener solicitud relacionada para el creador
-      const solicitudData = solicitudId > 0
-        ? await prisma.solicitud.findUnique({ where: { id: solicitudId } })
-        : null;
+      let solicitudData: any = null;
+      try {
+        if (solicitudId > 0) {
+          solicitudData = await prisma.solicitud.findUnique({ where: { id: solicitudId } });
+        }
+      } catch (errSol) {
+        console.error('addComment: error fetching solicitud:', errSol);
+      }
 
       // Recopilar todos los involucrados (sin duplicados, excluyendo al autor)
       const involucrados = new Set<number>();
 
-      // Agregar responsable de la tarea
       if (tarea.id_responsable && tarea.id_responsable !== userId) {
         involucrados.add(tarea.id_responsable);
       }
 
-      // Agregar asignados de la tarea
       if (tarea.id_asignado) {
         tarea.id_asignado.split(',').forEach(id => {
           const parsed = parseInt(id.trim());
@@ -1297,37 +1301,52 @@ export class NotificacionesController {
         });
       }
 
-      // Agregar creador de la solicitud
       if (solicitudData?.usuario_id && solicitudData.usuario_id !== userId) {
         involucrados.add(solicitudData.usuario_id);
       }
 
-      // Crear una notificación para cada involucrado
+      // Crear una notificación para cada involucrado — try/catch por cada una
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
+      let notifsCreadas = 0;
+      let notifsFalladas = 0;
 
       for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            id_solicitud: solicitudId.toString(),
-            id_propuesta: tarea.id_propuesta || '',
-            campania_id: tarea.campania_id || null,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            responsable: '',
-            asignado: userName,
-            id_asignado: userId.toString(),
-          },
-        });
+        try {
+          await prisma.tareas.create({
+            data: {
+              titulo: tituloNotificacion,
+              descripcion: descripcionNotificacion,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              id_solicitud: solicitudId.toString(),
+              id_propuesta: tarea.id_propuesta || '',
+              campania_id: tarea.campania_id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              responsable: '',
+              asignado: userName,
+              id_asignado: userId.toString(),
+            },
+          });
+          notifsCreadas++;
+        } catch (errNotif) {
+          notifsFalladas++;
+          console.error(`addComment: falla creando notif para user ${responsableId}:`, errNotif);
+        }
       }
+
+      console.log(`addComment tarea=${tarea.id}: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados total`);
 
       // Emitir evento WebSocket para actualizar tareas en tiempo real
       emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tareaId: tarea.id });
+
+      // Finalmente enviar response — ya pasamos todas las operaciones
+      res.status(201).json({
+        success: true,
+        data: responsePayload,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al agregar comentario';
       res.status(500).json({
