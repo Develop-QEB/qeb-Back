@@ -7680,6 +7680,15 @@ export class CampanasController {
       // reserva que use este arte está marcada como instalada — sirve para mostrar el
       // badge "Instalado" en la biblioteca y disparar el flujo de auto-instalación al
       // re-asignar este arte a nuevo inventario).
+      //
+      // tiene_instalado se considera true si:
+      //   - reservas.instalado = 1 (validado por testigo), o
+      //   - alguna tarea Instalación que cubre la reserva está en Atendido/Completado
+      //     (consistente con el filtro de sub-tab "Instaladas" en Validar Instalación).
+      // El segundo criterio es importante porque en el flujo normal el usuario primero
+      // atiende la Instalación (la deja en "Atendido") y solo después valida testigo
+      // (que marca reservas.instalado=1).
+      //
       // nombre_arte y nota vienen de artes_tradicionales (priorizado) y luego imagenes_digitales.
       const query = `
         SELECT
@@ -7691,53 +7700,74 @@ export class CampanasController {
           MAX(estatus) as estatus,
           MAX(tiene_instalado) as tiene_instalado
         FROM (
-          SELECT DISTINCT
+          SELECT
             r.archivo as url,
             SUBSTRING_INDEX(r.archivo, '/', -1) as nombre,
-            COUNT(*) as uso_count,
+            COUNT(DISTINCT r.id) as uso_count,
             NULL as nombre_arte,
             NULL as nota,
             MAX(r.arte_aprobado) as estatus,
-            MAX(CASE WHEN r.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
+            MAX(CASE
+              WHEN r.instalado = 1 THEN 1
+              WHEN tr.tipo = 'Instalación' AND tr.estatus IN ('Atendido','Completado') THEN 1
+              ELSE 0
+            END) as tiene_instalado
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN tareas tr ON tr.campania_id = cm.id
+            AND tr.tipo = 'Instalación'
+            AND FIND_IN_SET(r.id, REPLACE(tr.ids_reservas, ' ', '')) > 0
           WHERE cm.id = ?
             AND r.archivo IS NOT NULL
             AND r.archivo != ''
             AND r.deleted_at IS NULL
           GROUP BY r.archivo
           UNION ALL
-          SELECT DISTINCT
+          SELECT
             at2.archivo as url,
             SUBSTRING_INDEX(at2.archivo, '/', -1) as nombre,
-            COUNT(*) as uso_count,
+            COUNT(DISTINCT at2.id) as uso_count,
             MAX(at2.nombre_arte) as nombre_arte,
             MAX(at2.nota) as nota,
             MAX(r2.arte_aprobado) as estatus,
-            MAX(CASE WHEN r2.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
+            MAX(CASE
+              WHEN r2.instalado = 1 THEN 1
+              WHEN tr2.tipo = 'Instalación' AND tr2.estatus IN ('Atendido','Completado') THEN 1
+              ELSE 0
+            END) as tiene_instalado
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
           JOIN cotizacion ct2 ON sc2.idquote = ct2.id_propuesta
           JOIN campania cm2 ON cm2.cotizacion_id = ct2.id
+          LEFT JOIN tareas tr2 ON tr2.campania_id = cm2.id
+            AND tr2.tipo = 'Instalación'
+            AND FIND_IN_SET(r2.id, REPLACE(tr2.ids_reservas, ' ', '')) > 0
           WHERE cm2.id = ?
           GROUP BY at2.archivo
           UNION ALL
-          SELECT DISTINCT
+          SELECT
             imd.archivo as url,
             SUBSTRING_INDEX(imd.archivo, '/', -1) as nombre,
-            COUNT(*) as uso_count,
+            COUNT(DISTINCT imd.id) as uso_count,
             MAX(imd.nombre_arte) as nombre_arte,
             MAX(imd.comentario) as nota,
             MAX(r3.arte_aprobado) as estatus,
-            MAX(CASE WHEN r3.instalado = 1 THEN 1 ELSE 0 END) as tiene_instalado
+            MAX(CASE
+              WHEN r3.instalado = 1 THEN 1
+              WHEN tr3.tipo = 'Instalación' AND tr3.estatus IN ('Atendido','Completado') THEN 1
+              ELSE 0
+            END) as tiene_instalado
           FROM imagenes_digitales imd
           JOIN reservas r3 ON r3.id = imd.id_reserva
           JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
           JOIN cotizacion ct3 ON sc3.idquote = ct3.id_propuesta
           JOIN campania cm3 ON cm3.cotizacion_id = ct3.id
+          LEFT JOIN tareas tr3 ON tr3.campania_id = cm3.id
+            AND tr3.tipo = 'Instalación'
+            AND FIND_IN_SET(r3.id, REPLACE(tr3.ids_reservas, ' ', '')) > 0
           WHERE cm3.id = ?
           GROUP BY imd.archivo
         ) combined
