@@ -581,6 +581,9 @@ export class InventariosController {
           sentido: true,
           isla: true,
           mueble_isla: true,
+          mundialista: true,
+          mueble_chico: true,
+          isla_vip: true,
         },
       });
 
@@ -1819,25 +1822,56 @@ export class InventariosController {
         res.status(404).json({ success: false, error: 'Inventario no encontrado' });
         return;
       }
-      const newEstatus = inventario.estatus === 'Bloqueado' ? 'Disponible' : 'Bloqueado';
-      const updated = await prisma.inventarios.update({
-        where: { id },
-        data: { estatus: newEstatus },
-      });
-
+      const wasBloqueado = inventario.estatus === 'Bloqueado';
+      const newEstatus = wasBloqueado ? 'Disponible' : 'Bloqueado';
       const userName = req.user?.nombre || req.user?.email || 'Sistema';
       const accion = newEstatus === 'Bloqueado' ? 'Bloqueado' : 'Desbloqueado';
-      await prisma.historial.create({
-        data: {
-          tipo: 'Inventario',
-          ref_id: id,
-          accion,
-          fecha_hora: new Date(),
-          detalles: `${userName} ${accion === 'Bloqueado' ? 'bloqueó' : 'desbloqueó'} el inventario ${inventario.codigo_unico || id}`,
-        },
+
+      // Cuando se PASA a Bloqueado, soft-delete las reservas activas del
+      // inventario (`deleted_at = NOW()`). El estatus de la reserva se
+      // preserva para auditoría — solo el deleted_at las saca del flujo.
+      // Esto "desocupa" el espacio: la campaña que tenía la cara la pierde
+      // y el asesor recibirá la tarea para reasignar.
+      // Al DESBLOQUEAR no se restauran reservas — eso lo decide el asesor
+      // manualmente vía las tareas creadas.
+      let liberadas = 0;
+      await prisma.$transaction(async (tx) => {
+        if (!wasBloqueado) {
+          // Resolver inventario polimórfico: r.inventario_id puede apuntar a
+          // inventarios.id directamente o a espacio_inventario.id (que a su
+          // vez apunta a inventarios.id). Soft-delete ambos casos.
+          const result = await tx.$executeRawUnsafe(
+            `UPDATE reservas r
+             LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
+             SET r.deleted_at = NOW()
+             WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
+               AND r.deleted_at IS NULL
+               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')`,
+            id
+          );
+          liberadas = Number(result) || 0;
+        }
+
+        await tx.inventarios.update({
+          where: { id },
+          data: { estatus: newEstatus },
+        });
+
+        await tx.historial.create({
+          data: {
+            tipo: 'Inventario',
+            ref_id: id,
+            accion,
+            fecha_hora: new Date(),
+            detalles: liberadas > 0
+              ? `${userName} bloqueó el inventario ${inventario.codigo_unico || id} — ${liberadas} reservas liberadas`
+              : `${userName} ${accion === 'Bloqueado' ? 'bloqueó' : 'desbloqueó'} el inventario ${inventario.codigo_unico || id}`,
+          },
+        });
       });
 
-      res.json({ success: true, data: updated });
+      const updated = await prisma.inventarios.findUnique({ where: { id } });
+      res.json({ success: true, data: updated, reservas_liberadas: liberadas });
     } catch (error) {
       console.error('Error toggling block:', error);
       const message = error instanceof Error ? error.message : 'Error al bloquear/desbloquear inventario';

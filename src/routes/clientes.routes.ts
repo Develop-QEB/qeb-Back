@@ -14,6 +14,9 @@ router.get('/sap', clientesController.getSAPClientes.bind(clientesController));
 router.get('/sap/:database', clientesController.getSAPClientesByDatabase.bind(clientesController));
 router.get('/cuics', clientesController.getAllCUICs.bind(clientesController));
 router.get('/resolve', clientesController.resolveByCuic.bind(clientesController));
+// Sync desde SAP — Administrador/DEV (validado dentro del controller)
+router.post('/sync/preview', clientesController.syncPreview.bind(clientesController));
+router.post('/:id/sync-from-sap', clientesController.syncApply.bind(clientesController));
 router.post('/', clientesController.create.bind(clientesController));
 router.get('/:id', clientesController.getById.bind(clientesController));
 router.delete('/:id', clientesController.delete.bind(clientesController));

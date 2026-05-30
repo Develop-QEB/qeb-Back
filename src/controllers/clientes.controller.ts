@@ -674,6 +674,302 @@ export class ClientesController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  // ===========================================================================
+  // SYNC desde SAP — preview (compara) + apply (actualiza cliente + propaga a
+  // solicitudes con ese cliente_id). Solo rol Administrador o DEV.
+  // ===========================================================================
+  async syncPreview(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!canSyncClientes(req)) {
+        res.status(403).json({ success: false, error: 'Acceso denegado (solo Administrador/DEV)' });
+        return;
+      }
+
+      // 1. Traer SAP de las DBs activas (CIMU + TRADE) con cache.
+      const [sapCimu, sapTrade] = await Promise.all([
+        fetchSapClientesPorDb('CIMU'),
+        fetchSapClientesPorDb('TRADE'),
+      ]);
+      // Si una DB devuelve 0 rows, asumimos endpoint caído (sesión expirada,
+      // 401, etc.) — NO marcamos sus clientes como huérfanos (sería falso
+      // positivo). El front muestra warning en vez.
+      const dbsNoDisponibles: string[] = [];
+      if (sapCimu.length === 0) dbsNoDisponibles.push('CIMU');
+      if (sapTrade.length === 0) dbsNoDisponibles.push('TRADE');
+      const sapMap = new Map<string, Record<string, unknown>>();
+      for (const row of sapCimu) {
+        const r = row as Record<string, unknown>;
+        const cuic = r.CUIC as number | undefined;
+        if (cuic != null) sapMap.set(`CIMU|${cuic}`, r);
+      }
+      for (const row of sapTrade) {
+        const r = row as Record<string, unknown>;
+        const cuic = r.CUIC as number | undefined;
+        if (cuic != null) sapMap.set(`TRADE|${cuic}`, r);
+      }
+
+      // 2. Traer todos los clientes QEB con CUIC + sap_database válidos.
+      const qebClientes = await prisma.cliente.findMany({
+        where: { CUIC: { not: null } },
+      });
+
+      // 3. Comparar.
+      const diffs: SyncDiff[] = [];
+      let huerfanos = 0;
+      let noComparables = 0;
+      let conCambios = 0;
+      for (const qeb of qebClientes) {
+        const db = (qeb.sap_database || '').toUpperCase();
+        if (!db || (db !== 'CIMU' && db !== 'TRADE')) continue; // sin db conocido, no comparable
+        // Si la DB SAP no respondió, no podemos saber si es huérfano.
+        if (dbsNoDisponibles.includes(db)) {
+          noComparables++;
+          continue;
+        }
+        const sapRow = sapMap.get(`${db}|${qeb.CUIC}`);
+        if (!sapRow) {
+          huerfanos++;
+          diffs.push({
+            cliente_id: qeb.id,
+            cuic: qeb.CUIC as number,
+            sap_database: qeb.sap_database || '',
+            razon_social_actual: qeb.T0_U_RazonSocial,
+            es_huerfano: true,
+            cambios: {},
+          });
+          continue;
+        }
+        const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+        if (Object.keys(cambios).length > 0) {
+          conCambios++;
+          diffs.push({
+            cliente_id: qeb.id,
+            cuic: qeb.CUIC as number,
+            sap_database: qeb.sap_database || '',
+            razon_social_actual: qeb.T0_U_RazonSocial,
+            es_huerfano: false,
+            cambios,
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        summary: {
+          total_qeb: qebClientes.length,
+          con_cambios: conCambios,
+          huerfanos,
+          no_comparables: noComparables,
+          dbs_no_disponibles: dbsNoDisponibles,
+        },
+        diffs,
+      });
+    } catch (error) {
+      console.error('syncPreview error:', error);
+      const message = error instanceof Error ? error.message : 'Error en sync preview';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async syncApply(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!canSyncClientes(req)) {
+        res.status(403).json({ success: false, error: 'Acceso denegado (solo Administrador/DEV)' });
+        return;
+      }
+
+      const clienteId = parseInt(req.params.id, 10);
+      if (!clienteId) {
+        res.status(400).json({ success: false, error: 'cliente_id inválido' });
+        return;
+      }
+
+      const qeb = await prisma.cliente.findUnique({ where: { id: clienteId } });
+      if (!qeb) {
+        res.status(404).json({ success: false, error: 'Cliente no encontrado' });
+        return;
+      }
+      const db = (qeb.sap_database || '').toUpperCase();
+      if (qeb.CUIC == null || (db !== 'CIMU' && db !== 'TRADE')) {
+        res.status(400).json({ success: false, error: 'Cliente sin CUIC o sap_database válido' });
+        return;
+      }
+
+      const sapRows = await fetchSapClientesPorDb(db);
+      const sapRow = sapRows.find(r => (r as { CUIC?: number }).CUIC === qeb.CUIC);
+      if (!sapRow) {
+        res.status(404).json({
+          success: false,
+          error: `Cliente CUIC ${qeb.CUIC} ya no existe en SAP ${db} (huérfano)`,
+        });
+        return;
+      }
+
+      const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+      if (Object.keys(cambios).length === 0) {
+        res.json({ success: true, cambios_aplicados: {}, solicitudes_afectadas: 0, mensaje: 'Sin cambios' });
+        return;
+      }
+
+      // Aplicar al cliente
+      const updateCliente: Record<string, unknown> = {};
+      for (const [field, val] of Object.entries(cambios)) {
+        updateCliente[field] = val.sap;
+      }
+      await prisma.cliente.update({ where: { id: clienteId }, data: updateCliente });
+
+      // Propagar a solicitudes con ese cliente_id
+      const updateSolicitud: Record<string, unknown> = {};
+      for (const [field, val] of Object.entries(cambios)) {
+        const solField = SOLICITUD_FIELD_MAP[field];
+        if (solField) updateSolicitud[solField] = val.sap;
+      }
+      let solicitudesAfectadas = 0;
+      if (Object.keys(updateSolicitud).length > 0) {
+        const r = await prisma.solicitud.updateMany({
+          where: { cliente_id: clienteId, deleted_at: null },
+          data: updateSolicitud,
+        });
+        solicitudesAfectadas = r.count;
+      }
+
+      // Historial
+      await prisma.historial.create({
+        data: {
+          tipo: 'cliente_sync_sap',
+          ref_id: clienteId,
+          accion: `Sincronizado desde SAP ${db}: ${Object.keys(cambios).length} campo(s)`,
+          detalles: JSON.stringify({
+            usuario: req.user?.nombre || 'desconocido',
+            usuario_id: req.user?.userId,
+            cuic: qeb.CUIC,
+            sap_database: db,
+            cambios,
+            solicitudes_afectadas: solicitudesAfectadas,
+          }),
+        },
+      });
+
+      res.json({
+        success: true,
+        cambios_aplicados: cambios,
+        solicitudes_afectadas: solicitudesAfectadas,
+      });
+    } catch (error) {
+      console.error('syncApply error:', error);
+      const message = error instanceof Error ? error.message : 'Error en sync apply';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const clientesController = new ClientesController();
+
+// ===========================================================================
+// Helpers de sync (privados, fuera de la clase para reutilización limpia)
+// ===========================================================================
+
+function canSyncClientes(req: AuthRequest): boolean {
+  const r = req.user?.rol;
+  return r === 'Administrador' || r === 'DEV';
+}
+
+interface FieldDef { qeb: keyof import('@prisma/client').Prisma.clienteUncheckedUpdateInput; sap: string | string[]; tipo: 'string' | 'number' }
+const SYNC_FIELDS: FieldDef[] = [
+  { qeb: 'T0_U_IDAsesor', sap: 'T0_U_IDAsesor', tipo: 'number' },
+  { qeb: 'T0_U_Asesor', sap: 'T0_U_Asesor', tipo: 'string' },
+  { qeb: 'T0_U_IDAgencia', sap: 'T0_U_IDAgencia', tipo: 'number' },
+  { qeb: 'T0_U_Agencia', sap: 'T0_U_Agencia', tipo: 'string' },
+  { qeb: 'T0_U_Cliente', sap: 'T0_U_Cliente', tipo: 'string' },
+  { qeb: 'T0_U_RazonSocial', sap: 'T0_U_RazonSocial', tipo: 'string' },
+  { qeb: 'T0_U_IDACA', sap: 'T0_U_IDACA', tipo: 'number' },
+  { qeb: 'T1_U_Cliente', sap: 'T1_U_Cliente', tipo: 'string' },
+  { qeb: 'T1_U_IDACA', sap: 'T1_U_IDACA', tipo: 'number' },
+  { qeb: 'T1_U_IDCM', sap: 'T1_U_IDCM', tipo: 'number' },
+  { qeb: 'T1_U_IDMarca', sap: 'T1_U_IDMarca', tipo: 'number' },
+  { qeb: 'T1_U_UnidadNegocio', sap: 'T1_U_UnidadNegocio', tipo: 'string' },
+  { qeb: 'T2_U_IDCategoria', sap: 'T2_U_IDCategoria', tipo: 'number' },
+  { qeb: 'T2_U_Categoria', sap: 'T2_U_Categoria', tipo: 'string' },
+  { qeb: 'T2_U_IDCM', sap: 'T2_U_IDCM', tipo: 'number' },
+  { qeb: 'T2_U_IDProducto', sap: 'T2_U_IDProducto', tipo: 'number' },
+  { qeb: 'T2_U_Marca', sap: 'T2_U_Marca', tipo: 'string' },
+  { qeb: 'T2_U_Producto', sap: 'T2_U_Producto', tipo: 'string' },
+  { qeb: 'card_code', sap: 'ACA_U_SAPCode', tipo: 'string' },
+  // CIMU sólo expone ASESOR_U_SAPCode; TRADE expone ambos (Original = real, sin map)
+  { qeb: 'salesperson_code', sap: ['ASESOR_U_SAPCode_Original', 'ASESOR_U_SAPCode'], tipo: 'number' },
+];
+
+// Mapeo cliente.<campo> → solicitud.<campo> para propagar (β)
+const SOLICITUD_FIELD_MAP: Record<string, string> = {
+  T0_U_RazonSocial: 'razon_social',
+  T0_U_Asesor: 'asesor',
+  T0_U_Agencia: 'agencia',
+  T1_U_UnidadNegocio: 'unidad_negocio',
+  T1_U_IDMarca: 'marca_id',
+  T2_U_Marca: 'marca_nombre',
+  T2_U_IDCategoria: 'categoria_id',
+  T2_U_Categoria: 'categoria_nombre',
+  T2_U_IDProducto: 'producto_id',
+  T2_U_Producto: 'producto_nombre',
+  card_code: 'card_code',
+  salesperson_code: 'salesperson_code',
+};
+
+interface SyncDiff {
+  cliente_id: number;
+  cuic: number;
+  sap_database: string;
+  razon_social_actual: string | null;
+  es_huerfano: boolean;
+  cambios: Record<string, { actual: unknown; sap: unknown }>;
+}
+
+// Compara una fila cliente QEB vs un row SAP. Devuelve { field: { actual, sap } }
+// solo para los campos que difieren (normalizando null/empty/string<->number).
+function computeDiffCliente(qeb: Record<string, unknown>, sap: Record<string, unknown>): Record<string, { actual: unknown; sap: unknown }> {
+  const out: Record<string, { actual: unknown; sap: unknown }> = {};
+  for (const { qeb: qebField, sap: sapField, tipo } of SYNC_FIELDS) {
+    const a = normalize(qeb[qebField as string], tipo);
+    const sapKeys = Array.isArray(sapField) ? sapField : [sapField];
+    let b: unknown = null;
+    for (const k of sapKeys) {
+      const candidate = normalize(sap[k], tipo);
+      if (candidate != null) { b = candidate; break; }
+    }
+    if (a !== b) {
+      out[qebField as string] = { actual: qeb[qebField as string] ?? null, sap: b };
+    }
+  }
+  return out;
+}
+
+function normalize(v: unknown, tipo: 'string' | 'number'): unknown {
+  if (v == null || v === '') return null;
+  if (tipo === 'number') {
+    const n = Number(v);
+    return isNaN(n) ? null : n;
+  }
+  return String(v).trim();
+}
+
+async function fetchSapClientesPorDb(database: string): Promise<unknown[]> {
+  const cache = sapCaches[database];
+  const now = Date.now();
+  if (cache && now - cache.timestamp < CACHE_DURATION) return cache.data;
+  const endpoint = SAP_ENDPOINTS[database];
+  if (!endpoint) return [];
+  try {
+    const response = await fetch(`${SAP_API_URL}${endpoint}`);
+    if (!response.ok) return cache?.data || [];
+    const sapData: any = await response.json();
+    let arr: unknown[] = [];
+    if (Array.isArray(sapData)) arr = sapData;
+    else if (sapData.value && Array.isArray(sapData.value)) arr = sapData.value;
+    else if (sapData.data && Array.isArray(sapData.data)) arr = sapData.data;
+    sapCaches[database] = { data: arr, timestamp: now };
+    return arr;
+  } catch {
+    return cache?.data || [];
+  }
+}

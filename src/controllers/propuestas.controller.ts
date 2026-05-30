@@ -947,32 +947,20 @@ export class PropuestasController {
       cache.deletePattern('propuestas:list:');
       cache.deletePattern('campanas:list:');
 
-      // Si se descarta o rechaza, liberar todas las reservas (soft delete).
-      // Si se rechaza, además eliminar todos los grupos/circuitos (caras) de la propuesta.
-      if (status === 'Descartada' || status === 'Rechazada') {
+      // Si la propuesta pasa a un status "negativo" (Rechazada/Cancelada/Descartada),
+      // liberar todas las reservas activas asociadas (soft-delete).
+      // NO se eliminan SC ni se tocan otras tablas — solo reservas.
+      if (status === 'Rechazada' || status === 'Cancelada' || status === 'Descartada') {
         const caras = await prisma.solicitudCaras.findMany({
           where: { idquote: String(propuestaId) },
         });
         const caraIds = caras.map(c => c.id);
         if (caraIds.length > 0) {
-          if (status === 'Rechazada') {
-            const [liberadas, eliminadas] = await prisma.$transaction([
-              prisma.reservas.updateMany({
-                where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
-                data: { deleted_at: new Date() },
-              }),
-              prisma.solicitudCaras.deleteMany({
-                where: { id: { in: caraIds } },
-              }),
-            ]);
-            console.log(`[Rechazada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas, ${eliminadas.count} grupos/circuitos eliminados`);
-          } else {
-            const liberadas = await prisma.reservas.updateMany({
-              where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
-              data: { deleted_at: new Date() },
-            });
-            console.log(`[Descartada] Propuesta #${propuestaId}: ${liberadas.count} reservas liberadas`);
-          }
+          const liberadas = await prisma.reservas.updateMany({
+            where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+            data: { deleted_at: new Date() },
+          });
+          console.log(`[Propuesta #${propuestaId} → ${status}] ${liberadas.count} reservas liberadas (soft-delete)`);
         }
 
         // Finalizar tareas de autorización pendientes asociadas a esta propuesta
@@ -4060,7 +4048,10 @@ export class PropuestasController {
       let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
       let autorizacion_dcm = currentCara.autorizacion_dcm || 'aprobado';
 
-      if (authFieldsChanged) {
+      // Recalcular si campos de auth cambiaron, O si la cara está rechazada
+      // (para que al editar un circuito rechazado se resetee a pendiente/aprobado)
+      const wasRejected = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+      if (authFieldsChanged || wasRejected) {
         const artUpperUpd = ((articulo || currentCara.articulo) || '').toUpperCase();
         const isRtRowUpd = !!(currentCara.grupo_rt_bf) && !artUpperUpd.startsWith('BF') && !artUpperUpd.startsWith('CF');
         let bonificacionForAuth = bonificacion ? parseFloat(bonificacion) : 0;
@@ -4092,7 +4083,9 @@ export class PropuestasController {
       const effArtUp = articulo ?? currentCara.articulo;
       const effCarasUp = caras !== undefined && caras !== null ? caras : currentCara.caras;
       const effBonifUp = bonificacion !== undefined && bonificacion !== null ? bonificacion : currentCara.bonificacion;
-      const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any);
+      const effCfUp = caras_flujo !== undefined && caras_flujo !== null ? caras_flujo : currentCara.caras_flujo;
+      const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
+      const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
       const updatedCara = await prisma.solicitudCaras.update({
         where: { id: parseInt(caraId) },
@@ -4342,7 +4335,7 @@ export class PropuestasController {
 
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG).
-      const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion);
+      const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion, caras_flujo, caras_contraflujo);
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4579,7 +4572,9 @@ export class PropuestasController {
           const effArtBk = data.articulo ?? currentCara?.articulo;
           const effCarasBk = data.caras !== undefined && data.caras !== null ? data.caras : currentCara?.caras;
           const effBonifBk = data.bonificacion !== undefined && data.bonificacion !== null ? data.bonificacion : currentCara?.bonificacion;
-          const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any);
+          const effCfBk = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCara?.caras_flujo;
+          const effCcBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
+          const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any, effCfBk as any, effCcBk as any);
 
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },

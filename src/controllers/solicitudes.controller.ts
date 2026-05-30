@@ -902,6 +902,32 @@ export class SolicitudesController {
         data: { status },
       });
 
+      // Si la solicitud pasa a un status "negativo" (Rechazada/Cancelada),
+      // liberar todas las reservas activas asociadas (soft-delete).
+      // NO se elimina ningún SC ni se tocan propuesta/campaña — solo reservas.
+      // El listado ya oculta 'Rechazada' por default, así que se ve "desaparecida".
+      if (status === 'Rechazada' || status === 'Cancelada') {
+        const propuestasRel = await prisma.propuesta.findMany({
+          where: { solicitud_id: solicitud.id, deleted_at: null },
+          select: { id: true },
+        });
+        const propuestaIdsStr = propuestasRel.map(p => String(p.id));
+        if (propuestaIdsStr.length > 0) {
+          const scs = await prisma.solicitudCaras.findMany({
+            where: { idquote: { in: propuestaIdsStr } },
+            select: { id: true },
+          });
+          const scIds = scs.map(s => s.id);
+          if (scIds.length > 0) {
+            const lib = await prisma.reservas.updateMany({
+              where: { solicitudCaras_id: { in: scIds }, deleted_at: null },
+              data: { deleted_at: new Date() },
+            });
+            console.log(`[Solicitud #${solicitud.id} → ${status}] ${lib.count} reservas liberadas (soft-delete)`);
+          }
+        }
+      }
+
       // Crear notificaciones para los involucrados
       const nombreSolicitud = solicitud.razon_social || solicitud.marca_nombre || 'Sin nombre';
       const tituloNotificacion = `Cambio de estado en solicitud #${solicitud.id}`;
@@ -2144,7 +2170,7 @@ export class SolicitudesController {
           // (el split de bonificadas es front-only). Corrige CT-DIG que metía
           // el conteo en caras_flujo/caras_contraflujo.
           const artEfectivo = cara.articulo || articulo;
-          const bonifOv = bonifCaraOverride(artEfectivo, cara.caras, cara.bonificacion);
+          const bonifOv = bonifCaraOverride(artEfectivo, cara.caras, cara.bonificacion, cara.caras_flujo, cara.caras_contraflujo);
 
           const solicitudCara = await tx.solicitudCaras.create({
             data: {
@@ -3260,7 +3286,7 @@ export class SolicitudesController {
             }
 
             // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
-            const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion);
+            const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion, cara.caras_flujo, cara.caras_contraflujo);
             const createdCara = await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),

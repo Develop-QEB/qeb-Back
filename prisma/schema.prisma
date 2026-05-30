@@ -59,6 +59,8 @@ model inventarios {
   tarifa_piso          Decimal? @db.Decimal(12, 2)
   tarifa_publica       Decimal? @db.Decimal(12, 2)
   mundialista          String?  @db.VarChar(10)
+  mueble_chico         String?  @db.VarChar(10)
+  isla_vip             String?  @db.VarChar(10)
   cto                  String?  @db.VarChar(20)
 
   @@index([archivos_id], map: "idx_archivos_id")
@@ -109,6 +111,7 @@ model campania {
   fecha_aprobacion DateTime? @db.DateTime(0)
   posted_to_sap    Int?      @default(0) @db.TinyInt
   posted_aps       String?   @db.Text
+  prefactura_aps   String?   @db.Text
 
   @@index([cotizacion_id], map: "idx_cotizacion_id")
   @@index([id, fecha_inicio, fecha_fin], map: "idx_campania_fechas")
@@ -226,17 +229,23 @@ model imagenes_digitales {
   fecha_testigo      DateTime @db.Date
   imagen_testigo     String   @db.Text
   archivo_data       String?  @db.LongText
+  // Nombre manual del arte capturado por el usuario en el modal de carga.
+  // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
+  nombre_arte        String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_id_reserva")
 }
 
 model artes_tradicionales {
-  id         Int      @id @default(autoincrement())
-  id_reserva Int
-  archivo    String   @db.VarChar(255)
-  nota       String   @db.Text
-  spot       Int      @default(1)
-  created_at DateTime @default(now()) @db.DateTime(0)
+  id          Int      @id @default(autoincrement())
+  id_reserva  Int
+  archivo     String   @db.VarChar(255)
+  nota        String   @db.Text
+  spot        Int      @default(1)
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  // Nombre manual del arte capturado por el usuario en el modal de carga.
+  // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
+  nombre_arte String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_at_id_reserva")
 }
