@@ -5,6 +5,7 @@ import { AuthRequest } from '../types';
 import { getIO, SOCKET_EVENTS, emitToAll } from '../config/socket';
 import Anthropic from '@anthropic-ai/sdk';
 import { chatbotController } from './chatbot.controller';
+import { logHistorial } from '../utils/historial';
 
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
@@ -154,6 +155,24 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       },
     });
 
+    await logHistorial({
+      tipo: 'ticket',
+      refId: ticket.id,
+      accion: `Creó ticket "${ticket.titulo}" (${ticket.prioridad})`,
+      usuario: userName,
+      usuarioId: userId,
+      usuarioRol: req.user?.rol,
+      origen: 'tickets',
+      extras: {
+        ticket: {
+          id: ticket.id,
+          titulo: ticket.titulo,
+          prioridad: ticket.prioridad,
+          tieneImagen: !!ticket.imagen,
+        },
+      },
+    });
+
     // Enviar email de notificacion a los programadores
     const devEmail = process.env.DEV_EMAIL || 'Develop@qeb.mx';
 
@@ -275,6 +294,37 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
       where: { id: Number(id) },
       data: updateData,
     });
+
+    if (ticket.status !== status) {
+      await logHistorial({
+        tipo: 'ticket',
+        refId: ticket.id,
+        accion: `Cambió status de ticket #${ticket.id} (${ticket.status} → ${status})`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'tickets',
+        cambios: [{ campo: 'status', label: 'Estatus', antes: ticket.status, despues: status }],
+        extras: {
+          ticket: { id: ticket.id, titulo: ticket.titulo },
+          incluyoRespuesta: !!respuesta,
+        },
+      });
+    } else if (respuesta) {
+      await logHistorial({
+        tipo: 'ticket',
+        refId: ticket.id,
+        accion: `Respondió ticket #${ticket.id} sin cambiar status`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'tickets',
+        extras: {
+          ticket: { id: ticket.id, titulo: ticket.titulo },
+          status: status,
+        },
+      });
+    }
 
     // Emitir evento de socket
     try {
@@ -583,6 +633,26 @@ export const createTicketMensaje = async (req: AuthRequest, res: Response) => {
         tipo: 'Mención en Ticket',
         ticketId,
         mencionados: mencionadosUnicos,
+      });
+    }
+
+    // Solo registrar audit log si el autor es Administrador o DEV
+    // (tickets reciben muchos mensajes de usuarios normales, no auditamos esos)
+    const rol = req.user?.rol;
+    if (rol === 'Administrador' || rol === 'DEV') {
+      await logHistorial({
+        tipo: 'ticket',
+        refId: ticketId,
+        accion: `Comentó en ticket #${ticketId}`,
+        usuario: userName,
+        usuarioId: userId,
+        usuarioRol: rol,
+        origen: 'tickets_mensaje',
+        extras: {
+          mensajePreview: mensaje ? mensaje.substring(0, 100) : '(archivo)',
+          tieneArchivo: !!archivo_url,
+          menciones: menciones && Array.isArray(menciones) ? menciones.length : 0,
+        },
       });
     }
 

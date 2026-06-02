@@ -3,6 +3,21 @@ import { validationResult } from 'express-validator';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { emitToProveedores, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { logHistorial, diffFields } from '../utils/historial';
+
+const PROVEEDOR_FIELD_LABELS = {
+  nombre: 'Nombre',
+  direccion: 'Dirección',
+  ciudad: 'Ciudad',
+  codigo_postal: 'Código Postal',
+  telefono: 'Teléfono',
+  email: 'Email',
+  sitio_web: 'Sitio Web',
+  contacto_principal: 'Contacto Principal',
+  categoria: 'Categoría',
+  notas: 'Notas',
+  estado: 'Estado',
+};
 
 export class ProveedoresController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -143,6 +158,26 @@ export class ProveedoresController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'creado' });
+
+      await logHistorial({
+        tipo: 'proveedor',
+        refId: proveedor.id,
+        accion: `Creó proveedor "${proveedor.nombre}"`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_proveedores',
+        extras: {
+          proveedor: {
+            id: proveedor.id,
+            nombre: proveedor.nombre,
+            categoria: proveedor.categoria,
+            ciudad: proveedor.ciudad,
+            contacto: proveedor.contacto_principal,
+            email: proveedor.email,
+          },
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al crear proveedor';
       res.status(500).json({
@@ -223,6 +258,25 @@ export class ProveedoresController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'actualizado' });
+
+      const cambios = diffFields(
+        existing as unknown as Record<string, unknown>,
+        proveedor as unknown as Record<string, unknown>,
+        PROVEEDOR_FIELD_LABELS,
+      );
+      if (cambios.length > 0) {
+        await logHistorial({
+          tipo: 'proveedor',
+          refId: proveedor.id,
+          accion: `Editó proveedor "${proveedor.nombre}" (${cambios.length} campo(s))`,
+          usuario: userName,
+          usuarioId: req.user?.userId,
+          usuarioRol: req.user?.rol,
+          origen: 'admin_proveedores',
+          cambios,
+          extras: { proveedor: { id: proveedor.id, nombre: proveedor.nombre } },
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar proveedor';
       res.status(500).json({
@@ -328,6 +382,26 @@ export class ProveedoresController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'proveedor', accion: 'eliminado' });
+
+      await logHistorial({
+        tipo: 'proveedor',
+        refId: existing.id,
+        accion: `Eliminó proveedor "${existing.nombre}"`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_proveedores',
+        extras: {
+          proveedorEliminado: {
+            id: existing.id,
+            nombre: existing.nombre,
+            categoria: existing.categoria,
+            ciudad: existing.ciudad,
+            contacto: existing.contacto_principal,
+            email: existing.email,
+          },
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar proveedor';
       res.status(500).json({

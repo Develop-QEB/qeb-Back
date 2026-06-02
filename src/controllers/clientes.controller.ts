@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { emitToClientes, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { logHistorial } from '../utils/historial';
 
 const SAP_API_URL = process.env.SAP_API_URL || 'https://binding-convinced-ride-foto.trycloudflare.com';
 
@@ -545,6 +546,27 @@ export class ClientesController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'cliente', accion: 'creado' });
+
+      await logHistorial({
+        tipo: 'cliente',
+        refId: cliente.id,
+        accion: `Creó cliente "${cliente.T0_U_RazonSocial || cliente.CUIC || '?'}" (CUIC ${cliente.CUIC || '?'})`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_clientes',
+        extras: {
+          cliente: {
+            id: cliente.id,
+            cuic: cliente.CUIC,
+            razonSocial: cliente.T0_U_RazonSocial,
+            agencia: cliente.T0_U_Agencia,
+            marca: cliente.T2_U_Marca,
+            categoria: cliente.T2_U_Categoria,
+            sapDb: cliente.sap_database,
+          },
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al crear cliente';
       res.status(500).json({
@@ -586,6 +608,26 @@ export class ClientesController {
         usuario: userName,
       });
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'cliente', accion: 'eliminado' });
+
+      await logHistorial({
+        tipo: 'cliente',
+        refId: cliente.id,
+        accion: `Eliminó cliente "${cliente.T0_U_RazonSocial || cliente.CUIC || '?'}" (CUIC ${cliente.CUIC || '?'})`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_clientes',
+        extras: {
+          clienteEliminado: {
+            id: cliente.id,
+            cuic: cliente.CUIC,
+            razonSocial: cliente.T0_U_RazonSocial,
+            agencia: cliente.T0_U_Agencia,
+            marca: cliente.T2_U_Marca,
+            sapDb: cliente.sap_database,
+          },
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar cliente';
       res.status(500).json({

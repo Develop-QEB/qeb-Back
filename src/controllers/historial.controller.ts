@@ -15,10 +15,12 @@ export class HistorialController {
       const fechaHasta = req.query.fechaHasta as string;
       const accion = req.query.accion as string;
       const usuario = req.query.usuario as string;
+      const auditAdmin = req.query.audit_admin === 'true' || req.query.audit_admin === '1';
 
       const userRole = req.user?.rol;
       const userName = req.user?.nombre;
       const isAdmin = userRole === 'Administrador' || userRole === 'DEV';
+      const isDev = userRole === 'DEV';
 
       const where: Record<string, unknown> = {};
       const andConditions: Record<string, unknown>[] = [];
@@ -82,6 +84,18 @@ export class HistorialController {
           OR: [
             { accion: { contains: userName } },
             { detalles: { contains: userName } },
+          ],
+        });
+      }
+
+      // Filtro "Auditoria Admin" — solo visible para DEV. Filtra entradas
+      // donde el actor es Administrador o DEV (segun usuarioRol en detalles).
+      // El helper logHistorial guarda usuarioRol con ese formato literal.
+      if (auditAdmin && isDev) {
+        andConditions.push({
+          OR: [
+            { detalles: { contains: '"usuarioRol":"Administrador"' } },
+            { detalles: { contains: '"usuarioRol":"DEV"' } },
           ],
         });
       }
