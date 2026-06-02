@@ -9977,7 +9977,10 @@ export class CampanasController {
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
-          if (authFieldsChanged) {
+          // Recalcular si cambiaron campos de auth O si la cara venía rechazada
+          // (refresh/reenviar a autorización: resetea rechazado -> pendiente/aprobado)
+          const wasRejectedBulk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+          if (authFieldsChanged || wasRejectedBulk) {
             const artUpperBulk = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
             const isRtRowBulk = !!(currentCara?.grupo_rt_bf) && !artUpperBulk.startsWith('BF') && !artUpperBulk.startsWith('CF');
             let bonificacionForAuthBulk = data.bonificacion ? parseFloat(data.bonificacion) : 0;

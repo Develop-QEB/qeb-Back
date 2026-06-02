@@ -4556,7 +4556,10 @@ export class PropuestasController {
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
-          if (authFieldsChanged) {
+          // Recalcular si cambiaron campos de auth O si la cara venía rechazada
+          // (refresh/reenviar a autorización: resetea rechazado -> pendiente/aprobado)
+          const wasRejectedBk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+          if (authFieldsChanged || wasRejectedBk) {
             const artUpperP = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
             const isRtRowP = !!(currentCara?.grupo_rt_bf) && !artUpperP.startsWith('BF') && !artUpperP.startsWith('CF');
             let bonificacionForAuthP = data.bonificacion ? parseFloat(data.bonificacion) : 0;
