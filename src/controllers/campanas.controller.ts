@@ -92,8 +92,15 @@ const markReservasComoInstaladas = async (params: {
   reservaIds: number[];
   userId?: number;
   userName: string;
+  // 'instalado' (default): marca reservas instalado=1, estatus='Instalado',
+  //   crea Instalacion 'Completado' → items van a sub-tab "Instaladas".
+  // 'rotacion': solo crea Instalacion 'Activo' (Por Instalar). NO toca
+  //   reservas.instalado ni reservas.estatus. Para cuando el arte se reusa
+  //   por rotacion y aun debe instalarse fisicamente.
+  mode?: 'instalado' | 'rotacion';
 }): Promise<void> => {
   const { campanaId, userName } = params;
+  const mode = params.mode || 'instalado';
   const reservaIdsBase = params.reservaIds.filter(n => Number.isFinite(n));
   if (reservaIdsBase.length === 0) return;
 
@@ -117,41 +124,48 @@ const markReservasComoInstaladas = async (params: {
 
   if (allAffectedReservaIds.length === 0) return;
 
-  // 1) Marcar reservas como instaladas
   const placeholdersAll = allAffectedReservaIds.map(() => '?').join(',');
-  await prisma.$executeRawUnsafe(
-    `UPDATE reservas SET instalado = 1, estatus = 'Instalado' WHERE id IN (${placeholdersAll})`,
-    ...allAffectedReservaIds
-  );
 
-  // 2) Limpiar de Instalaciones abiertas (Pendiente/Activo/En proceso) para no
-  //    dejar la reserva tanto en "Por Instalar" como en "Instaladas".
-  const tareasAbiertas = await prisma.tareas.findMany({
-    where: {
-      campania_id: campanaId,
-      tipo: 'Instalación',
-      estatus: { in: ['Pendiente', 'Activo', 'En proceso'] },
-    },
-    select: { id: true, ids_reservas: true },
-  });
+  // 1) Solo en modo 'instalado': marcar reservas como instaladas. En 'rotacion'
+  //    NO tocamos instalado/estatus (los items aun van a "Por Instalar").
+  if (mode === 'instalado') {
+    await prisma.$executeRawUnsafe(
+      `UPDATE reservas SET instalado = 1, estatus = 'Instalado' WHERE id IN (${placeholdersAll})`,
+      ...allAffectedReservaIds
+    );
+  }
 
-  const affectedSet = new Set(allAffectedReservaIds);
-  for (const t of tareasAbiertas) {
-    const ids = (t.ids_reservas || '')
-      .replace(/\*/g, ',')
-      .split(',')
-      .map(s => parseInt(s.trim()))
-      .filter(n => !isNaN(n));
-    if (ids.length === 0) continue;
-    const remaining = ids.filter(n => !affectedSet.has(n));
-    if (remaining.length === ids.length) continue;
-    if (remaining.length === 0) {
-      await prisma.tareas.delete({ where: { id: t.id } });
-    } else {
-      await prisma.tareas.update({
-        where: { id: t.id },
-        data: { ids_reservas: remaining.join(',') },
-      });
+  // 2) Limpiar de Instalaciones abiertas (Pendiente/Activo/En proceso) solo en
+  //    modo 'instalado' — en rotacion la nueva tarea VIVE precisamente en esos
+  //    estatus, asi que no tiene sentido limpiar.
+  if (mode === 'instalado') {
+    const tareasAbiertas = await prisma.tareas.findMany({
+      where: {
+        campania_id: campanaId,
+        tipo: 'Instalación',
+        estatus: { in: ['Pendiente', 'Activo', 'En proceso'] },
+      },
+      select: { id: true, ids_reservas: true },
+    });
+
+    const affectedSet = new Set(allAffectedReservaIds);
+    for (const t of tareasAbiertas) {
+      const ids = (t.ids_reservas || '')
+        .replace(/\*/g, ',')
+        .split(',')
+        .map(s => parseInt(s.trim()))
+        .filter(n => !isNaN(n));
+      if (ids.length === 0) continue;
+      const remaining = ids.filter(n => !affectedSet.has(n));
+      if (remaining.length === ids.length) continue;
+      if (remaining.length === 0) {
+        await prisma.tareas.delete({ where: { id: t.id } });
+      } else {
+        await prisma.tareas.update({
+          where: { id: t.id },
+          data: { ids_reservas: remaining.join(',') },
+        });
+      }
     }
   }
 
@@ -175,14 +189,19 @@ const markReservasComoInstaladas = async (params: {
     }
   }
 
-  // 4) Crear nueva Instalación Completada con TODAS las reservas afectadas
+  // 4) Crear tarea Instalacion: 'Completado' en modo instalado, 'Activo' en rotacion.
   const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const esRotacion = mode === 'rotacion';
   const nuevaInstalacion = await prisma.tareas.create({
     data: {
-      titulo: 'Instalación previa (arte de biblioteca)',
-      descripcion: 'Inventario marcado como instalado al asignar un arte de la biblioteca que ya estaba instalado en otro inventario.',
+      titulo: esRotacion
+        ? 'Instalación pendiente (rotación de arte)'
+        : 'Instalación previa (arte de biblioteca)',
+      descripcion: esRotacion
+        ? 'Rotación: arte reutilizado pendiente de instalación física en estos inventarios.'
+        : 'Inventario marcado como instalado al asignar un arte de la biblioteca que ya estaba instalado en otro inventario.',
       tipo: 'Instalación',
-      estatus: 'Completado',
+      estatus: esRotacion ? 'Activo' : 'Completado',
       fecha_inicio: ahora,
       fecha_fin: ahora,
       id_responsable: params.userId || 0,
@@ -195,7 +214,7 @@ const markReservasComoInstaladas = async (params: {
       ids_reservas: allAffectedReservaIds.join(','),
       listado_inventario: allAffectedReservaIds.join(','),
       evidencia: JSON.stringify({
-        origen: 'arte_biblioteca_instalado',
+        origen: esRotacion ? 'arte_biblioteca_rotacion' : 'arte_biblioteca_instalado',
         cantidad: allAffectedReservaIds.length,
       }),
     },
@@ -208,9 +227,11 @@ const markReservasComoInstaladas = async (params: {
         data: {
           tipo: 'Instalación',
           ref_id: propuestaIdNum,
-          accion: 'Validación',
+          accion: esRotacion ? 'Rotación' : 'Validación',
           fecha_hora: new Date(),
-          detalles: `${userName} marcó ${allAffectedReservaIds.length} reserva(s) como instaladas al asignar arte de biblioteca con estatus Instalado`,
+          detalles: esRotacion
+            ? `${userName} asignó arte de biblioteca en modo rotación a ${allAffectedReservaIds.length} reserva(s) — pendientes de instalación`
+            : `${userName} marcó ${allAffectedReservaIds.length} reserva(s) como instaladas al asignar arte de biblioteca con estatus Instalado`,
         },
       });
     } catch (errHist) {
@@ -231,7 +252,7 @@ const markReservasComoInstaladas = async (params: {
   });
 
   console.log(
-    `markReservasComoInstaladas: campana=${campanaId}, reservas=${allAffectedReservaIds.length}, tareaInstalacion=${nuevaInstalacion.id}`
+    `markReservasComoInstaladas[${mode}]: campana=${campanaId}, reservas=${allAffectedReservaIds.length}, tareaInstalacion=${nuevaInstalacion.id}`
   );
 };
 
@@ -4102,7 +4123,7 @@ export class CampanasController {
   async assignArte(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivo, markInstalado } = req.body;
+      const { reservaIds, archivo, markInstalado, instalacionMode } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4314,16 +4335,20 @@ export class CampanasController {
       }
 
       // Si el arte asignado venía de la biblioteca con estatus Instalado, marcar
-      // el inventario destino como instalado y dejarlo en "Instaladas" de Validar
-      // Instalación. Se hace después de persistir el archivo para no romper la
-      // respuesta principal si esto falla.
+      // el inventario destino segun el modo elegido por el usuario:
+      // - 'instalado' (default): instalado=1, va a "Instaladas".
+      // - 'rotacion': solo crea Instalacion 'Activo', va a "Por Instalar".
+      // Se hace después de persistir el archivo para no romper la respuesta
+      // principal si esto falla.
       if (markInstalado === true) {
         try {
+          const mode: 'instalado' | 'rotacion' = instalacionMode === 'rotacion' ? 'rotacion' : 'instalado';
           await markReservasComoInstaladas({
             campanaId,
             reservaIds: reservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
             userId,
             userName,
+            mode,
           });
         } catch (errMark) {
           console.error('assignArte: markReservasComoInstaladas falló:', errMark);
@@ -4362,7 +4387,7 @@ export class CampanasController {
   async assignArteDigital(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos, markInstalado } = req.body;
+      const { reservaIds, archivos, markInstalado, instalacionMode } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4472,14 +4497,16 @@ export class CampanasController {
       }
 
       // Auto-instalación cuando se asigna arte digital de biblioteca ya instalado
-      // en otro inventario (ver assignArte para detalles del flujo).
+      // en otro inventario (ver assignArte para detalles del flujo + modos).
       if (markInstalado === true) {
         try {
+          const mode: 'instalado' | 'rotacion' = instalacionMode === 'rotacion' ? 'rotacion' : 'instalado';
           await markReservasComoInstaladas({
             campanaId,
             reservaIds: allReservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
             userId,
             userName,
+            mode,
           });
         } catch (errMark) {
           console.error('assignArteDigital: markReservasComoInstaladas falló:', errMark);
@@ -10180,7 +10207,7 @@ export class CampanasController {
   async assignArteTradicional(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos, markInstalado } = req.body;
+      const { reservaIds, archivos, markInstalado, instalacionMode } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -10280,14 +10307,16 @@ export class CampanasController {
       }
 
       // Auto-instalación cuando alguno de los artes tradicionales venía de
-      // biblioteca ya instalado en otro inventario.
+      // biblioteca ya instalado en otro inventario. Modo controla destino.
       if (markInstalado === true) {
         try {
+          const mode: 'instalado' | 'rotacion' = instalacionMode === 'rotacion' ? 'rotacion' : 'instalado';
           await markReservasComoInstaladas({
             campanaId,
             reservaIds: allReservaIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)),
             userId,
             userName,
+            mode,
           });
         } catch (errMark) {
           console.error('assignArteTradicional: markReservasComoInstaladas falló:', errMark);
