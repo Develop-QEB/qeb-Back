@@ -5,6 +5,7 @@ import { getMexicoDate } from '../utils/dateHelper';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
+  verificarCarasRechazadas,
   crearTareasAutorizacion,
   obtenerResumenAutorizacion
 } from '../services/autorizacion.service';
@@ -878,6 +879,19 @@ export class SolicitudesController {
       }
 
       const statusAnterior = solicitudAnterior.status;
+
+      // Atendida es estado final permanente: una solicitud que ya generó
+      // propuesta no puede regresar. El front lo bloquea desde el botón
+      // Bitácora del detalle (SolicitudesPage.tsx statusReadOnly), pero
+      // esta validación cierra la puerta a llamadas directas a la API
+      // o a caches stale del listado. Casos vistos: 80179, 80127, 80780.
+      if (statusAnterior === 'Atendida' && status !== 'Atendida') {
+        res.status(400).json({
+          success: false,
+          error: `No se puede cambiar el estatus de "Atendida" a "${status}". Atendida es estado final — la solicitud ya generó su propuesta. Si necesitas cancelar el flujo, rechaza la propuesta o campaña desde su detalle.`,
+        });
+        return;
+      }
 
       // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
       // autorización DG/DCM. Política: la solicitud no avanza a propuesta
@@ -2627,6 +2641,23 @@ export class SolicitudesController {
             success: false,
             error: `No se puede atender la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}).`,
             autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
+      }
+
+      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
+      {
+        const rech = await verificarCarasRechazadas(solicitud.id.toString());
+        if (rech.tieneRechazadas) {
+          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const partes: string[] = [];
+          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
+          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede atender: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
+            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
           });
           return;
         }

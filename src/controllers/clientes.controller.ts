@@ -681,11 +681,6 @@ export class ClientesController {
   // ===========================================================================
   async syncPreview(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (!canSyncClientes(req)) {
-        res.status(403).json({ success: false, error: 'Acceso denegado (solo Administrador/DEV)' });
-        return;
-      }
-
       // 1. Traer SAP de las DBs activas (CIMU + TRADE) con cache.
       const [sapCimu, sapTrade] = await Promise.all([
         fetchSapClientesPorDb('CIMU'),
@@ -774,11 +769,6 @@ export class ClientesController {
 
   async syncApply(req: AuthRequest, res: Response): Promise<void> {
     try {
-      if (!canSyncClientes(req)) {
-        res.status(403).json({ success: false, error: 'Acceso denegado (solo Administrador/DEV)' });
-        return;
-      }
-
       const clienteId = parseInt(req.params.id, 10);
       if (!clienteId) {
         res.status(400).json({ success: false, error: 'cliente_id inválido' });
@@ -869,11 +859,6 @@ export const clientesController = new ClientesController();
 // ===========================================================================
 // Helpers de sync (privados, fuera de la clase para reutilización limpia)
 // ===========================================================================
-
-function canSyncClientes(req: AuthRequest): boolean {
-  const r = req.user?.rol;
-  return r === 'Administrador' || r === 'DEV';
-}
 
 interface FieldDef { qeb: keyof import('@prisma/client').Prisma.clienteUncheckedUpdateInput; sap: string | string[]; tipo: 'string' | 'number' }
 const SYNC_FIELDS: FieldDef[] = [
