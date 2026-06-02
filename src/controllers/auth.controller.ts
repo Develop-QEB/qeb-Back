@@ -6,6 +6,7 @@ import { uploadBufferToSpaces } from '../config/spaces';
 import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
 import bcrypt from 'bcrypt';
+import { logHistorial } from '../utils/historial';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -30,6 +31,17 @@ export class AuthController {
 
       const { nombre, correo, password, area, puesto } = req.body;
       const result = await authService.register({ nombre, correo, password, area, puesto });
+
+      const newUserId = (result as any)?.user?.id || (result as any)?.id || 0;
+      await logHistorial({
+        tipo: 'usuario',
+        refId: newUserId,
+        accion: `Registro auto-servicio: "${nombre}"`,
+        usuario: nombre,
+        usuarioId: newUserId,
+        origen: 'auth_register',
+        extras: { nuevoUsuario: { nombre, correo, area, puesto } },
+      });
 
       res.status(201).json({
         success: true,
@@ -125,10 +137,38 @@ export class AuthController {
       const { nombre, area, puesto } = req.body;
       const isAdmin = ['Administrador', 'DEV'].includes(req.user.rol);
 
+      const before = await prisma.usuario.findFirst({
+        where: { id: req.user.userId },
+        select: { nombre: true, area: true, puesto: true },
+      });
+
       const user = await authService.updateProfile(req.user.userId, {
         nombre,
         ...(isAdmin && { area, puesto }),
       });
+
+      const cambios: Array<{ campo: string; label: string; antes: unknown; despues: unknown }> = [];
+      if (before && nombre !== undefined && before.nombre !== nombre) {
+        cambios.push({ campo: 'nombre', label: 'Nombre', antes: before.nombre, despues: nombre });
+      }
+      if (before && isAdmin && area !== undefined && before.area !== area) {
+        cambios.push({ campo: 'area', label: 'Área', antes: before.area, despues: area });
+      }
+      if (before && isAdmin && puesto !== undefined && before.puesto !== puesto) {
+        cambios.push({ campo: 'puesto', label: 'Puesto', antes: before.puesto, despues: puesto });
+      }
+      if (cambios.length > 0) {
+        await logHistorial({
+          tipo: 'usuario',
+          refId: req.user.userId,
+          accion: `Actualizó su perfil (${cambios.length} campo(s))`,
+          usuario: req.user.nombre || 'Usuario',
+          usuarioId: req.user.userId,
+          usuarioRol: req.user.rol,
+          origen: 'auth_self',
+          cambios,
+        });
+      }
 
       res.json({
         success: true,
@@ -172,6 +212,16 @@ export class AuthController {
       }
 
       await authService.changePassword(req.user.userId, currentPassword, newPassword);
+
+      await logHistorial({
+        tipo: 'usuario',
+        refId: req.user.userId,
+        accion: 'Cambió su propia contraseña',
+        usuario: req.user.nombre || 'Usuario',
+        usuarioId: req.user.userId,
+        usuarioRol: req.user.rol,
+        origen: 'auth_self',
+      });
 
       res.json({
         success: true,
@@ -265,6 +315,15 @@ async resetPassword(req: Request, res: Response): Promise<void> {
       data: { user_password: hash, reset_token: null, reset_token_expiry: null },
     });
 
+    await logHistorial({
+      tipo: 'usuario',
+      refId: usuario.id,
+      accion: `Restableció contraseña por email (${usuario.nombre})`,
+      usuario: usuario.nombre,
+      usuarioId: usuario.id,
+      origen: 'auth_reset_password',
+    });
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Error al restablecer contraseña' });
@@ -339,6 +398,16 @@ async resetPassword(req: Request, res: Response): Promise<void> {
       });
 
       const user = await authService.updateFotoPerfil(req.user.userId, uploaded.url);
+
+      await logHistorial({
+        tipo: 'usuario',
+        refId: req.user.userId,
+        accion: 'Cambió su foto de perfil',
+        usuario: req.user.nombre || 'Usuario',
+        usuarioId: req.user.userId,
+        usuarioRol: req.user.rol,
+        origen: 'auth_self',
+      });
 
       res.json({
         success: true,

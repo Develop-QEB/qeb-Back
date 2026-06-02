@@ -4,6 +4,15 @@ import { AuthRequest } from '../types';
 import bcrypt from 'bcryptjs';
 import { authService } from '../services/auth.service';
 import { serializeBigInt } from '../utils/serialization';
+import { logHistorial, diffFields } from '../utils/historial';
+
+const USUARIO_FIELD_LABELS = {
+  nombre: 'Nombre',
+  correo_electronico: 'Correo electrónico',
+  area: 'Área',
+  puesto: 'Puesto',
+  user_role: 'Rol',
+};
 
 export class UsuariosController {
   async create(req: AuthRequest, res: Response): Promise<void> {
@@ -47,6 +56,16 @@ export class UsuariosController {
       // Hash del password
       const hashedPassword = await bcrypt.hash(password, 10);
 
+      // Politica: el rol DEV no se asigna desde el endpoint. Si se requiere,
+      // hacerlo via DB directamente.
+      if (rol === 'DEV') {
+        res.status(403).json({
+          success: false,
+          error: 'El rol DEV no se puede asignar desde esta interfaz',
+        });
+        return;
+      }
+
       const usuario = await prisma.usuario.create({
         data: {
           nombre,
@@ -57,6 +76,26 @@ export class UsuariosController {
           user_role: rol || 'Normal',
           foto_perfil: foto_perfil || null,
           created_at: new Date(),
+        },
+      });
+
+      await logHistorial({
+        tipo: 'usuario',
+        refId: usuario.id,
+        accion: `Creó usuario "${usuario.nombre}" (rol ${usuario.user_role})`,
+        usuario: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_usuarios',
+        extras: {
+          nuevoUsuario: {
+            id: usuario.id,
+            nombre: usuario.nombre,
+            correo: usuario.correo_electronico,
+            area: usuario.area,
+            puesto: usuario.puesto,
+            rol: usuario.user_role,
+          },
         },
       });
 
@@ -195,14 +234,15 @@ export class UsuariosController {
         return;
       }
 
-      // Solo un DEV puede asignar o quitar el rol DEV
+      // El rol DEV no se puede asignar ni quitar desde el screen de usuarios
+      // (politica: nadie). Si se requiere cambiar, hacerlo via DB directamente.
       if (rol !== undefined) {
         const isSettingDev = rol === 'DEV';
         const isRemovingDev = usuario.user_role === 'DEV' && rol !== 'DEV';
-        if ((isSettingDev || isRemovingDev) && req.user?.rol !== 'DEV') {
+        if (isSettingDev || isRemovingDev) {
           res.status(403).json({
             success: false,
-            error: 'Solo un usuario DEV puede asignar o quitar el rol DEV',
+            error: 'El rol DEV no se puede asignar ni modificar desde esta interfaz',
           });
           return;
         }
@@ -219,6 +259,37 @@ export class UsuariosController {
           updated_at: new Date(),
         },
       });
+
+      const cambios = diffFields(
+        {
+          nombre: usuario.nombre,
+          correo_electronico: usuario.correo_electronico,
+          area: usuario.area,
+          puesto: usuario.puesto,
+          user_role: usuario.user_role,
+        },
+        {
+          nombre: updated.nombre,
+          correo_electronico: updated.correo_electronico,
+          area: updated.area,
+          puesto: updated.puesto,
+          user_role: updated.user_role,
+        },
+        USUARIO_FIELD_LABELS,
+      );
+      if (cambios.length > 0) {
+        await logHistorial({
+          tipo: 'usuario',
+          refId: updated.id,
+          accion: `Editó usuario "${updated.nombre}" (${cambios.length} campo(s))`,
+          usuario: req.user?.nombre || 'Sistema',
+          usuarioId: req.user?.userId,
+          usuarioRol: req.user?.rol,
+          origen: 'admin_usuarios',
+          cambios,
+          extras: { usuarioEditado: { id: updated.id, nombre: updated.nombre } },
+        });
+      }
 
       const responseData: any = {
         id: updated.id,
@@ -281,6 +352,17 @@ export class UsuariosController {
         data: { user_password: hash, updated_at: new Date() },
       });
 
+      await logHistorial({
+        tipo: 'usuario',
+        refId: usuario.id,
+        accion: `Restableció contraseña de "${usuario.nombre}"`,
+        usuario: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_usuarios',
+        extras: { usuarioAfectado: { id: usuario.id, nombre: usuario.nombre, correo: usuario.correo_electronico } },
+      });
+
       res.json({ success: true, message: 'Contraseña restablecida correctamente' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al restablecer contraseña';
@@ -318,6 +400,12 @@ export class UsuariosController {
         return;
       }
 
+      // Capturar info antes del soft-delete para auditoria
+      const usuariosEliminados = await prisma.usuario.findMany({
+        where: { id: { in: ids }, deleted_at: null },
+        select: { id: true, nombre: true, correo_electronico: true, user_role: true, area: true, puesto: true },
+      });
+
       // Soft delete - marcar como eliminados
       await prisma.usuario.updateMany({
         where: {
@@ -328,6 +416,28 @@ export class UsuariosController {
           deleted_at: new Date(),
         },
       });
+
+      for (const u of usuariosEliminados) {
+        await logHistorial({
+          tipo: 'usuario',
+          refId: u.id,
+          accion: `Eliminó usuario "${u.nombre}" (rol ${u.user_role})`,
+          usuario: req.user?.nombre || 'Sistema',
+          usuarioId: req.user?.userId,
+          usuarioRol: req.user?.rol,
+          origen: 'admin_usuarios',
+          extras: {
+            usuarioEliminado: {
+              id: u.id,
+              nombre: u.nombre,
+              correo: u.correo_electronico,
+              rol: u.user_role,
+              area: u.area,
+              puesto: u.puesto,
+            },
+          },
+        });
+      }
 
       res.json({
         success: true,
@@ -352,7 +462,19 @@ export class UsuariosController {
       }
 
       const targetId = parseInt(req.params.id);
+      const target = await prisma.usuario.findFirst({ where: { id: targetId }, select: { id: true, nombre: true, user_role: true } });
       const result = await authService.impersonate(targetId);
+
+      await logHistorial({
+        tipo: 'usuario',
+        refId: targetId,
+        accion: `Suplantó identidad de "${target?.nombre || `usuario ${targetId}`}" (rol ${target?.user_role || '?'})`,
+        usuario: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_usuarios_impersonate',
+        extras: { suplantado: { id: targetId, nombre: target?.nombre, rol: target?.user_role } },
+      });
 
       res.json({
         success: true,
@@ -513,6 +635,32 @@ export class UsuariosController {
       if (ops.length > 0) {
         await prisma.$transaction(ops);
       }
+
+      // Resumen agrupado por nuevo usuario (cuantas reasignaciones por destino)
+      const resumenPorDestino: Record<string, { nombre: string; sol: number; prop: number; tarea: number }> = {};
+      for (const r of reassignments) {
+        const newUser = newUserCache.get(r.newUserId);
+        if (!newUser) continue;
+        const key = String(newUser.id);
+        if (!resumenPorDestino[key]) resumenPorDestino[key] = { nombre: newUser.nombre, sol: 0, prop: 0, tarea: 0 };
+        if (r.type === 'solicitud') resumenPorDestino[key].sol++;
+        else if (r.type === 'propuesta') resumenPorDestino[key].prop++;
+        else if (r.type === 'tarea') resumenPorDestino[key].tarea++;
+      }
+      await logHistorial({
+        tipo: 'usuario',
+        refId: userId,
+        accion: `Reasignó ${reassignments.length} elemento(s) desde "${oldUser.nombre}"`,
+        usuario: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'admin_usuarios_reassign',
+        extras: {
+          desde: { id: oldUser.id, nombre: oldUser.nombre },
+          destinos: resumenPorDestino,
+          total: reassignments.length,
+        },
+      });
 
       res.json({ success: true, message: 'Reasignaciones completadas' });
     } catch (error) {
