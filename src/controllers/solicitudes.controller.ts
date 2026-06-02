@@ -2499,29 +2499,41 @@ export class SolicitudesController {
         involucrados.add(solicitud.usuario_id);
       }
 
-      // Crear una notificación para cada involucrado
+      // Crear una notificación para cada involucrado — cada una en su propio
+      // try/catch (Promise.allSettled) para que un fallo no rompa las demas.
+      // Esto cierra el caso de fallos silenciosos en los que el for-await
+      // se cortaba en el primer error.
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
 
-      for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            id_solicitud: solicitud.id.toString(),
-            id_propuesta: propuesta?.id?.toString() || '',
-            campania_id: campania?.id || null,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            responsable: '',
-            asignado: userName,
-            id_asignado: userId.toString(),
-          },
-        });
+      const resultados = await Promise.allSettled(
+        Array.from(involucrados).map(responsableId =>
+          prisma.tareas.create({
+            data: {
+              titulo: tituloNotificacion,
+              descripcion: descripcionNotificacion,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              id_solicitud: solicitud.id.toString(),
+              id_propuesta: propuesta?.id?.toString() || '',
+              campania_id: campania?.id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              responsable: '',
+              asignado: userName,
+              id_asignado: userId.toString(),
+            },
+          })
+        )
+      );
+      const notifsCreadas = resultados.filter(r => r.status === 'fulfilled').length;
+      const notifsFalladas = resultados.length - notifsCreadas;
+      if (notifsFalladas > 0) {
+        console.error(`solicitudes.addComment: ${notifsFalladas}/${resultados.length} notifs fallaron en solicitud ${solicitud.id}`,
+          resultados.filter(r => r.status === 'rejected').map((r: any) => r.reason?.message));
       }
+      console.log(`solicitudes.addComment[sol=${solicitud.id}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
 
       res.json({
         success: true,
