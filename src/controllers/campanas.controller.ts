@@ -18,6 +18,7 @@ import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENT
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
+import { logHistorial } from '../utils/historial';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
@@ -7065,7 +7066,43 @@ export class CampanasController {
   async markPostedToSAP(req: AuthRequest, res: Response): Promise<void> {
     try {
       const campanaId = parseInt(req.params.id);
+
+      // Snapshot previo para auditar contexto financiero del POST SAP
+      const [before] = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT c.id, c.nombre, c.posted_to_sap, c.posted_aps, c.prefactura_aps,
+                s.razon_social, s.id as solicitud_id, p.id as propuesta_id
+         FROM campania c
+         LEFT JOIN cotizacion cot ON c.cotizacion_id = cot.id
+         LEFT JOIN propuesta p ON cot.id_propuesta = p.id
+         LEFT JOIN solicitud s ON p.solicitud_id = s.id
+         WHERE c.id = ?`,
+        campanaId,
+      );
+
       await prisma.$queryRawUnsafe('UPDATE campania SET posted_to_sap = 1 WHERE id = ?', campanaId);
+
+      await logHistorial({
+        tipo: 'campana',
+        refId: campanaId,
+        accion: `POST a SAP en campaña #${campanaId} ${before?.nombre ? `"${before.nombre}"` : ''}`.trim(),
+        usuario: req.user?.nombre || 'Usuario',
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'campana_sap',
+        extras: {
+          campana: {
+            id: campanaId,
+            nombre: before?.nombre,
+            cliente: before?.razon_social,
+            solicitudId: before?.solicitud_id,
+            propuestaId: before?.propuesta_id,
+            postedAps: before?.posted_aps,
+            prefacturaAps: before?.prefactura_aps,
+            yaEstabaPosteado: !!before?.posted_to_sap,
+          },
+        },
+      });
+
       res.json({ success: true });
     } catch (error) {
       console.error('Error en markPostedToSAP:', error);
