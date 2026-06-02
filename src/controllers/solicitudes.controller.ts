@@ -3363,7 +3363,12 @@ export class SolicitudesController {
             }
             recreatedCaras.push(createdCara);
 
-            // Auto-reserva circuito digital (en update se borraron reservas al deleteMany caras, por eso hay que reservar de nuevo)
+            // [APAGADO 2026-06-02] Auto-reserva circuito digital — el equipo
+            // pidió tenerla deshabilitada (las asesoras reservan manualmente
+            // desde el modal de asignar inventario). Mismo apagón que las
+            // otras 5 llamadas en propuestas/campanas/atender solicitud.
+            // Para reactivar, descomenta el bloque y borra este comentario.
+            /*
             // Para BF: la cantidad real está en bonificacion (caras es 0)
             const tieneGrupoBfUpd = !!cara.grupo_rt_bf;
             const esBfArtUpd = (cara.articulo || '').toUpperCase().startsWith('BF') || (cara.articulo || '').toUpperCase().startsWith('CF');
@@ -3382,6 +3387,7 @@ export class SolicitudesController {
             if (autoRes) {
               console.log(`[circuitos] update: solicitudCara ${createdCara.id} auto-reservó ${autoRes.reservadas} inventarios`);
             }
+            */
           }
 
           // Propagate RT auth state to BF pairs within each grupo_rt_bf
