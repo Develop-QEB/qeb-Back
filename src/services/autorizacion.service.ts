@@ -482,6 +482,36 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
 }
 
 /**
+ * Igual que verificarCarasPendientes pero buscando autorizaciones en estado
+ * 'rechazado'. Si CUALQUIER cara está rechazada por DG o por DCM, el llamador
+ * debe bloquear el avance del flujo (atender solicitud / aprobar propuesta).
+ */
+export async function verificarCarasRechazadas(idquote: string): Promise<{
+  tieneRechazadas: boolean;
+  rechazadasDg: number[];
+  rechazadasDcm: number[];
+}> {
+  const caras = await prisma.solicitudCaras.findMany({
+    where: { idquote },
+    select: { id: true, autorizacion_dg: true, autorizacion_dcm: true }
+  });
+
+  const rechazadasDg = caras
+    .filter(c => c.autorizacion_dg === 'rechazado')
+    .map(c => c.id);
+
+  const rechazadasDcm = caras
+    .filter(c => c.autorizacion_dcm === 'rechazado')
+    .map(c => c.id);
+
+  return {
+    tieneRechazadas: rechazadasDg.length > 0 || rechazadasDcm.length > 0,
+    rechazadasDg,
+    rechazadasDcm
+  };
+}
+
+/**
  * Crea tareas de autorización para DG y/o DCM
  */
 export async function crearTareasAutorizacion(
@@ -1223,6 +1253,7 @@ async function enviarCorreoResumenAutorizacion(
 export default {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
+  verificarCarasRechazadas,
   crearTareasAutorizacion,
   aprobarCaras,
   rechazarSolicitud,

@@ -5,6 +5,7 @@ import { serializeBigInt } from '../utils/serialization';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
+  verificarCarasRechazadas,
   crearTareasAutorizacion
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
@@ -1810,6 +1811,24 @@ export class PropuestasController {
       if (!propuesta) {
         res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
         return;
+      }
+
+      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
+      // Mismo criterio que el guard del atender solicitud.
+      {
+        const rech = await verificarCarasRechazadas(propuestaId.toString());
+        if (rech.tieneRechazadas) {
+          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const partes: string[] = [];
+          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
+          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede aprobar: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
+            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
+          });
+          return;
+        }
       }
 
       // Get solicitud data
