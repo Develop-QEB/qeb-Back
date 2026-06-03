@@ -17,6 +17,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropu
 import { uploadBufferToSpaces } from '../config/spaces';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
+import { logHistorial } from '../utils/historial';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -907,6 +908,18 @@ export class PropuestasController {
 
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
+
+          // BF/CF/CT: artículos 100% bonificación. El split flujo/contra es INTERNO
+          // a la bonificación (cosmético) — NO es renta. Mismo criterio que el front
+          // (getCaraCompletionStatus): se valida SOLO por el total de reservas
+          // bonificadas, sin exigir flujo/contra de renta (que no existen aquí).
+          // Sin esto, las cortesías con caras_flujo/contra > 0 quedaban bloqueadas
+          // en el pase a ventas aunque su bonificación estuviera 100% reservada.
+          const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
+          if (isBonifSplit) {
+            return bonificacionReservado !== (Number(cara.bonificacion) || 0);
+          }
+
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
           const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
           const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
@@ -1753,26 +1766,55 @@ export class PropuestasController {
         involucrados.add(solicitudData.usuario_id);
       }
 
-      // Crear una notificación para cada involucrado
+      // Notifs: cada una en su propio try/catch (Promise.allSettled) para
+      // que un fallo no rompa las demas.
       const now = new Date();
       const fechaFin = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +1 día
 
-      for (const responsableId of involucrados) {
-        await prisma.tareas.create({
-          data: {
-            titulo: tituloNotificacion,
-            descripcion: descripcionNotificacion,
-            tipo: 'Notificación',
-            estatus: 'Pendiente',
-            id_responsable: responsableId,
-            id_solicitud: propuesta.solicitud_id?.toString() || '',
-            id_propuesta: propuestaId.toString(),
-            campania_id: campania?.id || null,
-            fecha_inicio: now,
-            fecha_fin: fechaFin,
-            responsable: '',
-            asignado: userName,
-            id_asignado: userId.toString(),
+      const resultados = await Promise.allSettled(
+        Array.from(involucrados).map(responsableId =>
+          prisma.tareas.create({
+            data: {
+              titulo: tituloNotificacion,
+              descripcion: descripcionNotificacion,
+              tipo: 'Notificación',
+              estatus: 'Pendiente',
+              id_responsable: responsableId,
+              id_solicitud: propuesta.solicitud_id?.toString() || '',
+              id_propuesta: propuestaId.toString(),
+              campania_id: campania?.id || null,
+              fecha_inicio: now,
+              fecha_fin: fechaFin,
+              responsable: '',
+              asignado: userName,
+              id_asignado: userId.toString(),
+            },
+          })
+        )
+      );
+      const notifsCreadas = resultados.filter(r => r.status === 'fulfilled').length;
+      const notifsFalladas = resultados.length - notifsCreadas;
+      if (notifsFalladas > 0) {
+        console.error(`propuestas.addComment: ${notifsFalladas}/${resultados.length} notifs fallaron en propuesta ${propuestaId}`,
+          resultados.filter(r => r.status === 'rejected').map((r: any) => r.reason?.message));
+      }
+      console.log(`propuestas.addComment[prop=${propuestaId}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
+
+      // Audit log SOLO si el autor es Administrador o DEV (no saturar el log
+      // con comentarios de usuarios normales en propuestas).
+      const rol = req.user?.rol;
+      if (rol === 'Administrador' || rol === 'DEV') {
+        await logHistorial({
+          tipo: 'propuesta',
+          refId: propuestaId,
+          accion: `Comentó en propuesta #${propuestaId}`,
+          usuario: userName,
+          usuarioId: userId,
+          usuarioRol: rol,
+          origen: 'propuestas_comentario',
+          extras: {
+            propuesta: { id: propuestaId, nombre: nombrePropuesta, campaniaId: campania?.id },
+            comentarioPreview: comentario.substring(0, 100),
           },
         });
       }

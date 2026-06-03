@@ -10,6 +10,7 @@ import {
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import nodemailer from 'nodemailer';
+import { logHistorial } from '../utils/historial';
 
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
@@ -1537,20 +1538,21 @@ export class NotificacionesController {
 
       const result = await aprobarCaras(idquote, tipo, userId || 0, userName);
 
-      // Guardar historial de aprobación
+      // Guardar historial de aprobación (con usuarioRol para auditoria admin)
       const propuestaId = parseInt(idquote);
       if (!isNaN(propuestaId)) {
-        await prisma.historial.create({
-          data: {
-            tipo: 'autorizacion_aprobacion',
-            ref_id: propuestaId,
-            accion: `Aprobación ${tipo.toUpperCase()} por ${userName}`,
-            detalles: JSON.stringify({
-              tipo: tipo.toUpperCase(),
-              carasAprobadas: result.carasAprobadas,
-              aprobadoPor: userName,
-              userId,
-            }),
+        await logHistorial({
+          tipo: 'autorizacion_aprobacion',
+          refId: propuestaId,
+          accion: `Aprobación ${tipo.toUpperCase()} por ${userName}`,
+          usuario: userName,
+          usuarioId: userId,
+          usuarioRol: req.user?.rol,
+          origen: 'autorizacion',
+          extras: {
+            tipo: tipo.toUpperCase(),
+            carasAprobadas: result.carasAprobadas,
+            aprobadoPor: userName,
           },
         });
 
@@ -1656,18 +1658,19 @@ export class NotificacionesController {
 
       await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
 
-      // Guardar historial de rechazo
-      await prisma.historial.create({
-        data: {
-          tipo: 'autorizacion_rechazo',
-          ref_id: propuestaId,
-          accion: `Rechazo ${tipoAutorizacion.toUpperCase()} por ${userName}`,
-          detalles: JSON.stringify({
-            tipo: tipoAutorizacion.toUpperCase(),
-            motivo: comentario,
-            rechazadoPor: userName,
-            userId,
-          }),
+      // Guardar historial de rechazo (con usuarioRol para auditoria admin)
+      await logHistorial({
+        tipo: 'autorizacion_rechazo',
+        refId: propuestaId,
+        accion: `Rechazo ${tipoAutorizacion.toUpperCase()} por ${userName}`,
+        usuario: userName,
+        usuarioId: userId,
+        usuarioRol: req.user?.rol,
+        origen: 'autorizacion',
+        extras: {
+          tipo: tipoAutorizacion.toUpperCase(),
+          motivo: comentario,
+          rechazadoPor: userName,
         },
       });
 

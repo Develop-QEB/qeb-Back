@@ -4,6 +4,7 @@ import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
 import { ESTATUS_QUE_BLOQUEAN } from '../services/inventario-bloqueo.service';
+import { logHistorial } from '../utils/historial';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371; // km
@@ -1600,6 +1601,24 @@ export class InventariosController {
           }
         }
 
+        await logHistorial({
+          tipo: 'inventario',
+          refId: 0,
+          accion: `Bulk import inventarios: ${toInsert.length} nuevos, ${actualizados} actualizados, ${duplicados_ocupados} duplicados`,
+          usuario: req.user?.nombre || 'Usuario',
+          usuarioId: req.user?.userId,
+          usuarioRol: req.user?.rol,
+          origen: 'inventarios_bulk',
+          extras: {
+            total: inventarios.length,
+            insertados: toInsert.length,
+            actualizados,
+            duplicados_ocupados,
+            errores: errores.length,
+            overwriteCodigos: overwriteSet.size,
+          },
+        });
+
         res.json({
           success: true,
           data: {
@@ -1611,6 +1630,17 @@ export class InventariosController {
           },
         });
       } else {
+        await logHistorial({
+          tipo: 'inventario',
+          refId: 0,
+          accion: `Bulk import inventarios fallido: 0 filas válidas de ${inventarios.length}`,
+          usuario: req.user?.nombre || 'Usuario',
+          usuarioId: req.user?.userId,
+          usuarioRol: req.user?.rol,
+          origen: 'inventarios_bulk',
+          extras: { total: inventarios.length, errores: errores.length },
+        });
+
         res.json({
           success: true,
           data: {
