@@ -908,6 +908,18 @@ export class PropuestasController {
 
           const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
           const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
+
+          // BF/CF/CT: artículos 100% bonificación. El split flujo/contra es INTERNO
+          // a la bonificación (cosmético) — NO es renta. Mismo criterio que el front
+          // (getCaraCompletionStatus): se valida SOLO por el total de reservas
+          // bonificadas, sin exigir flujo/contra de renta (que no existen aquí).
+          // Sin esto, las cortesías con caras_flujo/contra > 0 quedaban bloqueadas
+          // en el pase a ventas aunque su bonificación estuviera 100% reservada.
+          const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
+          if (isBonifSplit) {
+            return bonificacionReservado !== (Number(cara.bonificacion) || 0);
+          }
+
           const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
           const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
           const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
