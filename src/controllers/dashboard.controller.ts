@@ -819,7 +819,7 @@ export class DashboardController {
         .map((sc) => parseInt(sc.idquote || ''))
         .filter((v) => !isNaN(v));
 
-      // Obtener campana_id via cotizacion (para el link de APS)
+      // Obtener campana_id via cotizacion (para el link de APS))
       const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
         where: { id_propuesta: { in: idquoteValues } },
         select: { id: true, id_propuesta: true, nombre_campania: true },
