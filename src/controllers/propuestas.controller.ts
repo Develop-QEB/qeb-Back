@@ -2749,8 +2749,8 @@ export class PropuestasController {
     }
   }
 
-  // Public endpoint (no auth): KML del inventario seleccionado para abrir en Google Maps.
-  // Google descarga este KML por URL (maps?q=<url>), por eso debe ser publico y sin token.
+  // Public endpoint (no auth): descarga KML del inventario seleccionado de una propuesta.
+  // Lo usa el visor de mapa publico (boton "Descargar KML").
   // ?ids=1,2,3 -> ids de inventario seleccionados; sin ids se exporta todo el inventario.
   async getPublicKML(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -2822,7 +2822,7 @@ export class PropuestasController {
 </kml>`;
 
       res.setHeader('Content-Type', 'application/vnd.google-earth.kml+xml; charset=utf-8');
-      res.setHeader('Content-Disposition', `inline; filename="propuesta_${propuestaId}.kml"`);
+      res.setHeader('Content-Disposition', `attachment; filename="propuesta_${propuestaId}.kml"`);
       res.send(kml);
     } catch (error) {
       console.error('Error en getPublicKML propuesta:', error);
