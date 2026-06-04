@@ -2286,7 +2286,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -2665,7 +2665,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -3799,7 +3799,8 @@ export class CampanasController {
                          'archivo', archivo,
                          'nota', COALESCE(nota, ''),
                          'spot', spot,
-                         'nombre_arte', nombre_arte
+                         'nombre_arte', nombre_arte,
+                         'estatus_operaciones', estatus_operaciones
                        )
                      ) AS CHAR
                    ) as artes_detalle
@@ -3929,11 +3930,77 @@ export class CampanasController {
       // no tienen APS asignado (para el preview de Versionario Artes, donde
       // queremos mostrar tambien circuitos pendientes de asignacion APS).
       const includeWithoutAps = String(req.query.includeWithoutAps || '').toLowerCase() === 'true';
-      console.log('Fetching inventario sin arte for campana:', campanaId, '| includeWithoutAps:', includeWithoutAps);
+      // Modo agrupado por circuito (sc.id): devuelve ~1 fila por circuito en vez
+      // de 1 por reserva. Solo lo usa el Versionario de Artes (que de todos modos
+      // re-agrupa por sc.id). Agrupamos por sc.id + campos de estatus para que el
+      // desglose de estatus se mantenga exacto (front lo pondera por caras_totales).
+      const grouped = String(req.query.grouped || '').toLowerCase() === 'true';
+      console.log('Fetching inventario sin arte for campana:', campanaId, '| includeWithoutAps:', includeWithoutAps, '| grouped:', grouped);
 
       const apsFilter = includeWithoutAps ? '' : `
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0`;
+
+      const groupedQuery = `
+        SELECT
+          MAX(sc.id) AS grupo,
+          MAX(sc.id) AS solicitudCarasId,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          CASE WHEN COUNT(DISTINCT inv.mueble) > 1 THEN 'Varios' ELSE MIN(inv.mueble) END AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          CASE WHEN COUNT(DISTINCT inv.plaza) > 1 THEN 'Varios' ELSE MIN(inv.plaza) END AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          CASE WHEN COUNT(DISTINCT inv.mueble) > 1 THEN 'Varios' ELSE MIN(inv.mueble) END AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
+          MIN(inv.codigo_unico) as codigo_unico_display,
+          MIN(inv.tipo_de_cara) as tipo_de_cara_display,
+          NULL AS archivo,
+          NULL AS epInId,
+          MAX(rsv.estatus) AS estatus,
+          NULL AS espacio,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MIN(sc.fin_periodo) AS fin_periodo,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsv_id,
+          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ',') AS APS,
+          MAX(rsv.tarea) AS tarea,
+          MAX(rsv.instalado) AS instalado,
+          MAX(rsv.arte_aprobado) AS arte_aprobado,
+          MAX(CASE WHEN rsv.tarea IS NOT NULL AND rsv.tarea != '' THEN rsv.tarea ELSE rsv.estatus END) AS status_mostrar,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          CASE WHEN COUNT(DISTINCT sc.articulo) > 1 THEN 'Varios' ELSE MAX(sc.articulo) END AS articulo,
+          CASE WHEN COUNT(DISTINCT sc.tipo) > 1 THEN 'Varios' ELSE MAX(sc.tipo) END AS tipo_medio,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          MIN(inv.id) as grupo_completo_id
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id = ?
+          AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
+          AND rsv.archivo IS NULL
+          AND imDig.id_reserva IS NULL${apsFilter}
+        GROUP BY sc.id, rsv.tarea, rsv.instalado, rsv.estatus, rsv.arte_aprobado
+        ORDER BY MIN(rsv.id) DESC
+      `;
 
       const query = `
         SELECT
@@ -3999,9 +4066,9 @@ export class CampanasController {
         ORDER BY MIN(rsv.id) DESC
       `;
 
-      const inventario = await prisma.$queryRawUnsafe(query, campanaId);
+      const inventario = await prisma.$queryRawUnsafe(grouped ? groupedQuery : query, campanaId);
 
-      console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0);
+      console.log('Inventario sin arte result count:', Array.isArray(inventario) ? inventario.length : 0, grouped ? '(agrupado)' : '');
 
       const inventarioSerializable = serializeBigInt(inventario);
 
@@ -4016,6 +4083,200 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // BULK para el Versionario de Artes: trae inventario (con arte + sin arte) de
+  // VARIAS campañas en UNA sola request usando `cm.id IN (...)`, en vez de 2
+  // llamadas por cada campaña. El front lo llama en chunks. Devuelve
+  // { [campaniaId]: { conArte: [...], sinArte: [...] } }.
+  async getInventarioVersionarioBulk(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idsParam = String(req.query.ids || '');
+      const campanaIds = idsParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      if (campanaIds.length === 0) { res.json({ success: true, data: {} }); return; }
+      const includeWithoutAps = String(req.query.includeWithoutAps || '').toLowerCase() === 'true';
+      const ph = campanaIds.map(() => '?').join(',');
+      const apsFilter = includeWithoutAps ? '' : `
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0`;
+
+      const conArteQuery = `
+        SELECT
+          cm.id AS campania_id,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          MIN(inv.mueble) AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          MIN(inv.plaza) AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          MIN(inv.mueble) AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
+          CASE
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(inv.codigo_unico), '_', -1))
+            ELSE MIN(inv.codigo_unico)
+          END as codigo_unico_display,
+          CASE
+            WHEN COUNT(DISTINCT inv.id) > 1 AND MAX(rsv.grupo_completo_id) IS NOT NULL THEN 'Completo'
+            ELSE MIN(inv.tipo_de_cara)
+          END as tipo_de_cara_display,
+          MAX(rsv.archivo) AS archivo,
+          MAX(at_grp.artes_all) AS artes_multiples,
+          MAX(at_grp.artes_detalle) AS artes_detalle,
+          GROUP_CONCAT(DISTINCT epIn.id ORDER BY epIn.id SEPARATOR ',') AS epInId,
+          MAX(rsv.estatus) AS estatus,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
+          MAX(rsv.arte_aprobado) AS arte_aprobado,
+          MAX(sc.id) AS solicitudCarasId,
+          MAX(sc.id) AS grupo,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MAX(sc.fin_periodo) AS fin_periodo,
+          MAX(rsv.comentario_rechazo) AS comentario_rechazo,
+          MAX(rsv.instalado) AS instalado,
+          MAX(rsv.APS) AS APS,
+          MAX(rsv.tarea) AS tarea,
+          MAX(CASE WHEN rsv.tarea IS NOT NULL AND rsv.tarea != '' THEN rsv.tarea ELSE rsv.estatus END) AS status_mostrar,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          MAX(sol.IMU) AS IMU,
+          MAX(sc.articulo) AS articulo,
+          MAX(sc.tipo) AS tipo_medio,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          COALESCE(MAX(rsv.grupo_completo_id), MIN(inv.id)) as grupo_completo_id
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN propuesta pr ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+          LEFT JOIN solicitud sol ON sol.id = pr.solicitud_id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          LEFT JOIN (
+            SELECT id_reserva,
+                   GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all,
+                   CAST(
+                     JSON_ARRAYAGG(
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                     ) AS CHAR
+                   ) as artes_detalle
+            FROM artes_tradicionales
+            GROUP BY id_reserva
+          ) at_grp ON at_grp.id_reserva = rsv.id
+        WHERE
+          cm.id IN (${ph})
+          AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
+          AND rsv.APS IS NOT NULL
+          AND rsv.APS > 0
+          AND (
+            (rsv.archivo IS NOT NULL AND rsv.archivo != '')
+            OR EXISTS (SELECT 1 FROM imagenes_digitales imDig WHERE imDig.id_reserva = rsv.id LIMIT 1)
+          )
+        GROUP BY cm.id, COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      // sinArte AGRUPADO por circuito (sc.id) + campos de estatus: ~1 fila por
+      // circuito en vez de 1 por reserva. Reduce muchísimo el payload del
+      // Versionario (que de todos modos re-agrupa por sc.id y pondera el
+      // desglose de estatus por caras_totales).
+      const sinArteQuery = `
+        SELECT
+          cm.id AS campania_id,
+          MAX(sc.id) AS grupo,
+          MAX(sc.id) AS solicitudCarasId,
+          MIN(inv.id) AS id,
+          MIN(inv.codigo_unico) AS codigo_unico,
+          MIN(inv.ubicacion) AS ubicacion,
+          MIN(inv.tipo_de_cara) AS tipo_de_cara,
+          MIN(inv.cara) AS cara,
+          CASE WHEN COUNT(DISTINCT inv.mueble) > 1 THEN 'Varios' ELSE MIN(inv.mueble) END AS mueble,
+          MIN(inv.latitud) AS latitud,
+          MIN(inv.longitud) AS longitud,
+          CASE WHEN COUNT(DISTINCT inv.plaza) > 1 THEN 'Varios' ELSE MIN(inv.plaza) END AS plaza,
+          MIN(inv.estado) AS estado,
+          MIN(inv.municipio) AS municipio,
+          CASE WHEN COUNT(DISTINCT inv.mueble) > 1 THEN 'Varios' ELSE MIN(inv.mueble) END AS tipo_de_mueble,
+          MIN(inv.ancho) AS ancho,
+          MIN(inv.alto) AS alto,
+          MIN(inv.nivel_socioeconomico) AS nivel_socioeconomico,
+          MAX(sc.tarifa_publica) AS tarifa_publica,
+          MIN(inv.tradicional_digital) AS tradicional_digital,
+          MIN(inv.codigo_unico) as codigo_unico_display,
+          MIN(inv.tipo_de_cara) as tipo_de_cara_display,
+          NULL AS archivo,
+          NULL AS epInId,
+          MAX(rsv.estatus) AS estatus,
+          NULL AS espacio,
+          MAX(sc.inicio_periodo) AS inicio_periodo,
+          MIN(sc.fin_periodo) AS fin_periodo,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsvId,
+          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') AS rsv_id,
+          GROUP_CONCAT(DISTINCT rsv.APS ORDER BY rsv.APS SEPARATOR ',') AS APS,
+          MAX(rsv.tarea) AS tarea,
+          MAX(rsv.instalado) AS instalado,
+          MAX(rsv.arte_aprobado) AS arte_aprobado,
+          MAX(CASE WHEN rsv.tarea IS NOT NULL AND rsv.tarea != '' THEN rsv.tarea ELSE rsv.estatus END) AS status_mostrar,
+          COUNT(DISTINCT rsv.id) AS caras_totales,
+          CASE WHEN COUNT(DISTINCT sc.articulo) > 1 THEN 'Varios' ELSE MAX(sc.articulo) END AS articulo,
+          CASE WHEN COUNT(DISTINCT sc.tipo) > 1 THEN 'Varios' ELSE MAX(sc.tipo) END AS tipo_medio,
+          MAX(cat.numero_catorcena) AS numero_catorcena,
+          MAX(cat.año) AS anio_catorcena,
+          MIN(inv.id) as grupo_completo_id
+        FROM inventarios inv
+          INNER JOIN espacio_inventario epIn ON inv.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          LEFT JOIN imagenes_digitales imDig ON imDig.id_reserva = rsv.id
+          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE
+          cm.id IN (${ph})
+          AND rsv.deleted_at IS NULL
+          AND sc.inicio_periodo <= cm.fecha_fin
+          AND sc.fin_periodo >= cm.fecha_inicio
+          AND rsv.archivo IS NULL
+          AND imDig.id_reserva IS NULL${apsFilter}
+        GROUP BY cm.id, sc.id, rsv.tarea, rsv.instalado, rsv.estatus, rsv.arte_aprobado
+        ORDER BY MIN(rsv.id) DESC
+      `;
+
+      const [conArteRows, sinArteRows] = await Promise.all([
+        prisma.$queryRawUnsafe(conArteQuery, ...campanaIds),
+        prisma.$queryRawUnsafe(sinArteQuery, ...campanaIds),
+      ]);
+
+      const ser = (rows: unknown): Record<string, unknown>[] =>
+        Array.isArray(rows) ? rows.map((row) => {
+          const n: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(row as Record<string, unknown>)) n[k] = typeof v === 'bigint' ? Number(v) : v;
+          return n;
+        }) : [];
+
+      const data: Record<string, { conArte: Record<string, unknown>[]; sinArte: Record<string, unknown>[] }> = {};
+      for (const cid of campanaIds) data[cid] = { conArte: [], sinArte: [] };
+      for (const row of ser(conArteRows)) { const cid = Number(row.campania_id); if (data[cid]) data[cid].conArte.push(row); }
+      for (const row of ser(sinArteRows)) { const cid = Number(row.campania_id); if (data[cid]) data[cid].sinArte.push(row); }
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getInventarioVersionarioBulk:', error);
+      const message = error instanceof Error ? error.message : 'Error bulk inventario versionario';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
@@ -4438,7 +4699,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -4462,12 +4723,13 @@ export class CampanasController {
         savedFiles.push(archivoData);
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
+        const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
       }
 
@@ -4588,7 +4850,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -4612,12 +4874,13 @@ export class CampanasController {
         savedFiles.push(archivoData);
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
+        const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
       }
 
@@ -4699,10 +4962,11 @@ export class CampanasController {
         fecha_testigo: Date;
         imagen_testigo: string;
         nombre_arte: string | null;
+        estatus_operaciones: string | null;
       }[]>(`
         SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
                comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo,
-               MAX(nombre_arte) as nombre_arte
+               MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
         FROM imagenes_digitales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
@@ -4722,6 +4986,7 @@ export class CampanasController {
           spot: img.spot,
           tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
           nombre_arte: img.nombre_arte || null,
+          estatus_operaciones: img.estatus_operaciones || null,
         })),
       });
     } catch (error) {
@@ -4789,6 +5054,59 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * BULK: todas las imágenes/videos digitales de UNA campaña en una sola request,
+   * conservando el `id_reserva` REAL de cada archivo (a diferencia de
+   * getImagenesDigitales que colapsa con MIN(id_reserva)). Lo usa el Versionario
+   * de Artes para no pedir 1 request por reserva al descargar el Excel.
+   */
+  async getImagenesDigitalesBulk(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      if (isNaN(campanaId)) {
+        res.status(400).json({ success: false, error: 'ID de campaña inválido' });
+        return;
+      }
+      const rows = await prisma.$queryRawUnsafe<{
+        id_reserva: number;
+        archivo: string;
+        archivo_data: string | null;
+        comentario: string | null;
+        nombre_arte: string | null;
+        estatus_operaciones: string | null;
+        spot: number;
+      }[]>(`
+        SELECT DISTINCT img.id_reserva, img.archivo, img.archivo_data,
+               img.comentario, img.nombre_arte, img.estatus_operaciones, img.spot
+        FROM imagenes_digitales img
+          INNER JOIN reservas r ON r.id = img.id_reserva
+          INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        WHERE cm.id = ? AND r.deleted_at IS NULL
+        ORDER BY img.id_reserva, img.spot ASC
+      `, campanaId);
+
+      res.json({
+        success: true,
+        data: rows.map(img => ({
+          idReserva: Number(img.id_reserva),
+          archivo: img.archivo,
+          archivoData: img.archivo_data,
+          comentario: img.comentario || '',
+          nombre_arte: img.nombre_arte || null,
+          estatus_operaciones: img.estatus_operaciones || null,
+          spot: Number(img.spot),
+          tipo: img.archivo && img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
+        })),
+      });
+    } catch (error) {
+      console.error('Error en getImagenesDigitalesBulk:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener imágenes digitales bulk';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
@@ -7761,6 +8079,7 @@ export class CampanasController {
           SUM(uso_count) as uso_count,
           MAX(nombre_arte) as nombre_arte,
           MAX(nota) as nota,
+          MAX(estatus_operaciones) as estatus_operaciones,
           MAX(estatus) as estatus,
           MAX(tiene_instalado) as tiene_instalado
         FROM (
@@ -7770,6 +8089,7 @@ export class CampanasController {
             COUNT(DISTINCT r.id) as uso_count,
             NULL as nombre_arte,
             NULL as nota,
+            NULL as estatus_operaciones,
             MAX(r.arte_aprobado) as estatus,
             MAX(CASE
               WHEN r.instalado = 1 THEN 1
@@ -7795,6 +8115,7 @@ export class CampanasController {
             COUNT(DISTINCT at2.id) as uso_count,
             MAX(at2.nombre_arte) as nombre_arte,
             MAX(at2.nota) as nota,
+            MAX(at2.estatus_operaciones) as estatus_operaciones,
             MAX(r2.arte_aprobado) as estatus,
             MAX(CASE
               WHEN r2.instalado = 1 THEN 1
@@ -7818,6 +8139,7 @@ export class CampanasController {
             COUNT(DISTINCT imd.id) as uso_count,
             MAX(imd.nombre_arte) as nombre_arte,
             MAX(imd.comentario) as nota,
+            MAX(imd.estatus_operaciones) as estatus_operaciones,
             MAX(r3.arte_aprobado) as estatus,
             MAX(CASE
               WHEN r3.instalado = 1 THEN 1
@@ -7839,7 +8161,7 @@ export class CampanasController {
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -7848,6 +8170,7 @@ export class CampanasController {
         usos: Number(arte.uso_count),
         nombre_arte: arte.nombre_arte || null,
         nota: arte.nota || null,
+        estatus_operaciones: arte.estatus_operaciones || null,
         estatus: arte.estatus || null,
         tiene_instalado: Number(arte.tiene_instalado || 0) === 1,
       }));
@@ -10298,7 +10621,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot, nombre_arte } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -10309,14 +10632,15 @@ export class CampanasController {
         savedFiles.push(archivoFinal);
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
+        const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
         for (const reservaId of allReservaIds) {
           const pairKey = `${reservaId}:${archivoFinal}`;
           if (insertedPairs.has(pairKey)) continue;
           insertedPairs.add(pairKey);
           await prisma.$executeRawUnsafe(`
-            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte)
-            VALUES (?, ?, ?, ?, ?)
-          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal);
+            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte, estatus_operaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal);
         }
       }
 
@@ -10413,9 +10737,10 @@ export class CampanasController {
         spot: number;
         created_at: Date;
         nombre_arte: string | null;
+        estatus_operaciones: string | null;
       }[]>(`
         SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot,
-               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte
+               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
         FROM artes_tradicionales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, nota, spot
@@ -10433,6 +10758,7 @@ export class CampanasController {
             spot: a.spot,
             createdAt: a.created_at,
             nombre_arte: a.nombre_arte || null,
+            estatus_operaciones: a.estatus_operaciones || null,
           })),
         });
         return;

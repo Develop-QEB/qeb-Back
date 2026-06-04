@@ -20,6 +20,8 @@ router.get('/export-layout', campanasController.getExportLayout.bind(campanasCon
 
 // Rutas dinámicas con :id
 router.get('/', campanasController.getAll.bind(campanasController));
+// Bulk de inventario para el Versionario (antes de '/:id' para que no colisione)
+router.get('/inventario-versionario-bulk', campanasController.getInventarioVersionarioBulk.bind(campanasController));
 router.get('/:id', campanasController.getById.bind(campanasController));
 router.patch('/:id', campanasController.update.bind(campanasController));
 router.patch('/:id/status', campanasController.updateStatus.bind(campanasController));
@@ -71,6 +73,7 @@ router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bin
 router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
 router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));
 router.post('/:id/add-arte-digital', campanasController.addArteDigital.bind(campanasController));
+router.get('/:id/imagenes-digitales-bulk', campanasController.getImagenesDigitalesBulk.bind(campanasController));
 router.get('/:id/imagenes-digitales/:reservaId', campanasController.getImagenesDigitales.bind(campanasController));
 router.get('/:id/reserva-archivo/:reservaId', campanasController.getReservaArchivo.bind(campanasController));
 router.get('/:id/digital-file-summaries', campanasController.getDigitalFileSummaries.bind(campanasController));
