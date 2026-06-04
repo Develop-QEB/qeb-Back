@@ -2749,6 +2749,87 @@ export class PropuestasController {
     }
   }
 
+  // Public endpoint (no auth): KML del inventario seleccionado para abrir en Google Maps.
+  // Google descarga este KML por URL (maps?q=<url>), por eso debe ser publico y sin token.
+  // ?ids=1,2,3 -> ids de inventario seleccionados; sin ids se exporta todo el inventario.
+  async getPublicKML(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const idsParam = typeof req.query.ids === 'string' ? req.query.ids : '';
+      const selectedIds = new Set(
+        idsParam.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
+      );
+
+      // Mismo query que getInventarioReservado (puntos reservados de la propuesta)
+      const query = `
+        SELECT
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza
+        FROM inventarios i
+          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, String(propuestaId)) as any[];
+
+      // Filtrar por seleccion y dedup por id de inventario (un punto por ubicacion)
+      const seen = new Set<number>();
+      const puntos = inventario.filter(item => {
+        const invId = Number(item.id);
+        if (selectedIds.size > 0 && !selectedIds.has(invId)) return false;
+        if (item.latitud == null || item.longitud == null) return false;
+        if (seen.has(invId)) return false;
+        seen.add(invId);
+        return true;
+      });
+
+      const esc = (v: any) => String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      const placemarks = puntos.map(i => `
+    <Placemark>
+      <name>${esc(i.codigo_unico)}</name>
+      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}]]></description>
+      <Point><coordinates>${i.longitud},${i.latitud},0</coordinates></Point>
+    </Placemark>`).join('');
+
+      const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Propuesta ${propuestaId} - ${puntos.length} ubicaciones</name>${placemarks}
+  </Document>
+</kml>`;
+
+      res.setHeader('Content-Type', 'application/vnd.google-earth.kml+xml; charset=utf-8');
+      res.setHeader('Content-Disposition', `inline; filename="propuesta_${propuestaId}.kml"`);
+      res.send(kml);
+    } catch (error) {
+      console.error('Error en getPublicKML propuesta:', error);
+      res.status(500).send('Error al generar KML');
+    }
+  }
+
   // Public endpoint for client view (no auth required)
   async getPublicDetails(req: AuthRequest, res: Response): Promise<void> {
     try {
