@@ -2330,6 +2330,36 @@ export class SolicitudesController {
         console.error('[create] Error verificando pendientes (no-blocking):', err);
       }
 
+      // Crear tareas de autorización ANTES de responder, dentro del ciclo de
+      // vida del request, con reintentos. Antes esto corría DESPUÉS de res.json
+      // (fire-and-forget) y se perdía si el proceso se reciclaba o la conexión
+      // parpadeaba justo después de responder → tareas huérfanas para DG/DCM
+      // (caso 80875 Aldonza / 80876 Leonor). Si aun con reintentos falla, el
+      // cron de madrugada (depurarTareasAutorizacionResueltas) lo repara.
+      if (autorizacionInfo.tienePendientes && userId) {
+        const MAX_INTENTOS = 3;
+        for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
+          try {
+            await crearTareasAutorizacion(
+              result.solicitud.id,
+              result.propuesta.id,
+              userId,
+              userName,
+              autorizacionInfo.pendientesDg,
+              autorizacionInfo.pendientesDcm
+            );
+            break;
+          } catch (err) {
+            console.error(`[create] Error creando tareas autorización (intento ${intento}/${MAX_INTENTOS}):`, err);
+            if (intento < MAX_INTENTOS) {
+              await new Promise(r => setTimeout(r, 1000 * intento));
+            } else {
+              console.error('[create] FALLO definitivo creando tareas; el cron de madrugada reparará el huérfano');
+            }
+          }
+        }
+      }
+
       // Build message with authorization info
       let mensaje = 'Solicitud creada exitosamente';
       if (autorizacionInfo.tienePendientes) {
@@ -2363,21 +2393,8 @@ export class SolicitudesController {
         usuario: userName,
       });
 
-      // Lógica post-respuesta: tareas de autorización (no bloquea al usuario)
-      try {
-        if (autorizacionInfo.tienePendientes && userId) {
-          await crearTareasAutorizacion(
-            result.solicitud.id,
-            result.propuesta.id,
-            userId,
-            userName,
-            autorizacionInfo.pendientesDg,
-            autorizacionInfo.pendientesDcm
-          );
-        }
-      } catch (err) {
-        console.error('[create] Error creando tareas autorización (no-blocking):', err);
-      }
+      // (Las tareas de autorización ya se crearon ARRIBA, antes de res.json,
+      // dentro del ciclo de vida del request. Ya no se hace fire-and-forget.)
 
       // Lógica post-respuesta: correo electrónico (no bloquea al usuario)
       try {
