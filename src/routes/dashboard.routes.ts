@@ -24,4 +24,7 @@ router.get('/top-clientes', dashboardController.getTopClientes.bind(dashboardCon
 // Inventario detallado con info de campañas/propuestas
 router.get('/inventory-detail', dashboardController.getInventoryDetail.bind(dashboardController));
 
+// Reporte "Pase a ventas" (CSV) — descarga directa
+router.get('/pase-a-ventas-report', dashboardController.getPaseAVentasReport.bind(dashboardController));
+
 export default router;
