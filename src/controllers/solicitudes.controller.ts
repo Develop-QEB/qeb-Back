@@ -401,11 +401,19 @@ export class SolicitudesController {
       const sortOrder = (req.query.sortOrder as string) || 'desc';
       const groupBy = req.query.groupBy as string;
       const tipoPeriodo = req.query.tipoPeriodo as string;
-      // Filtros por historial: rango de fecha de cambio de estatus / creacion
-      const cambioEstatusDesde = req.query.cambioEstatusDesde as string;
-      const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
-      const creacionDesde = req.query.creacionDesde as string;
-      const creacionHasta = req.query.creacionHasta as string;
+      // Filtros por historial — nuevo formato: modo + fechaDesde/Hasta + estatusValor.
+      // modo: 'creacion' filtra por accion 'Creación', 'cambio_estatus' por 'Cambio de estado'.
+      // estatusValor (opcional, solo en cambio_estatus): filtra ademas el JSON
+      // detalles para que el "despues" del cambio coincida con ese valor.
+      // Compat hacia atras: si llegan los params viejos los aceptamos tambien.
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = {
@@ -569,6 +577,12 @@ export class SolicitudesController {
         const qp: any[] = [];
         if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
         if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+        // Filtro por estatus especifico (ej. "Pase a ventas"): match en el
+        // JSON `detalles` por el campo "despues" del cambio de estado.
+        if (estatusValor) {
+          conds.push('detalles LIKE ?');
+          qp.push(`%"despues":"${estatusValor}"%`);
+        }
         const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
           `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
         addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
