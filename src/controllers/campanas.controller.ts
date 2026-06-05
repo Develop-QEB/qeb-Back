@@ -9026,21 +9026,76 @@ export class CampanasController {
       let artesCountMap = new Map<number, number>();
       let artesNamesMap = new Map<number, string>();
       let artesDataFilenamesMap = new Map<number, string>();
+      // Nuevos mapas para Orden de Montaje: nombre_arte MANUAL, notas y URL de DO.
+      // Se concatenan por coma cuando hay varios artes (digital).
+      let artesNombreManualMap = new Map<number, string>();
+      let artesNotasMap = new Map<number, string>();
+      let artesUrlsDoMap = new Map<number, string>();
       if (rsvIds.length > 0) {
         const placeholdersRsv = rsvIds.map(() => '?').join(',');
-        const artesCountQuery = `
-          SELECT id_reserva, COUNT(*) as total_artes,
-                 GROUP_CONCAT(SUBSTRING_INDEX(archivo, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_artes,
-                 GROUP_CONCAT(SUBSTRING_INDEX(archivo_data, '/', -1) ORDER BY spot SEPARATOR ', ') as nombres_archivo_data
+        // Traemos las filas crudas y agregamos en JS (evita el límite de
+        // group_concat_max_len al concatenar URLs largas de Spaces).
+        const artesRowsQuery = `
+          SELECT id_reserva, archivo, archivo_data, nombre_arte, comentario, spot
           FROM imagenes_digitales
           WHERE id_reserva IN (${placeholdersRsv})
-          GROUP BY id_reserva
+          ORDER BY id_reserva, spot
         `;
-        const artesCountArr = (await prisma.$queryRawUnsafe(artesCountQuery, ...rsvIds)) as any[];
-        for (const row of artesCountArr) {
-          artesCountMap.set(Number(row.id_reserva), Number(row.total_artes));
-          if (row.nombres_artes) artesNamesMap.set(Number(row.id_reserva), String(row.nombres_artes));
-          if (row.nombres_archivo_data) artesDataFilenamesMap.set(Number(row.id_reserva), String(row.nombres_archivo_data));
+        const artesRows = (await prisma.$queryRawUnsafe(artesRowsQuery, ...rsvIds)) as any[];
+        const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
+        const acc = new Map<number, { names: string[]; dataNames: string[]; manual: string[]; notas: string[]; urls: string[] }>();
+        for (const r of artesRows) {
+          const rid = Number(r.id_reserva);
+          if (!acc.has(rid)) acc.set(rid, { names: [], dataNames: [], manual: [], notas: [], urls: [] });
+          const a = acc.get(rid)!;
+          a.names.push(fileNameOf(r.archivo));
+          a.dataNames.push(fileNameOf(r.archivo_data));
+          // nombre_arte manual; si está vacío caemos al nombre de archivo.
+          a.manual.push(String(r.nombre_arte || '').trim() || fileNameOf(r.archivo_data || r.archivo));
+          a.notas.push(String(r.comentario || '').trim());
+          const url = (r.archivo_data || r.archivo || '').toString().trim();
+          if (url) a.urls.push(url);
+        }
+        for (const [rid, a] of acc) {
+          artesCountMap.set(rid, a.names.length);
+          if (a.names.length) artesNamesMap.set(rid, a.names.filter(Boolean).join(', '));
+          if (a.dataNames.length) artesDataFilenamesMap.set(rid, a.dataNames.filter(Boolean).join(', '));
+          if (a.manual.length) artesNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
+          if (a.notas.some(Boolean)) artesNotasMap.set(rid, a.notas.filter(Boolean).join(', '));
+          if (a.urls.length) artesUrlsDoMap.set(rid, a.urls.join(', '));
+        }
+      }
+
+      // Artes TRADICIONALES (tabla artes_tradicionales): mismo agregado por
+      // reserva para nombre_arte manual, notas y URL de DO. Se usa en los items
+      // tradicionales del Orden de Montaje.
+      const tradNombreManualMap = new Map<number, string>();
+      const tradNotasMap = new Map<number, string>();
+      const tradUrlsMap = new Map<number, string>();
+      if (rsvIds.length > 0) {
+        const placeholdersRsv = rsvIds.map(() => '?').join(',');
+        const tradRowsQuery = `
+          SELECT id_reserva, archivo, nombre_arte, nota, spot
+          FROM artes_tradicionales
+          WHERE id_reserva IN (${placeholdersRsv})
+          ORDER BY id_reserva, spot
+        `;
+        const tradRows = (await prisma.$queryRawUnsafe(tradRowsQuery, ...rsvIds)) as any[];
+        const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
+        const acc = new Map<number, { manual: string[]; notas: string[]; urls: string[] }>();
+        for (const r of tradRows) {
+          const rid = Number(r.id_reserva);
+          if (!acc.has(rid)) acc.set(rid, { manual: [], notas: [], urls: [] });
+          const a = acc.get(rid)!;
+          a.manual.push(String(r.nombre_arte || '').trim() || fileNameOf(r.archivo));
+          a.notas.push(String(r.nota || '').trim());
+          const url = (r.archivo || '').toString().trim();
+          if (url) a.urls.push(url);
+        }
+        for (const [rid, a] of acc) {
+          if (a.manual.some(Boolean)) tradNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
+          if (a.notas.some(Boolean)) tradNotasMap.set(rid, a.notas.filter(Boolean).join(', '));
+          if (a.urls.length) tradUrlsMap.set(rid, a.urls.join(', '));
         }
       }
 
@@ -9101,12 +9156,27 @@ export class CampanasController {
           }
         }
 
+        // Campos de arte unificados (digital vs tradicional) para el Orden de
+        // Montaje: nombre_arte manual, notas y URL de DO, separados por coma.
+        const nombreArteManual = isDigital
+          ? (artesNombreManualMap.get(rsvId) || null)
+          : (tradNombreManualMap.get(rsvId) || null);
+        const notasArtes = isDigital
+          ? (artesNotasMap.get(rsvId) || null)
+          : (tradNotasMap.get(rsvId) || null);
+        const urlsArtesDo = isDigital
+          ? (artesUrlsDoMap.get(rsvId) || null)
+          : (tradUrlsMap.get(rsvId) || null);
+
         return {
           ...row,
           indicaciones,
           num_artes_digitales: artesCountMap.get(rsvId) || 0,
           nombres_artes_digitales: artesNamesMap.get(rsvId) || null,
           nombres_archivo_data: artesDataFilenamesMap.get(rsvId) || null,
+          nombre_arte_manual: nombreArteManual,
+          notas_artes: notasArtes,
+          urls_artes_do: urlsArtesDo,
         };
       });
 
