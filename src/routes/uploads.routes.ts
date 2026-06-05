@@ -326,7 +326,11 @@ router.get('/proxy-image', authMiddleware, async (req: Request, res: Response) =
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'public, max-age=300');
+    // NO cachear: con `public, max-age=300` un CDN/proxy compartido podía servir
+    // la imagen de OTRO arte (respuestas cruzadas) → en el Excel del Versionario
+    // salía la foto equivocada en la celda (mismo URL correcto, imagen de otra).
+    // `no-store` fuerza que cada petición traiga la imagen real de su URL.
+    res.setHeader('Cache-Control', 'no-store');
     res.send(buf);
   } catch (error) {
     console.error('Error proxy-image:', error);
