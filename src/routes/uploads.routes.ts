@@ -301,8 +301,20 @@ router.get('/proxy-image', authMiddleware, async (req: Request, res: Response) =
       res.status(400).json({ success: false, error: 'Falta parametro url' });
       return;
     }
+    // Validacion de origen. Aceptamos:
+    //  1) Cualquier host de DigitalOcean Spaces (cubre la variante CDN
+    //     `*.cdn.digitaloceanspaces.com` vs la directa, y buckets dev/prod).
+    //     Antes solo se aceptaba startsWith(getPublicBaseUrl()) exacto, lo que
+    //     rechazaba (400) las URLs con dominio CDN o de otro bucket y hacia que
+    //     el Excel mostrara "Ver arte" en vez de la imagen.
+    //  2) Fallback: que empiece con la base publica configurada (por si se usa
+    //     un dominio propio / CDN custom via SPACES_PUBLIC_BASE_URL).
     const allowedBase = getPublicBaseUrl();
-    if (!allowedBase || !url.startsWith(allowedBase)) {
+    let host = '';
+    try { host = new URL(url).hostname.toLowerCase(); } catch { host = ''; }
+    const isDoSpaces = host.endsWith('.digitaloceanspaces.com');
+    const matchesBase = !!allowedBase && url.startsWith(allowedBase);
+    if (!isDoSpaces && !matchesBase) {
       res.status(400).json({ success: false, error: 'URL no permitida' });
       return;
     }
