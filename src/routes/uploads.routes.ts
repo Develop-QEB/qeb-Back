@@ -89,11 +89,14 @@ const fileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFil
   }
 };
 
+// Límite alto para soportar videos digitales (cartelera digital MP4 suele pesar 50-200MB).
+// Para imágenes/PDF este límite es muy generoso, pero como single value de multer aplica a todo;
+// la validación de magic-bytes ya rechaza imágenes vacías/corruptas.
 const uploadArte = multer({
   storage: storageMemory,
   fileFilter,
   limits: {
-    fileSize: 20 * 1024 * 1024, // 20MB max
+    fileSize: 200 * 1024 * 1024, // 200MB max (soporta videos digitales)
   },
 });
 
@@ -434,7 +437,7 @@ router.use((err: Error, _req: Request, res: Response, next: Function) => {
     if (err.code === 'LIMIT_FILE_SIZE') {
       res.status(400).json({
         success: false,
-        error: 'El archivo es demasiado grande. Maximo 20MB.',
+        error: 'El archivo es demasiado grande. Maximo 200MB.',
       });
       return;
     }
