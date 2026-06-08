@@ -819,7 +819,7 @@ export class DashboardController {
         .map((sc) => parseInt(sc.idquote || ''))
         .filter((v) => !isNaN(v));
 
-      // Obtener campana_id via cotizacion (para el link de APS)
+      // Obtener campana_id via cotizacion (para el link de APS))
       const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
         where: { id_propuesta: { in: idquoteValues } },
         select: { id: true, id_propuesta: true, nombre_campania: true },
@@ -1044,6 +1044,113 @@ export class DashboardController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // Reporte "Pase a ventas": CSV con cada propuesta que cambio a "Pase a ventas",
+  // con catorcena, semana ISO, fecha del pase, inversion y quien lo hizo.
+  // Lee del historial (tipo='Propuesta', accion='Cambio de estado') — misma
+  // fuente que el reporte que se generaba manualmente.
+  async getPaseAVentasReport(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      type Row = {
+        fecha_hora: Date;
+        propuesta_id: number;
+        detalles: string | null;
+        periodo_inicio: Date | null;
+        periodo_fin: Date | null;
+        nombre_campania: string | null;
+        tipo_periodo: string | null;
+        marca_nombre: string | null;
+        asesor: string | null;
+        razon_social: string | null;
+        inversion: number | null;
+        numero_catorcena: number | null;
+      };
+
+      const rows = await prisma.$queryRawUnsafe<Row[]>(`
+        SELECT h.fecha_hora, h.ref_id AS propuesta_id, h.detalles,
+               ct.fecha_inicio AS periodo_inicio, ct.fecha_fin AS periodo_fin,
+               ct.nombre_campania, ct.tipo_periodo,
+               s.marca_nombre, s.asesor, s.razon_social,
+               p.inversion, cat.numero_catorcena
+        FROM historial h
+          INNER JOIN propuesta p ON p.id = h.ref_id
+          LEFT JOIN cotizacion ct ON ct.id_propuesta = p.id
+          LEFT JOIN solicitud s ON s.id = p.solicitud_id
+          LEFT JOIN catorcenas cat ON ct.fecha_inicio >= cat.fecha_inicio AND ct.fecha_inicio <= cat.fecha_fin
+        WHERE h.tipo = 'Propuesta' AND h.accion = 'Cambio de estado'
+          AND h.detalles LIKE '%despues":"Pase a ventas"%'
+        ORDER BY h.fecha_hora
+      `);
+
+      // Semana ISO 8601 (lunes inicio, semana 1 contiene el primer jueves)
+      const isoWeek = (d: Date): number => {
+        const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+        const day = date.getUTCDay() || 7;
+        date.setUTCDate(date.getUTCDate() + 4 - day);
+        const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+        return Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+      };
+      const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+      const fmtFecha = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : '');
+      const csvCell = (v: unknown) => {
+        const s = v === null || v === undefined ? '' : String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+
+      const header = ['catorcena', 'periodo_inicio', 'periodo_fin', 'fecha_pase', 'semana',
+        'dia_semana', 'hora_pase', 'propuesta_id', 'campania', 'marca', 'cliente', 'asesor',
+        'tipo_periodo', 'inversion', 'status_antes', 'quien_paso_a_ventas'];
+      const lines: string[] = [header.join(',')];
+
+      for (const r of rows) {
+        let antes = '';
+        let usuario = '';
+        let esPaseReal = false;
+        try {
+          const det = JSON.parse(r.detalles || '{}');
+          usuario = det.usuario || '';
+          const cambios = Array.isArray(det.cambios) ? det.cambios : [];
+          for (const cb of cambios) {
+            if (cb.campo === 'Estado' && cb.despues === 'Pase a ventas' && cb.antes !== 'Pase a ventas') {
+              antes = cb.antes || '';
+              esPaseReal = true;
+              break;
+            }
+          }
+        } catch { /* detalle no parseable */ }
+        if (!esPaseReal) continue; // descarta re-clicks Pase a ventas -> Pase a ventas
+
+        const fh = new Date(r.fecha_hora);
+        const hora = fh.toISOString().slice(11, 16);
+        lines.push([
+          r.numero_catorcena ?? '',
+          fmtFecha(r.periodo_inicio),
+          fmtFecha(r.periodo_fin),
+          fmtFecha(r.fecha_hora),
+          isoWeek(fh),
+          DIAS[fh.getDay()],
+          hora,
+          r.propuesta_id,
+          r.nombre_campania ?? '',
+          r.marca_nombre ?? '',
+          r.razon_social ?? '',
+          r.asesor ?? '',
+          r.tipo_periodo ?? '',
+          r.inversion != null ? Number(r.inversion).toFixed(2) : '0.00',
+          antes,
+          usuario,
+        ].map(csvCell).join(','));
+      }
+
+      const hoy = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="pase_a_ventas_${hoy}.csv"`);
+      res.send('﻿' + lines.join('\n')); // BOM para que Excel respete acentos
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al generar reporte de pase a ventas';
+      res.status(500).json({ success: false, error: message });
     }
   }
 }

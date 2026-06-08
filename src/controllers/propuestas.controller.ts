@@ -401,16 +401,21 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
-      const cambioEstatusDesde = req.query.cambioEstatusDesde as string;
-      const cambioEstatusHasta = req.query.cambioEstatusHasta as string;
-      const creacionDesde = req.query.creacionDesde as string;
-      const creacionHasta = req.query.creacionHasta as string;
+      // Filtros por historial — nuevo formato modo + fecha + estatusValor.
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -492,6 +497,8 @@ export class PropuestasController {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        // Filtro por estatus especifico via JSON detalles del cambio.
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
         sub += `)`;
         whereConditions += ` AND ${sub}`;
       }
@@ -2746,6 +2753,87 @@ export class PropuestasController {
       console.error('Error en getInventarioReservado propuesta:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener inventario';
       res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Public endpoint (no auth): descarga KML del inventario seleccionado de una propuesta.
+  // Lo usa el visor de mapa publico (boton "Descargar KML").
+  // ?ids=1,2,3 -> ids de inventario seleccionados; sin ids se exporta todo el inventario.
+  async getPublicKML(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      const idsParam = typeof req.query.ids === 'string' ? req.query.ids : '';
+      const selectedIds = new Set(
+        idsParam.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
+      );
+
+      // Mismo query que getInventarioReservado (puntos reservados de la propuesta)
+      const query = `
+        SELECT
+          MIN(i.id) as id,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL
+            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
+            ELSE MIN(i.codigo_unico)
+          END as codigo_unico,
+          MIN(i.mueble) as mueble,
+          MIN(i.ubicacion) as ubicacion,
+          CASE
+            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
+            ELSE MIN(i.tipo_de_cara)
+          END as tipo_de_cara,
+          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
+          MIN(i.latitud) as latitud,
+          MIN(i.longitud) as longitud,
+          MIN(i.plaza) as plaza
+        FROM inventarios i
+          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
+          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
+      `;
+
+      const inventario = await prisma.$queryRawUnsafe(query, String(propuestaId)) as any[];
+
+      // Filtrar por seleccion y dedup por id de inventario (un punto por ubicacion)
+      const seen = new Set<number>();
+      const puntos = inventario.filter(item => {
+        const invId = Number(item.id);
+        if (selectedIds.size > 0 && !selectedIds.has(invId)) return false;
+        if (item.latitud == null || item.longitud == null) return false;
+        if (seen.has(invId)) return false;
+        seen.add(invId);
+        return true;
+      });
+
+      const esc = (v: any) => String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      const placemarks = puntos.map(i => `
+    <Placemark>
+      <name>${esc(i.codigo_unico)}</name>
+      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}]]></description>
+      <Point><coordinates>${i.longitud},${i.latitud},0</coordinates></Point>
+    </Placemark>`).join('');
+
+      const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Propuesta ${propuestaId} - ${puntos.length} ubicaciones</name>${placemarks}
+  </Document>
+</kml>`;
+
+      res.setHeader('Content-Type', 'application/vnd.google-earth.kml+xml; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="propuesta_${propuestaId}.kml"`);
+      res.send(kml);
+    } catch (error) {
+      console.error('Error en getPublicKML propuesta:', error);
+      res.status(500).send('Error al generar KML');
     }
   }
 
