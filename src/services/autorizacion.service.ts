@@ -561,16 +561,24 @@ export async function crearTareasAutorizacion(
     ? campaniaIdResuelto
     : (origen === 'campana' ? campaniaId : origen === 'propuesta' ? propuestaId : solicitudId);
 
-  // Obtener usuarios DG y DCM (buscar por puesto, role o area con múltiples variantes)
+  // Obtener usuarios DG y DCM (igualdad exacta — antes contains 'Director General'
+  // tambien matcheaba 'Director General Adjunto' y ese rol no debe recibir
+  // tareas de autorizacion DG porque tampoco puede aprobarlas/rechazarlas
+  // (el aprobador en notificaciones.controller exige puesto === 'Director General').
   const usuariosDg = await prisma.usuario.findMany({
     where: {
       deleted_at: null,
+      // 'Director General Adjunto' y 'Director Desarrollo de Nuevos Negocios'
+      // NO deben recibir tareas DG; el filtro IN con igualdad exacta los excluye
+      // automaticamente (no requiere NOT adicional).
       OR: [
-        { puesto: { contains: 'DG' } },
-        { puesto: { contains: 'Director General' } },
-        { user_role: { contains: 'Director General' } },
-        { area: { contains: 'Dirección General' } },
-        { area: { contains: 'Direccion General' } },
+        { puesto: 'DG' },
+        { puesto: 'Director General' },
+        { puesto: 'Dirección General' },
+        { puesto: 'Direccion General' },
+        { user_role: 'Director General' },
+        { area: 'Dirección General' },
+        { area: 'Direccion General' },
       ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
@@ -1130,12 +1138,16 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
     prisma.usuario.findMany({
       where: {
         deleted_at: null,
+        // Igualdad exacta (no contains) para que 'Director General Adjunto'
+        // y otros roles que contienen la cadena no caigan en el resumen DG.
         OR: [
-          { puesto: { contains: 'DG' } },
-          { puesto: { contains: 'Director General' } },
-          { user_role: { contains: 'Director General' } },
-          { area: { contains: 'Dirección General' } },
-          { area: { contains: 'Direccion General' } },
+          { puesto: 'DG' },
+          { puesto: 'Director General' },
+          { puesto: 'Dirección General' },
+          { puesto: 'Direccion General' },
+          { user_role: 'Director General' },
+          { area: 'Dirección General' },
+          { area: 'Direccion General' },
         ],
       },
       select: { id: true, nombre: true, correo_electronico: true }
