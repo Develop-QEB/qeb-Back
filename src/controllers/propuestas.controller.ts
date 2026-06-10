@@ -6,7 +6,8 @@ import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
   verificarCarasRechazadas,
-  crearTareasAutorizacion
+  crearTareasAutorizacion,
+  conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
@@ -998,6 +999,21 @@ export class PropuestasController {
         });
         if (tareasAuth.count > 0) {
           console.log(`[${status}] Propuesta #${propuestaId}: ${tareasAuth.count} tareas de autorización finalizadas`);
+        }
+
+        // Propagar el rechazo a la SOLICITUD para que la oportunidad desaparezca
+        // de TODOS los listados (Solicitudes la mostraba como "Atendida") y de BI
+        // (V_Oportunidades toma el "Estatus de Oportunidad" de la solicitud).
+        // Antes solo se rechazaba la propuesta, dejando la solicitud en Atendida —
+        // resultado: 77 oportunidades rechazadas seguian saliendo como vivas.
+        if (propuesta.solicitud_id) {
+          const solRej = await prisma.solicitud.updateMany({
+            where: { id: propuesta.solicitud_id, status: { not: 'Rechazada' } },
+            data: { status: 'Rechazada' },
+          });
+          if (solRej.count > 0) {
+            console.log(`[${status}] Propuesta #${propuestaId}: solicitud #${propuesta.solicitud_id} → Rechazada`);
+          }
         }
       }
 
@@ -4211,7 +4227,7 @@ export class PropuestasController {
           });
           if (bfPair) bonificacionForAuth = Number(bfPair.bonificacion) || 0;
         }
-        const estadoResult = await calcularEstadoAutorizacion({
+        const estadoResultCalc = await calcularEstadoAutorizacion({
           ciudad: ciudad || undefined,
           estado: estados || undefined,
           formato: formato || '',
@@ -4222,6 +4238,16 @@ export class PropuestasController {
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
           articulo: articulo || null
         }, userId);
+        // Direcciones Aprobadas: si ya estaba aprobada y costo/caras NO bajan, se
+        // conserva la aprobación (sin nueva autorización). Valores efectivos:
+        // si el campo no viene en la edición, se usa el actual de la cara.
+        const effCostoAuth = costo !== undefined && costo !== null ? parseFloat(costo) : Number(currentCara.costo || 0);
+        const effCarasAuth = caras !== undefined && caras !== null ? parseInt(caras) : Number(currentCara.caras || 0);
+        const estadoResult = conservarAprobacionSiIncrementa(
+          estadoResultCalc,
+          { autorizacion_dg: currentCara.autorizacion_dg, autorizacion_dcm: currentCara.autorizacion_dcm, costo: Number(currentCara.costo || 0), caras: Number(currentCara.caras || 0) },
+          { costo: effCostoAuth, caras: effCarasAuth }
+        );
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
@@ -4705,7 +4731,7 @@ export class PropuestasController {
                 if (bfPairP) bonificacionForAuthP = Number(bfPairP.bonificacion) || 0;
               }
             }
-            const estadoResult = await calcularEstadoAutorizacion({
+            const estadoResultCalcBk = await calcularEstadoAutorizacion({
               ciudad: data.ciudad || undefined,
               estado: data.estados || undefined,
               formato: data.formato || '',
@@ -4716,6 +4742,14 @@ export class PropuestasController {
               tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
               articulo: data.articulo || null
             }, userId);
+            // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
+            const effCostoBkAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCara?.costo || 0);
+            const effCarasBkAuth = data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : Number(currentCara?.caras || 0);
+            const estadoResult = conservarAprobacionSiIncrementa(
+              estadoResultCalcBk,
+              { autorizacion_dg: currentCara?.autorizacion_dg, autorizacion_dcm: currentCara?.autorizacion_dcm, costo: Number(currentCara?.costo || 0), caras: Number(currentCara?.caras || 0) },
+              { costo: effCostoBkAuth, caras: effCarasBkAuth }
+            );
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }
