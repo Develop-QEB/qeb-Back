@@ -8,7 +8,8 @@ import nodemailer from 'nodemailer';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
-  crearTareasAutorizacion
+  crearTareasAutorizacion,
+  conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
@@ -2041,6 +2042,7 @@ export class CampanasController {
           MAX(sc.fin_periodo) as fin_periodo,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
           MAX(sc.cortesia) as cortesia,
@@ -2099,6 +2101,7 @@ export class CampanasController {
           sc.fin_periodo as fin_periodo,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
           sc.bonificacion as bonificacion_sc,
           sc.costo as renta,
           sc.cortesia as cortesia,
@@ -2279,6 +2282,7 @@ export class CampanasController {
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
           MAX(sc.cortesia) as cortesia
@@ -2362,6 +2366,7 @@ export class CampanasController {
           0 as instalado,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
           sc.bonificacion as bonificacion_sc,
           sc.costo as renta,
           sc.cortesia as cortesia,
@@ -2586,6 +2591,7 @@ export class CampanasController {
           MAX(sc.fin_periodo) as fin_periodo,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
           MAX(sc.cortesia) as cortesia,
@@ -2658,6 +2664,7 @@ export class CampanasController {
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
           MAX(sc.cortesia) as cortesia
@@ -2723,6 +2730,7 @@ export class CampanasController {
           sc.fin_periodo as fin_periodo,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
           sc.bonificacion as bonificacion_sc,
           sc.costo as renta,
           sc.cortesia as cortesia,
@@ -2782,6 +2790,7 @@ export class CampanasController {
           0 as instalado,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
           sc.bonificacion as bonificacion_sc,
           sc.costo as renta,
           sc.cortesia as cortesia,
@@ -3171,6 +3180,7 @@ export class CampanasController {
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
+          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
           MAX(sc.bonificacion) as bonificacion_sc,
           MAX(sc.costo) as renta,
           MAX(sc.cortesia) as cortesia
@@ -3229,6 +3239,7 @@ export class CampanasController {
           0 as instalado,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
+          COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
           sc.bonificacion as bonificacion_sc,
           sc.costo as renta,
           sc.cortesia as cortesia
@@ -9922,7 +9933,7 @@ export class CampanasController {
           });
           if (bfPair) bonificacionForAuth = Number(bfPair.bonificacion) || 0;
         }
-        const estadoResult = await calcularEstadoAutorizacion({
+        const estadoResultCalcCm = await calcularEstadoAutorizacion({
           ciudad: data.ciudad || undefined,
           estado: data.estados || undefined,
           formato: data.formato || '',
@@ -9933,6 +9944,14 @@ export class CampanasController {
           tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
           articulo: data.articulo || null
         }, userId);
+        // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
+        const effCostoCmAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCaraFull?.costo || 0);
+        const effCarasCmAuth = data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : Number(currentCaraFull?.caras || 0);
+        const estadoResult = conservarAprobacionSiIncrementa(
+          estadoResultCalcCm,
+          { autorizacion_dg: currentCaraFull?.autorizacion_dg, autorizacion_dcm: currentCaraFull?.autorizacion_dcm, costo: Number(currentCaraFull?.costo || 0), caras: Number(currentCaraFull?.caras || 0) },
+          { costo: effCostoCmAuth, caras: effCarasCmAuth }
+        );
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
       }
@@ -10395,7 +10414,7 @@ export class CampanasController {
                 if (bfPairBulk) bonificacionForAuthBulk = Number(bfPairBulk.bonificacion) || 0;
               }
             }
-            const estadoResult = await calcularEstadoAutorizacion({
+            const estadoResultCalcBulk = await calcularEstadoAutorizacion({
               ciudad: data.ciudad || undefined,
               estado: data.estados || undefined,
               formato: data.formato || '',
@@ -10406,6 +10425,14 @@ export class CampanasController {
               tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
               articulo: data.articulo || null
             }, userId);
+            // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
+            const effCostoBulkAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCara?.costo || 0);
+            const effCarasBulkAuth = data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : Number(currentCara?.caras || 0);
+            const estadoResult = conservarAprobacionSiIncrementa(
+              estadoResultCalcBulk,
+              { autorizacion_dg: currentCara?.autorizacion_dg, autorizacion_dcm: currentCara?.autorizacion_dcm, costo: Number(currentCara?.costo || 0), caras: Number(currentCara?.caras || 0) },
+              { costo: effCostoBulkAuth, caras: effCarasBulkAuth }
+            );
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
           }
