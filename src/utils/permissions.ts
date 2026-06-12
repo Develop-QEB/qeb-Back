@@ -17,6 +17,23 @@ const FULL_VISIBILITY_ROLES = [
   'Especialista de trafico',
   'Auxiliar de trafico',
   'Especialista de BI',
+  // Nuevos roles transversales (Matriz QEB 2026-01-28) — ven todo sin estar
+  // en ningun equipo. NO aprueban autorizaciones (eso queda solo a DG/DCM).
+  'Director General Adjunto',
+  'Director Desarrollo de Nuevos Negocios',
+  'Gerente Comercial Vía Pública',
+  'Gerente Comercial Plazas',
+  'Jefe de BI',
+  // TI y Mejora Continua: admin completo
+  'Gerente de TI',
+  'Especialista de TI',
+  'Analista de TI',
+  'Jefe de Mejora Continua',
+  'Analista de Mejora Continua',
+  // Coordinador de Diseno: ve todas las tareas/campanas sin importar equipos.
+  // (Ajuste por CSV: "debe estar en todos los equipos" — implementado a
+  // nivel de codigo en vez de tener que añadirlo a cada equipo en DB.)
+  'Coordinador de Diseño',
   'DEV',
 ];
 

@@ -124,8 +124,11 @@ export class UsuariosController {
 
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Verificar que el usuario sea Administrador
-      if (!['Administrador', 'DEV'].includes(req.user?.rol || '')) {
+      // Roles autorizados a leer la lista completa de usuarios.
+      // Coordinador de Diseño se incluye porque necesita reasignar
+      // diseñadores en tareas de Revisión de artes (CSV).
+      const rolesPermitidos = ['Administrador', 'DEV', 'Coordinador de Diseño'];
+      if (!rolesPermitidos.includes(req.user?.rol || '')) {
         res.status(403).json({
           success: false,
           error: 'No tienes permisos para acceder a esta sección',

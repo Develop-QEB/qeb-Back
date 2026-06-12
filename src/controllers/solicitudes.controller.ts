@@ -1607,7 +1607,12 @@ export class SolicitudesController {
   async getUsers(req: AuthRequest, res: Response): Promise<void> {
     try {
       const area = req.query.area as string;
-      const filterByTeam = req.query.filterByTeam === 'true';
+      const userRol = req.user?.rol || '';
+      // Roles con visibilidad total ignoran filterByTeam — necesitan acceder
+      // a usuarios fuera de sus propios equipos (ej. Coordinador de Diseño
+      // puede asignar diseñadores aunque no este en ningun equipo de diseño).
+      const skipTeamFilter = ['Administrador', 'DEV', 'Coordinador de Diseño'].includes(userRol);
+      const filterByTeam = !skipTeamFilter && req.query.filterByTeam === 'true';
       const userId = req.user?.userId;
 
       let teamMemberIds: number[] = [];
