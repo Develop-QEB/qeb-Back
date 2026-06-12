@@ -561,24 +561,21 @@ export async function crearTareasAutorizacion(
     ? campaniaIdResuelto
     : (origen === 'campana' ? campaniaId : origen === 'propuesta' ? propuestaId : solicitudId);
 
-  // Obtener usuarios DG y DCM (igualdad exacta — antes contains 'Director General'
-  // tambien matcheaba 'Director General Adjunto' y ese rol no debe recibir
-  // tareas de autorizacion DG porque tampoco puede aprobarlas/rechazarlas
-  // (el aprobador en notificaciones.controller exige puesto === 'Director General').
+  // Obtener usuarios DG: solo por puesto/user_role exactos. Antes existian
+  // matches por area ('Dirección General') que arrastraban a 'Director General
+  // Adjunto' y 'Director Desarrollo de Nuevos Negocios' (mismo area pero
+  // puesto distinto). Esos roles NO deben recibir tareas DG porque tampoco
+  // pueden aprobarlas/rechazarlas (el aprobador en notificaciones.controller
+  // exige puesto === 'Director General').
   const usuariosDg = await prisma.usuario.findMany({
     where: {
       deleted_at: null,
-      // 'Director General Adjunto' y 'Director Desarrollo de Nuevos Negocios'
-      // NO deben recibir tareas DG; el filtro IN con igualdad exacta los excluye
-      // automaticamente (no requiere NOT adicional).
       OR: [
         { puesto: 'DG' },
         { puesto: 'Director General' },
         { puesto: 'Dirección General' },
         { puesto: 'Direccion General' },
         { user_role: 'Director General' },
-        { area: 'Dirección General' },
-        { area: 'Direccion General' },
       ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
@@ -599,8 +596,6 @@ export async function crearTareasAutorizacion(
         { puesto: 'Direccion Comercial' },
         { user_role: 'Director Comercial' },
         { user_role: 'Dirección Comercial' },
-        { area: 'Dirección Comercial' },
-        { area: 'Direccion Comercial' },
       ],
     },
     select: { id: true, nombre: true, correo_electronico: true }
@@ -1138,16 +1133,15 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
     prisma.usuario.findMany({
       where: {
         deleted_at: null,
-        // Igualdad exacta (no contains) para que 'Director General Adjunto'
-        // y otros roles que contienen la cadena no caigan en el resumen DG.
+        // Solo puesto/user_role exactos. Quitamos area para no arrastrar
+        // a Director General Adjunto / Desarrollo Nuevos Negocios que
+        // comparten el area pero no el puesto.
         OR: [
           { puesto: 'DG' },
           { puesto: 'Director General' },
           { puesto: 'Dirección General' },
           { puesto: 'Direccion General' },
           { user_role: 'Director General' },
-          { area: 'Dirección General' },
-          { area: 'Direccion General' },
         ],
       },
       select: { id: true, nombre: true, correo_electronico: true }
@@ -1162,8 +1156,6 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
           { puesto: 'Direccion Comercial' },
           { user_role: 'Director Comercial' },
           { user_role: 'Dirección Comercial' },
-          { area: 'Dirección Comercial' },
-          { area: 'Direccion Comercial' },
         ],
       },
       select: { id: true, nombre: true, correo_electronico: true }
