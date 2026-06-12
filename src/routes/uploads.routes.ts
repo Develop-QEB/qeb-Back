@@ -341,6 +341,62 @@ router.get('/proxy-image', authMiddleware, async (req: Request, res: Response) =
   }
 });
 
+// Proxy bulk de imagenes: recibe lista de URLs, las descarga desde Spaces en
+// paralelo SERVER-SIDE (sin el limite de 6 conn/host del browser) y devuelve
+// los buffers como base64. Pensado para la descarga del Versionario Artes que
+// embebe cientos de miniaturas: pasa de N round-trips browser→back a 1.
+// Limite: 100 URLs por request para evitar payloads gigantes.
+router.post('/proxy-images-bulk', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const body = req.body as { urls?: unknown };
+    const urls = Array.isArray(body.urls) ? body.urls.filter((u): u is string => typeof u === 'string' && !!u) : [];
+    if (urls.length === 0) {
+      res.status(400).json({ success: false, error: 'Falta arreglo urls' });
+      return;
+    }
+    if (urls.length > 100) {
+      res.status(400).json({ success: false, error: 'Máximo 100 URLs por request' });
+      return;
+    }
+
+    const allowedBase = getPublicBaseUrl();
+    const fetchOne = async (url: string): Promise<{ url: string; buffer?: string; contentType?: string; error?: string }> => {
+      let host = '';
+      try { host = new URL(url).hostname.toLowerCase(); } catch { host = ''; }
+      const isDoSpaces = host.endsWith('.digitaloceanspaces.com');
+      const matchesBase = !!allowedBase && url.startsWith(allowedBase);
+      if (!isDoSpaces && !matchesBase) {
+        return { url, error: 'URL no permitida' };
+      }
+      try {
+        // AbortController para que un upstream colgado no detenga al lote entero.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 20_000);
+        try {
+          const upstream = await fetch(url, { signal: ctrl.signal });
+          if (!upstream.ok) return { url, error: `Upstream ${upstream.status}` };
+          const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+          const buf = Buffer.from(await upstream.arrayBuffer());
+          return { url, buffer: buf.toString('base64'), contentType };
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (err) {
+        return { url, error: err instanceof Error ? err.message : 'fetch failed' };
+      }
+    };
+
+    // Fetch en paralelo total: el servidor no tiene el limite del browser (6/host).
+    // Spaces aguanta cientos de conexiones paralelas sin sudar.
+    const results = await Promise.all(urls.map(fetchOne));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: results });
+  } catch (error) {
+    console.error('Error proxy-images-bulk:', error);
+    res.status(500).json({ success: false, error: 'Error en proxy bulk' });
+  }
+});
+
 // Link preview: extrae Open Graph (og:image, og:title, og:description) y favicon
 // de una URL externa para mostrar una vista previa en el front (artes
 // pendientes/rechazo). Llamado desde el front porque hacerlo desde el navegador
