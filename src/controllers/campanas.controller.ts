@@ -8795,8 +8795,8 @@ export class CampanasController {
 
       // Solo campañas cuya propuesta esté Aprobada — INVIAN VP/Digital es vista
       // de campaña activa, no de propuestas en revisión.
-      const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string }[]>(`
-        SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status
+      const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string; tipo_periodo: string | null }[]>(`
+        SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status, ct.tipo_periodo
         FROM campania cm
         INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         INNER JOIN propuesta pr ON pr.id = ct.id_propuesta AND pr.deleted_at IS NULL
@@ -8921,6 +8921,7 @@ export class CampanasController {
           sc.cortesia,
           sc.inicio_periodo,
           sc.fin_periodo,
+          sc.formato AS sc_formato,
           rsv.id AS rsv_id,
           rsv.estatus AS rsv_estatus,
           rsv.archivo AS rsv_archivo,
@@ -8971,7 +8972,12 @@ export class CampanasController {
           : null;
         const arteUrl = r.rsv_archivo ? 'HAS_ARTE' : null;
         const inicioYear = inicio.getFullYear();
-        const finSegmento = `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
+        // Mensual (gran formato / UN+) muestra MES; catorcena muestra catorcena.
+        const esMensualRow = (camp?.tipo_periodo || 'catorcena') === 'mensual';
+        const inicioPeriodoLabel = esMensualRow ? `Meses ${inicioYear}` : `Catorcenas ${inicioYear}`;
+        const finSegmento = esMensualRow
+          ? `Mes #${String(inicio.getMonth() + 1).padStart(2, '0')}`
+          : `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
 
         // posted: mismo criterio que CAT — campaña con posted_to_sap=1 o el rsv_aps
         // de esta fila incluido en posted_aps.
@@ -8992,7 +8998,7 @@ export class CampanasController {
           PrecioPorCara: precioPorCara,
           Vendedor: propuestaByIdMap.get(String(r.idquote))?.nombre_usuario || null,
           Descripcion: null,
-          InicioPeriodo: `Catorcenas ${inicioYear}`,
+          InicioPeriodo: inicioPeriodoLabel,
           FinSegmento: finSegmento,
           Arte: cliente?.T2_U_Marca || null,
           CodigoArte: r.rsv_id,
@@ -9004,6 +9010,10 @@ export class CampanasController {
           Unidad: r.codigo_unico ? String(r.codigo_unico) : null,
           Cara: r.tipo_de_cara ? String(r.tipo_de_cara) : null,
           Ciudad: r.plaza ? String(r.plaza) : null,
+          // formato (sc.formato) + tipo_periodo: para la pestaña "Inventario UN+"
+          // (filtrar mensual + gran formato, mismo criterio que Ocupación UN+).
+          formato: r.sc_formato ? String(r.sc_formato) : null,
+          tipo_periodo: camp?.tipo_periodo || 'catorcena',
           sap_database: cliente?.sap_database || null,
           TipoDistribucion: tipoDist,
           Reproducciones: null,
