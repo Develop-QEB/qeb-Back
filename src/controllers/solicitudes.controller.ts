@@ -7,7 +7,8 @@ import {
   verificarCarasPendientes,
   verificarCarasRechazadas,
   crearTareasAutorizacion,
-  obtenerResumenAutorizacion
+  obtenerResumenAutorizacion,
+  conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -3315,12 +3316,29 @@ export class SolicitudesController {
           // (evita reservas huérfanas y conflictos fantasma al re-auto-reservar circuitos)
           const oldCaras = await tx.solicitudCaras.findMany({
             where: { idquote: propuesta.id.toString() },
-            select: { id: true },
+            select: {
+              id: true, articulo: true, ciudad: true, formato: true, tipo: true,
+              inicio_periodo: true, costo: true, caras: true,
+              autorizacion_dg: true, autorizacion_dcm: true,
+            },
           });
           if (oldCaras.length > 0) {
             await tx.reservas.deleteMany({
               where: { solicitudCaras_id: { in: oldCaras.map(c => c.id) } },
             });
+          }
+          // Direcciones Aprobadas: mapa de caras VIEJAS por llave natural para
+          // poder conservar la aprobación si la edición solo sube costo/caras
+          // (la cara se borra y recrea, así que guardamos su estado previo aquí).
+          const keyCaraAuth = (c: { articulo?: string | null; ciudad?: string | null; formato?: string | null; tipo?: string | null; inicio_periodo?: Date | string | null }) => {
+            const ini = c.inicio_periodo ? new Date(c.inicio_periodo).toISOString().slice(0, 10) : '';
+            return [c.articulo || '', c.ciudad || '', c.formato || '', c.tipo || '', ini].join('|');
+          };
+          const oldByKeyAuth = new Map<string, typeof oldCaras>();
+          for (const oc of oldCaras) {
+            const k = keyCaraAuth(oc);
+            if (!oldByKeyAuth.has(k)) oldByKeyAuth.set(k, []);
+            oldByKeyAuth.get(k)!.push(oc);
           }
           await tx.solicitudCaras.deleteMany({
             where: { idquote: propuesta.id.toString() },
@@ -3362,6 +3380,21 @@ export class SolicitudesController {
               }, userId);
               autorizacion_dg = estadoResult.autorizacion_dg;
               autorizacion_dcm = estadoResult.autorizacion_dcm;
+            }
+
+            // Direcciones Aprobadas: igual que en propuesta/campaña — si esta cara
+            // YA estaba aprobada (match contra la cara vieja por llave natural) y
+            // costo/caras NO bajan, se conserva la aprobación (sin nueva autorización).
+            const oldMatchArr = oldByKeyAuth.get(keyCaraAuth({ articulo: cara.articulo, ciudad: cara.ciudad, formato: cara.formato, tipo: cara.tipo, inicio_periodo: cara.inicio_periodo }));
+            const oldMatch = oldMatchArr && oldMatchArr.length > 0 ? oldMatchArr.shift() : undefined;
+            if (oldMatch) {
+              const conserved = conservarAprobacionSiIncrementa(
+                { autorizacion_dg: autorizacion_dg as any, autorizacion_dcm: autorizacion_dcm as any },
+                { autorizacion_dg: oldMatch.autorizacion_dg, autorizacion_dcm: oldMatch.autorizacion_dcm, costo: Number(oldMatch.costo || 0), caras: Number(oldMatch.caras || 0) },
+                { costo: Number(cara.costo || 0), caras: Number(cara.caras || 0) }
+              );
+              autorizacion_dg = conserved.autorizacion_dg;
+              autorizacion_dcm = conserved.autorizacion_dcm;
             }
 
             // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.

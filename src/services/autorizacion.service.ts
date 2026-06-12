@@ -471,6 +471,32 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
 }
 
 /**
+ * Regla "Direcciones Aprobadas": si una cara YA estaba aprobada por DG y DCM y
+ * la edición solo INCREMENTA (o deja igual) costo y caras, se conserva la
+ * aprobación — NO se dispara una nueva autorización. Si costo o caras BAJAN, se
+ * respeta el recálculo normal (puede volver a pendiente/autorización).
+ *
+ * Se aplica en los 3 niveles (solicitud / propuesta / campaña) DESPUÉS de
+ * `calcularEstadoAutorizacion`, usando los valores efectivos nuevos vs los que
+ * tenía la cara antes de editar.
+ */
+export function conservarAprobacionSiIncrementa(
+  estado: EstadoAutorizacionResult,
+  prev: { autorizacion_dg?: string | null; autorizacion_dcm?: string | null; costo?: number | null; caras?: number | null },
+  nuevo: { costo: number; caras: number }
+): EstadoAutorizacionResult {
+  const yaAprobada = prev.autorizacion_dg === 'aprobado' && prev.autorizacion_dcm === 'aprobado';
+  if (!yaAprobada) return estado;
+  const noBajaCosto = Number(nuevo.costo) >= Number(prev.costo ?? 0) - 0.005;
+  const noBajaCaras = Number(nuevo.caras) >= Number(prev.caras ?? 0);
+  if (noBajaCosto && noBajaCaras) {
+    console.log('[conservarAprobacionSiIncrementa] Cara ya aprobada y costo/caras no bajan → se conserva aprobación (sin nueva autorización)');
+    return { ...estado, autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado', motivo_dg: undefined, motivo_dcm: undefined };
+  }
+  return estado;
+}
+
+/**
  * Verifica si una solicitud tiene caras pendientes de autorización
  * Ahora verifica ambas columnas: autorizacion_dg y autorizacion_dcm
  */
