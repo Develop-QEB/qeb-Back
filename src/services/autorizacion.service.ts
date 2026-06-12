@@ -149,6 +149,30 @@ function normalizarTipo(tipo: string | null | undefined): string {
 }
 
 /**
+ * Si una cara ya estaba aprobada (DG o DCM) y la edicion NO incrementa
+ * costo ni caras (se mantiene igual o baja), se conserva la aprobacion
+ * existente para no obligar a re-autorizar. Para los demas casos se
+ * respeta el resultado calculado por calcularEstadoAutorizacion.
+ */
+export function conservarAprobacionSiIncrementa(
+  calc: EstadoAutorizacionResult,
+  antes: { autorizacion_dg?: string | null; autorizacion_dcm?: string | null; costo: number; caras: number },
+  despues: { costo: number; caras: number },
+): EstadoAutorizacionResult {
+  const incrementaCosto = despues.costo > antes.costo;
+  const incrementaCaras = despues.caras > antes.caras;
+  const incrementa = incrementaCosto || incrementaCaras;
+  return {
+    autorizacion_dg: !incrementa && antes.autorizacion_dg === 'aprobado'
+      ? 'aprobado'
+      : calc.autorizacion_dg,
+    autorizacion_dcm: !incrementa && antes.autorizacion_dcm === 'aprobado'
+      ? 'aprobado'
+      : calc.autorizacion_dcm,
+  };
+}
+
+/**
  * Calcula el estado de autorización de una cara
  * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
  */
