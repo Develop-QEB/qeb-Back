@@ -1864,6 +1864,13 @@ export class InventariosController {
       // y el asesor recibirá la tarea para reasignar.
       // Al DESBLOQUEAR no se restauran reservas — eso lo decide el asesor
       // manualmente vía las tareas creadas.
+      //
+      // Solo se liberan reservas ACTUALES o FUTURAS: las cuyo período aún no
+      // termina (`sc.fin_periodo >= CURDATE()`). Las pasadas se conservan
+      // intactas — bloquear el inventario no debe borrar historial de pautas
+      // ya vencidas. El período real vive en `solicitudCaras.inicio/fin_periodo`
+      // (no en `reservas.calendario_id`, que tiene datos sucios); misma fuente
+      // de verdad que usa `inventario-bloqueo.service.ts`.
       let liberadas = 0;
       await prisma.$transaction(async (tx) => {
         if (!wasBloqueado) {
@@ -1873,10 +1880,12 @@ export class InventariosController {
           const result = await tx.$executeRawUnsafe(
             `UPDATE reservas r
              LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
+             INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
              SET r.deleted_at = NOW()
              WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
                AND r.deleted_at IS NULL
-               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')`,
+               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+               AND sc.fin_periodo >= CURDATE()`,
             id
           );
           liberadas = Number(result) || 0;
