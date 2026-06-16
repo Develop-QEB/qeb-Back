@@ -245,6 +245,7 @@ export const SOCKET_EVENTS = {
   ARTE_SUBIDO: 'arte:subido',
   ARTE_APROBADO: 'arte:aprobado',
   ARTE_RECHAZADO: 'arte:rechazado',
+  ARTE_ESTATUS_OPERACIONES_ACTUALIZADO: 'arte:estatus-operaciones:actualizado',
 
   // Inventario
   INVENTARIO_ACTUALIZADO: 'inventario:actualizado',

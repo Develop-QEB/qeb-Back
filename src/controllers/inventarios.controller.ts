@@ -470,6 +470,7 @@ export class InventariosController {
         solicitudCaraId,
         excluir_categoria,
         excluir_distancia_km,
+        excluir_modo,
         excluir_mi_macro,
       } = req.query;
 
@@ -752,12 +753,25 @@ export class InventariosController {
       //     calendario_id=0 o desincronizado. Usamos las fechas del SC
       //     (`sc.inicio_periodo`/`sc.fin_periodo`) como source of truth, igual
       //     que getEspaciosBloqueados.
+      //
+      // Modos (excluir_modo):
+      //   - 'distancia' (default): quita disponibles a < X km de inventario
+      //     reservado por la categoría (Haversine).
+      //   - 'contracara': quita disponibles cuya MISMA estructura física
+      //     (codigo_unico base + plaza) ya tenga la categoría en la otra cara.
+      //     Misma llave que filterCompletos del front (codigo_unico.split('_')[0]
+      //     + plaza), una cara Flujo y otra Contraflujo del mismo mueble.
+      //   - 'ambas': aplica los dos criterios.
       let resultados = disponibles;
       if (excluir_categoria && fecha_inicio && fecha_fin) {
-        const categoriaCoordenadas = await prisma.$queryRaw<
-          Array<{ id: number; latitud: number; longitud: number }>
+        const modo = (excluir_modo as string) || 'distancia';
+        const aplicaDistancia = modo === 'distancia' || modo === 'ambas';
+        const aplicaContracara = modo === 'contracara' || modo === 'ambas';
+
+        const categoriaReservados = await prisma.$queryRaw<
+          Array<{ id: number; latitud: number; longitud: number; codigo_unico: string | null; plaza: string | null }>
         >`
-          SELECT DISTINCT i.id, i.latitud, i.longitud
+          SELECT DISTINCT i.id, i.latitud, i.longitud, i.codigo_unico, i.plaza
           FROM reservas r
           JOIN espacio_inventario ei ON ei.id = r.inventario_id
           JOIN inventarios i ON i.id = ei.inventario_id
@@ -772,13 +786,27 @@ export class InventariosController {
           AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')
         `;
 
-        if (categoriaCoordenadas.length > 0) {
+        if (categoriaReservados.length > 0) {
           const distanciaKm = excluir_distancia_km ? parseFloat(excluir_distancia_km as string) : 1;
+          // Llave de estructura física = codigo_unico base + plaza (en mayúsculas).
+          const estructuraKey = (cod: string | null, plaza: string | null) =>
+            `${(cod || '').split('_')[0]}|${(plaza || '').toUpperCase()}`;
+          const contracaraSet = aplicaContracara
+            ? new Set(categoriaReservados.map(c => estructuraKey(c.codigo_unico, c.plaza)))
+            : null;
+
           resultados = disponibles.filter(item => {
-            if (item.latitud == null || item.longitud == null) return true;
-            for (const coord of categoriaCoordenadas) {
-              if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < distanciaKm) {
-                return false;
+            // Contracara: la otra cara del mismo mueble ya la tiene la categoría.
+            if (contracaraSet && contracaraSet.has(estructuraKey(item.codigo_unico, item.plaza))) {
+              return false;
+            }
+            // Distancia: cercano a un reservado de la categoría.
+            if (aplicaDistancia && item.latitud != null && item.longitud != null) {
+              for (const coord of categoriaReservados) {
+                if (coord.latitud == null || coord.longitud == null) continue;
+                if (haversineDistance(item.latitud, item.longitud, coord.latitud, coord.longitud) < distanciaKm) {
+                  return false;
+                }
               }
             }
             return true;
@@ -800,6 +828,7 @@ export class InventariosController {
           fecha_inicio,
           fecha_fin,
           excluir_categoria,
+          excluir_modo,
         },
       });
     } catch (error) {
@@ -1864,6 +1893,13 @@ export class InventariosController {
       // y el asesor recibirá la tarea para reasignar.
       // Al DESBLOQUEAR no se restauran reservas — eso lo decide el asesor
       // manualmente vía las tareas creadas.
+      //
+      // Solo se liberan reservas ACTUALES o FUTURAS: las cuyo período aún no
+      // termina (`sc.fin_periodo >= CURDATE()`). Las pasadas se conservan
+      // intactas — bloquear el inventario no debe borrar historial de pautas
+      // ya vencidas. El período real vive en `solicitudCaras.inicio/fin_periodo`
+      // (no en `reservas.calendario_id`, que tiene datos sucios); misma fuente
+      // de verdad que usa `inventario-bloqueo.service.ts`.
       let liberadas = 0;
       await prisma.$transaction(async (tx) => {
         if (!wasBloqueado) {
@@ -1873,10 +1909,12 @@ export class InventariosController {
           const result = await tx.$executeRawUnsafe(
             `UPDATE reservas r
              LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
+             INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
              SET r.deleted_at = NOW()
              WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
                AND r.deleted_at IS NULL
-               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')`,
+               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+               AND sc.fin_periodo >= CURDATE()`,
             id
           );
           liberadas = Number(result) || 0;

@@ -4748,6 +4748,16 @@ export class CampanasController {
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
           `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: idempotente por (campania, archivo).
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, userId || null);
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -4899,6 +4909,16 @@ export class CampanasController {
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
           `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: idempotente por (campania, archivo).
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, req.user?.userId || null);
       }
 
       // Registrar en historial
@@ -5500,6 +5520,79 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * Actualizar estatus_operaciones de un arte para TODAS las reservas que comparten
+   * el mismo archivo dentro de la campaña. El campo es del arte (no de la reserva
+   * individual), así que un solo cambio se propaga a todas las filas que tienen
+   * ese archivo en artes_tradicionales / imagenes_digitales.
+   */
+  async updateArteEstatusOperaciones(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { archivo, estatus_operaciones } = req.body as { archivo?: string; estatus_operaciones?: string | null };
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!campanaId || Number.isNaN(campanaId)) {
+        res.status(400).json({ success: false, error: 'campanaId inválido' });
+        return;
+      }
+      if (!archivo || typeof archivo !== 'string') {
+        res.status(400).json({ success: false, error: 'Se requiere archivo (URL)' });
+        return;
+      }
+
+      const nuevoValor = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+
+      const updateTradSql = `
+        UPDATE artes_tradicionales at
+        JOIN reservas r ON r.id = at.id_reserva
+        JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        JOIN cotizacion ct ON CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci = sc.idquote
+        JOIN campania camp ON camp.cotizacion_id = ct.id
+        SET at.estatus_operaciones = ?
+        WHERE at.archivo = ? AND camp.id = ?
+      `;
+      const affectedTrad = await prisma.$executeRawUnsafe(updateTradSql, nuevoValor, archivo, campanaId);
+
+      const updateDigSql = `
+        UPDATE imagenes_digitales img
+        JOIN reservas r ON r.id = img.id_reserva
+        JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        JOIN cotizacion ct ON CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci = sc.idquote
+        JOIN campania camp ON camp.cotizacion_id = ct.id
+        SET img.estatus_operaciones = ?
+        WHERE img.archivo = ? AND camp.id = ?
+      `;
+      const affectedDig = await prisma.$executeRawUnsafe(updateDigSql, nuevoValor, archivo, campanaId);
+
+      const totalAffected = Number(affectedTrad || 0) + Number(affectedDig || 0);
+
+      res.json({
+        success: true,
+        data: {
+          affected: totalAffected,
+          tradicional: Number(affectedTrad || 0),
+          digital: Number(affectedDig || 0),
+          archivo,
+          estatus_operaciones: nuevoValor,
+        },
+      });
+
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_ESTATUS_OPERACIONES_ACTUALIZADO, {
+        campanaId,
+        archivo,
+        estatus_operaciones: nuevoValor,
+        affected: totalAffected,
+        usuario: userName,
+      });
+    } catch (error) {
+      console.error('Error en updateArteEstatusOperaciones:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar estatus_operaciones';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
@@ -8173,12 +8266,29 @@ export class CampanasController {
             AND FIND_IN_SET(r3.id, REPLACE(tr3.ids_reservas, ' ', '')) > 0
           WHERE cm3.id = ?
           GROUP BY imd.archivo
+          UNION ALL
+          -- Biblioteca persistente: artes ya cargados que pudieron quedar
+          -- "huérfanos" si se reasignaron inventarios. uso_count = 0 para que
+          -- no inflen el conteo; otros UNIONs aportan el conteo real cuando
+          -- el arte sigue asignado a alguna reserva.
+          SELECT
+            ba.archivo as url,
+            SUBSTRING_INDEX(ba.archivo, '/', -1) as nombre,
+            0 as uso_count,
+            MAX(ba.nombre_arte) as nombre_arte,
+            MAX(ba.nota) as nota,
+            MAX(ba.estatus_operaciones) as estatus_operaciones,
+            NULL as estatus,
+            0 as tiene_instalado
+          FROM biblioteca_artes ba
+          WHERE ba.campania_id = ?
+          GROUP BY ba.archivo
         ) combined
         GROUP BY url
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -8795,8 +8905,8 @@ export class CampanasController {
 
       // Solo campañas cuya propuesta esté Aprobada — INVIAN VP/Digital es vista
       // de campaña activa, no de propuestas en revisión.
-      const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string }[]>(`
-        SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status
+      const campsRows = await prisma.$queryRawUnsafe<{ id: number; cotizacion_id: number; id_propuesta: number; descuento: number | null; nombre: string; cliente_id: number; status: string; tipo_periodo: string | null }[]>(`
+        SELECT cm.id, cm.cotizacion_id, ct.id_propuesta, ct.descuento, cm.nombre, cm.cliente_id, cm.status, ct.tipo_periodo
         FROM campania cm
         INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         INNER JOIN propuesta pr ON pr.id = ct.id_propuesta AND pr.deleted_at IS NULL
@@ -8921,6 +9031,7 @@ export class CampanasController {
           sc.cortesia,
           sc.inicio_periodo,
           sc.fin_periodo,
+          sc.formato AS sc_formato,
           rsv.id AS rsv_id,
           rsv.estatus AS rsv_estatus,
           rsv.archivo AS rsv_archivo,
@@ -8971,7 +9082,12 @@ export class CampanasController {
           : null;
         const arteUrl = r.rsv_archivo ? 'HAS_ARTE' : null;
         const inicioYear = inicio.getFullYear();
-        const finSegmento = `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
+        // Mensual (gran formato / UN+) muestra MES; catorcena muestra catorcena.
+        const esMensualRow = (camp?.tipo_periodo || 'catorcena') === 'mensual';
+        const inicioPeriodoLabel = esMensualRow ? `Meses ${inicioYear}` : `Catorcenas ${inicioYear}`;
+        const finSegmento = esMensualRow
+          ? `Mes #${String(inicio.getMonth() + 1).padStart(2, '0')}`
+          : `Catorcena #${String(Math.floor((Math.floor((inicio.getTime() - new Date(inicioYear, 0, 0).getTime()) / 86400000) - 1) / 14) + 1).padStart(2, '0')}`;
 
         // posted: mismo criterio que CAT — campaña con posted_to_sap=1 o el rsv_aps
         // de esta fila incluido en posted_aps.
@@ -8992,7 +9108,7 @@ export class CampanasController {
           PrecioPorCara: precioPorCara,
           Vendedor: propuestaByIdMap.get(String(r.idquote))?.nombre_usuario || null,
           Descripcion: null,
-          InicioPeriodo: `Catorcenas ${inicioYear}`,
+          InicioPeriodo: inicioPeriodoLabel,
           FinSegmento: finSegmento,
           Arte: cliente?.T2_U_Marca || null,
           CodigoArte: r.rsv_id,
@@ -9004,6 +9120,10 @@ export class CampanasController {
           Unidad: r.codigo_unico ? String(r.codigo_unico) : null,
           Cara: r.tipo_de_cara ? String(r.tipo_de_cara) : null,
           Ciudad: r.plaza ? String(r.plaza) : null,
+          // formato (sc.formato) + tipo_periodo: para la pestaña "Inventario UN+"
+          // (filtrar mensual + gran formato, mismo criterio que Ocupación UN+).
+          formato: r.sc_formato ? String(r.sc_formato) : null,
+          tipo_periodo: camp?.tipo_periodo || 'catorcena',
           sap_database: cliente?.sap_database || null,
           TipoDistribucion: tipoDist,
           Reproducciones: null,
@@ -10745,6 +10865,18 @@ export class CampanasController {
             VALUES (?, ?, ?, ?, ?, ?)
           `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: guardar el arte aunque luego se desasigne de
+        // todos los inventarios. Idempotente por (campania_id, archivo): si ya
+        // existe actualiza los metadatos.
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'tradicional', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, userId || null);
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)

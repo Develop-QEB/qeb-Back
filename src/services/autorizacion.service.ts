@@ -149,30 +149,6 @@ function normalizarTipo(tipo: string | null | undefined): string {
 }
 
 /**
- * Si una cara ya estaba aprobada (DG o DCM) y la edicion NO incrementa
- * costo ni caras (se mantiene igual o baja), se conserva la aprobacion
- * existente para no obligar a re-autorizar. Para los demas casos se
- * respeta el resultado calculado por calcularEstadoAutorizacion.
- */
-export function conservarAprobacionSiIncrementa(
-  calc: EstadoAutorizacionResult,
-  antes: { autorizacion_dg?: string | null; autorizacion_dcm?: string | null; costo: number; caras: number },
-  despues: { costo: number; caras: number },
-): EstadoAutorizacionResult {
-  const incrementaCosto = despues.costo > antes.costo;
-  const incrementaCaras = despues.caras > antes.caras;
-  const incrementa = incrementaCosto || incrementaCaras;
-  return {
-    autorizacion_dg: !incrementa && antes.autorizacion_dg === 'aprobado'
-      ? 'aprobado'
-      : calc.autorizacion_dg,
-    autorizacion_dcm: !incrementa && antes.autorizacion_dcm === 'aprobado'
-      ? 'aprobado'
-      : calc.autorizacion_dcm,
-  };
-}
-
-/**
  * Calcula el estado de autorización de una cara
  * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
  */
@@ -468,6 +444,32 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
   console.log('[calcularEstadoAutorizacion] Resultado final (Filtro 2 - par/impar):', resultado);
 
   return resultado as EstadoAutorizacionResult;
+}
+
+/**
+ * Regla "Direcciones Aprobadas": si una cara YA estaba aprobada por DG y DCM y
+ * la edición solo INCREMENTA (o deja igual) costo y caras, se conserva la
+ * aprobación — NO se dispara una nueva autorización. Si costo o caras BAJAN, se
+ * respeta el recálculo normal (puede volver a pendiente/autorización).
+ *
+ * Se aplica en los 3 niveles (solicitud / propuesta / campaña) DESPUÉS de
+ * `calcularEstadoAutorizacion`, usando los valores efectivos nuevos vs los que
+ * tenía la cara antes de editar.
+ */
+export function conservarAprobacionSiIncrementa(
+  estado: EstadoAutorizacionResult,
+  prev: { autorizacion_dg?: string | null; autorizacion_dcm?: string | null; costo?: number | null; caras?: number | null },
+  nuevo: { costo: number; caras: number }
+): EstadoAutorizacionResult {
+  const yaAprobada = prev.autorizacion_dg === 'aprobado' && prev.autorizacion_dcm === 'aprobado';
+  if (!yaAprobada) return estado;
+  const noBajaCosto = Number(nuevo.costo) >= Number(prev.costo ?? 0) - 0.005;
+  const noBajaCaras = Number(nuevo.caras) >= Number(prev.caras ?? 0);
+  if (noBajaCosto && noBajaCaras) {
+    console.log('[conservarAprobacionSiIncrementa] Cara ya aprobada y costo/caras no bajan → se conserva aprobación (sin nueva autorización)');
+    return { ...estado, autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado', motivo_dg: undefined, motivo_dcm: undefined };
+  }
+  return estado;
 }
 
 /**

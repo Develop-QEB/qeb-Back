@@ -6,6 +6,7 @@ import { initializeSocket } from './config/socket';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
+import { finalizarCampanasPorIniciarVencidas } from './services/campania-status.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -116,6 +117,15 @@ async function main() {
     // Tambien dispara al arrancar para procesar pendientes acumulados (idempotente).
     enviarRecordatoriosPendientes().catch((err: unknown) => {
       console.error('[Recordatorios] Error en ejecucion inicial:', err);
+    });
+
+    // A medianoche CDMX: las campañas pegadas en "Por iniciar" cuya fecha_fin ya
+    // pasó (dinámicamente "Pasada") se cambian a "finalizada". No toca los demás
+    // estados (Cancelada/Rechazada/Pausada/inactiva/En Operacion, etc.).
+    programarDiario(0, 'FinalizarCampanasVencidas 00:00', async () => { await finalizarCampanasPorIniciarVencidas(); });
+    // Tambien corre al arrancar para alinear las que ya estaban vencidas (idempotente).
+    finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
+      console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
     });
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);

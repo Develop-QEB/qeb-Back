@@ -83,13 +83,15 @@ export class NotificacionesController {
         where.OR = orConditions;
       }
 
-      // Diseñadores solo deben ver tareas/notificaciones relacionadas a Diseño:
-      // tareas de Revisión/Corrección y notificaciones de artes (aprobados,
-      // rechazados, pendientes, reasignacion, comentarios). Filtra el ruido de
-      // "Campaña nueva", "APS asignado", "Seguimiento Campaña", etc.
+      // Diseñadores y Coordinador de Diseño solo deben ver tareas/notificaciones
+      // relacionadas a Diseño: tareas de Revisión/Corrección y notificaciones de
+      // artes (aprobados, rechazados, pendientes, reasignacion, comentarios).
+      // Filtra el ruido de "Campaña nueva", "APS asignado", "Seguimiento Campaña",
+      // etc. — relevante para Estefania (Coord) que aparece como id_asignado en
+      // 325 propuestas históricas de cuando tenía otro rol.
       // Se usa `contains` con palabras clave para tolerar variantes de titulo
       // (singular/plural, con/sin acentos, "Arte" vs "Artes", etc.).
-      if (userRole === 'Diseñadores') {
+      if (userRole === 'Diseñadores' || userRole === 'Coordinador de Diseño') {
         const disenoWhitelist = {
           OR: [
             { tipo: { in: ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'] } },
@@ -1102,9 +1104,10 @@ export class NotificacionesController {
         where.OR = orConditions;
       }
 
-      // Diseñadores: solo cuentan tareas de Diseño (mismo whitelist que getAll).
-      // Se usa `contains` con palabras clave para tolerar variantes de titulo.
-      if (userRole === 'Diseñadores') {
+      // Diseñadores y Coord de Diseño: solo cuentan tareas de Diseño (mismo
+      // whitelist que getAll). Se usa `contains` con palabras clave para tolerar
+      // variantes de titulo.
+      if (userRole === 'Diseñadores' || userRole === 'Coordinador de Diseño') {
         const disenoWhitelist = {
           OR: [
             { tipo: { in: ['Revision de artes', 'Revisión de artes', 'Correccion', 'Corrección'] } },

@@ -82,6 +82,7 @@ router.post('/:id/assign-arte-tradicional', campanasController.assignArteTradici
 router.get('/:id/artes-tradicionales/:reservaId', campanasController.getArtesTradicionales.bind(campanasController));
 router.get('/:id/tradicional-file-summaries', campanasController.getTradicionalFileSummaries.bind(campanasController));
 router.post('/:id/arte-status', campanasController.updateArteStatus.bind(campanasController));
+router.patch('/:id/artes/estatus-operaciones', campanasController.updateArteEstatusOperaciones.bind(campanasController));
 router.post('/:id/instalado', campanasController.updateInstalado.bind(campanasController));
 router.post('/:id/check-reservas-tareas', campanasController.checkReservasTareas.bind(campanasController));
 router.delete('/:id/limpiar-artes-prueba', campanasController.limpiarArtesPrueba.bind(campanasController));

@@ -2050,7 +2050,10 @@ export class PropuestasController {
           ? await tx.usuario.findMany({
               where: {
                 id: { in: idsAsignados },
-                deleted_at: null
+                deleted_at: null,
+                // Coordinador de Diseño no debe recibir tareas de seguimiento de
+                // campaña ni de atender propuesta — su flujo es solo Diseño.
+                NOT: { user_role: 'Coordinador de Diseño' }
               },
               select: { id: true, nombre: true, correo_electronico: true }
             })
@@ -2088,8 +2091,12 @@ export class PropuestasController {
         for (const asignadoId of asignadosSinAnalistas) {
           const usuario = await tx.usuario.findUnique({
             where: { id: asignadoId },
-            select: { nombre: true, correo_electronico: true }
+            select: { nombre: true, correo_electronico: true, user_role: true }
           });
+
+          // Coordinador de Diseño no recibe notificación "Campaña nueva" — su
+          // flujo es solo Diseño (revisión/corrección de artes).
+          if (usuario && usuario.user_role === 'Coordinador de Diseño') continue;
 
           if (usuario) {
             await tx.tareas.create({
