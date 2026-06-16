@@ -100,9 +100,17 @@ const markReservasComoInstaladas = async (params: {
   //   reservas.instalado ni reservas.estatus. Para cuando el arte se reusa
   //   por rotacion y aun debe instalarse fisicamente.
   mode?: 'instalado' | 'rotacion';
+  // Asignados de Operaciones para la tarea creada (CSV de ids y nombres,
+  // o arrays). Aplica principalmente al modo 'rotacion' (la tarea queda
+  // 'Activo' y necesita responsable). En 'instalado' tambien se guardan
+  // como registro aunque la tarea esté 'Completado'.
+  idAsignado?: string | null;
+  asignado?: string | null;
 }): Promise<void> => {
   const { campanaId, userName } = params;
   const mode = params.mode || 'instalado';
+  const idAsignadoVal = (params.idAsignado && String(params.idAsignado).trim()) || null;
+  const asignadoVal = (params.asignado && String(params.asignado).trim()) || null;
   const reservaIdsBase = params.reservaIds.filter(n => Number.isFinite(n));
   if (reservaIdsBase.length === 0) return;
 
@@ -208,8 +216,8 @@ const markReservasComoInstaladas = async (params: {
       fecha_fin: ahora,
       id_responsable: params.userId || 0,
       responsable: userName,
-      asignado: null,
-      id_asignado: null,
+      asignado: asignadoVal,
+      id_asignado: idAsignadoVal,
       id_solicitud: idSolicitud,
       id_propuesta: idPropuesta,
       campania_id: campanaId,
@@ -4402,7 +4410,7 @@ export class CampanasController {
   async assignArte(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivo, markInstalado, instalacionMode } = req.body;
+      const { reservaIds, archivo, markInstalado, instalacionMode, idAsignadoOperaciones, asignadoOperaciones } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4628,6 +4636,8 @@ export class CampanasController {
             userId,
             userName,
             mode,
+            idAsignado: idAsignadoOperaciones,
+            asignado: asignadoOperaciones,
           });
         } catch (errMark) {
           console.error('assignArte: markReservasComoInstaladas falló:', errMark);
@@ -4666,7 +4676,7 @@ export class CampanasController {
   async assignArteDigital(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos, markInstalado, instalacionMode } = req.body;
+      const { reservaIds, archivos, markInstalado, instalacionMode, idAsignadoOperaciones, asignadoOperaciones } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -4797,6 +4807,8 @@ export class CampanasController {
             userId,
             userName,
             mode,
+            idAsignado: idAsignadoOperaciones,
+            asignado: asignadoOperaciones,
           });
         } catch (errMark) {
           console.error('assignArteDigital: markReservasComoInstaladas falló:', errMark);
@@ -8316,6 +8328,32 @@ export class CampanasController {
     }
   }
 
+  // Listar usuarios activos del área "Operaciones" — para el selector que
+  // aparece en el modal Asignar Arte cuando el usuario elige Rotación, así
+  // la tarea de Instalación generada queda asignada a personas de Operaciones.
+  async getUsuariosOperaciones(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const usuarios = await prisma.usuario.findMany({
+        where: {
+          deleted_at: null,
+          OR: [
+            { area: { contains: 'Operaciones' } },
+            { puesto: { contains: 'Operaciones' } },
+          ],
+        },
+        select: { id: true, nombre: true, area: true, puesto: true, user_role: true },
+        orderBy: { nombre: 'asc' },
+      });
+      res.json({ success: true, data: usuarios });
+    } catch (error) {
+      console.error('Error en getUsuariosOperaciones:', error);
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Error al obtener usuarios de operaciones',
+      });
+    }
+  }
+
 // Obtener lista de usuarios para asignación (filtrado por equipo)
   async getUsuarios(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -10793,7 +10831,7 @@ export class CampanasController {
   async assignArteTradicional(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds, archivos, markInstalado, instalacionMode } = req.body;
+      const { reservaIds, archivos, markInstalado, instalacionMode, idAsignadoOperaciones, asignadoOperaciones } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = parseInt(id);
@@ -10916,6 +10954,8 @@ export class CampanasController {
             userId,
             userName,
             mode,
+            idAsignado: idAsignadoOperaciones,
+            asignado: asignadoOperaciones,
           });
         } catch (errMark) {
           console.error('assignArteTradicional: markReservasComoInstaladas falló:', errMark);

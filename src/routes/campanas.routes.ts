@@ -9,6 +9,7 @@ router.use(authMiddleware);
 // Rutas estáticas (ANTES de /:id para que no las capture el parámetro dinámico)
 router.get('/stats', campanasController.getStats.bind(campanasController));
 router.get('/usuarios/lista', campanasController.getUsuarios.bind(campanasController));
+router.get('/usuarios/operaciones', campanasController.getUsuariosOperaciones.bind(campanasController));
 router.get('/ordenes-montaje/cat', campanasController.getOrdenMontajeCAT.bind(campanasController));
 router.get('/ordenes-montaje/invian', campanasController.getOrdenMontajeINVIAN.bind(campanasController));
 
