@@ -2822,7 +2822,9 @@ export class SolicitudesController {
                   { area: { contains: 'Trafico' } }
                 ],
                 ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
-                deleted_at: null
+                deleted_at: null,
+                // Coordinador de Diseño nunca recibe "Atender Propuesta".
+                NOT: { user_role: 'Coordinador de Diseño' }
               },
               select: { id: true, nombre: true, correo_electronico: true }
             });
@@ -2831,13 +2833,14 @@ export class SolicitudesController {
             const usuariosTraficoRaw = await tx.usuario.findMany({
               where: {
                 id: { in: nuevosAsignadosIds },
-                deleted_at: null
+                deleted_at: null,
+                NOT: { user_role: 'Coordinador de Diseño' }
               },
               select: { id: true, nombre: true, correo_electronico: true }
             });
-            
+
             // Filtrar al creador si existe
-            usuariosTrafico = solicitud.usuario_id 
+            usuariosTrafico = solicitud.usuario_id
               ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
               : usuariosTraficoRaw;
           }
