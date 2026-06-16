@@ -5504,6 +5504,79 @@ export class CampanasController {
   }
 
   /**
+   * Actualizar estatus_operaciones de un arte para TODAS las reservas que comparten
+   * el mismo archivo dentro de la campaña. El campo es del arte (no de la reserva
+   * individual), así que un solo cambio se propaga a todas las filas que tienen
+   * ese archivo en artes_tradicionales / imagenes_digitales.
+   */
+  async updateArteEstatusOperaciones(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { archivo, estatus_operaciones } = req.body as { archivo?: string; estatus_operaciones?: string | null };
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!campanaId || Number.isNaN(campanaId)) {
+        res.status(400).json({ success: false, error: 'campanaId inválido' });
+        return;
+      }
+      if (!archivo || typeof archivo !== 'string') {
+        res.status(400).json({ success: false, error: 'Se requiere archivo (URL)' });
+        return;
+      }
+
+      const nuevoValor = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+
+      const updateTradSql = `
+        UPDATE artes_tradicionales at
+        JOIN reservas r ON r.id = at.id_reserva
+        JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        JOIN cotizacion ct ON CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci = sc.idquote
+        JOIN campania camp ON camp.cotizacion_id = ct.id
+        SET at.estatus_operaciones = ?
+        WHERE at.archivo = ? AND camp.id = ?
+      `;
+      const affectedTrad = await prisma.$executeRawUnsafe(updateTradSql, nuevoValor, archivo, campanaId);
+
+      const updateDigSql = `
+        UPDATE imagenes_digitales img
+        JOIN reservas r ON r.id = img.id_reserva
+        JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+        JOIN cotizacion ct ON CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci = sc.idquote
+        JOIN campania camp ON camp.cotizacion_id = ct.id
+        SET img.estatus_operaciones = ?
+        WHERE img.archivo = ? AND camp.id = ?
+      `;
+      const affectedDig = await prisma.$executeRawUnsafe(updateDigSql, nuevoValor, archivo, campanaId);
+
+      const totalAffected = Number(affectedTrad || 0) + Number(affectedDig || 0);
+
+      res.json({
+        success: true,
+        data: {
+          affected: totalAffected,
+          tradicional: Number(affectedTrad || 0),
+          digital: Number(affectedDig || 0),
+          archivo,
+          estatus_operaciones: nuevoValor,
+        },
+      });
+
+      emitToCampana(campanaId, SOCKET_EVENTS.ARTE_ESTATUS_OPERACIONES_ACTUALIZADO, {
+        campanaId,
+        archivo,
+        estatus_operaciones: nuevoValor,
+        affected: totalAffected,
+        usuario: userName,
+      });
+    } catch (error) {
+      console.error('Error en updateArteEstatusOperaciones:', error);
+      const message = error instanceof Error ? error.message : 'Error al actualizar estatus_operaciones';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
    * Actualizar estado de instalación (testigo)
    */
   async updateInstalado(req: AuthRequest, res: Response): Promise<void> {
