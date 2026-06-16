@@ -4748,6 +4748,16 @@ export class CampanasController {
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
           `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: idempotente por (campania, archivo).
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, userId || null);
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -4899,6 +4909,16 @@ export class CampanasController {
             VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
           `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: idempotente por (campania, archivo).
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, req.user?.userId || null);
       }
 
       // Registrar en historial
@@ -8246,12 +8266,29 @@ export class CampanasController {
             AND FIND_IN_SET(r3.id, REPLACE(tr3.ids_reservas, ' ', '')) > 0
           WHERE cm3.id = ?
           GROUP BY imd.archivo
+          UNION ALL
+          -- Biblioteca persistente: artes ya cargados que pudieron quedar
+          -- "huérfanos" si se reasignaron inventarios. uso_count = 0 para que
+          -- no inflen el conteo; otros UNIONs aportan el conteo real cuando
+          -- el arte sigue asignado a alguna reserva.
+          SELECT
+            ba.archivo as url,
+            SUBSTRING_INDEX(ba.archivo, '/', -1) as nombre,
+            0 as uso_count,
+            MAX(ba.nombre_arte) as nombre_arte,
+            MAX(ba.nota) as nota,
+            MAX(ba.estatus_operaciones) as estatus_operaciones,
+            NULL as estatus,
+            0 as tiene_instalado
+          FROM biblioteca_artes ba
+          WHERE ba.campania_id = ?
+          GROUP BY ba.archivo
         ) combined
         GROUP BY url
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -10828,6 +10865,18 @@ export class CampanasController {
             VALUES (?, ?, ?, ?, ?, ?)
           `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal);
         }
+
+        // Biblioteca persistente: guardar el arte aunque luego se desasigne de
+        // todos los inventarios. Idempotente por (campania_id, archivo): si ya
+        // existe actualiza los metadatos.
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
+          VALUES (?, ?, 'tradicional', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+            nota = COALESCE(VALUES(nota), nota),
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
+        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, userId || null);
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)
