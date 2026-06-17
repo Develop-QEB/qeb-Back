@@ -129,6 +129,11 @@ export async function createReservaConLock(
   fechaInicio: Date,
   fechaFin: Date,
   excludeCaraIds?: number[],
+  // OPCIONAL: inventario_id padre del espacio, ya precalculado por el caller en
+  // bulk. Si viene, evita el SELECT extra dentro de la transacción (solo se usa
+  // para el payload del emit, no afecta la correctitud de la reserva). Si no
+  // viene (undefined), se consulta como antes — los callers viejos no cambian.
+  cachedInvId?: number | null,
 ): Promise<{ ok: true; reserva: { id: number } } | { ok: false; reason: 'OCCUPIED' }> {
   const espacioId = Number(data.inventario_id);
   try {
@@ -168,17 +173,30 @@ export async function createReservaConLock(
 
       const created = await tx.reservas.create({ data, select: { id: true } });
 
-      // Para el evento socket: obtener el inventarios.id padre del espacio.
-      const invParentRow = await tx.$queryRawUnsafe<{ inv_id: number | null }[]>(
-        `SELECT inventario_id AS inv_id FROM espacio_inventario WHERE id = ? LIMIT 1`,
-        espacioId
-      );
+      // Para el evento socket: inventarios.id padre del espacio. Si el caller ya
+      // lo precalculó en bulk (cachedInvId !== undefined) lo usamos y evitamos el
+      // round-trip; si no, lo consultamos como siempre.
+      let invId: number | null;
+      if (cachedInvId !== undefined) {
+        invId = cachedInvId;
+      } else {
+        const invParentRow = await tx.$queryRawUnsafe<{ inv_id: number | null }[]>(
+          `SELECT inventario_id AS inv_id FROM espacio_inventario WHERE id = ? LIMIT 1`,
+          espacioId
+        );
+        invId = invParentRow[0]?.inv_id ?? null;
+      }
 
       return {
         reserva: created,
-        invId: invParentRow[0]?.inv_id ?? null,
+        invId,
       };
-    }, { timeout: 10000 });
+      // maxWait alto: bajo el paralelismo de reservas (lotes) + la carga concurrente
+      // del front (getDisponibles/reservas-modal), conseguir una conexión del pool
+      // puede tardar más de los 2s default. Esperamos hasta 20s para NO soltar items
+      // por un P2028 ("unable to start a transaction in the given time"). timeout =
+      // tope de EJECUCIÓN de la transacción una vez iniciada.
+    }, { timeout: 10000, maxWait: 20000 });
 
     // Emitir evento real-time para que otros buscadores de inventario en
     // vivo quiten este espacio de su listado de disponibles.

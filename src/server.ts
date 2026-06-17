@@ -84,49 +84,56 @@ async function main() {
   try {
     await connectWithRetry();
 
-    // CRON Limpieza de reservas DESACTIVADO: el flujo soft-deleteaba reservas
-    // Reservado/Bonificado sin generar historial. Si se reactiva, hacerlo a través
-    // de un endpoint con auditoría, no como tarea automática.
-    // Procesar tickets pendientes sin respuesta de soporte
-    chatbotController.processarTicketsPendientes().catch(err => {
-      console.error('[AutoTicket] Error en procesamiento inicial:', err);
-    });
+    // DISABLE_STARTUP_CRONS=true → para correr el back local contra una BD
+    // distinta a la habitual (ej. prod, para reproducir un bug) SIN que los
+    // crones de arranque ni los programados muten la BD.
+    if (process.env.DISABLE_STARTUP_CRONS === 'true') {
+      console.log('[CRON] DISABLE_STARTUP_CRONS=true — todos los crones desactivados.');
+    } else {
+      // CRON Limpieza de reservas DESACTIVADO: el flujo soft-deleteaba reservas
+      // Reservado/Bonificado sin generar historial. Si se reactiva, hacerlo a través
+      // de un endpoint con auditoría, no como tarea automática.
+      // Procesar tickets pendientes sin respuesta de soporte
+      chatbotController.processarTicketsPendientes().catch(err => {
+        console.error('[AutoTicket] Error en procesamiento inicial:', err);
+      });
 
-    // Depurar tareas de autorización resueltas al arrancar
-    depurarTareasAutorizacionResueltas().catch((err: unknown) => {
-      console.error('[DepurarAutorizaciones] Error en depuración inicial:', err);
-    });
+      // Depurar tareas de autorización resueltas al arrancar
+      depurarTareasAutorizacionResueltas().catch((err: unknown) => {
+        console.error('[DepurarAutorizaciones] Error en depuración inicial:', err);
+      });
 
-    // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
-    programarDiario(9, 'ResumenAutorizaciones 09:00', enviarResumenAutorizacionesPendientes);
-    programarDiario(16, 'ResumenAutorizaciones 16:00', enviarResumenAutorizacionesPendientes);
+      // Programar resumen diario de autorizaciones pendientes a directores (9am y 4pm CDMX)
+      programarDiario(9, 'ResumenAutorizaciones 09:00', enviarResumenAutorizacionesPendientes);
+      programarDiario(16, 'ResumenAutorizaciones 16:00', enviarResumenAutorizacionesPendientes);
 
-    // Detectar y limpiar reservas zombi cada día (3am CDMX, hora valle).
-    // Soft-deletea las que NO tienen APS y loguea las que SÍ para revisión manual
-    // (no se borran automáticamente porque su APS ya está en SAP como documento).
-    programarDiario(3, 'ZombiMonitor 03:00', async () => { await detectarYLimpiarZombis(); });
+      // Detectar y limpiar reservas zombi cada día (3am CDMX, hora valle).
+      // Soft-deletea las que NO tienen APS y loguea las que SÍ para revisión manual
+      // (no se borran automáticamente porque su APS ya está en SAP como documento).
+      programarDiario(3, 'ZombiMonitor 03:00', async () => { await detectarYLimpiarZombis(); });
 
-    // Depurar tareas de autorización + reparar huérfanos (caras pendientes
-    // sin tarea visible para DG/DCM). 4am CDMX, antes de que el equipo abra.
-    programarDiario(4, 'DepurarAutorizaciones 04:00', async () => { await depurarTareasAutorizacionResueltas(); });
+      // Depurar tareas de autorización + reparar huérfanos (caras pendientes
+      // sin tarea visible para DG/DCM). 4am CDMX, antes de que el equipo abra.
+      programarDiario(4, 'DepurarAutorizaciones 04:00', async () => { await depurarTareasAutorizacionResueltas(); });
 
-    // Recordatorios de historial (Acciones Manuales con fecha programada).
-    // Cada dia a las 8am CDMX revisa entradas listas para notificar segun
-    // fecha_entrega - recordar_dias_antes y crea tareas de tipo "Recordatorio".
-    programarDiario(8, 'Recordatorios 08:00', async () => { await enviarRecordatoriosPendientes(); });
-    // Tambien dispara al arrancar para procesar pendientes acumulados (idempotente).
-    enviarRecordatoriosPendientes().catch((err: unknown) => {
-      console.error('[Recordatorios] Error en ejecucion inicial:', err);
-    });
+      // Recordatorios de historial (Acciones Manuales con fecha programada).
+      // Cada dia a las 8am CDMX revisa entradas listas para notificar segun
+      // fecha_entrega - recordar_dias_antes y crea tareas de tipo "Recordatorio".
+      programarDiario(8, 'Recordatorios 08:00', async () => { await enviarRecordatoriosPendientes(); });
+      // Tambien dispara al arrancar para procesar pendientes acumulados (idempotente).
+      enviarRecordatoriosPendientes().catch((err: unknown) => {
+        console.error('[Recordatorios] Error en ejecucion inicial:', err);
+      });
 
-    // A medianoche CDMX: las campañas pegadas en "Por iniciar" cuya fecha_fin ya
-    // pasó (dinámicamente "Pasada") se cambian a "finalizada". No toca los demás
-    // estados (Cancelada/Rechazada/Pausada/inactiva/En Operacion, etc.).
-    programarDiario(0, 'FinalizarCampanasVencidas 00:00', async () => { await finalizarCampanasPorIniciarVencidas(); });
-    // Tambien corre al arrancar para alinear las que ya estaban vencidas (idempotente).
-    finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
-      console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
-    });
+      // A medianoche CDMX: las campañas pegadas en "Por iniciar" cuya fecha_fin ya
+      // pasó (dinámicamente "Pasada") se cambian a "finalizada". No toca los demás
+      // estados (Cancelada/Rechazada/Pausada/inactiva/En Operacion, etc.).
+      programarDiario(0, 'FinalizarCampanasVencidas 00:00', async () => { await finalizarCampanasPorIniciarVencidas(); });
+      // Tambien corre al arrancar para alinear las que ya estaban vencidas (idempotente).
+      finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
+        console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
+      });
+    }
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
     console.log('[DB] Server running without DB — requests will retry on demand.');
