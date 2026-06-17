@@ -3196,160 +3196,116 @@ export class PropuestasController {
       };
 
       // Create reservas
-      const createdReservas = [];
+      const createdReservas: { id: number }[] = [];
       const totalReservas = reservas.length;
       let reservasProcesadas = 0;
 
-      // Process grupos completos first
+      // PREFETCH 1: reservas ACTIVAS de esta cara (1 query) para dedup en memoria,
+      // en vez de un findFirst por item (antes ~1 query por reserva).
+      const existentesCara = new Set<number>(
+        (await prisma.reservas.findMany({
+          where: { solicitudCaras_id: solicitudCaraId, deleted_at: null },
+          select: { inventario_id: true },
+        })).map(r => r.inventario_id)
+      );
+
+      // PLANIFICACIÓN (serial, en memoria): asigna espacio a cada item respetando
+      // el Set de bloqueados/usados y descarta los que no aplican. El Set se marca
+      // AQUÍ para que dos items del request no tomen el mismo espacio. La garantía
+      // anti-doble-booking real (cross-request) sigue siendo el SELECT FOR UPDATE
+      // dentro de createReservaConLock.
+      type WorkItem = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      const workList: WorkItem[] = [];
+      const planItem = (reserva: typeof reservas[number], grupoCompletoId: number | null): void => {
+        const espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
+        if (!espacioId) {
+          console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
+          reservasProcesadas++;
+          return;
+        }
+        if (espaciosReservadosEnPeriodo.has(espacioId)) {
+          console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          reservasProcesadas++;
+          return;
+        }
+        if (existentesCara.has(espacioId)) {
+          reservasProcesadas++;
+          return;
+        }
+        const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
+        espaciosReservadosEnPeriodo.add(espacioId);
+        workList.push({ espacioId, estatus, grupoCompletoId });
+      };
+
+      // Grupos completos primero (cada invId del grupo), luego las normales.
       for (const [grupoId, invIds] of gruposCompletos) {
         for (const invId of invIds) {
           const reserva = reservas.find(r => r.inventario_id === invId);
           if (!reserva) continue;
-
-          // Use espacio_id directly if provided (for digital items), otherwise find available
-          let espacioId = reserva.espacio_id || encontrarEspacioDisponible(invId);
-          if (!espacioId) {
-            console.warn(`No hay espacios disponibles para inventario_id ${invId}`);
-            reservasProcesadas++;
-            continue;
-          }
-
-          // Validar que el espacio no esté reservado en el período (por otra propuesta)
-          if (espaciosReservadosEnPeriodo.has(espacioId)) {
-            console.warn(`El espacio ${espacioId} ya está reservado en el período`);
-            reservasProcesadas++;
-            continue;
-          }
-
-          const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
-
-          // Verificar duplicados en la misma propuesta Y mismo período
-          const exists = await prisma.reservas.findFirst({
-            where: {
-              inventario_id: espacioId,
-              solicitudCaras_id: solicitudCaraId,
-              deleted_at: null
-            }
-          });
-
-          if (exists) {
-            reservasProcesadas++;
-            continue;
-          }
-
-          // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
-          // de conflictos para evitar doble-booking en concurrencia (3 usuarios
-          // reservando el mismo espacio al mismo tiempo).
-          const lockResult = await createReservaConLock({
-            inventario_id: espacioId,
-            calendario_id: calendario.id,
-            cliente_id: clienteId,
-            solicitudCaras_id: solicitudCaraId,
-            estatus,
-            estatus_original: estatus,
-            arte_aprobado: 'Pendiente',
-            comentario_rechazo: '',
-            fecha_testigo: new Date(),
-            imagen_testigo: '',
-            instalado: false,
-            tarea: '',
-            grupo_completo_id: parseInt(grupoId),
-          }, fechaIni, fechaFinDate, proposalCaraIds);
-          if (!lockResult.ok) {
-            console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
-            reservasProcesadas++;
-            continue;
-          }
-          const created = lockResult.reserva;
-
-          // Marcar espacio como usado para evitar duplicados en este request
-          espaciosReservadosEnPeriodo.add(espacioId);
-          createdReservas.push(created);
-          reservasProcesadas++;
-
-          // Emitir progreso cada 5 reservas o en la última
-          if (reservasProcesadas % 5 === 0 || reservasProcesadas === totalReservas) {
-            emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_PROGRESO, {
-              propuestaId,
-              procesadas: reservasProcesadas,
-              total: totalReservas,
-              creadas: createdReservas.length,
-              porcentaje: Math.round((reservasProcesadas / totalReservas) * 100)
-            });
-          }
+          planItem(reserva, parseInt(grupoId));
         }
       }
-
-      // Process normal reservas
       for (const reserva of reservasNormales) {
-        // Use espacio_id directly if provided (for digital items), otherwise find available
-        let espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
-        if (!espacioId) {
-          console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
-          reservasProcesadas++;
-          continue;
-        }
+        planItem(reserva, null);
+      }
 
-        // Validar que el espacio no esté reservado en el período (por otra propuesta)
-        if (espaciosReservadosEnPeriodo.has(espacioId)) {
-          console.warn(`El espacio ${espacioId} ya está reservado en el período`);
-          reservasProcesadas++;
-          continue;
-        }
-
-        const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
-
-        // Verificar duplicados en la misma cara (mismo período)
-        const exists = await prisma.reservas.findFirst({
-          where: {
-            inventario_id: espacioId,
-            solicitudCaras_id: solicitudCaraId,
-            deleted_at: null
-          }
+      // PREFETCH 2: inventario_id padre de cada espacio (1 query) para que
+      // createReservaConLock no haga ese SELECT por item (solo lo usa el emit).
+      const invPadrePorEspacio = new Map<number, number | null>();
+      if (workList.length > 0) {
+        const filas = await prisma.espacio_inventario.findMany({
+          where: { id: { in: workList.map(w => w.espacioId) } },
+          select: { id: true, inventario_id: true },
         });
+        for (const f of filas) invPadrePorEspacio.set(f.id, f.inventario_id);
+      }
 
-        if (exists) {
+      // EJECUCIÓN paralela en lotes acotados. El cuello de botella eran las ~60
+      // transacciones EN SERIE contra una BD remota (latencia de red). Con lotes
+      // de BATCH_SIZE concurrentes se reduce ~2.5-3.5x. Pool = 30, así que 5 deja
+      // holgura. SELECT FOR UPDATE serializa por-espacio dentro de la BD.
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < workList.length; i += BATCH_SIZE) {
+        const lote = workList.slice(i, i + BATCH_SIZE);
+        const resultados = await Promise.all(lote.map(async (w) => {
+          try {
+            const lockResult = await createReservaConLock({
+              inventario_id: w.espacioId,
+              calendario_id: calendario.id,
+              cliente_id: clienteId,
+              solicitudCaras_id: solicitudCaraId,
+              estatus: w.estatus,
+              estatus_original: w.estatus,
+              arte_aprobado: 'Pendiente',
+              comentario_rechazo: '',
+              fecha_testigo: new Date(),
+              imagen_testigo: '',
+              instalado: false,
+              tarea: '',
+              grupo_completo_id: w.grupoCompletoId,
+            }, fechaIni, fechaFinDate, proposalCaraIds, invPadrePorEspacio.get(w.espacioId) ?? null);
+            return { w, lockResult };
+          } catch (err) {
+            console.error(`[Reserva] error inesperado en espacio ${w.espacioId}:`, err);
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+          }
+        }));
+        for (const { w, lockResult } of resultados) {
           reservasProcesadas++;
-          continue;
+          if (lockResult.ok) {
+            createdReservas.push(lockResult.reserva);
+          } else {
+            console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+          }
         }
-
-        const lockResult = await createReservaConLock({
-          inventario_id: espacioId,
-          calendario_id: calendario.id,
-          cliente_id: clienteId,
-          solicitudCaras_id: solicitudCaraId,
-          estatus,
-          estatus_original: estatus,
-          arte_aprobado: 'Pendiente',
-          comentario_rechazo: '',
-          fecha_testigo: new Date(),
-          imagen_testigo: '',
-          instalado: false,
-          tarea: '',
-          grupo_completo_id: null,
-        }, fechaIni, fechaFinDate, proposalCaraIds);
-        if (!lockResult.ok) {
-          console.warn(`[Race] espacio ${espacioId} fue reservado por otro usuario concurrentemente`);
-          reservasProcesadas++;
-          continue;
-        }
-        const created = lockResult.reserva;
-
-        // Marcar espacio como usado para evitar duplicados en este request
-        espaciosReservadosEnPeriodo.add(espacioId);
-        createdReservas.push(created);
-        reservasProcesadas++;
-
-        // Emitir progreso cada 5 reservas o en la última
-        if (reservasProcesadas % 5 === 0 || reservasProcesadas === totalReservas) {
-          emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_PROGRESO, {
-            propuestaId,
-            procesadas: reservasProcesadas,
-            total: totalReservas,
-            creadas: createdReservas.length,
-            porcentaje: Math.round((reservasProcesadas / totalReservas) * 100)
-          });
-        }
+        // Progreso por lote
+        emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_PROGRESO, {
+          propuestaId,
+          procesadas: reservasProcesadas,
+          total: totalReservas,
+          creadas: createdReservas.length,
+          porcentaje: Math.round((reservasProcesadas / totalReservas) * 100)
+        });
       }
 
       // Update solicitudCaras totals if needed

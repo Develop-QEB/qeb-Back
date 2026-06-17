@@ -9778,43 +9778,82 @@ export class CampanasController {
       const isBfCara = !!(scData?.articulo && (scData.articulo.toUpperCase().startsWith('BF') || scData.articulo.toUpperCase().startsWith('CF')));
 
       let reservasOmitidas = 0;
+      // grupo_completo_id: campañas usa UN solo id para todas las no-bonificación.
+      // Se crea de forma perezosa la primera vez que se necesita (igual que antes).
       let currentGroupId: number | null = null;
+      const getGroupId = async (): Promise<number> => {
+        if (currentGroupId === null) {
+          const maxGroup = await prisma.reservas.aggregate({ _max: { grupo_completo_id: true } });
+          currentGroupId = (maxGroup._max.grupo_completo_id || 0) + 1;
+        }
+        return currentGroupId;
+      };
 
-      // Procesar reservas
+      // PREFETCH espacios de los inventarios sin espacio_id (1 query) en vez de
+      // consultar por item dentro del loop.
+      const invIdsSinEspacioC = reservas.filter(r => !r.espacio_id).map(r => r.inventario_id);
+      const espaciosCampMap = new Map<number, number[]>();
+      if (invIdsSinEspacioC.length > 0) {
+        const espC = await prisma.espacio_inventario.findMany({
+          where: { inventario_id: { in: invIdsSinEspacioC } },
+          orderBy: { numero_espacio: 'asc' },
+        });
+        for (const e of espC) {
+          if (!espaciosCampMap.has(e.inventario_id)) espaciosCampMap.set(e.inventario_id, []);
+          espaciosCampMap.get(e.inventario_id)!.push(e.id);
+        }
+      }
+      const encontrarEspacioCamp = (invId: number): number | null => {
+        const list = espaciosCampMap.get(invId);
+        if (!list) return null;
+        for (const id of list) {
+          if (!espaciosReservadosEnPeriodo.has(id)) return id;
+        }
+        return null;
+      };
+
+      // PREFETCH dedup para la cara (activas y soft-deleted), 1 query c/u, en vez
+      // de dos findFirst por item.
+      const activasCaraC = new Set<number>();
+      const softDeletedCaraC = new Map<number, number>(); // espacioId -> reserva soft-deleted más reciente
+      if (solicitudCaraId) {
+        const activas = await prisma.reservas.findMany({
+          where: { solicitudCaras_id: solicitudCaraId, deleted_at: null },
+          select: { inventario_id: true },
+        });
+        for (const r of activas) activasCaraC.add(r.inventario_id);
+        const borradas = await prisma.reservas.findMany({
+          where: { solicitudCaras_id: solicitudCaraId, deleted_at: { not: null } },
+          select: { id: true, inventario_id: true },
+          orderBy: { id: 'desc' },
+        });
+        for (const r of borradas) {
+          if (!softDeletedCaraC.has(r.inventario_id)) softDeletedCaraC.set(r.inventario_id, r.id);
+        }
+      }
+
+      // PLANIFICACIÓN serial: asigna espacio, descarta los que no aplican y separa
+      // reactivaciones (soft-deleted) del trabajo de creación. Marca el Set para
+      // que dos items del request no tomen el mismo espacio.
+      type WorkItemCamp = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      const workListCamp: WorkItemCamp[] = [];
+      const reactivarList: { reservaId: number; estatus: string }[] = [];
       for (const reserva of reservas) {
         let espacioId: number;
-
-        // Si viene espacio_id del frontend, usarlo directamente
         if (reserva.espacio_id) {
           espacioId = reserva.espacio_id;
         } else {
-          // Buscar todos los espacios del inventario
-          const espaciosInventario = await prisma.espacio_inventario.findMany({
-            where: { inventario_id: reserva.inventario_id },
-            orderBy: { numero_espacio: 'asc' },
-          });
-
-          if (espaciosInventario.length === 0) {
-            console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
-            continue;
-          }
-
-          // Buscar el primer espacio disponible (no reservado en el período)
-          let espacioEncontrado: number | null = null;
-          for (const espacio of espaciosInventario) {
-            if (!espaciosReservadosEnPeriodo.has(espacio.id)) {
-              espacioEncontrado = espacio.id;
-              break;
+          const enc = encontrarEspacioCamp(reserva.inventario_id);
+          if (enc === null) {
+            if (!espaciosCampMap.has(reserva.inventario_id)) {
+              console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+            } else {
+              console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
+              reservasOmitidas++;
             }
-          }
-
-          if (!espacioEncontrado) {
-            console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
-            reservasOmitidas++;
             continue;
           }
-
-          espacioId = espacioEncontrado;
+          espacioId = enc;
         }
 
         // Validar que el espacio no esté ya reservado en el período
@@ -9824,94 +9863,93 @@ export class CampanasController {
           continue;
         }
 
-        // Fix dups PATSA-style: si ya existe reserva activa para este
-        // espacio + sc, NO crear otra. Antes este endpoint solo validaba contra
-        // otras campañas (getEspaciosBloqueados), no contra la misma sc.
-        // Eso permitía que dos llamadas seguidas (doble click, retry de red,
-        // o re-asignación tras quitar APS) crearan reservas duplicadas
-        // apuntando al mismo inv+sc — patrón PATSA-JAGUAR-PUMA, SALVO, NESPRESSO.
+        const estatus = (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido';
+
+        // Fix dups PATSA-style: si ya existe reserva activa para este espacio + sc,
+        // NO crear otra. Si hay una soft-deleted previa, reactivarla en vez de
+        // crear nueva (flujo quitar→regresar APS). Ambos checks ahora son en
+        // memoria con los prefetch de arriba.
         if (solicitudCaraId) {
-          const existingActiva = await prisma.reservas.findFirst({
-            where: {
-              inventario_id: espacioId,
-              solicitudCaras_id: solicitudCaraId,
-              deleted_at: null,
-            },
-          });
-          if (existingActiva) {
-            console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId} (rv=${existingActiva.id}), omitiendo`);
+          if (activasCaraC.has(espacioId)) {
+            console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId}, omitiendo`);
             reservasOmitidas++;
             continue;
           }
-
-          // Si hay reserva soft-deleted previa con mismos datos, reactivarla
-          // en vez de crear nueva. Eso previene fantasmas y "filas huérfanas"
-          // del flujo quitar→regresar APS.
-          const softDeleted = await prisma.reservas.findFirst({
-            where: {
-              inventario_id: espacioId,
-              solicitudCaras_id: solicitudCaraId,
-              deleted_at: { not: null },
-            },
-            orderBy: { id: 'desc' },
-          });
-          if (softDeleted) {
-            await prisma.reservas.update({
-              where: { id: softDeleted.id },
-              data: {
-                deleted_at: null,
-                calendario_id: calendario.id,
-                cliente_id: clienteId || 0,
-                estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
-                estatus_original: '',
-                APS: null,
-              },
-            });
+          const softId = softDeletedCaraC.get(espacioId);
+          if (softId) {
+            reactivarList.push({ reservaId: softId, estatus });
             espaciosReservadosEnPeriodo.add(espacioId);
-            reservasCreadas++;
             continue;
           }
         }
 
-        // Determinar si necesita grupo completo
-        let grupoCompletoId: number | null = null;
-        if (agruparComoCompleto && reserva.tipo !== 'Bonificacion') {
-          if (!currentGroupId) {
-            // Crear nuevo grupo
-            const maxGroup = await prisma.reservas.aggregate({
-              _max: { grupo_completo_id: true }
-            });
-            currentGroupId = (maxGroup._max.grupo_completo_id || 0) + 1;
-          }
-          grupoCompletoId = currentGroupId;
-        }
-
-        // createReservaConLock: SELECT FOR UPDATE sobre el espacio + re-check
-        // de conflictos para evitar doble-booking concurrente.
-        const lockResult = await createReservaConLock({
-          solicitudCaras_id: solicitudCaraId,
-          inventario_id: espacioId,
-          calendario_id: calendario.id,
-          cliente_id: clienteId || 0,
-          estatus: (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido',
-          arte_aprobado: '',
-          comentario_rechazo: '',
-          estatus_original: '',
-          fecha_testigo: new Date(),
-          imagen_testigo: '',
-          instalado: false,
-          tarea: '',
-          grupo_completo_id: grupoCompletoId,
-        }, fechaIni, fechaFinDate);
-        if (!lockResult.ok) {
-          console.warn(`[Race] espacio ${espacioId} conflicto de reserva en período`);
-          reservasOmitidas++;
-          continue;
-        }
-
-        // Marcar espacio como usado para evitar duplicados en este mismo request
+        const grupoCompletoId = (agruparComoCompleto && reserva.tipo !== 'Bonificacion') ? await getGroupId() : null;
         espaciosReservadosEnPeriodo.add(espacioId);
+        workListCamp.push({ espacioId, estatus, grupoCompletoId });
+      }
+
+      // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
+      for (const r of reactivarList) {
+        await prisma.reservas.update({
+          where: { id: r.reservaId },
+          data: {
+            deleted_at: null,
+            calendario_id: calendario.id,
+            cliente_id: clienteId || 0,
+            estatus: r.estatus,
+            estatus_original: '',
+            APS: null,
+          },
+        });
         reservasCreadas++;
+      }
+
+      // PREFETCH invId padre en bulk (solo para el payload del emit).
+      const invPadrePorEspacioCamp = new Map<number, number | null>();
+      if (workListCamp.length > 0) {
+        const filas = await prisma.espacio_inventario.findMany({
+          where: { id: { in: workListCamp.map(w => w.espacioId) } },
+          select: { id: true, inventario_id: true },
+        });
+        for (const f of filas) invPadrePorEspacioCamp.set(f.id, f.inventario_id);
+      }
+
+      // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
+      // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
+      const BATCH_SIZE_CAMP = 5;
+      for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
+        const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
+        const resultados = await Promise.all(lote.map(async (w) => {
+          try {
+            const lockResult = await createReservaConLock({
+              solicitudCaras_id: solicitudCaraId,
+              inventario_id: w.espacioId,
+              calendario_id: calendario.id,
+              cliente_id: clienteId || 0,
+              estatus: w.estatus,
+              arte_aprobado: '',
+              comentario_rechazo: '',
+              estatus_original: '',
+              fecha_testigo: new Date(),
+              imagen_testigo: '',
+              instalado: false,
+              tarea: '',
+              grupo_completo_id: w.grupoCompletoId,
+            }, fechaIni, fechaFinDate, undefined, invPadrePorEspacioCamp.get(w.espacioId) ?? null);
+            return { w, lockResult };
+          } catch (err) {
+            console.error(`[Reserva camp] error inesperado en espacio ${w.espacioId}:`, err);
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+          }
+        }));
+        for (const { w, lockResult } of resultados) {
+          if (lockResult.ok) {
+            reservasCreadas++;
+          } else {
+            console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+            reservasOmitidas++;
+          }
+        }
       }
 
       if (reservasCreadas > 0) {

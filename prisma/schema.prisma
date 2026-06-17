@@ -322,6 +322,10 @@ model reservas {
   @@index([archivo(length: 100)], map: "idx_rsv_archivo")
   @@index([solicitudCaras_id, deleted_at, APS, grupo_completo_id], map: "idx_rsv_query_sin_arte")
   @@index([deleted_at, estatus], map: "idx_rsv_deleted_estatus")
+  // Abarata el check de conflicto de createReservaConLock (inventario-bloqueo.service.ts):
+  // WHERE inventario_id = ? AND deleted_at IS NULL AND estatus IN (...). Importante
+  // bajo el nuevo paralelismo de reservas (lotes de 5). Crear con scripts/add_idx_rsv_conflict.cjs.
+  @@index([inventario_id, deleted_at, estatus], map: "idx_rsv_conflict")
 }
 
 model session_locks {
