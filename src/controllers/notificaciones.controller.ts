@@ -1142,9 +1142,19 @@ export class NotificacionesController {
         ];
       }
 
-      const [total, activas, porTipo, porEstatus] = await Promise.all([
+      const [total, activas, badgeCount, porTipo, porEstatus] = await Promise.all([
         prisma.tareas.count({ where }),
         prisma.tareas.count({ where: { ...where, estatus: { not: 'Atendido' } } }),
+        // badge_count: lo que se muestra en la burbuja roja del header.
+        // Coincide con la logica del badge en Header.tsx: tareas/notificaciones
+        // del usuario cuyo estatus NO esta resuelto (Atendido/Rechazado/Cancelado).
+        // Antes el front pedia getAll con limit=200 y filtraba en cliente — eso
+        // daba conteos incorrectos para usuarios con muchas tareas historicas
+        // (ej. Rodrigo Margain con 405 registros: el limit se llenaba con
+        // Atendidos viejos y el conteo cliente no veia el conjunto completo).
+        prisma.tareas.count({
+          where: { ...where, estatus: { notIn: ['Atendido', 'Rechazado', 'Cancelado'] } },
+        }),
         prisma.tareas.groupBy({
           by: ['tipo'],
           where,
@@ -1176,6 +1186,8 @@ export class NotificacionesController {
           no_leidas: activas,
           activas,
           atendidas: total - activas,
+          // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
+          badge_count: badgeCount,
           por_tipo,
           por_estatus,
         },
