@@ -30,6 +30,12 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false },
 });
 
+// [Excepcion personal — Estefania Navas (Coord Diseño, id 1057647)]
+// Por solicitud explicita, no recibe correos de propuestas/solicitudes.
+// Sus correos de Diseño/Artes vienen por otros caminos. Si entra otra persona
+// con el mismo caso o cambia su correo, actualizar la constante.
+const EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES = 'enavas@imu.com.mx';
+
 async function enviarCorreoTarea(
   tareaId: number,
   titulo: string,
@@ -49,6 +55,7 @@ async function enviarCorreoTarea(
   } = {},
   linkUrl?: string
 ): Promise<void> {
+  if (destinatarioEmail?.toLowerCase() === EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES) return;
   const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
     day: '2-digit',
     month: 'short',
@@ -234,12 +241,14 @@ async function enviarCorreoNotificacion(
   descripcion: string,
   destinatarioEmail: string,
   destinatarioNombre: string,
+  // Ver EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES arriba para contexto.
   datosAdicionales: {
     accion?: string;
     usuario?: string;
     cliente?: string;
   } = {}
 ): Promise<void> {
+  if (destinatarioEmail?.toLowerCase() === EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES) return;
   const htmlBody = `
   <!DOCTYPE html>
   <html>
@@ -3010,21 +3019,26 @@ export class SolicitudesController {
               { area: { contains: 'Trafico' } }
             ],
             ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
-            deleted_at: null
+            deleted_at: null,
+            // [Excepcion Estefania Navas id=1057647 — Coord Diseño]
+            // No recibe correo "Atender Propuesta".
+            NOT: { id: 1057647 }
           },
           select: { id: true, nombre: true, correo_electronico: true }
         });
       } else {
         const usuariosTraficoRaw = await prisma.usuario.findMany({
-          where: { 
+          where: {
             id: { in: nuevosAsignadosIds },
-            deleted_at: null 
+            deleted_at: null,
+            // [Excepcion Estefania Navas id=1057647 — Coord Diseño]
+            NOT: { id: 1057647 }
           },
           select: { id: true, nombre: true, correo_electronico: true }
         });
-        
+
         // Filtrar al creador si existe
-        usuariosTrafico = solicitud.usuario_id 
+        usuariosTrafico = solicitud.usuario_id
           ? usuariosTraficoRaw.filter(u => u.id !== solicitud.usuario_id)
           : usuariosTraficoRaw;
       }

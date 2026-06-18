@@ -32,6 +32,13 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false },
 });
 
+// [Excepcion personal — Estefania Navas (Coord Diseño, id 1057647)]
+// Por solicitud explicita, no recibe correos de propuestas/solicitudes.
+// Sus correos de Diseño/Artes vienen por otros caminos (notificaciones.controller,
+// campanas.controller) y no se afectan. Si entra otra persona con el mismo
+// caso o cambia su correo, actualizar la constante.
+const EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES = 'enavas@imu.com.mx';
+
 async function enviarCorreoTarea(
   tareaId: number,
   titulo: string,
@@ -51,6 +58,7 @@ async function enviarCorreoTarea(
   } = {},
   linkUrl?: string
 ): Promise<void> {
+  if (destinatarioEmail?.toLowerCase() === EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES) return;
   const formatearFecha = (fecha: Date) => fecha.toLocaleDateString('es-MX', {
     day: '2-digit',
     month: 'short',
@@ -236,12 +244,14 @@ async function enviarCorreoNotificacion(
   descripcion: string,
   destinatarioEmail: string,
   destinatarioNombre: string,
+  // Ver EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES arriba para contexto.
   datosAdicionales: {
     accion?: string;
     usuario?: string;
     cliente?: string;
   } = {}
 ): Promise<void> {
+  if (destinatarioEmail?.toLowerCase() === EMAIL_EXCLUIDO_PROPUESTAS_SOLICITUDES) return;
   const htmlBody = `
   <!DOCTYPE html>
   <html>
@@ -2182,7 +2192,13 @@ export class PropuestasController {
           ? await prisma.usuario.findMany({
               where: {
                 id: { in: idsAsignadosCorreo },
-                deleted_at: null
+                deleted_at: null,
+                // [Excepcion Estefania Navas id=1057647 — Coord Diseño]
+                // Quedo como id_asignado en ~325 propuestas historicas y nos
+                // pidio que no le siga llegando correo de "Seguimiento Campaña".
+                // Excluida por id especifico (no por rol) para no afectar a
+                // otros usuarios.
+                NOT: { id: 1057647 }
               },
               select: { id: true, nombre: true, correo_electronico: true }
             })
@@ -2242,6 +2258,11 @@ export class PropuestasController {
         const asignadosSinAnalistas = asignadosPropuesta.filter(id => !analistaIds.includes(id));
 
         for (const asignadoId of asignadosSinAnalistas) {
+          // [Excepcion Estefania Navas id=1057647 — Coord Diseño]
+          // Esta como id_asignado en ~325 propuestas historicas; nos pidio
+          // dejar de recibir correo "Campaña nueva". Excluida por id, no por
+          // rol, para no afectar a otros usuarios.
+          if (asignadoId === 1057647) continue;
           const usuario = await prisma.usuario.findUnique({
             where: { id: asignadoId },
             select: { nombre: true, correo_electronico: true }
