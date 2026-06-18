@@ -6153,6 +6153,87 @@ export class CampanasController {
         },
       });
 
+      // [Side-effect] Si esta tarea es una Recepción Faltantes (resultado de
+      // marcar una Recepción como parcial/incompleta), generar una tarea
+      // informativa "Gestión de Recepción Parcial" por cada Analista de
+      // Servicio al Cliente activo. Cada ASC ve su propia tarea, hereda la
+      // evidencia con el detalle por arte y solo necesita finalizarla.
+      try {
+        let esRecepcionParcial = false;
+        let evidenciaParcialObj: any = null;
+        if (tipo === 'Recepción' && evidenciaData) {
+          try {
+            const evObj = JSON.parse(evidenciaData);
+            if (evObj?.tipo === 'recepcion_faltantes') {
+              esRecepcionParcial = true;
+              evidenciaParcialObj = evObj;
+            }
+          } catch {}
+        }
+
+        if (esRecepcionParcial) {
+          const ascs = await prisma.usuario.findMany({
+            where: {
+              deleted_at: null,
+              user_role: 'Analista de Servicio al Cliente',
+            },
+            select: { id: true, nombre: true },
+          });
+
+          const totalFaltantes = Number(evidenciaParcialObj?.totalFaltantes || numImpresionesTotal || 0);
+          const detallePorArte = Array.isArray(evidenciaParcialObj?.faltantesPorArte)
+            ? evidenciaParcialObj.faltantesPorArte
+            : [];
+
+          const evidenciaAsc = JSON.stringify({
+            tipo: 'gestion_recepcion_parcial',
+            recepcionFaltantesId: tarea.id,
+            recepcionFaltantesTitulo: tarea.titulo,
+            totalFaltantes,
+            faltantesPorArte: detallePorArte,
+            campania_nombre: campanaNombre,
+          });
+
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+
+          for (const asc of ascs) {
+            try {
+              const tareaAsc = await prisma.tareas.create({
+                data: {
+                  titulo: `Recepción Parcial - ${campanaNombre}`,
+                  descripcion: descripcionAsc,
+                  tipo: 'Gestión de Recepción Parcial',
+                  estatus: 'Activo',
+                  fecha_inicio: ahora,
+                  fecha_fin: fechaFinFinal,
+                  id_responsable: asc.id,
+                  responsable: asc.nombre,
+                  asignado: asc.nombre,
+                  id_asignado: String(asc.id),
+                  id_solicitud: solicitudId,
+                  id_propuesta: propuestaId,
+                  campania_id: campanaId,
+                  ids_reservas: ids_reservas || null,
+                  evidencia: evidenciaAsc,
+                },
+              });
+              emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+                tareaId: tareaAsc.id,
+                campanaId,
+                tipo: tareaAsc.tipo,
+                titulo: tareaAsc.titulo,
+              });
+              emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaAsc.id, tipo: tareaAsc.tipo });
+            } catch (errAsc) {
+              console.error(`createTarea[Recepción Parcial]: error creando tarea ASC id=${asc.id}:`, errAsc);
+            }
+          }
+          console.log(`createTarea[Recepción Parcial]: ${ascs.length} tarea(s) creada(s) para ASC desde tarea ${tarea.id}`);
+        }
+      } catch (errParcial) {
+        console.error('createTarea: error en side-effect Recepción Parcial:', errParcial);
+      }
+
       // Actualizar campo tarea en las reservas si se proporcionaron ids
       if (ids_reservas) {
         const reservaIdArray = ids_reservas.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id));
