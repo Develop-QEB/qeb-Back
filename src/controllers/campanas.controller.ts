@@ -94,7 +94,8 @@ const markReservasComoInstaladas = async (params: {
   reservaIds: number[];
   userId?: number;
   userName: string;
-  // 'instalado' (default): marca reservas instalado=1, estatus='Instalado',
+  // 'instalado' (default): marca reservas instalado=1 (sin tocar `estatus`,
+  //   que conserva la ocupacion real Reservado/Vendido),
   //   crea Instalacion 'Completado' → items van a sub-tab "Instaladas".
   // 'rotacion': solo crea Instalacion 'Activo' (Por Instalar). NO toca
   //   reservas.instalado ni reservas.estatus. Para cuando el arte se reusa
@@ -139,8 +140,10 @@ const markReservasComoInstaladas = async (params: {
   // 1) Solo en modo 'instalado': marcar reservas como instaladas. En 'rotacion'
   //    NO tocamos instalado/estatus (los items aun van a "Por Instalar").
   if (mode === 'instalado') {
+    // NO pisamos `estatus`: eso machacaba la ocupacion real (Reservado/Vendido).
+    // La instalacion vive en la columna `instalado`, que es la que lee el sistema.
     await prisma.$executeRawUnsafe(
-      `UPDATE reservas SET instalado = 1, estatus = 'Instalado' WHERE id IN (${placeholdersAll})`,
+      `UPDATE reservas SET instalado = 1 WHERE id IN (${placeholdersAll})`,
       ...allAffectedReservaIds
     );
   }
@@ -4445,7 +4448,7 @@ export class CampanasController {
         // Limpiar arte - poner archivo NULL y resetear estados
         const updateDirectQuery = `
           UPDATE reservas
-          SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
+          SET archivo = NULL, arte_aprobado = ''
           WHERE id IN (${placeholders})
         `;
 
@@ -4470,7 +4473,7 @@ export class CampanasController {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
           const updateGruposQuery = `
             UPDATE reservas
-            SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
+            SET archivo = NULL, arte_aprobado = ''
             WHERE grupo_completo_id IN (${grupoPlaceholders})
           `;
 
@@ -4586,7 +4589,7 @@ export class CampanasController {
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${placeholders})
       `;
 
@@ -4597,7 +4600,7 @@ export class CampanasController {
         const grupoPlaceholders = grupoIds.map(() => '?').join(',');
         const updateGruposQuery = `
           UPDATE reservas
-          SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+          SET archivo = ?, arte_aprobado = 'Pendiente'
           WHERE grupo_completo_id IN (${grupoPlaceholders})
         `;
 
@@ -4774,7 +4777,7 @@ export class CampanasController {
       const firstFileUrl = savedFiles[0] || '';
       const updateReservasQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${allReservaIds.map(() => '?').join(',')})
       `;
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
@@ -5650,9 +5653,8 @@ export class CampanasController {
         updateParams.push(fechaTestigo);
       }
 
-      if (instalado) {
-        updateFields.push("estatus = 'Instalado'");
-      }
+      // NO pisamos `estatus` al instalar (antes ponia 'Instalado' y borraba la
+      // ocupacion real). La instalacion ya queda registrada en `instalado`.
 
       const updateQuery = `
         UPDATE reservas
@@ -11042,7 +11044,7 @@ export class CampanasController {
       const firstFileUrl = savedFiles[0] || '';
       const updateReservasQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${allReservaIds.map(() => '?').join(',')})
       `;
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
