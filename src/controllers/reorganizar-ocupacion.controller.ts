@@ -321,7 +321,7 @@ export const compararCsv = async (req: AuthRequest, res: Response) => {
          LEFT JOIN cliente cl ON cl.id = cm.cliente_id
          WHERE i.id IN (${phInv2})
            AND rsv.deleted_at IS NULL
-           AND rsv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+           AND rsv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
            AND rsv.solicitudCaras_id <> ?
            AND NOT (sc.fin_periodo < ? OR sc.inicio_periodo > ?)`,
         ...invIds, sc.id, sc.inicio_periodo, sc.fin_periodo,

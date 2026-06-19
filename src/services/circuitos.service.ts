@@ -193,7 +193,7 @@ export async function autoReservarCircuitoSiAplica(
       `SELECT COUNT(*) c FROM reservas rv
          INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
          WHERE rv.inventario_id = ? AND rv.deleted_at IS NULL
-           AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+           AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
            AND sc.inicio_periodo <= ?
            AND sc.fin_periodo >= ?`,
       r.espacio_id, params.fechaFin, params.fechaInicio

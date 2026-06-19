@@ -94,7 +94,8 @@ const markReservasComoInstaladas = async (params: {
   reservaIds: number[];
   userId?: number;
   userName: string;
-  // 'instalado' (default): marca reservas instalado=1, estatus='Instalado',
+  // 'instalado' (default): marca reservas instalado=1 (sin tocar `estatus`,
+  //   que conserva la ocupacion real Reservado/Vendido),
   //   crea Instalacion 'Completado' → items van a sub-tab "Instaladas".
   // 'rotacion': solo crea Instalacion 'Activo' (Por Instalar). NO toca
   //   reservas.instalado ni reservas.estatus. Para cuando el arte se reusa
@@ -139,8 +140,10 @@ const markReservasComoInstaladas = async (params: {
   // 1) Solo en modo 'instalado': marcar reservas como instaladas. En 'rotacion'
   //    NO tocamos instalado/estatus (los items aun van a "Por Instalar").
   if (mode === 'instalado') {
+    // NO pisamos `estatus`: eso machacaba la ocupacion real (Reservado/Vendido).
+    // La instalacion vive en la columna `instalado`, que es la que lee el sistema.
     await prisma.$executeRawUnsafe(
-      `UPDATE reservas SET instalado = 1, estatus = 'Instalado' WHERE id IN (${placeholdersAll})`,
+      `UPDATE reservas SET instalado = 1 WHERE id IN (${placeholdersAll})`,
       ...allAffectedReservaIds
     );
   }
@@ -4445,7 +4448,7 @@ export class CampanasController {
         // Limpiar arte - poner archivo NULL y resetear estados
         const updateDirectQuery = `
           UPDATE reservas
-          SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
+          SET archivo = NULL, arte_aprobado = ''
           WHERE id IN (${placeholders})
         `;
 
@@ -4470,7 +4473,7 @@ export class CampanasController {
           const grupoPlaceholders = grupoIds.map(() => '?').join(',');
           const updateGruposQuery = `
             UPDATE reservas
-            SET archivo = NULL, arte_aprobado = '', estatus = 'Sin Arte'
+            SET archivo = NULL, arte_aprobado = ''
             WHERE grupo_completo_id IN (${grupoPlaceholders})
           `;
 
@@ -4586,7 +4589,7 @@ export class CampanasController {
       // Actualizar reservas directamente seleccionadas
       const updateDirectQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${placeholders})
       `;
 
@@ -4597,7 +4600,7 @@ export class CampanasController {
         const grupoPlaceholders = grupoIds.map(() => '?').join(',');
         const updateGruposQuery = `
           UPDATE reservas
-          SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+          SET archivo = ?, arte_aprobado = 'Pendiente'
           WHERE grupo_completo_id IN (${grupoPlaceholders})
         `;
 
@@ -4774,7 +4777,7 @@ export class CampanasController {
       const firstFileUrl = savedFiles[0] || '';
       const updateReservasQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${allReservaIds.map(() => '?').join(',')})
       `;
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
@@ -5650,9 +5653,8 @@ export class CampanasController {
         updateParams.push(fechaTestigo);
       }
 
-      if (instalado) {
-        updateFields.push("estatus = 'Instalado'");
-      }
+      // NO pisamos `estatus` al instalar (antes ponia 'Instalado' y borraba la
+      // ocupacion real). La instalacion ya queda registrada en `instalado`.
 
       const updateQuery = `
         UPDATE reservas
@@ -6152,6 +6154,87 @@ export class CampanasController {
           num_impresiones: numImpresionesTotal,
         },
       });
+
+      // [Side-effect] Si esta tarea es una Recepción Faltantes (resultado de
+      // marcar una Recepción como parcial/incompleta), generar una tarea
+      // informativa "Gestión de Recepción Parcial" por cada Analista de
+      // Servicio al Cliente activo. Cada ASC ve su propia tarea, hereda la
+      // evidencia con el detalle por arte y solo necesita finalizarla.
+      try {
+        let esRecepcionParcial = false;
+        let evidenciaParcialObj: any = null;
+        if (tipo === 'Recepción' && evidenciaData) {
+          try {
+            const evObj = JSON.parse(evidenciaData);
+            if (evObj?.tipo === 'recepcion_faltantes') {
+              esRecepcionParcial = true;
+              evidenciaParcialObj = evObj;
+            }
+          } catch {}
+        }
+
+        if (esRecepcionParcial) {
+          const ascs = await prisma.usuario.findMany({
+            where: {
+              deleted_at: null,
+              user_role: 'Analista de Servicio al Cliente',
+            },
+            select: { id: true, nombre: true },
+          });
+
+          const totalFaltantes = Number(evidenciaParcialObj?.totalFaltantes || numImpresionesTotal || 0);
+          const detallePorArte = Array.isArray(evidenciaParcialObj?.faltantesPorArte)
+            ? evidenciaParcialObj.faltantesPorArte
+            : [];
+
+          const evidenciaAsc = JSON.stringify({
+            tipo: 'gestion_recepcion_parcial',
+            recepcionFaltantesId: tarea.id,
+            recepcionFaltantesTitulo: tarea.titulo,
+            totalFaltantes,
+            faltantesPorArte: detallePorArte,
+            campania_nombre: campanaNombre,
+          });
+
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+
+          for (const asc of ascs) {
+            try {
+              const tareaAsc = await prisma.tareas.create({
+                data: {
+                  titulo: `Recepción Parcial - ${campanaNombre}`,
+                  descripcion: descripcionAsc,
+                  tipo: 'Gestión de Recepción Parcial',
+                  estatus: 'Activo',
+                  fecha_inicio: ahora,
+                  fecha_fin: fechaFinFinal,
+                  id_responsable: asc.id,
+                  responsable: asc.nombre,
+                  asignado: asc.nombre,
+                  id_asignado: String(asc.id),
+                  id_solicitud: solicitudId,
+                  id_propuesta: propuestaId,
+                  campania_id: campanaId,
+                  ids_reservas: ids_reservas || null,
+                  evidencia: evidenciaAsc,
+                },
+              });
+              emitToCampana(campanaId, SOCKET_EVENTS.TAREA_CREADA, {
+                tareaId: tareaAsc.id,
+                campanaId,
+                tipo: tareaAsc.tipo,
+                titulo: tareaAsc.titulo,
+              });
+              emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaAsc.id, tipo: tareaAsc.tipo });
+            } catch (errAsc) {
+              console.error(`createTarea[Recepción Parcial]: error creando tarea ASC id=${asc.id}:`, errAsc);
+            }
+          }
+          console.log(`createTarea[Recepción Parcial]: ${ascs.length} tarea(s) creada(s) para ASC desde tarea ${tarea.id}`);
+        }
+      } catch (errParcial) {
+        console.error('createTarea: error en side-effect Recepción Parcial:', errParcial);
+      }
 
       // Actualizar campo tarea en las reservas si se proporcionaron ids
       if (ids_reservas) {
@@ -10961,7 +11044,7 @@ export class CampanasController {
       const firstFileUrl = savedFiles[0] || '';
       const updateReservasQuery = `
         UPDATE reservas
-        SET archivo = ?, arte_aprobado = 'Pendiente', estatus = 'Con Arte'
+        SET archivo = ?, arte_aprobado = 'Pendiente'
         WHERE id IN (${allReservaIds.map(() => '?').join(',')})
       `;
       await prisma.$executeRawUnsafe(updateReservasQuery, firstFileUrl, ...allReservaIds);
