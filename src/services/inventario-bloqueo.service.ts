@@ -40,6 +40,10 @@ export const ESTATUS_QUE_BLOQUEAN = [
   'Vendido',
   'Vendido bonificado',
   'Con Arte',
+  // 'Sin Arte' = reserva viva a la que le quitaron/rechazaron el arte; el cliente
+  // SIGUE teniendo el espacio, así que debe bloquear igual. Antes faltaba y el
+  // espacio reaparecía en getDisponibles -> otra campaña lo tomaba -> duplicado.
+  'Sin Arte',
 ] as const;
 
 type TxClient = PrismaClient | Prisma.TransactionClient;
@@ -79,7 +83,7 @@ export async function getEspaciosBloqueados(
      FROM reservas rv
      INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
      WHERE rv.deleted_at IS NULL
-       AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+       AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
        AND sc.inicio_periodo <= ?
        AND sc.fin_periodo >= ?
        ${excludeFilter}`,
@@ -160,7 +164,7 @@ export async function createReservaConLock(
            INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
            WHERE rv.inventario_id = ?
              AND rv.deleted_at IS NULL
-             AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+             AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
              AND sc.inicio_periodo <= ?
              AND sc.fin_periodo >= ?
              ${excludeFilter}`,

@@ -146,7 +146,7 @@ export class InventariosController {
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -622,7 +622,7 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] },
+            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] },
           },
           select: { inventario_id: true },
         });
@@ -783,7 +783,7 @@ export class InventariosController {
           AND r.deleted_at IS NULL
           AND sc.inicio_periodo <= ${new Date(fecha_fin as string)}
           AND sc.fin_periodo >= ${new Date(fecha_inicio as string)}
-          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')
+          AND r.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
         `;
 
         if (categoriaReservados.length > 0) {
@@ -1325,7 +1325,7 @@ export class InventariosController {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
               inventario_id: { in: espacios.map(e => e.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte'] }
+              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] }
             },
             select: { inventario_id: true }
           });
@@ -1546,7 +1546,7 @@ export class InventariosController {
                AND cal.deleted_at IS NULL
                AND cal.fecha_inicio <= CURDATE()
                AND cal.fecha_fin >= CURDATE()
-               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
+               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
             ...invIds
           );
           for (const row of rows) {
@@ -1728,7 +1728,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -1756,7 +1756,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of campRows) {
@@ -1913,7 +1913,7 @@ export class InventariosController {
              SET r.deleted_at = NOW()
              WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
                AND r.deleted_at IS NULL
-               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
                AND sc.fin_periodo >= CURDATE()`,
             id
           );
@@ -2040,7 +2040,7 @@ export class InventariosController {
         INNER JOIN solicitudCaras sc ON sc.idquote = CAST(p.id AS CHAR) COLLATE utf8mb4_unicode_ci
         INNER JOIN reservas r ON r.solicitudCaras_id = sc.id
           AND r.deleted_at IS NULL
-          AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')
+          AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
         WHERE c.T2_U_Categoria IS NOT NULL AND c.T2_U_Categoria != ''
         ORDER BY c.T2_U_Categoria
       `;

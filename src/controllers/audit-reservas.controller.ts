@@ -25,7 +25,7 @@ function isDev(req: AuthRequest): boolean {
   return req.user?.rol === 'DEV';
 }
 
-const ESTATUS_BLOQUEAN = "('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte')";
+const ESTATUS_BLOQUEAN = "('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')";
 const CAM_STATUS_EXCLUIR = "('Cancelada','finalizada','Finalizada')";
 
 // =============================================================================
