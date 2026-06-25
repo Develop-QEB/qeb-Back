@@ -11204,6 +11204,12 @@ export class CampanasController {
         return;
       }
 
+      // COUNT(DISTINCT archivo): hay reservas con filas duplicadas en
+      // artes_tradicionales (mismo archivo/spot/nota insertados >1 vez por
+      // flujos antiguos sin DELETE previo). El badge del thumbnail mostraba
+      // "2" para reservas con un solo arte real. La galeria que abre al
+      // clickear ya deduplicaba (por eso mostraba "1 arte"), pero el badge
+      // no — ahora ambos coinciden.
       const summaries = await prisma.$queryRaw<{
         id_reserva: number;
         total_archivos: number;
@@ -11211,7 +11217,7 @@ export class CampanasController {
       }[]>`
         SELECT
           at2.id_reserva,
-          COUNT(*) as total_archivos,
+          COUNT(DISTINCT at2.archivo) as total_archivos,
           SUBSTRING(MIN(at2.nota), 1, 80) as first_nota
         FROM artes_tradicionales at2
         INNER JOIN reservas r ON r.id = at2.id_reserva
