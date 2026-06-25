@@ -172,15 +172,9 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     }
   }
 
-  // Artículos de impresión (IM): si tarifa es 0, requiere DCM; si no, aprobado
+  // Artículos de impresión (IM): NUNCA van a autorización (siempre auto-aprobados,
+  // incluso con tarifa $0). Petición de Mario: las impresiones no se mandan a autorización.
   if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
-    if ((cara.tarifa_publica || 0) <= 0) {
-      return {
-        autorizacion_dg: 'aprobado',
-        autorizacion_dcm: 'pendiente',
-        motivo_dcm: 'Artículo de Impresión con tarifa $0 requiere autorización DCM',
-      };
-    }
     return {
       autorizacion_dg: 'aprobado',
       autorizacion_dcm: 'aprobado',
