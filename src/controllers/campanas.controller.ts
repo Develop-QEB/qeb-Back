@@ -9303,11 +9303,18 @@ export class CampanasController {
         `;
         const artesRows = (await prisma.$queryRawUnsafe(artesRowsQuery, ...rsvIds)) as any[];
         const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
-        const acc = new Map<number, { names: string[]; dataNames: string[]; manual: string[]; notas: string[]; urls: string[] }>();
+        const acc = new Map<number, { names: string[]; dataNames: string[]; manual: string[]; notas: string[]; urls: string[]; seen: Set<string> }>();
         for (const r of artesRows) {
           const rid = Number(r.id_reserva);
-          if (!acc.has(rid)) acc.set(rid, { names: [], dataNames: [], manual: [], notas: [], urls: [] });
+          if (!acc.has(rid)) acc.set(rid, { names: [], dataNames: [], manual: [], notas: [], urls: [], seen: new Set() });
           const a = acc.get(rid)!;
+          // Dedup por archivo (= versión de arte). Un mismo archivo repetido —
+          // porque el arte se reasignó/recargó varias veces — cuenta como UNA
+          // versión. Antes la orden de montaje mostraba el nombre N veces.
+          // Mismo criterio que el Versionario (dedup por URL/archivo).
+          const dedupKey = (r.archivo_data || r.archivo || '').toString().trim();
+          if (dedupKey && a.seen.has(dedupKey)) continue;
+          if (dedupKey) a.seen.add(dedupKey);
           a.names.push(fileNameOf(r.archivo));
           a.dataNames.push(fileNameOf(r.archivo_data));
           // nombre_arte manual; si está vacío caemos al nombre de archivo.
@@ -9342,11 +9349,17 @@ export class CampanasController {
         `;
         const tradRows = (await prisma.$queryRawUnsafe(tradRowsQuery, ...rsvIds)) as any[];
         const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
-        const acc = new Map<number, { manual: string[]; notas: string[]; urls: string[] }>();
+        const acc = new Map<number, { manual: string[]; notas: string[]; urls: string[]; seen: Set<string> }>();
         for (const r of tradRows) {
           const rid = Number(r.id_reserva);
-          if (!acc.has(rid)) acc.set(rid, { manual: [], notas: [], urls: [] });
+          if (!acc.has(rid)) acc.set(rid, { manual: [], notas: [], urls: [], seen: new Set() });
           const a = acc.get(rid)!;
+          // Dedup por archivo (= versión de arte): mismo archivo repetido cuenta
+          // como una sola versión. Igual que el Versionario. Antes la orden de
+          // montaje mostraba el nombre de arte repetido por cada renglón duplicado.
+          const dedupKey = (r.archivo || '').toString().trim();
+          if (dedupKey && a.seen.has(dedupKey)) continue;
+          if (dedupKey) a.seen.add(dedupKey);
           a.manual.push(String(r.nombre_arte || '').trim() || fileNameOf(r.archivo));
           a.notas.push(String(r.nota || '').trim());
           const url = (r.archivo || '').toString().trim();
