@@ -331,6 +331,54 @@ export function emitToAll(event: string, data: unknown): void {
   }
 }
 
+/**
+ * Emite el popup/refresh para una fila de `tareas` recién creada. Lo llama el
+ * middleware de Prisma en `tareas.create`, así cualquier notificación o tarea
+ * (actual o futura) avisa a sus destinatarios sin tocar cada controlador.
+ *
+ * - Emite UN evento por fila, con su propio `tarea_id`, de modo que al hacer
+ *   clic en el toast se abra exactamente esa notificación/tarea.
+ * - 'Notificación': destinatario = id_responsable (en estas filas id_asignado
+ *   es el AUTOR, por eso no se incluye). categoria = la de la fila.
+ * - Tareas reales: destinatarios = id_responsable + id_asignado.
+ * - 'Recordatorio' se omite: emite su propio evento (con fecha_entrega) desde su
+ *   servicio. El frontend solo muestra popup si el usuario está en destinatarios.
+ */
+export function emitTareaCreadaPopup(tarea: {
+  id: number;
+  tipo?: string | null;
+  categoria?: string | null;
+  titulo?: string | null;
+  descripcion?: string | null;
+  id_responsable?: number | null;
+  id_asignado?: string | null;
+}): void {
+  if (!io) return;
+  const tipo = tarea.tipo || '';
+  if (!tipo || tipo === 'Recordatorio') return;
+
+  const esNotif = tipo === 'Notificación';
+  const destinatarios = new Set<number>();
+  if (tarea.id_responsable) destinatarios.add(tarea.id_responsable);
+  if (!esNotif && tarea.id_asignado) {
+    for (const s of String(tarea.id_asignado).split(',')) {
+      const n = parseInt(s.trim(), 10);
+      if (!isNaN(n)) destinatarios.add(n);
+    }
+  }
+  if (destinatarios.size === 0) return;
+
+  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+    tipo,
+    clase: esNotif ? 'notificacion' : 'tarea',
+    categoria: esNotif ? (tarea.categoria || 'general') : undefined,
+    titulo: tarea.titulo || tipo,
+    descripcion: tarea.descripcion || undefined,
+    tarea_id: tarea.id,
+    destinatarios: Array.from(destinatarios),
+  });
+}
+
 // Helper para emitir a una propuesta específica
 export function emitToPropuesta(propuestaId: number, event: string, data: unknown): void {
   if (io) {

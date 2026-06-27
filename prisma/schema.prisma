@@ -423,9 +423,32 @@ model tareas {
   num_impresiones    Int?
   archivo_testigo    String?   @db.VarChar(1000)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
+  // Subcategoría para notificaciones (tipo='Notificación'). En tareas reales el
+  // `tipo` ya hace de categoría, por eso es opcional. Ej: 'cambio_estatus',
+  // 'comentario', 'autorizacion', 'recordatorio', 'general'.
+  categoria          String?   @db.VarChar(100)
 
   @@index([campania_id])
   @@index([campania_id, id_responsable], map: "idx_tareas_campania_responsable")
+}
+
+// Preferencias de notificaciones por usuario (Fase 1).
+// Semántica opt-out: la ausencia de fila significa "habilitado".
+// - canal: 'popup' | 'email'
+// - clase: 'notificacion' | 'tarea' | '__global__' (master del canal)
+// - clave: categoría (notificación) o tipo (tarea); '__all__' para el master
+model usuario_preferencias_notif {
+  id         Int       @id @default(autoincrement())
+  usuario_id Int
+  canal      String    @db.VarChar(20)
+  clase      String    @db.VarChar(20)
+  clave      String    @db.VarChar(100)
+  habilitado Boolean   @default(true)
+  created_at DateTime? @default(now()) @db.Timestamp(0)
+  updated_at DateTime? @updatedAt @db.Timestamp(0)
+
+  @@unique([usuario_id, canal, clase, clave], map: "uq_pref_notif")
+  @@index([usuario_id], map: "idx_pref_notif_usuario")
 }
 
 model usuario {

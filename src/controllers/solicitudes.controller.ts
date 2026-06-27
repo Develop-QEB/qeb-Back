@@ -13,8 +13,9 @@ import {
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
-import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToSolicitudes, emitToSolicitud, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { serializeBigInt } from '../utils/serialization';
@@ -1010,6 +1011,7 @@ export class SolicitudesController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1042,7 +1044,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             solicitud.id,
             tituloNotificacion,
@@ -1227,7 +1229,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'creacion_eliminacion')) {
           enviarCorreoNotificacion(
             solicitud.id,
             'Solicitud eliminada',
@@ -2439,7 +2441,8 @@ export class SolicitudesController {
             select: { correo_electronico: true },
           });
 
-          if (creadorConEmail?.correo_electronico) {
+          if (creadorConEmail?.correo_electronico
+              && await correoPermitido(userId, 'tarea', 'Seguimiento')) {
             enviarCorreoTarea(
               result.solicitud.id,
               nombre_campania,
@@ -2559,6 +2562,7 @@ export class SolicitudesController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'comentario',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               id_solicitud: solicitud.id.toString(),
@@ -2581,6 +2585,9 @@ export class SolicitudesController {
       }
       console.log(`solicitudes.addComment[sol=${solicitud.id}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
 
+      // Refrescar la bitácora abierta del detalle de la solicitud en vivo.
+      emitToSolicitud(solicitud.id, SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, { solicitudId: solicitud.id });
+
       res.json({
         success: true,
         data: {
@@ -2595,7 +2602,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'comentario')) {
           enviarCorreoNotificacion(
             solicitud.id,
             tituloNotificacion,
@@ -2981,7 +2988,8 @@ export class SolicitudesController {
           select: { correo_electronico: true, nombre: true },
         });
 
-        if (creador?.correo_electronico) {
+        if (creador?.correo_electronico
+            && await correoPermitido(asignadoOriginal, 'tarea', 'Seguimiento')) {
           enviarCorreoTarea(
             solicitud.id,
             cotizacionData?.nombre_campania || '',
@@ -3044,7 +3052,8 @@ export class SolicitudesController {
       }
 
       for (const usuarioTrafico of usuariosTrafico) {
-        if (usuarioTrafico.correo_electronico) {
+        if (usuarioTrafico.correo_electronico
+            && await correoPermitido(usuarioTrafico.id, 'tarea', 'Seguimiento')) {
           enviarCorreoTarea(
             solicitud.id,
             cotizacionData?.nombre_campania || '',
@@ -3078,7 +3087,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             solicitud.id,
             'Solicitud atendida',
@@ -3618,7 +3627,7 @@ export class SolicitudesController {
       const nombreSolicitudCorreo = razon_social || marca_nombre || solicitud.razon_social || 'Sin nombre';
 
       for (const usuario of usuariosNotificarUpdate) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'general')) {
           enviarCorreoNotificacion(
             solicitud.id,
             `Solicitud #${solicitud.id} editada`,

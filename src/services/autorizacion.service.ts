@@ -1,5 +1,6 @@
 import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 
 const transporter = nodemailer.createTransport({
@@ -1187,6 +1188,7 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
   if (pendientesDg > 0) {
     for (const u of usuariosDg) {
       if (!u.correo_electronico) continue;
+      if (!(await correoPermitido(u.id, 'tarea', 'Autorización DG'))) continue;
       envios.push(
         enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DG', pendientesDg)
           .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))
@@ -1197,6 +1199,7 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
   if (pendientesDcm > 0) {
     for (const u of usuariosDcm) {
       if (!u.correo_electronico) continue;
+      if (!(await correoPermitido(u.id, 'tarea', 'Autorización DCM'))) continue;
       envios.push(
         enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DCM', pendientesDcm)
           .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))

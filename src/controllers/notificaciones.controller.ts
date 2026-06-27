@@ -9,6 +9,7 @@ import {
   depurarTareasAutorizacionResueltas,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { logHistorial } from '../utils/historial';
 
@@ -740,7 +741,8 @@ export class NotificacionesController {
                 },
               });
 
-              if (usuarioTrafico.correo_electronico) {
+              if (usuarioTrafico.correo_electronico
+                  && await correoPermitido(usuarioTrafico.id, 'notificacion', 'cambio_estatus')) {
                 const nombrePropuesta = nombreCampaniaAjuste;
                 const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
                 <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
@@ -826,7 +828,8 @@ export class NotificacionesController {
                 where: { id: solicitudCreador.usuario_id },
                 select: { nombre: true, correo_electronico: true },
               });
-              if (creador?.correo_electronico) {
+              if (creador?.correo_electronico
+                  && await correoPermitido(solicitudCreador.usuario_id, 'notificacion', 'cambio_estatus')) {
                 const nombrePropuesta = nombreCampaniaAjuste;
                 const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
                 <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
@@ -1072,10 +1075,7 @@ export class NotificacionesController {
 
       const where: Record<string, unknown> = {};
       if (userId) {
-        const orConditions: Record<string, unknown>[] = [
-          { id_responsable: userId },
-          ...idAsignadoMatch(userId),
-        ];
+        const ids: number[] = [userId];
 
         // Coordinador de Diseño también ve stats de Diseñadores
         if (userRole === 'Coordinador de Diseño') {
@@ -1083,10 +1083,7 @@ export class NotificacionesController {
             where: { user_role: 'Diseñadores', deleted_at: null },
             select: { id: true },
           });
-          for (const d of disenadores) {
-            orConditions.push({ id_responsable: d.id });
-            orConditions.push(...idAsignadoMatch(d.id));
-          }
+          ids.push(...disenadores.map(d => d.id));
         }
 
         // Gerente Digital (Operaciones) también ve stats de Jefe de Operaciones Digital
@@ -1095,13 +1092,17 @@ export class NotificacionesController {
             where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
             select: { id: true },
           });
-          for (const j of jefesDigital) {
-            orConditions.push({ id_responsable: j.id });
-            orConditions.push(...idAsignadoMatch(j.id));
-          }
+          ids.push(...jefesDigital.map(j => j.id));
         }
 
-        where.OR = orConditions;
+        const asignadoConds = ids.flatMap(id => idAsignadoMatch(id));
+        where.OR = [
+          ...ids.map(id => ({ id_responsable: id })),
+          // En las NOTIFICACIONES, id_asignado es el AUTOR (no el destinatario),
+          // así que el match por asignado solo aplica a TAREAS reales. Si no, el
+          // badge se inflaba contando notificaciones que el propio usuario generó.
+          { AND: [{ tipo: { not: 'Notificación' } }, { OR: asignadoConds }] },
+        ];
       }
 
       // Diseñadores y Coord de Diseño: solo cuentan tareas de Diseño (mismo

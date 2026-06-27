@@ -16,6 +16,7 @@ import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
@@ -1125,7 +1126,8 @@ export class PropuestasController {
 
         // Enviar correos a usuarios de Tráfico
         for (const usuarioTrafico of usuariosTrafico) {
-          if (usuarioTrafico.id !== userId && usuarioTrafico.correo_electronico) {
+          if (usuarioTrafico.id !== userId && usuarioTrafico.correo_electronico
+              && await correoPermitido(usuarioTrafico.id, 'tarea', 'Ajuste Cto Cliente')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               nombrePropuesta,
@@ -1196,7 +1198,8 @@ export class PropuestasController {
             : undefined;
 
           // Enviar correo al asesor/creador
-          if (creadorSolicitud.correo_electronico) {
+          if (creadorSolicitud.correo_electronico
+              && await correoPermitido(creadorSolicitud.id, 'tarea', 'Ajuste Comercial')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               nombrePropuesta,
@@ -1230,7 +1233,8 @@ export class PropuestasController {
           });
 
           for (const usuarioTrafico of usuariosTrafico) {
-            if (usuarioTrafico.correo_electronico) {
+            if (usuarioTrafico.correo_electronico
+                && await correoPermitido(usuarioTrafico.id, 'notificacion', 'cambio_estatus')) {
               enviarCorreoNotificacion(
                 propuesta.solicitud_id || 0,
                 `Propuesta ajustada: ${nombrePropuesta}`,
@@ -1280,7 +1284,8 @@ export class PropuestasController {
             },
           });
 
-          if (creadorAtendida.correo_electronico) {
+          if (creadorAtendida.correo_electronico
+              && await correoPermitido(solicitud!.usuario_id, 'notificacion', 'cambio_estatus')) {
             enviarCorreoNotificacion(
               propuesta.solicitud_id || 0,
               `Ajuste completado: ${nombreCampAtendida}`,
@@ -1300,7 +1305,8 @@ export class PropuestasController {
           select: { nombre: true, correo_electronico: true }
         });
 
-        if (creador?.correo_electronico) {
+        if (creador?.correo_electronico
+            && await correoPermitido(solicitud.usuario_id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             propuesta.solicitud_id || 0,
             `Propuesta atendida: ${nombrePropuesta}`,
@@ -1323,6 +1329,7 @@ export class PropuestasController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1811,6 +1818,7 @@ export class PropuestasController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'comentario',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               id_solicitud: propuesta.solicitud_id?.toString() || '',
@@ -1832,6 +1840,9 @@ export class PropuestasController {
           resultados.filter(r => r.status === 'rejected').map((r: any) => r.reason?.message));
       }
       console.log(`propuestas.addComment[prop=${propuestaId}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
+
+      // Refrescar la bitácora abierta del detalle de la propuesta en vivo.
+      emitToPropuestas(SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, { propuestaId });
 
       // Audit log SOLO si el autor es Administrador o DEV (no saturar el log
       // con comentarios de usuarios normales en propuestas).
@@ -2227,7 +2238,8 @@ export class PropuestasController {
           : undefined;
 
         for (const analista of usuariosAnalistaCorreo) {
-          if (analista.correo_electronico) {
+          if (analista.correo_electronico
+              && await correoPermitido(analista.id, 'tarea', 'Seguimiento')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               campania.nombre,
@@ -2268,7 +2280,8 @@ export class PropuestasController {
             select: { nombre: true, correo_electronico: true }
           });
 
-          if (usuario?.correo_electronico) {
+          if (usuario?.correo_electronico
+              && await correoPermitido(asignadoId, 'notificacion', 'general')) {
             enviarCorreoNotificacion(
               propuesta.solicitud_id || 0,
               `Campaña nueva - ${campania.nombre}`,

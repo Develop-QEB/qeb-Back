@@ -16,6 +16,7 @@ import { getEspaciosBloqueados, createReservaConLock } from '../services/inventa
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
@@ -1199,6 +1200,7 @@ export class CampanasController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1347,6 +1349,7 @@ export class CampanasController {
                 titulo: `Campaña atendida: ${nombreCampanaStatus}`,
                 descripcion: `${userName} marcó la campaña como Atendido`,
                 tipo: 'Notificación',
+                categoria: 'cambio_estatus',
                 estatus: 'Pendiente',
                 fecha_inicio: now,
                 fecha_fin: fechaFin,
@@ -3571,6 +3574,7 @@ export class CampanasController {
                   titulo: tituloNotificacion,
                   descripcion: descripcionNotificacion,
                   tipo: 'Notificación',
+                  categoria: 'comentario',
                   estatus: 'Pendiente',
                   id_responsable: responsableId,
                   id_solicitud: solicitudId.toString(),
@@ -6486,7 +6490,8 @@ export class CampanasController {
             where: { id: asignadoIdNum },
             select: { correo_electronico: true, nombre: true },
           }).then(async usuarioAsignado => {
-            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
+            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS
+            && await correoPermitido(asignadoIdNum, 'tarea', tipo)) {
               // Coordinador(es) de Diseño en CC para tareas de Diseño (no duplicar si es creador o asignado)
               let ccEmails: string[] = [];
               if (DISENO_TIPOS.includes(tipo || '')) {

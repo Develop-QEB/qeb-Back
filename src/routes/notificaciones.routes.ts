@@ -1,10 +1,15 @@
 import { Router } from 'express';
 import { notificacionesController } from '../controllers/notificaciones.controller';
+import { preferenciasNotifController } from '../controllers/preferenciasNotif.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
 router.use(authMiddleware);
+
+// Preferencias de notificaciones del usuario actual (ANTES de rutas con :id)
+router.get('/preferencias', preferenciasNotifController.getMine.bind(preferenciasNotifController));
+router.put('/preferencias', preferenciasNotifController.updateMine.bind(preferenciasNotifController));
 
 // Stats y operaciones globales
 router.get('/stats', notificacionesController.getStats.bind(notificacionesController));

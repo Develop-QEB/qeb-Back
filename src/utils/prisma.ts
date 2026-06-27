@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { getMexicoDate } from './dateHelper';
+import { emitTareaCreadaPopup } from '../config/socket';
 
 // Use DATABASE_URL exactly as provided by environment
 function getDatasourceUrl(): string {
@@ -101,6 +102,21 @@ const createPrismaClient = () => {
       params.args.data.fecha_fin = fin;
     }
     return next(params);
+  });
+
+  // Middleware: al crear una TAREA real, notificar (popup) a sus asignados.
+  // Punto único para todos los tipos de tarea (autorización, revisión de artes,
+  // instalación, etc.). No rompe la creación si el socket falla.
+  client.$use(async (params, next) => {
+    const result = await next(params);
+    if (params.model === 'tareas' && params.action === 'create' && result) {
+      try {
+        emitTareaCreadaPopup(result as Parameters<typeof emitTareaCreadaPopup>[0]);
+      } catch (err) {
+        console.warn('[Prisma] emitTareaCreadaPopup falló:', err instanceof Error ? err.message : err);
+      }
+    }
+    return result;
   });
 
   // Keepalive: ping DB every 4 minutes to prevent Hostinger from dropping idle connections
