@@ -168,7 +168,7 @@ Herramientas: Barra de busqueda, filtros avanzados (embudo con operadores: igual
 Ver detalle: Click en el icono de ojo (morado). Abre modal con:
 - Encabezado: Icono, CUIC, badge SAP, nombre cliente.
 - Fila de stats: CUIC, Marca, Agencia, Categoria (colores distintos).
-- Informacion General: ID, CUIC, Cliente, Razon Social, Unidad de Negocio.
+- Informacion General: ID, CUIC, Cliente, Razon Social.
 - Asesor Comercial: Nombre, ID, Codigo SAP, Unidad.
 - Agencia, Marca y Producto, Categoria (en columnas).
 - Vigencias (ValidFrom/ValidTo) formateadas.
