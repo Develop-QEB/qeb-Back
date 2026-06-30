@@ -11374,75 +11374,84 @@ export class CampanasController {
         return;
       }
 
-      const placeholders = campanaIds.map(() => '?').join(', ');
+      // Cacheado (TTL corto): las 2 queries hacen GROUP BY con join CAST/COLLATE
+      // (anula el indice de idquote -> full scan de solicitudCaras). El front las
+      // pide repetidamente en batches; cachear por el set de ids ORDENADOS evita
+      // re-escanear. La data es identica; solo se sirve de memoria por <= CACHE_TTL.SHORT.
+      const invCacheKey = `campanas:inversiones-cat:${[...campanaIds].sort((a, b) => a - b).join(',')}`;
+      const result = await cache.getOrSet(invCacheKey, async () => {
+        const placeholders = campanaIds.map(() => '?').join(', ');
 
-      // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
-      //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
-      const perCatorcenaQuery = `
-        SELECT /*+ MAX_EXECUTION_TIME(30000) */
-          cm.id AS campania_id,
-          cat.numero_catorcena,
-          cat.año AS anio_catorcena,
-          COALESCE(SUM(
-            sc.costo
-            * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
-            / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
-          ), 0) AS inversion
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN catorcenas cat
-            ON sc.inicio_periodo <= cat.fecha_fin
-           AND sc.fin_periodo    >= cat.fecha_inicio
-        WHERE cm.id IN (${placeholders})
-        GROUP BY cm.id, cat.numero_catorcena, cat.año
-      `;
+        // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
+        //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
+        const perCatorcenaQuery = `
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
+            cm.id AS campania_id,
+            cat.numero_catorcena,
+            cat.año AS anio_catorcena,
+            COALESCE(SUM(
+              sc.costo
+              * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
+              / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+            ), 0) AS inversion
+          FROM campania cm
+            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+            INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN catorcenas cat
+              ON sc.inicio_periodo <= cat.fecha_fin
+             AND sc.fin_periodo    >= cat.fecha_inicio
+          WHERE cm.id IN (${placeholders})
+          GROUP BY cm.id, cat.numero_catorcena, cat.año
+        `;
 
-      // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
-      const totalQuery = `
-        SELECT /*+ MAX_EXECUTION_TIME(30000) */
-          cm.id AS campania_id,
-          COALESCE(SUM(sc.costo), 0) AS inversion
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-        WHERE cm.id IN (${placeholders})
-        GROUP BY cm.id
-      `;
+        // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
+        const totalQuery = `
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
+            cm.id AS campania_id,
+            COALESCE(SUM(sc.costo), 0) AS inversion
+          FROM campania cm
+            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+          WHERE cm.id IN (${placeholders})
+          GROUP BY cm.id
+        `;
 
-      const [perCatorcenaRows, totalRows] = await Promise.all([
-        prisma.$queryRawUnsafe<Array<{
-          campania_id: number;
-          numero_catorcena: number | null;
-          anio_catorcena: number | null;
-          inversion: bigint | number;
-        }>>(perCatorcenaQuery, ...campanaIds),
-        prisma.$queryRawUnsafe<Array<{
-          campania_id: number;
-          inversion: bigint | number;
-        }>>(totalQuery, ...campanaIds),
-      ]);
+        const [perCatorcenaRows, totalRows] = await Promise.all([
+          prisma.$queryRawUnsafe<Array<{
+            campania_id: number;
+            numero_catorcena: number | null;
+            anio_catorcena: number | null;
+            inversion: bigint | number;
+          }>>(perCatorcenaQuery, ...campanaIds),
+          prisma.$queryRawUnsafe<Array<{
+            campania_id: number;
+            inversion: bigint | number;
+          }>>(totalQuery, ...campanaIds),
+        ]);
 
-      const result: Record<number, Record<string, { inversion: number }>> = {};
+        const out: Record<number, Record<string, { inversion: number }>> = {};
 
-      for (const row of perCatorcenaRows) {
-        const cid = Number(row.campania_id);
-        if (!result[cid]) result[cid] = {};
-        const inv = Number(row.inversion || 0);
-        if (row.numero_catorcena != null && row.anio_catorcena != null) {
-          const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
-          if (!result[cid][catKey]) result[cid][catKey] = { inversion: 0 };
-          result[cid][catKey].inversion += inv;
+        for (const row of perCatorcenaRows) {
+          const cid = Number(row.campania_id);
+          if (!out[cid]) out[cid] = {};
+          const inv = Number(row.inversion || 0);
+          if (row.numero_catorcena != null && row.anio_catorcena != null) {
+            const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
+            if (!out[cid][catKey]) out[cid][catKey] = { inversion: 0 };
+            out[cid][catKey].inversion += inv;
+          }
         }
-      }
 
-      for (const row of totalRows) {
-        const cid = Number(row.campania_id);
-        if (!result[cid]) result[cid] = {};
-        result[cid]['total'] = { inversion: Number(row.inversion || 0) };
-      }
+        for (const row of totalRows) {
+          const cid = Number(row.campania_id);
+          if (!out[cid]) out[cid] = {};
+          out[cid]['total'] = { inversion: Number(row.inversion || 0) };
+        }
+
+        return out;
+      }, CACHE_TTL.SHORT);
 
       res.json({ success: true, data: result });
     } catch (error) {

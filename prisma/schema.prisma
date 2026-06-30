@@ -556,6 +556,11 @@ model criterios_autorizacion {
   caras_max_dcm  Int?
   activo         Boolean  @default(true)
   created_at     DateTime @default(now()) @db.Timestamp(0)
+
+  // Lookup de calcularEstadoAutorizacion (se llama por cara en bulk). Sin esto
+  // cada findFirst(formato,tipo,plaza,activo) era full scan. Crear con
+  // scripts/add_idx_criterios_lookup.cjs.
+  @@index([formato, tipo, plaza, activo], map: "idx_criterios_lookup")
 }
 
 model solicitud_original {

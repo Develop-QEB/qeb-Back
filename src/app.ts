@@ -60,11 +60,6 @@ app.options(/.*/, cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
-// Log ALL incoming requests for debugging
-app.use((req, res, next) => {
-  console.log(`[REQUEST] ${req.method} ${req.url}`);
-  next();
-});
 app.use(morgan('dev'));
 // Aumentar límite para soportar archivos base64 (videos pueden ser grandes)
 app.use(express.json({ limit: '200mb' }));
