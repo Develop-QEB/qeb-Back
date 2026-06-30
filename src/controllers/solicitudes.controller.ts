@@ -3417,7 +3417,7 @@ export class SolicitudesController {
               const conserved = conservarAprobacionSiIncrementa(
                 { autorizacion_dg: autorizacion_dg as any, autorizacion_dcm: autorizacion_dcm as any },
                 { autorizacion_dg: oldMatch.autorizacion_dg, autorizacion_dcm: oldMatch.autorizacion_dcm, costo: Number(oldMatch.costo || 0), caras: Number(oldMatch.caras || 0) },
-                { costo: Number(cara.costo || 0), caras: Number(cara.caras || 0) }
+                { costo: Number(cara.costo || 0), caras: Number(cara.caras || 0), tarifa_publica: Number(cara.tarifa_publica || 0) }
               );
               autorizacion_dg = conserved.autorizacion_dg;
               autorizacion_dcm = conserved.autorizacion_dcm;
