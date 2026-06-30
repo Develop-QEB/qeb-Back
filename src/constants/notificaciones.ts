@@ -21,36 +21,63 @@ export const CLAVE_MASTER = '__all__';
 export interface CatalogoItem {
   clave: string;
   label: string;
+  /** false = este tipo NO envía correo → el frontend oculta su toggle de correo. */
+  email?: boolean;
 }
 
-/** Categorías de notificaciones (tipo='Notificación'). */
+/** Categorías de notificaciones (tipo='Notificación'). Solo las que se usan. */
 export const CATEGORIAS_NOTIFICACION: CatalogoItem[] = [
   { clave: 'cambio_estatus', label: 'Cambios de estado' },
   { clave: 'comentario', label: 'Comentarios en bitácora' },
-  { clave: 'autorizacion', label: 'Autorizaciones (resultado)' },
-  { clave: 'creacion_eliminacion', label: 'Creación / eliminación' },
   { clave: 'recordatorio', label: 'Recordatorios' },
-  { clave: 'sistema', label: 'Sistema' },
   { clave: 'general', label: 'Otras notificaciones' },
 ];
 
-/** Tipos de tarea (canónicos). El matching ignora acentos y mayúsculas. */
+/**
+ * Tipos de tarea CANÓNICOS (los que se ofrecen como toggle). Cada uno agrupa
+ * las variantes reales vía `canonicalizarTipoTarea`. El matching ignora acentos
+ * y mayúsculas. Solo se incluyen tipos que REALMENTE se crean en el sistema.
+ */
 export const TIPOS_TAREA: CatalogoItem[] = [
   { clave: 'Autorización DG', label: 'Autorización DG' },
   { clave: 'Autorización DCM', label: 'Autorización DCM' },
+  { clave: 'Resultado de autorización', label: 'Resultado de autorización (aprobada/rechazada)', email: false },
   { clave: 'Revisión de artes', label: 'Revisión de artes' },
   { clave: 'Corrección', label: 'Corrección' },
   { clave: 'Ajuste Cto Cliente', label: 'Ajuste CTO Cliente' },
   { clave: 'Ajuste Comercial', label: 'Ajuste Comercial' },
-  { clave: 'Ajuste de Caras', label: 'Ajuste de Caras' },
-  { clave: 'Instalación', label: 'Instalación' },
   { clave: 'Impresión', label: 'Impresión' },
-  { clave: 'Testigo', label: 'Testigo' },
-  { clave: 'Programación', label: 'Programación' },
-  { clave: 'Recepción', label: 'Recepción' },
-  { clave: 'Producción', label: 'Producción' },
+  { clave: 'Instalación', label: 'Instalación', email: false },
+  { clave: 'Programación', label: 'Programación', email: false },
+  { clave: 'Recepción', label: 'Recepción', email: false },
+  { clave: 'Producción', label: 'Producción', email: false },
   { clave: 'Seguimiento', label: 'Seguimiento' },
 ];
+
+/**
+ * Mapea el `tipo` real de una fila de tareas a su clave canónica del catálogo,
+ * para que las preferencias por tipo cubran todas las variantes de nombre.
+ * Ej: 'Seguimiento Solicitud' → 'Seguimiento'; 'Aprobación DG' → 'Resultado de
+ * autorización'; 'Orden de Programación' → 'Programación'.
+ */
+export function canonicalizarTipoTarea(tipo: string | null | undefined): string {
+  const t = normalizarClave(tipo);
+  if (!t) return '';
+  if (t.startsWith('seguimiento')) return 'Seguimiento';
+  if (t.startsWith('aprobacion') || t.startsWith('rechazo')) return 'Resultado de autorización';
+  if (t.startsWith('autorizacion dg')) return 'Autorización DG';
+  if (t.startsWith('autorizacion dcm')) return 'Autorización DCM';
+  if (t.includes('orden de programacion') || t === 'programacion') return 'Programación';
+  if (t.includes('orden de instalacion') || t === 'instalacion') return 'Instalación';
+  if (t.includes('recepcion')) return 'Recepción'; // incluye "Gestión de Recepción Parcial"
+  if (t.startsWith('ajuste cto')) return 'Ajuste Cto Cliente';
+  if (t.startsWith('ajuste comercial')) return 'Ajuste Comercial';
+  if (t.startsWith('revision de artes')) return 'Revisión de artes';
+  if (t.startsWith('correccion')) return 'Corrección';
+  // Coincidencia exacta contra el catálogo (normalizada); si no, deja el tipo tal cual.
+  const match = TIPOS_TAREA.find((x) => normalizarClave(x.clave) === t);
+  return match ? match.clave : (tipo || '');
+}
 
 export const CATEGORIA_DEFAULT = 'general';
 
@@ -70,41 +97,10 @@ export function clavesValidas(clase: ClaseNotif): Set<string> {
 }
 
 /**
- * Catálogo de preferencias RELEVANTE para un usuario según su rol/puesto.
- * Las notificaciones son universales; los tipos de tarea se filtran a lo que ese
- * rol realmente puede recibir (refleja las reglas de asignación del sistema).
+ * Catálogo COMPLETO de preferencias. El filtrado por rol se hace en el frontend
+ * con `getPermissions` (fuente de verdad de permisos), por eso aquí devolvemos
+ * todo el catálogo reconciliado.
  */
-export function catalogoParaUsuario(
-  userRole?: string | null,
-  puesto?: string | null
-): { notificacion: CatalogoItem[]; tarea: CatalogoItem[] } {
-  const rol = normalizarClave(userRole);
-  const pst = normalizarClave(puesto);
-
-  // Admin/DEV ven todo (gestión/pruebas).
-  if (rol === 'administrador' || rol === 'dev') {
-    return { notificacion: CATEGORIAS_NOTIFICACION, tarea: TIPOS_TAREA };
-  }
-
-  const esDiseno = rol === 'disenadores' || rol === 'coordinador de diseno';
-  const valoresDG = ['dg', 'director general', 'direccion general'];
-  const valoresDCM = ['dcm', 'director comercial', 'direccion comercial'];
-  const esDG = valoresDG.includes(rol) || valoresDG.includes(pst);
-  const esDCM = valoresDCM.includes(rol) || valoresDCM.includes(pst);
-
-  // Diseño: SOLO tareas de artes (igual que el filtro de getAll).
-  if (esDiseno) {
-    const arte = TIPOS_TAREA.filter((t) => t.clave === 'Revisión de artes' || t.clave === 'Corrección');
-    return { notificacion: CATEGORIAS_NOTIFICACION, tarea: arte };
-  }
-
-  // Resto: todo menos los tipos exclusivos de otro rol.
-  const tarea = TIPOS_TAREA.filter((t) => {
-    if (t.clave === 'Autorización DG') return esDG;
-    if (t.clave === 'Autorización DCM') return esDCM;
-    if (t.clave === 'Revisión de artes' || t.clave === 'Corrección') return false; // solo Diseño
-    return true;
-  });
-
-  return { notificacion: CATEGORIAS_NOTIFICACION, tarea };
+export function catalogoCompleto(): { notificacion: CatalogoItem[]; tarea: CatalogoItem[] } {
+  return { notificacion: CATEGORIAS_NOTIFICACION, tarea: TIPOS_TAREA };
 }

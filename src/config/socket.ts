@@ -1,5 +1,6 @@
 import { Server as SocketServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
+import { canonicalizarTipoTarea } from '../constants/notificaciones';
 
 let io: SocketServer | null = null;
 
@@ -358,8 +359,14 @@ export function emitTareaCreadaPopup(tarea: {
   if (!tipo || tipo === 'Recordatorio') return;
 
   const esNotif = tipo === 'Notificación';
+  // En "Autorización DG/DCM" el id_responsable es el ORIGINADOR (no destinatario);
+  // los destinatarios reales son los asignados (DG/DCM). Para el resto de tareas
+  // el responsable sí es destinatario.
+  const esAutorizacion = /^autorizacion/.test(
+    tipo.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  );
   const destinatarios = new Set<number>();
-  if (tarea.id_responsable) destinatarios.add(tarea.id_responsable);
+  if (tarea.id_responsable && !esAutorizacion) destinatarios.add(tarea.id_responsable);
   if (!esNotif && tarea.id_asignado) {
     for (const s of String(tarea.id_asignado).split(',')) {
       const n = parseInt(s.trim(), 10);
@@ -372,6 +379,8 @@ export function emitTareaCreadaPopup(tarea: {
     tipo,
     clase: esNotif ? 'notificacion' : 'tarea',
     categoria: esNotif ? (tarea.categoria || 'general') : undefined,
+    // Clave canónica para que el front haga match con el catálogo de toggles.
+    clave: esNotif ? undefined : canonicalizarTipoTarea(tipo),
     titulo: tarea.titulo || tipo,
     descripcion: tarea.descripcion || undefined,
     tarea_id: tarea.id,

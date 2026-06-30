@@ -8,11 +8,10 @@ import {
   PreferenciaInput,
 } from '../services/preferenciasNotif.service';
 import {
-  catalogoParaUsuario,
+  catalogoCompleto,
   CLASE_GLOBAL,
   CLAVE_MASTER,
 } from '../constants/notificaciones';
-import prisma from '../utils/prisma';
 
 export class PreferenciasNotifController {
   /** GET /notificaciones/preferencias — preferencias del usuario actual + catálogo. */
@@ -23,14 +22,10 @@ export class PreferenciasNotifController {
         res.status(401).json({ success: false, error: 'No autorizado' });
         return;
       }
-      const [preferencias, usuario] = await Promise.all([
-        getPreferenciasUsuario(userId),
-        prisma.usuario.findUnique({ where: { id: userId }, select: { user_role: true, puesto: true } }),
-      ]);
-      const catalogo = catalogoParaUsuario(usuario?.user_role, usuario?.puesto);
+      const preferencias = await getPreferenciasUsuario(userId);
       res.json({
         success: true,
-        data: { preferencias, catalogo },
+        data: { preferencias, catalogo: catalogoCompleto() },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener preferencias';

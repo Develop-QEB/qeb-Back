@@ -1229,7 +1229,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'creacion_eliminacion')) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'general')) {
           enviarCorreoNotificacion(
             solicitud.id,
             'Solicitud eliminada',
