@@ -10249,7 +10249,7 @@ export class CampanasController {
         const estadoResult = conservarAprobacionSiIncrementa(
           estadoResultCalcCm,
           { autorizacion_dg: currentCaraFull?.autorizacion_dg, autorizacion_dcm: currentCaraFull?.autorizacion_dcm, costo: Number(currentCaraFull?.costo || 0), caras: Number(currentCaraFull?.caras || 0) },
-          { costo: effCostoCmAuth, caras: effCarasCmAuth }
+          { costo: effCostoCmAuth, caras: effCarasCmAuth, tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : Number(currentCaraFull?.tarifa_publica || 0) }
         );
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
@@ -10730,7 +10730,7 @@ export class CampanasController {
             const estadoResult = conservarAprobacionSiIncrementa(
               estadoResultCalcBulk,
               { autorizacion_dg: currentCara?.autorizacion_dg, autorizacion_dcm: currentCara?.autorizacion_dcm, costo: Number(currentCara?.costo || 0), caras: Number(currentCara?.caras || 0) },
-              { costo: effCostoBulkAuth, caras: effCarasBulkAuth }
+              { costo: effCostoBulkAuth, caras: effCarasBulkAuth, tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : Number(currentCara?.tarifa_publica || 0) }
             );
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
