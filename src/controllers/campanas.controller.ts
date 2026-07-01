@@ -10716,6 +10716,18 @@ export class CampanasController {
         return;
       }
 
+      // Bloqueo: no permitir AGREGAR un circuito nuevo si la campaña ya tiene
+      // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
+      // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+      if (pendCmCr.tienePendientes) {
+        res.status(409).json({
+          success: false,
+          error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+        });
+        return;
+      }
+
       // Get solicitud_id for task creation
       const propuesta = await prisma.propuesta.findUnique({
         where: { id: cotizacion.id_propuesta },

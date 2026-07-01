@@ -3237,6 +3237,28 @@ export class SolicitudesController {
         where: { solicitud_id: solicitud.id, deleted_at: null },
       });
 
+      // Bloqueo: no permitir AGREGAR circuitos nuevos mientras la solicitud
+      // tenga autorización de dirección pendiente (DG/DCM). Editar caras
+      // existentes y metadatos sí se permite; solo se rechaza una adición neta
+      // (llegan más circuitos que los guardados). El front ya bloquea el botón;
+      // esto es el candado de servidor (no se puede saltar por API directa).
+      if (propuesta && Array.isArray(caras)) {
+        const carasActuales = await prisma.solicitudCaras.findMany({
+          where: { idquote: propuesta.id.toString() },
+          select: { autorizacion_dg: true, autorizacion_dcm: true },
+        });
+        const hayPendientes = carasActuales.some(
+          c => c.autorizacion_dg === 'pendiente' || c.autorizacion_dcm === 'pendiente'
+        );
+        if (hayPendientes && caras.length > carasActuales.length) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la solicitud tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
+      }
+
       // Get existing cotizacion
       const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
         where: { id_propuesta: propuesta.id },

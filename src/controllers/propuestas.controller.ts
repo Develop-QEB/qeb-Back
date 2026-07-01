@@ -4484,6 +4484,18 @@ export class PropuestasController {
         return;
       }
 
+      // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
+      // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
+      // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      const pendCrP = await verificarCarasPendientes(id);
+      if (pendCrP.tienePendientes) {
+        res.status(409).json({
+          success: false,
+          error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+        });
+        return;
+      }
+
       // Calculate authorization state — use BF pair's bonificacion for RT rows
       const artUpperCrP = (articulo || '').toUpperCase();
       const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
