@@ -353,25 +353,33 @@ export function emitTareaCreadaPopup(tarea: {
   descripcion?: string | null;
   id_responsable?: number | null;
   id_asignado?: string | null;
-}): void {
+}, extraDestinatarios?: number[]): void {
   if (!io) return;
   const tipo = tarea.tipo || '';
   if (!tipo || tipo === 'Recordatorio') return;
 
   const esNotif = tipo === 'Notificación';
-  // En "Autorización DG/DCM" el id_responsable es el ORIGINADOR (no destinatario);
-  // los destinatarios reales son los asignados (DG/DCM). Para el resto de tareas
-  // el responsable sí es destinatario.
-  const esAutorizacion = /^autorizacion/.test(
-    tipo.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
-  );
+  // Tipos donde id_responsable es el CREADOR (no un destinatario): autorización
+  // (originador) y tareas de diseño asignadas (Revisión de artes / Corrección,
+  // creadas desde gestor de artes con id_responsable = quien la crea). En estos
+  // el destinatario real es id_asignado, así que NO se notifica al responsable.
+  const tipoNorm = tipo.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const creadorEsResponsable =
+    tipoNorm.startsWith('autorizacion') ||
+    tipoNorm.startsWith('revision de artes') ||
+    tipoNorm.startsWith('correccion');
   const destinatarios = new Set<number>();
-  if (tarea.id_responsable && !esAutorizacion) destinatarios.add(tarea.id_responsable);
+  if (tarea.id_responsable && !creadorEsResponsable) destinatarios.add(tarea.id_responsable);
   if (!esNotif && tarea.id_asignado) {
     for (const s of String(tarea.id_asignado).split(',')) {
       const n = parseInt(s.trim(), 10);
       if (!isNaN(n)) destinatarios.add(n);
     }
+  }
+  // Supervisores que también deben ver el popup (p.ej. Coordinador de Diseño
+  // recibe lo de sus Diseñadores), calculados por el middleware.
+  if (extraDestinatarios) {
+    for (const id of extraDestinatarios) destinatarios.add(id);
   }
   if (destinatarios.size === 0) return;
 

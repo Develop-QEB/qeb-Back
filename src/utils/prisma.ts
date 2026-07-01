@@ -104,6 +104,22 @@ const createPrismaClient = () => {
     return next(params);
   });
 
+  // Cache corto (5 min) de la supervisión de Diseño: qué usuarios son
+  // Diseñadores y quiénes son Coordinadores de Diseño. Sirve para que el popup
+  // llegue también al Coordinador cuando la tarea/notificación va a un Diseñador
+  // (igual que la lista, que ya muestra al Coordinador lo de sus Diseñadores).
+  let disenoCache: { disenadores: Set<number>; coordinadores: number[]; ts: number } | null = null;
+  const getSupervisionDiseno = async () => {
+    const now = Date.now();
+    if (disenoCache && now - disenoCache.ts < 5 * 60 * 1000) return disenoCache;
+    const [dis, coord] = await Promise.all([
+      client.usuario.findMany({ where: { user_role: 'Diseñadores', deleted_at: null }, select: { id: true } }),
+      client.usuario.findMany({ where: { user_role: 'Coordinador de Diseño', deleted_at: null }, select: { id: true } }),
+    ]);
+    disenoCache = { disenadores: new Set(dis.map((r) => r.id)), coordinadores: coord.map((r) => r.id), ts: now };
+    return disenoCache;
+  };
+
   // Middleware: al crear una TAREA real, notificar (popup) a sus asignados.
   // Punto único para todos los tipos de tarea (autorización, revisión de artes,
   // instalación, etc.). No rompe la creación si el socket falla.
@@ -111,7 +127,23 @@ const createPrismaClient = () => {
     const result = await next(params);
     if (params.model === 'tareas' && params.action === 'create' && result) {
       try {
-        emitTareaCreadaPopup(result as Parameters<typeof emitTareaCreadaPopup>[0]);
+        const t = result as Parameters<typeof emitTareaCreadaPopup>[0];
+        // Destinatarios reales de la fila (igual criterio que emitTareaCreadaPopup).
+        const targetIds: number[] = [];
+        if (t.id_responsable) targetIds.push(t.id_responsable);
+        if (t.tipo !== 'Notificación' && t.id_asignado) {
+          for (const s of String(t.id_asignado).split(',')) {
+            const n = parseInt(s.trim(), 10);
+            if (!isNaN(n)) targetIds.push(n);
+          }
+        }
+        // Si algún destinatario es Diseñador, sumar a los Coordinadores de Diseño.
+        let extra: number[] | undefined;
+        if (targetIds.length > 0) {
+          const sup = await getSupervisionDiseno();
+          if (targetIds.some((id) => sup.disenadores.has(id))) extra = sup.coordinadores;
+        }
+        emitTareaCreadaPopup(t, extra);
       } catch (err) {
         console.warn('[Prisma] emitTareaCreadaPopup falló:', err instanceof Error ? err.message : err);
       }

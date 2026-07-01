@@ -3246,6 +3246,9 @@ export class SolicitudesController {
         where: { cotizacion_id: cotizacion.id },
       }) : null;
 
+      // Resumen de cambios (se llena dentro de la tx) para reusar en el correo.
+      let cambiosResumen = 'datos generales';
+
       await prisma.$transaction(async (tx) => {
         // Update solicitud
         await tx.solicitud.update({
@@ -3523,6 +3526,7 @@ export class SolicitudesController {
         if (archivo !== solicitud.archivo) addCambio('archivo', solicitud.archivo ? 'sí' : 'no', archivo ? 'sí' : 'no');
 
         const cambiosStr = cambiosLabels.length > 0 ? cambiosLabels.join(', ') : 'datos generales';
+        cambiosResumen = cambiosStr;
 
         // Create historial entry
         await tx.historial.create({
@@ -3577,6 +3581,7 @@ export class SolicitudesController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'general',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               responsable: '',
@@ -3631,7 +3636,7 @@ export class SolicitudesController {
           enviarCorreoNotificacion(
             solicitud.id,
             `Solicitud #${solicitud.id} editada`,
-            `${userName} realizó cambios en la solicitud`,
+            `${userName} modificó: ${cambiosResumen}`,
             usuario.correo_electronico,
             usuario.nombre,
             {

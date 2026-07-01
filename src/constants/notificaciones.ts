@@ -30,7 +30,8 @@ export const CATEGORIAS_NOTIFICACION: CatalogoItem[] = [
   { clave: 'cambio_estatus', label: 'Cambios de estado' },
   { clave: 'comentario', label: 'Comentarios en bitácora' },
   { clave: 'recordatorio', label: 'Recordatorios' },
-  { clave: 'general', label: 'Otras notificaciones' },
+  // 'general' es el comodín (ediciones y demás avisos varios).
+  { clave: 'general', label: 'Ediciones' },
 ];
 
 /**
