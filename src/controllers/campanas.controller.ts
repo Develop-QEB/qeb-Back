@@ -5543,6 +5543,220 @@ export class CampanasController {
   }
 
   /**
+   * Cerrar una tarea de Corrección y abrir la nueva Revisión de artes en una sola
+   * operación atómica. Reemplaza al flujo antiguo del front que hacía 3 llamadas
+   * separadas (updateArteStatus + createTarea + updateTarea Atendido); si alguna
+   * fallaba, quedaban estados inconsistentes (arte Pendiente sin Revisión, o
+   * Corrección Activa con Revisión ya creada).
+   *
+   * Todo lo crítico va dentro de prisma.$transaction — si algo falla, se revierte
+   * entero. WebSocket / notificaciones / historial se emiten después (best-effort).
+   */
+  async completarCorreccionEnviarRevision(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { correccionId, reservaIds, asignadoNombres, asignadoIds } = req.body as {
+        correccionId?: number;
+        reservaIds?: number[];
+        asignadoNombres?: string;
+        asignadoIds?: string;
+      };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!correccionId) {
+        res.status(400).json({ success: false, error: 'correccionId requerido' });
+        return;
+      }
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'reservaIds requerido' });
+        return;
+      }
+      if (!asignadoNombres) {
+        res.status(400).json({ success: false, error: 'asignadoNombres requerido' });
+        return;
+      }
+
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const comentario = 'Arte corregido y enviado a revisión';
+
+      // Obtener grupo_completo_id ANTES de la transacción (solo lectura)
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(
+        `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`,
+        ...reservaIds
+      );
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Verificar que la Corrección exista y esté activa (idempotencia)
+      const correccion = await prisma.tareas.findUnique({
+        where: { id: correccionId },
+        select: { id: true, estatus: true, campania_id: true, tipo: true },
+      });
+      if (!correccion) {
+        res.status(404).json({ success: false, error: 'Corrección no encontrada' });
+        return;
+      }
+      if (correccion.estatus === 'Atendido' || correccion.estatus === 'Completado') {
+        // Ya se completó antes — no volver a crear Revisión duplicada
+        res.json({
+          success: true,
+          data: { message: 'La Corrección ya estaba completada', alreadyDone: true },
+        });
+        return;
+      }
+
+      // Buscar tarea(s) de Revisión de artes previas para rotar roles
+      const tareasRevisionPrev = await prisma.$queryRawUnsafe<{
+        id: number;
+        ids_reservas: string;
+        responsable: string | null;
+        id_responsable: number;
+        asignado: string | null;
+        id_asignado: string | null;
+      }[]>(`
+        SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Revision de artes', 'Revisión de artes')
+          AND ids_reservas IS NOT NULL AND ids_reservas != ''
+          AND (estatus IS NULL OR estatus NOT IN ('Atendido', 'Completado', 'Cancelado', 'Rechazado', 'Finalizada'))
+      `, campanaId);
+
+      const rotaciones: Array<{
+        tareaId: number;
+        nuevoResponsable: string | null;
+        nuevoIdResponsable: number;
+        nuevoAsignado: string | null;
+        nuevoIdAsignado: string;
+      }> = [];
+      for (const t of tareasRevisionPrev) {
+        const tareaReservaIds = t.ids_reservas
+          .replace(/\*/g, ',')
+          .split(',')
+          .map(x => parseInt(x.trim()))
+          .filter(x => !isNaN(x));
+        const afecta = reservaIds.some(r => tareaReservaIds.includes(r));
+        if (!afecta) continue;
+        rotaciones.push({
+          tareaId: t.id,
+          nuevoResponsable: t.asignado,
+          nuevoIdResponsable: t.id_asignado ? parseInt(t.id_asignado) : t.id_responsable,
+          nuevoAsignado: t.responsable,
+          nuevoIdAsignado: String(t.id_responsable),
+        });
+      }
+
+      // TRANSACCIÓN — todo o nada
+      const nuevaTareaId = await prisma.$transaction(async (tx) => {
+        // 1) Reservas directas: arte_aprobado='Pendiente' + comentario_rechazo
+        await tx.$executeRawUnsafe(
+          `UPDATE reservas SET arte_aprobado = ?, comentario_rechazo = ? WHERE id IN (${placeholders})`,
+          'Pendiente', comentario, ...reservaIds
+        );
+
+        // 2) Reservas del mismo grupo (si hay)
+        if (grupoIds.length > 0) {
+          const grupoPh = grupoIds.map(() => '?').join(',');
+          await tx.$executeRawUnsafe(
+            `UPDATE reservas SET arte_aprobado = ?, comentario_rechazo = ? WHERE grupo_completo_id IN (${grupoPh})`,
+            'Pendiente', comentario, ...grupoIds
+          );
+        }
+
+        // 3) Rotar roles en Revisión anterior
+        for (const rot of rotaciones) {
+          await tx.tareas.update({
+            where: { id: rot.tareaId },
+            data: {
+              responsable: rot.nuevoResponsable,
+              id_responsable: rot.nuevoIdResponsable,
+              asignado: rot.nuevoAsignado,
+              id_asignado: rot.nuevoIdAsignado,
+            },
+          });
+        }
+
+        // 4) Crear nueva tarea de Revisión de artes
+        const nueva = await tx.tareas.create({
+          data: {
+            titulo: 'Revisión de artes - Corrección enviada',
+            descripcion: 'Los artes han sido corregidos y están listos para revisión.',
+            tipo: 'Revisión de artes',
+            estatus: 'Pendiente',
+            asignado: asignadoNombres,
+            id_asignado: asignadoIds || '',
+            responsable: userName,
+            id_responsable: userId ?? 0,
+            campania_id: campanaId,
+            ids_reservas: reservaIds.join(','),
+            id_solicitud: '',
+            id_propuesta: '',
+            fecha_inicio: new Date(),
+            fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+
+        // 5) Cerrar la Corrección como Atendida
+        await tx.tareas.update({
+          where: { id: correccionId },
+          data: { estatus: 'Atendido' },
+        });
+
+        return nueva.id;
+      });
+
+      res.json({
+        success: true,
+        data: {
+          message: 'Corrección completada y Revisión creada',
+          nuevaRevisionId: nuevaTareaId,
+          affected: reservaIds.length,
+        },
+      });
+
+      // Post-commit best-effort: historial + WebSocket. Si fallan, no afectan
+      // la consistencia — el flujo ya se completó atómicamente.
+      try {
+        const campana = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: CAMPANIA_SAFE_SELECT,
+        });
+        if (campana?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+          if (cot?.id_propuesta) {
+            await prisma.historial.create({
+              data: {
+                tipo: 'Arte',
+                ref_id: cot.id_propuesta,
+                accion: 'Pendiente',
+                fecha_hora: new Date(),
+                detalles: `${userName} envió corrección a revisión de ${reservaIds.length} reserva(s)`,
+              },
+            });
+          }
+        }
+      } catch (histErr) {
+        console.error('completarCorreccion: fallo al registrar historial (no crítico):', histErr);
+      }
+
+      try {
+        emitToCampana(campanaId, SOCKET_EVENTS.ARTE_RECHAZADO, {
+          campanaId, reservaIds, status: 'Pendiente', usuario: userName,
+        });
+        emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
+        emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { campanaId, status: 'Pendiente' });
+      } catch (sockErr) {
+        console.error('completarCorreccion: fallo al emitir WebSocket (no crítico):', sockErr);
+      }
+    } catch (error) {
+      console.error('Error en completarCorreccionEnviarRevision:', error);
+      const message = error instanceof Error ? error.message : 'Error al completar la corrección';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
    * Actualizar estatus_operaciones de un arte para TODAS las reservas que comparten
    * el mismo archivo dentro de la campaña. El campo es del arte (no de la reserva
    * individual), así que un solo cambio se propaga a todas las filas que tienen
