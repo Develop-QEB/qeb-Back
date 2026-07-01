@@ -2300,7 +2300,8 @@ export class SolicitudesController {
         }
 
         // Regla: si el total global de caras NO-digitales es impar, todas las
-        // NO-digitales requieren autorización DG. Los digitales/circuitos quedan exentos.
+        // NO-digitales requieren autorización DCM (impar → DCM, alineado con
+        // calcularEstadoAutorizacion/oddCarasNeedsDcm). Los digitales/circuitos quedan exentos.
         const noDigitalesPayload = caras.filter((c: any) => {
           const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
           return !isDigital;
@@ -2316,14 +2317,14 @@ export class SolicitudesController {
             return tipo !== 'digital' && !isCircuitoDigital(cara.articulo);
           };
           for (const createdCara of createdCaras) {
-            if (createdCara.autorizacion_dg !== 'pendiente' && isCaraNoDigital(createdCara)) {
+            if (createdCara.autorizacion_dcm !== 'pendiente' && isCaraNoDigital(createdCara)) {
               await tx.solicitudCaras.update({
                 where: { id: createdCara.id },
-                data: { autorizacion_dg: 'pendiente' },
+                data: { autorizacion_dcm: 'pendiente' },
               });
             }
           }
-          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DG`);
+          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DCM`);
         }
 
         return {
