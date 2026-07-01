@@ -3818,6 +3818,125 @@ export class SolicitudesController {
       res.status(500).json({ success: false, error: message });
     }
   }
+
+  // Bitacora de Notas Direccion: lista todas las notas + la nota inicial de
+  // solicitud.notas como entrada #0 sintetica (para compatibilidad con las
+  // solicitudes previas a la introduccion de la tabla).
+  async getNotasDireccion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idSolicitud = parseInt(req.params.id);
+      if (isNaN(idSolicitud)) {
+        res.status(400).json({ success: false, error: 'id invalido' });
+        return;
+      }
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: idSolicitud, deleted_at: null },
+        select: { id: true, notas: true, fecha: true, nombre_usuario: true, usuario_id: true, asesor: true },
+      });
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      const notas = await prisma.solicitud_nota_direccion.findMany({
+        where: { id_solicitud: idSolicitud },
+        orderBy: { created_at: 'asc' },
+      });
+
+      const entries: {
+        id: number | string;
+        texto: string;
+        autor_nombre: string | null;
+        autor_rol: string | null;
+        autor_id: number | null;
+        created_at: Date;
+        origen: 'inicial' | 'bitacora';
+      }[] = [];
+
+      // Nota inicial (del asesor al crear la solicitud). Se muestra como
+      // entrada sintetica si el campo solicitud.notas tiene texto.
+      const notaInicial = (solicitud.notas || '').trim();
+      if (notaInicial) {
+        entries.push({
+          id: `inicial-${solicitud.id}`,
+          texto: notaInicial,
+          autor_nombre: solicitud.nombre_usuario || solicitud.asesor || null,
+          autor_rol: 'Asesor',
+          autor_id: solicitud.usuario_id ?? null,
+          created_at: solicitud.fecha,
+          origen: 'inicial',
+        });
+      }
+      for (const n of notas) {
+        entries.push({
+          id: n.id,
+          texto: n.texto,
+          autor_nombre: n.usuario_nombre,
+          autor_rol: n.usuario_rol,
+          autor_id: n.id_usuario,
+          created_at: n.created_at,
+          origen: 'bitacora',
+        });
+      }
+
+      res.json({ success: true, data: entries });
+    } catch (error) {
+      console.error('Error getNotasDireccion:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener notas de direccion';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Agregar una nota nueva a la bitacora. Solo Direccion (DG/DCM) y admins.
+  async addNotaDireccion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idSolicitud = parseInt(req.params.id);
+      const { texto } = req.body as { texto?: string };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre;
+      const userRol = req.user?.rol;
+
+      if (isNaN(idSolicitud)) {
+        res.status(400).json({ success: false, error: 'id invalido' });
+        return;
+      }
+      if (!texto || !texto.trim()) {
+        res.status(400).json({ success: false, error: 'texto requerido' });
+        return;
+      }
+      const rolesPermitidos = ['Director General', 'Director Comercial', 'Administrador', 'DEV'];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para agregar notas de direccion' });
+        return;
+      }
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: idSolicitud, deleted_at: null },
+        select: { id: true },
+      });
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      const creada = await prisma.solicitud_nota_direccion.create({
+        data: {
+          id_solicitud: idSolicitud,
+          texto: texto.trim(),
+          id_usuario: userId ?? null,
+          usuario_nombre: userName ?? null,
+          usuario_rol: userRol ?? null,
+        },
+      });
+
+      res.status(201).json({ success: true, data: creada });
+    } catch (error) {
+      console.error('Error addNotaDireccion:', error);
+      const message = error instanceof Error ? error.message : 'Error al agregar nota de direccion';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
 }
 
 export const solicitudesController = new SolicitudesController();

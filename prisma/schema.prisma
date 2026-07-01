@@ -368,6 +368,22 @@ model solicitud {
   sap_database     String?   @db.VarChar(255)
 }
 
+// Bitacora de notas de Direccion sobre una solicitud. Cada entrada es una
+// nota nueva agregada por Direccion (DG/DCM/Admin/DEV) durante las
+// autorizaciones. La primera nota historica sigue viviendo en solicitud.notas
+// y se surface como entrada sintetica del lado del GET.
+model solicitud_nota_direccion {
+  id             Int      @id @default(autoincrement())
+  id_solicitud   Int
+  texto          String   @db.Text
+  id_usuario     Int?
+  usuario_nombre String?  @db.VarChar(255)
+  usuario_rol    String?  @db.VarChar(255)
+  created_at     DateTime @default(now()) @db.DateTime(0)
+
+  @@index([id_solicitud])
+}
+
 model solicitudCaras {
   id                   Int      @id @default(autoincrement())
   idquote              String?  @db.VarChar(255)

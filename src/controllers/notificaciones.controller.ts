@@ -289,16 +289,37 @@ export class NotificacionesController {
         .filter((id): id is number => id !== null && !isNaN(id))
       )];
 
-      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }> = {};
+      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; notas_direccion_bitacora_count: number; descripcion_trafico: string | null }> = {};
       if (solicitudIds.length > 0) {
-        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }[]>`
-          SELECT s.id, s.asesor, s.nombre_usuario, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre, s.notas AS notas_direccion, s.descripcion AS descripcion_trafico
+        // notas_direccion = ultima nota de la bitacora si existe, si no la nota
+        // inicial de solicitud.notas. bitacora_count = cuantas notas hay en la
+        // tabla nueva (permite al front mostrar "Ver historial (N)").
+        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; notas_direccion_bitacora_count: bigint | number; descripcion_trafico: string | null }[]>`
+          SELECT s.id, s.asesor, s.nombre_usuario,
+                 COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre,
+                 COALESCE(
+                   (SELECT snd.texto FROM solicitud_nota_direccion snd
+                     WHERE snd.id_solicitud = s.id
+                     ORDER BY snd.created_at DESC, snd.id DESC
+                     LIMIT 1),
+                   s.notas
+                 ) AS notas_direccion,
+                 (SELECT COUNT(*) FROM solicitud_nota_direccion snd
+                   WHERE snd.id_solicitud = s.id) AS notas_direccion_bitacora_count,
+                 s.descripcion AS descripcion_trafico
           FROM solicitud s
           LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
           WHERE s.id IN (${Prisma.join(solicitudIds)})
         `;
         for (const s of solicitudes) {
-          solicitudMap[s.id] = { asesor: s.asesor, nombre_usuario: s.nombre_usuario, cliente_nombre: s.cliente_nombre, notas_direccion: s.notas_direccion, descripcion_trafico: s.descripcion_trafico };
+          solicitudMap[s.id] = {
+            asesor: s.asesor,
+            nombre_usuario: s.nombre_usuario,
+            cliente_nombre: s.cliente_nombre,
+            notas_direccion: s.notas_direccion,
+            notas_direccion_bitacora_count: Number(s.notas_direccion_bitacora_count) || 0,
+            descripcion_trafico: s.descripcion_trafico,
+          };
         }
       }
 
@@ -402,6 +423,7 @@ export class NotificacionesController {
           : (solData?.nombre_usuario || null),
         cliente: solData?.cliente_nombre || null,
         notas_direccion: solData?.notas_direccion || null,
+        notas_direccion_bitacora_count: solData?.notas_direccion_bitacora_count ?? 0,
         descripcion_trafico: solData?.descripcion_trafico || null,
         formatos: formatosByTareaId[tarea.id] || null,
       };
@@ -533,6 +555,7 @@ export class NotificacionesController {
         ids_reservas: tarea.ids_reservas,
         comentarios,
         notas_direccion: null as string | null,
+        notas_direccion_bitacora_count: 0 as number,
         descripcion_trafico: null as string | null,
         cliente: null as string | null,
         creador: null as string | null,
@@ -543,15 +566,27 @@ export class NotificacionesController {
       if (tarea.id_solicitud) {
         const solId = parseInt(tarea.id_solicitud);
         if (!isNaN(solId)) {
-          const solRows = await prisma.$queryRaw<{ notas: string | null; descripcion: string | null; cliente_nombre: string | null; nombre_usuario: string | null; asesor: string | null }[]>`
-            SELECT s.notas, s.descripcion, s.nombre_usuario, s.asesor, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
+          const solRows = await prisma.$queryRaw<{ notas_direccion: string | null; notas_direccion_bitacora_count: bigint | number; descripcion: string | null; cliente_nombre: string | null; nombre_usuario: string | null; asesor: string | null }[]>`
+            SELECT
+              COALESCE(
+                (SELECT snd.texto FROM solicitud_nota_direccion snd
+                  WHERE snd.id_solicitud = s.id
+                  ORDER BY snd.created_at DESC, snd.id DESC
+                  LIMIT 1),
+                s.notas
+              ) AS notas_direccion,
+              (SELECT COUNT(*) FROM solicitud_nota_direccion snd
+                WHERE snd.id_solicitud = s.id) AS notas_direccion_bitacora_count,
+              s.descripcion, s.nombre_usuario, s.asesor,
+              COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
             FROM solicitud s
             LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
             WHERE s.id = ${solId}
             LIMIT 1
           `;
           if (solRows.length > 0) {
-            notificacion.notas_direccion = solRows[0].notas || null;
+            notificacion.notas_direccion = solRows[0].notas_direccion || null;
+            notificacion.notas_direccion_bitacora_count = Number(solRows[0].notas_direccion_bitacora_count) || 0;
             notificacion.descripcion_trafico = solRows[0].descripcion || null;
             notificacion.cliente = solRows[0].cliente_nombre || null;
             notificacion.creador = (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo'))
