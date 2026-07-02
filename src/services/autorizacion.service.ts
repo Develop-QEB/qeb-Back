@@ -1,5 +1,6 @@
 import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 
 const transporter = nodemailer.createTransport({
@@ -172,15 +173,9 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     }
   }
 
-  // Artículos de impresión (IM): si tarifa es 0, requiere DCM; si no, aprobado
+  // Artículos de impresión (IM): NUNCA van a autorización (siempre auto-aprobados,
+  // incluso con tarifa $0). Petición de Mario: las impresiones no se mandan a autorización.
   if (cara.articulo && cara.articulo.toUpperCase().startsWith('IM')) {
-    if ((cara.tarifa_publica || 0) <= 0) {
-      return {
-        autorizacion_dg: 'aprobado',
-        autorizacion_dcm: 'pendiente',
-        motivo_dcm: 'Artículo de Impresión con tarifa $0 requiere autorización DCM',
-      };
-    }
     return {
       autorizacion_dg: 'aprobado',
       autorizacion_dcm: 'aprobado',
@@ -448,9 +443,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
 
 /**
  * Regla "Direcciones Aprobadas": si una cara YA estaba aprobada por DG y DCM y
- * la edición solo INCREMENTA (o deja igual) costo y caras, se conserva la
- * aprobación — NO se dispara una nueva autorización. Si costo o caras BAJAN, se
- * respeta el recálculo normal (puede volver a pendiente/autorización).
+ * la edición INCREMENTA (o deja igual) el costo —o lo BAJA hasta un máximo del
+ * 3% de la TARIFA PÚBLICA— se conserva la aprobación, sin nueva autorización.
+ *
+ * Regla del jefe (jun 2026): una baja de tarifa de hasta 3% NO se manda; a partir
+ * de 3.1% (> 3%) sí. El 3% es sobre la tarifa pública. La tolerancia aplica SOLO
+ * a la tarifa; si bajan las CARAS, sí re-autoriza (sin cambio).
  *
  * Se aplica en los 3 niveles (solicitud / propuesta / campaña) DESPUÉS de
  * `calcularEstadoAutorizacion`, usando los valores efectivos nuevos vs los que
@@ -459,14 +457,19 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
 export function conservarAprobacionSiIncrementa(
   estado: EstadoAutorizacionResult,
   prev: { autorizacion_dg?: string | null; autorizacion_dcm?: string | null; costo?: number | null; caras?: number | null },
-  nuevo: { costo: number; caras: number }
+  nuevo: { costo: number; caras: number; tarifa_publica?: number | null }
 ): EstadoAutorizacionResult {
   const yaAprobada = prev.autorizacion_dg === 'aprobado' && prev.autorizacion_dcm === 'aprobado';
   if (!yaAprobada) return estado;
-  const noBajaCosto = Number(nuevo.costo) >= Number(prev.costo ?? 0) - 0.005;
+  // Tolerancia: baja de costo de hasta 3% de la tarifa pública se conserva
+  // (incrementos también: baja <= 0). Sin tarifa_publica → umbral 0 = cualquier
+  // baja re-autoriza (comportamiento previo).
+  const umbral = 0.03 * Number(nuevo.tarifa_publica ?? 0);
+  const bajaCosto = Number(prev.costo ?? 0) - Number(nuevo.costo);
+  const noBajaCosto = bajaCosto <= umbral + 0.005; // epsilon de centavos
   const noBajaCaras = Number(nuevo.caras) >= Number(prev.caras ?? 0);
   if (noBajaCosto && noBajaCaras) {
-    console.log('[conservarAprobacionSiIncrementa] Cara ya aprobada y costo/caras no bajan → se conserva aprobación (sin nueva autorización)');
+    console.log(`[conservarAprobacionSiIncrementa] Ya aprobada; baja costo ${bajaCosto.toFixed(2)} <= 3% tarifa (${umbral.toFixed(2)}) y caras no bajan → se conserva aprobación`);
     return { ...estado, autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado', motivo_dg: undefined, motivo_dcm: undefined };
   }
   return estado;
@@ -1193,6 +1196,7 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
   if (pendientesDg > 0) {
     for (const u of usuariosDg) {
       if (!u.correo_electronico) continue;
+      if (!(await correoPermitido(u.id, 'tarea', 'Autorización DG'))) continue;
       envios.push(
         enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DG', pendientesDg)
           .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))
@@ -1203,6 +1207,7 @@ export async function enviarResumenAutorizacionesPendientes(): Promise<void> {
   if (pendientesDcm > 0) {
     for (const u of usuariosDcm) {
       if (!u.correo_electronico) continue;
+      if (!(await correoPermitido(u.id, 'tarea', 'Autorización DCM'))) continue;
       envios.push(
         enviarCorreoResumenAutorizacion(u.correo_electronico, u.nombre, 'DCM', pendientesDcm)
           .catch(err => console.error(`[ResumenAutorizaciones] Error enviando a ${u.correo_electronico}:`, err))

@@ -26,6 +26,8 @@ router.patch('/:id/status', solicitudesController.updateStatus.bind(solicitudesC
 router.post('/:id/atender', solicitudesController.atender.bind(solicitudesController));
 router.get('/:id/comments', solicitudesController.getComments.bind(solicitudesController));
 router.post('/:id/comments', solicitudesController.addComment.bind(solicitudesController));
+router.get('/:id/notas-direccion', solicitudesController.getNotasDireccion.bind(solicitudesController));
+router.post('/:id/notas-direccion', solicitudesController.addNotaDireccion.bind(solicitudesController));
 router.post('/:id/archivo', uploadGeneral.single('archivo'), solicitudesController.uploadArchivo.bind(solicitudesController));
 router.delete('/:id', solicitudesController.delete.bind(solicitudesController));
 

@@ -1,5 +1,6 @@
 import prisma from '../utils/prisma';
-import { emitToHistorial, getIO, SOCKET_EVENTS } from '../config/socket';
+import { emitToHistorial, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 
 const transporter = nodemailer.createTransport({
@@ -145,6 +146,7 @@ export async function enviarRecordatoriosPendientes(): Promise<{
         const tarea = await prisma.tareas.create({
           data: {
             tipo: 'Recordatorio',
+            categoria: 'recordatorio',
             titulo: `Recordatorio: ${row.tipo} #${row.ref_id || ''}`.trim(),
             descripcion: notaOriginal || 'Recordatorio programado',
             contenido: JSON.stringify({
@@ -175,18 +177,20 @@ export async function enviarRecordatoriosPendientes(): Promise<{
           },
         });
 
-        // Emitir socket
-        const io = getIO();
-        if (io) {
-          io.to(`user:${usuarioId}`).emit(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-            tipo: 'Recordatorio',
-            titulo: tarea.titulo,
-            descripcion: tarea.descripcion,
-            tarea_id: tarea.id,
-            historial_id: histId,
-            fecha_entrega: fechaEntrega.toISOString(),
-          });
-        }
+        // Emitir socket. Antes se emitía a `user:${id}` (room que nadie usa, por
+        // eso el popup de recordatorio nunca llegaba). Ahora broadcast con
+        // `destinatarios`; el frontend filtra por el usuario actual.
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+          tipo: 'Recordatorio',
+          clase: 'notificacion',
+          categoria: 'recordatorio',
+          titulo: tarea.titulo,
+          descripcion: tarea.descripcion,
+          tarea_id: tarea.id,
+          historial_id: histId,
+          fecha_entrega: fechaEntrega.toISOString(),
+          destinatarios: [usuarioId],
+        });
         emitToHistorial(SOCKET_EVENTS.HISTORIAL_NUEVA, {
           id: histId,
           tipo: row.tipo,
@@ -195,7 +199,7 @@ export async function enviarRecordatoriosPendientes(): Promise<{
         });
 
         // Enviar correo de recordatorio (best-effort; no rompemos el flujo si falla)
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuarioId, 'notificacion', 'recordatorio')) {
           try {
             const asunto = `${row.tipo}${row.ref_id ? ` #${row.ref_id}` : ''} - ${fechaEntregaStr}`;
             await enviarCorreoRecordatorio(

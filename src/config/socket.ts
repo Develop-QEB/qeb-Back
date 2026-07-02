@@ -1,5 +1,6 @@
 import { Server as SocketServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
+import { canonicalizarTipoTarea } from '../constants/notificaciones';
 
 let io: SocketServer | null = null;
 
@@ -329,6 +330,70 @@ export function emitToAll(event: string, data: unknown): void {
     io.emit(event, data);
     console.log(`[Socket] Emitido ${event} a todos`);
   }
+}
+
+/**
+ * Emite el popup/refresh para una fila de `tareas` recién creada. Lo llama el
+ * middleware de Prisma en `tareas.create`, así cualquier notificación o tarea
+ * (actual o futura) avisa a sus destinatarios sin tocar cada controlador.
+ *
+ * - Emite UN evento por fila, con su propio `tarea_id`, de modo que al hacer
+ *   clic en el toast se abra exactamente esa notificación/tarea.
+ * - 'Notificación': destinatario = id_responsable (en estas filas id_asignado
+ *   es el AUTOR, por eso no se incluye). categoria = la de la fila.
+ * - Tareas reales: destinatarios = id_responsable + id_asignado.
+ * - 'Recordatorio' se omite: emite su propio evento (con fecha_entrega) desde su
+ *   servicio. El frontend solo muestra popup si el usuario está en destinatarios.
+ */
+export function emitTareaCreadaPopup(tarea: {
+  id: number;
+  tipo?: string | null;
+  categoria?: string | null;
+  titulo?: string | null;
+  descripcion?: string | null;
+  id_responsable?: number | null;
+  id_asignado?: string | null;
+}, extraDestinatarios?: number[]): void {
+  if (!io) return;
+  const tipo = tarea.tipo || '';
+  if (!tipo || tipo === 'Recordatorio') return;
+
+  const esNotif = tipo === 'Notificación';
+  // Tipos donde id_responsable es el CREADOR (no un destinatario): autorización
+  // (originador) y tareas de diseño asignadas (Revisión de artes / Corrección,
+  // creadas desde gestor de artes con id_responsable = quien la crea). En estos
+  // el destinatario real es id_asignado, así que NO se notifica al responsable.
+  const tipoNorm = tipo.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const creadorEsResponsable =
+    tipoNorm.startsWith('autorizacion') ||
+    tipoNorm.startsWith('revision de artes') ||
+    tipoNorm.startsWith('correccion');
+  const destinatarios = new Set<number>();
+  if (tarea.id_responsable && !creadorEsResponsable) destinatarios.add(tarea.id_responsable);
+  if (!esNotif && tarea.id_asignado) {
+    for (const s of String(tarea.id_asignado).split(',')) {
+      const n = parseInt(s.trim(), 10);
+      if (!isNaN(n)) destinatarios.add(n);
+    }
+  }
+  // Supervisores que también deben ver el popup (p.ej. Coordinador de Diseño
+  // recibe lo de sus Diseñadores), calculados por el middleware.
+  if (extraDestinatarios) {
+    for (const id of extraDestinatarios) destinatarios.add(id);
+  }
+  if (destinatarios.size === 0) return;
+
+  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+    tipo,
+    clase: esNotif ? 'notificacion' : 'tarea',
+    categoria: esNotif ? (tarea.categoria || 'general') : undefined,
+    // Clave canónica para que el front haga match con el catálogo de toggles.
+    clave: esNotif ? undefined : canonicalizarTipoTarea(tipo),
+    titulo: tarea.titulo || tipo,
+    descripcion: tarea.descripcion || undefined,
+    tarea_id: tarea.id,
+    destinatarios: Array.from(destinatarios),
+  });
 }
 
 // Helper para emitir a una propuesta específica

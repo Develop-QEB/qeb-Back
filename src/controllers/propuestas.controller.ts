@@ -16,6 +16,7 @@ import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
@@ -1125,7 +1126,8 @@ export class PropuestasController {
 
         // Enviar correos a usuarios de Tráfico
         for (const usuarioTrafico of usuariosTrafico) {
-          if (usuarioTrafico.id !== userId && usuarioTrafico.correo_electronico) {
+          if (usuarioTrafico.id !== userId && usuarioTrafico.correo_electronico
+              && await correoPermitido(usuarioTrafico.id, 'tarea', 'Ajuste Cto Cliente')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               nombrePropuesta,
@@ -1196,7 +1198,8 @@ export class PropuestasController {
             : undefined;
 
           // Enviar correo al asesor/creador
-          if (creadorSolicitud.correo_electronico) {
+          if (creadorSolicitud.correo_electronico
+              && await correoPermitido(creadorSolicitud.id, 'tarea', 'Ajuste Comercial')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               nombrePropuesta,
@@ -1230,7 +1233,8 @@ export class PropuestasController {
           });
 
           for (const usuarioTrafico of usuariosTrafico) {
-            if (usuarioTrafico.correo_electronico) {
+            if (usuarioTrafico.correo_electronico
+                && await correoPermitido(usuarioTrafico.id, 'notificacion', 'cambio_estatus')) {
               enviarCorreoNotificacion(
                 propuesta.solicitud_id || 0,
                 `Propuesta ajustada: ${nombrePropuesta}`,
@@ -1280,7 +1284,8 @@ export class PropuestasController {
             },
           });
 
-          if (creadorAtendida.correo_electronico) {
+          if (creadorAtendida.correo_electronico
+              && await correoPermitido(solicitud!.usuario_id, 'notificacion', 'cambio_estatus')) {
             enviarCorreoNotificacion(
               propuesta.solicitud_id || 0,
               `Ajuste completado: ${nombreCampAtendida}`,
@@ -1300,7 +1305,8 @@ export class PropuestasController {
           select: { nombre: true, correo_electronico: true }
         });
 
-        if (creador?.correo_electronico) {
+        if (creador?.correo_electronico
+            && await correoPermitido(solicitud.usuario_id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             propuesta.solicitud_id || 0,
             `Propuesta atendida: ${nombrePropuesta}`,
@@ -1323,6 +1329,7 @@ export class PropuestasController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1811,6 +1818,7 @@ export class PropuestasController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'comentario',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               id_solicitud: propuesta.solicitud_id?.toString() || '',
@@ -1832,6 +1840,9 @@ export class PropuestasController {
           resultados.filter(r => r.status === 'rejected').map((r: any) => r.reason?.message));
       }
       console.log(`propuestas.addComment[prop=${propuestaId}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
+
+      // Refrescar la bitácora abierta del detalle de la propuesta en vivo.
+      emitToPropuestas(SOCKET_EVENTS.PROPUESTA_ACTUALIZADA, { propuestaId });
 
       // Audit log SOLO si el autor es Administrador o DEV (no saturar el log
       // con comentarios de usuarios normales en propuestas).
@@ -2227,7 +2238,8 @@ export class PropuestasController {
           : undefined;
 
         for (const analista of usuariosAnalistaCorreo) {
-          if (analista.correo_electronico) {
+          if (analista.correo_electronico
+              && await correoPermitido(analista.id, 'tarea', 'Seguimiento')) {
             enviarCorreoTarea(
               propuesta.solicitud_id || 0,
               campania.nombre,
@@ -2268,7 +2280,8 @@ export class PropuestasController {
             select: { nombre: true, correo_electronico: true }
           });
 
-          if (usuario?.correo_electronico) {
+          if (usuario?.correo_electronico
+              && await correoPermitido(asignadoId, 'notificacion', 'general')) {
             enviarCorreoNotificacion(
               propuesta.solicitud_id || 0,
               `Campaña nueva - ${campania.nombre}`,
@@ -4232,7 +4245,7 @@ export class PropuestasController {
         const estadoResult = conservarAprobacionSiIncrementa(
           estadoResultCalc,
           { autorizacion_dg: currentCara.autorizacion_dg, autorizacion_dcm: currentCara.autorizacion_dcm, costo: Number(currentCara.costo || 0), caras: Number(currentCara.caras || 0) },
-          { costo: effCostoAuth, caras: effCarasAuth }
+          { costo: effCostoAuth, caras: effCarasAuth, tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : Number(currentCara.tarifa_publica || 0) }
         );
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
@@ -4471,6 +4484,18 @@ export class PropuestasController {
         return;
       }
 
+      // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
+      // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
+      // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      const pendCrP = await verificarCarasPendientes(id);
+      if (pendCrP.tienePendientes) {
+        res.status(409).json({
+          success: false,
+          error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+        });
+        return;
+      }
+
       // Calculate authorization state — use BF pair's bonificacion for RT rows
       const artUpperCrP = (articulo || '').toUpperCase();
       const isRtRowCrP = !!grupoRtBfCreate && !artUpperCrP.startsWith('BF') && !artUpperCrP.startsWith('CF');
@@ -4569,11 +4594,12 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DG.
+      // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
+      // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
       // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
       const todasCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dg: true, tipo: true, articulo: true }
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
       });
       const noDigitales = todasCaras.filter(c => {
         const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
@@ -4582,16 +4608,16 @@ export class PropuestasController {
       const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
       if (totalCarasGlobal % 2 !== 0) {
         const idsNoDigitales = noDigitales.map(c => c.id);
-        const carasNoP = noDigitales.filter(c => c.autorizacion_dg !== 'pendiente');
+        const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
         if (carasNoP.length > 0) {
           await prisma.solicitudCaras.updateMany({
             where: {
               id: { in: idsNoDigitales },
-              autorizacion_dg: { not: 'pendiente' }
+              autorizacion_dcm: { not: 'pendiente' }
             },
-            data: { autorizacion_dg: 'pendiente' }
+            data: { autorizacion_dcm: 'pendiente' }
           });
-          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DG`);
+          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
         }
       }
 
@@ -4734,7 +4760,7 @@ export class PropuestasController {
             const estadoResult = conservarAprobacionSiIncrementa(
               estadoResultCalcBk,
               { autorizacion_dg: currentCara?.autorizacion_dg, autorizacion_dcm: currentCara?.autorizacion_dcm, costo: Number(currentCara?.costo || 0), caras: Number(currentCara?.caras || 0) },
-              { costo: effCostoBkAuth, caras: effCarasBkAuth }
+              { costo: effCostoBkAuth, caras: effCarasBkAuth, tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : Number(currentCara?.tarifa_publica || 0) }
             );
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;

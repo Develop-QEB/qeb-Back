@@ -474,8 +474,6 @@ export class InventariosController {
         excluir_mi_macro,
       } = req.query;
 
-      console.log('[getDisponibles] Query params:', { ciudad, estado, formato, flujo, nse, tipo });
-
       // Build where clause for inventarios
       // Excluye Bloqueado (mandado a reparar) e Inactivo (fantasmas archivados).
       // Si en el futuro se agrega otro estatus para "no disponible", también va aquí
@@ -554,7 +552,6 @@ export class InventariosController {
       }
 
       // Get all inventarios that match the criteria
-      console.log('[getDisponibles] Where clause:', JSON.stringify(where, null, 2));
       const inventarios = await prisma.inventarios.findMany({
         where,
         select: {

@@ -13,8 +13,9 @@ import {
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
-import { emitToSolicitudes, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToSolicitudes, emitToSolicitud, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { serializeBigInt } from '../utils/serialization';
@@ -1010,6 +1011,7 @@ export class SolicitudesController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1042,7 +1044,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             solicitud.id,
             tituloNotificacion,
@@ -1227,7 +1229,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'general')) {
           enviarCorreoNotificacion(
             solicitud.id,
             'Solicitud eliminada',
@@ -2298,7 +2300,8 @@ export class SolicitudesController {
         }
 
         // Regla: si el total global de caras NO-digitales es impar, todas las
-        // NO-digitales requieren autorización DG. Los digitales/circuitos quedan exentos.
+        // NO-digitales requieren autorización DCM (impar → DCM, alineado con
+        // calcularEstadoAutorizacion/oddCarasNeedsDcm). Los digitales/circuitos quedan exentos.
         const noDigitalesPayload = caras.filter((c: any) => {
           const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
           return !isDigital;
@@ -2314,14 +2317,14 @@ export class SolicitudesController {
             return tipo !== 'digital' && !isCircuitoDigital(cara.articulo);
           };
           for (const createdCara of createdCaras) {
-            if (createdCara.autorizacion_dg !== 'pendiente' && isCaraNoDigital(createdCara)) {
+            if (createdCara.autorizacion_dcm !== 'pendiente' && isCaraNoDigital(createdCara)) {
               await tx.solicitudCaras.update({
                 where: { id: createdCara.id },
-                data: { autorizacion_dg: 'pendiente' },
+                data: { autorizacion_dcm: 'pendiente' },
               });
             }
           }
-          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DG`);
+          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DCM`);
         }
 
         return {
@@ -2439,7 +2442,8 @@ export class SolicitudesController {
             select: { correo_electronico: true },
           });
 
-          if (creadorConEmail?.correo_electronico) {
+          if (creadorConEmail?.correo_electronico
+              && await correoPermitido(userId, 'tarea', 'Seguimiento')) {
             enviarCorreoTarea(
               result.solicitud.id,
               nombre_campania,
@@ -2559,6 +2563,7 @@ export class SolicitudesController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'comentario',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               id_solicitud: solicitud.id.toString(),
@@ -2581,6 +2586,9 @@ export class SolicitudesController {
       }
       console.log(`solicitudes.addComment[sol=${solicitud.id}]: notifs ${notifsCreadas} creadas, ${notifsFalladas} falladas, ${involucrados.size} involucrados`);
 
+      // Refrescar la bitácora abierta del detalle de la solicitud en vivo.
+      emitToSolicitud(solicitud.id, SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, { solicitudId: solicitud.id });
+
       res.json({
         success: true,
         data: {
@@ -2595,7 +2603,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'comentario')) {
           enviarCorreoNotificacion(
             solicitud.id,
             tituloNotificacion,
@@ -2981,7 +2989,8 @@ export class SolicitudesController {
           select: { correo_electronico: true, nombre: true },
         });
 
-        if (creador?.correo_electronico) {
+        if (creador?.correo_electronico
+            && await correoPermitido(asignadoOriginal, 'tarea', 'Seguimiento')) {
           enviarCorreoTarea(
             solicitud.id,
             cotizacionData?.nombre_campania || '',
@@ -3044,7 +3053,8 @@ export class SolicitudesController {
       }
 
       for (const usuarioTrafico of usuariosTrafico) {
-        if (usuarioTrafico.correo_electronico) {
+        if (usuarioTrafico.correo_electronico
+            && await correoPermitido(usuarioTrafico.id, 'tarea', 'Seguimiento')) {
           enviarCorreoTarea(
             solicitud.id,
             cotizacionData?.nombre_campania || '',
@@ -3078,7 +3088,7 @@ export class SolicitudesController {
       });
 
       for (const usuario of usuariosNotificar) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'cambio_estatus')) {
           enviarCorreoNotificacion(
             solicitud.id,
             'Solicitud atendida',
@@ -3227,6 +3237,28 @@ export class SolicitudesController {
         where: { solicitud_id: solicitud.id, deleted_at: null },
       });
 
+      // Bloqueo: no permitir AGREGAR circuitos nuevos mientras la solicitud
+      // tenga autorización de dirección pendiente (DG/DCM). Editar caras
+      // existentes y metadatos sí se permite; solo se rechaza una adición neta
+      // (llegan más circuitos que los guardados). El front ya bloquea el botón;
+      // esto es el candado de servidor (no se puede saltar por API directa).
+      if (propuesta && Array.isArray(caras)) {
+        const carasActuales = await prisma.solicitudCaras.findMany({
+          where: { idquote: propuesta.id.toString() },
+          select: { autorizacion_dg: true, autorizacion_dcm: true },
+        });
+        const hayPendientes = carasActuales.some(
+          c => c.autorizacion_dg === 'pendiente' || c.autorizacion_dcm === 'pendiente'
+        );
+        if (hayPendientes && caras.length > carasActuales.length) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la solicitud tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
+      }
+
       // Get existing cotizacion
       const cotizacion = propuesta ? await prisma.cotizacion.findFirst({
         where: { id_propuesta: propuesta.id },
@@ -3236,6 +3268,9 @@ export class SolicitudesController {
       const campania = cotizacion ? await prisma.campania.findFirst({
         where: { cotizacion_id: cotizacion.id },
       }) : null;
+
+      // Resumen de cambios (se llena dentro de la tx) para reusar en el correo.
+      let cambiosResumen = 'datos generales';
 
       await prisma.$transaction(async (tx) => {
         // Update solicitud
@@ -3408,7 +3443,7 @@ export class SolicitudesController {
               const conserved = conservarAprobacionSiIncrementa(
                 { autorizacion_dg: autorizacion_dg as any, autorizacion_dcm: autorizacion_dcm as any },
                 { autorizacion_dg: oldMatch.autorizacion_dg, autorizacion_dcm: oldMatch.autorizacion_dcm, costo: Number(oldMatch.costo || 0), caras: Number(oldMatch.caras || 0) },
-                { costo: Number(cara.costo || 0), caras: Number(cara.caras || 0) }
+                { costo: Number(cara.costo || 0), caras: Number(cara.caras || 0), tarifa_publica: Number(cara.tarifa_publica || 0) }
               );
               autorizacion_dg = conserved.autorizacion_dg;
               autorizacion_dcm = conserved.autorizacion_dcm;
@@ -3514,6 +3549,7 @@ export class SolicitudesController {
         if (archivo !== solicitud.archivo) addCambio('archivo', solicitud.archivo ? 'sí' : 'no', archivo ? 'sí' : 'no');
 
         const cambiosStr = cambiosLabels.length > 0 ? cambiosLabels.join(', ') : 'datos generales';
+        cambiosResumen = cambiosStr;
 
         // Create historial entry
         await tx.historial.create({
@@ -3568,6 +3604,7 @@ export class SolicitudesController {
               titulo: tituloNotificacion,
               descripcion: descripcionNotificacion,
               tipo: 'Notificación',
+              categoria: 'general',
               estatus: 'Pendiente',
               id_responsable: responsableId,
               responsable: '',
@@ -3618,11 +3655,11 @@ export class SolicitudesController {
       const nombreSolicitudCorreo = razon_social || marca_nombre || solicitud.razon_social || 'Sin nombre';
 
       for (const usuario of usuariosNotificarUpdate) {
-        if (usuario.correo_electronico) {
+        if (usuario.correo_electronico && await correoPermitido(usuario.id, 'notificacion', 'general')) {
           enviarCorreoNotificacion(
             solicitud.id,
             `Solicitud #${solicitud.id} editada`,
-            `${userName} realizó cambios en la solicitud`,
+            `${userName} modificó: ${cambiosResumen}`,
             usuario.correo_electronico,
             usuario.nombre,
             {
@@ -3800,6 +3837,125 @@ export class SolicitudesController {
     } catch (error) {
       console.error('Error evaluando autorización:', error);
       const message = error instanceof Error ? error.message : 'Error al evaluar autorización';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Bitacora de Notas Direccion: lista todas las notas + la nota inicial de
+  // solicitud.notas como entrada #0 sintetica (para compatibilidad con las
+  // solicitudes previas a la introduccion de la tabla).
+  async getNotasDireccion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idSolicitud = parseInt(req.params.id);
+      if (isNaN(idSolicitud)) {
+        res.status(400).json({ success: false, error: 'id invalido' });
+        return;
+      }
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: idSolicitud, deleted_at: null },
+        select: { id: true, notas: true, fecha: true, nombre_usuario: true, usuario_id: true, asesor: true },
+      });
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      const notas = await prisma.solicitud_nota_direccion.findMany({
+        where: { id_solicitud: idSolicitud },
+        orderBy: { created_at: 'asc' },
+      });
+
+      const entries: {
+        id: number | string;
+        texto: string;
+        autor_nombre: string | null;
+        autor_rol: string | null;
+        autor_id: number | null;
+        created_at: Date;
+        origen: 'inicial' | 'bitacora';
+      }[] = [];
+
+      // Nota inicial (del asesor al crear la solicitud). Se muestra como
+      // entrada sintetica si el campo solicitud.notas tiene texto.
+      const notaInicial = (solicitud.notas || '').trim();
+      if (notaInicial) {
+        entries.push({
+          id: `inicial-${solicitud.id}`,
+          texto: notaInicial,
+          autor_nombre: solicitud.nombre_usuario || solicitud.asesor || null,
+          autor_rol: 'Asesor',
+          autor_id: solicitud.usuario_id ?? null,
+          created_at: solicitud.fecha,
+          origen: 'inicial',
+        });
+      }
+      for (const n of notas) {
+        entries.push({
+          id: n.id,
+          texto: n.texto,
+          autor_nombre: n.usuario_nombre,
+          autor_rol: n.usuario_rol,
+          autor_id: n.id_usuario,
+          created_at: n.created_at,
+          origen: 'bitacora',
+        });
+      }
+
+      res.json({ success: true, data: entries });
+    } catch (error) {
+      console.error('Error getNotasDireccion:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener notas de direccion';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Agregar una nota nueva a la bitacora. Solo Direccion (DG/DCM) y admins.
+  async addNotaDireccion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const idSolicitud = parseInt(req.params.id);
+      const { texto } = req.body as { texto?: string };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre;
+      const userRol = req.user?.rol;
+
+      if (isNaN(idSolicitud)) {
+        res.status(400).json({ success: false, error: 'id invalido' });
+        return;
+      }
+      if (!texto || !texto.trim()) {
+        res.status(400).json({ success: false, error: 'texto requerido' });
+        return;
+      }
+      const rolesPermitidos = ['Director General', 'Director Comercial', 'Administrador', 'DEV'];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para agregar notas de direccion' });
+        return;
+      }
+
+      const solicitud = await prisma.solicitud.findFirst({
+        where: { id: idSolicitud, deleted_at: null },
+        select: { id: true },
+      });
+      if (!solicitud) {
+        res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+        return;
+      }
+
+      const creada = await prisma.solicitud_nota_direccion.create({
+        data: {
+          id_solicitud: idSolicitud,
+          texto: texto.trim(),
+          id_usuario: userId ?? null,
+          usuario_nombre: userName ?? null,
+          usuario_rol: userRol ?? null,
+        },
+      });
+
+      res.status(201).json({ success: true, data: creada });
+    } catch (error) {
+      console.error('Error addNotaDireccion:', error);
+      const message = error instanceof Error ? error.message : 'Error al agregar nota de direccion';
       res.status(500).json({ success: false, error: message });
     }
   }

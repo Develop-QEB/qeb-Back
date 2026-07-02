@@ -16,6 +16,7 @@ import { getEspaciosBloqueados, createReservaConLock } from '../services/inventa
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
@@ -1199,6 +1200,7 @@ export class CampanasController {
             titulo: tituloNotificacion,
             descripcion: descripcionNotificacion,
             tipo: 'Notificación',
+            categoria: 'cambio_estatus',
             estatus: 'Pendiente',
             id_responsable: responsableId,
             responsable: '',
@@ -1347,6 +1349,7 @@ export class CampanasController {
                 titulo: `Campaña atendida: ${nombreCampanaStatus}`,
                 descripcion: `${userName} marcó la campaña como Atendido`,
                 tipo: 'Notificación',
+                categoria: 'cambio_estatus',
                 estatus: 'Pendiente',
                 fecha_inicio: now,
                 fecha_fin: fechaFin,
@@ -3571,6 +3574,7 @@ export class CampanasController {
                   titulo: tituloNotificacion,
                   descripcion: descripcionNotificacion,
                   tipo: 'Notificación',
+                  categoria: 'comentario',
                   estatus: 'Pendiente',
                   id_responsable: responsableId,
                   id_solicitud: solicitudId.toString(),
@@ -5539,6 +5543,220 @@ export class CampanasController {
   }
 
   /**
+   * Cerrar una tarea de Corrección y abrir la nueva Revisión de artes en una sola
+   * operación atómica. Reemplaza al flujo antiguo del front que hacía 3 llamadas
+   * separadas (updateArteStatus + createTarea + updateTarea Atendido); si alguna
+   * fallaba, quedaban estados inconsistentes (arte Pendiente sin Revisión, o
+   * Corrección Activa con Revisión ya creada).
+   *
+   * Todo lo crítico va dentro de prisma.$transaction — si algo falla, se revierte
+   * entero. WebSocket / notificaciones / historial se emiten después (best-effort).
+   */
+  async completarCorreccionEnviarRevision(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { correccionId, reservaIds, asignadoNombres, asignadoIds } = req.body as {
+        correccionId?: number;
+        reservaIds?: number[];
+        asignadoNombres?: string;
+        asignadoIds?: string;
+      };
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const campanaId = parseInt(id);
+
+      if (!correccionId) {
+        res.status(400).json({ success: false, error: 'correccionId requerido' });
+        return;
+      }
+      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+        res.status(400).json({ success: false, error: 'reservaIds requerido' });
+        return;
+      }
+      if (!asignadoNombres) {
+        res.status(400).json({ success: false, error: 'asignadoNombres requerido' });
+        return;
+      }
+
+      const placeholders = reservaIds.map(() => '?').join(',');
+      const comentario = 'Arte corregido y enviado a revisión';
+
+      // Obtener grupo_completo_id ANTES de la transacción (solo lectura)
+      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(
+        `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`,
+        ...reservaIds
+      );
+      const grupoIds = grupos.map(g => g.grupo_completo_id);
+
+      // Verificar que la Corrección exista y esté activa (idempotencia)
+      const correccion = await prisma.tareas.findUnique({
+        where: { id: correccionId },
+        select: { id: true, estatus: true, campania_id: true, tipo: true },
+      });
+      if (!correccion) {
+        res.status(404).json({ success: false, error: 'Corrección no encontrada' });
+        return;
+      }
+      if (correccion.estatus === 'Atendido' || correccion.estatus === 'Completado') {
+        // Ya se completó antes — no volver a crear Revisión duplicada
+        res.json({
+          success: true,
+          data: { message: 'La Corrección ya estaba completada', alreadyDone: true },
+        });
+        return;
+      }
+
+      // Buscar tarea(s) de Revisión de artes previas para rotar roles
+      const tareasRevisionPrev = await prisma.$queryRawUnsafe<{
+        id: number;
+        ids_reservas: string;
+        responsable: string | null;
+        id_responsable: number;
+        asignado: string | null;
+        id_asignado: string | null;
+      }[]>(`
+        SELECT id, ids_reservas, responsable, id_responsable, asignado, id_asignado
+        FROM tareas
+        WHERE campania_id = ?
+          AND tipo IN ('Revision de artes', 'Revisión de artes')
+          AND ids_reservas IS NOT NULL AND ids_reservas != ''
+          AND (estatus IS NULL OR estatus NOT IN ('Atendido', 'Completado', 'Cancelado', 'Rechazado', 'Finalizada'))
+      `, campanaId);
+
+      const rotaciones: Array<{
+        tareaId: number;
+        nuevoResponsable: string | null;
+        nuevoIdResponsable: number;
+        nuevoAsignado: string | null;
+        nuevoIdAsignado: string;
+      }> = [];
+      for (const t of tareasRevisionPrev) {
+        const tareaReservaIds = t.ids_reservas
+          .replace(/\*/g, ',')
+          .split(',')
+          .map(x => parseInt(x.trim()))
+          .filter(x => !isNaN(x));
+        const afecta = reservaIds.some(r => tareaReservaIds.includes(r));
+        if (!afecta) continue;
+        rotaciones.push({
+          tareaId: t.id,
+          nuevoResponsable: t.asignado,
+          nuevoIdResponsable: t.id_asignado ? parseInt(t.id_asignado) : t.id_responsable,
+          nuevoAsignado: t.responsable,
+          nuevoIdAsignado: String(t.id_responsable),
+        });
+      }
+
+      // TRANSACCIÓN — todo o nada
+      const nuevaTareaId = await prisma.$transaction(async (tx) => {
+        // 1) Reservas directas: arte_aprobado='Pendiente' + comentario_rechazo
+        await tx.$executeRawUnsafe(
+          `UPDATE reservas SET arte_aprobado = ?, comentario_rechazo = ? WHERE id IN (${placeholders})`,
+          'Pendiente', comentario, ...reservaIds
+        );
+
+        // 2) Reservas del mismo grupo (si hay)
+        if (grupoIds.length > 0) {
+          const grupoPh = grupoIds.map(() => '?').join(',');
+          await tx.$executeRawUnsafe(
+            `UPDATE reservas SET arte_aprobado = ?, comentario_rechazo = ? WHERE grupo_completo_id IN (${grupoPh})`,
+            'Pendiente', comentario, ...grupoIds
+          );
+        }
+
+        // 3) Rotar roles en Revisión anterior
+        for (const rot of rotaciones) {
+          await tx.tareas.update({
+            where: { id: rot.tareaId },
+            data: {
+              responsable: rot.nuevoResponsable,
+              id_responsable: rot.nuevoIdResponsable,
+              asignado: rot.nuevoAsignado,
+              id_asignado: rot.nuevoIdAsignado,
+            },
+          });
+        }
+
+        // 4) Crear nueva tarea de Revisión de artes
+        const nueva = await tx.tareas.create({
+          data: {
+            titulo: 'Revisión de artes - Corrección enviada',
+            descripcion: 'Los artes han sido corregidos y están listos para revisión.',
+            tipo: 'Revisión de artes',
+            estatus: 'Pendiente',
+            asignado: asignadoNombres,
+            id_asignado: asignadoIds || '',
+            responsable: userName,
+            id_responsable: userId ?? 0,
+            campania_id: campanaId,
+            ids_reservas: reservaIds.join(','),
+            id_solicitud: '',
+            id_propuesta: '',
+            fecha_inicio: new Date(),
+            fecha_fin: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+
+        // 5) Cerrar la Corrección como Atendida
+        await tx.tareas.update({
+          where: { id: correccionId },
+          data: { estatus: 'Atendido' },
+        });
+
+        return nueva.id;
+      });
+
+      res.json({
+        success: true,
+        data: {
+          message: 'Corrección completada y Revisión creada',
+          nuevaRevisionId: nuevaTareaId,
+          affected: reservaIds.length,
+        },
+      });
+
+      // Post-commit best-effort: historial + WebSocket. Si fallan, no afectan
+      // la consistencia — el flujo ya se completó atómicamente.
+      try {
+        const campana = await prisma.campania.findUnique({
+          where: { id: campanaId },
+          select: CAMPANIA_SAFE_SELECT,
+        });
+        if (campana?.cotizacion_id) {
+          const cot = await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id } });
+          if (cot?.id_propuesta) {
+            await prisma.historial.create({
+              data: {
+                tipo: 'Arte',
+                ref_id: cot.id_propuesta,
+                accion: 'Pendiente',
+                fecha_hora: new Date(),
+                detalles: `${userName} envió corrección a revisión de ${reservaIds.length} reserva(s)`,
+              },
+            });
+          }
+        }
+      } catch (histErr) {
+        console.error('completarCorreccion: fallo al registrar historial (no crítico):', histErr);
+      }
+
+      try {
+        emitToCampana(campanaId, SOCKET_EVENTS.ARTE_RECHAZADO, {
+          campanaId, reservaIds, status: 'Pendiente', usuario: userName,
+        });
+        emitToCampana(campanaId, SOCKET_EVENTS.INVENTARIO_ACTUALIZADO, { campanaId });
+        emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { campanaId, status: 'Pendiente' });
+      } catch (sockErr) {
+        console.error('completarCorreccion: fallo al emitir WebSocket (no crítico):', sockErr);
+      }
+    } catch (error) {
+      console.error('Error en completarCorreccionEnviarRevision:', error);
+      const message = error instanceof Error ? error.message : 'Error al completar la corrección';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
    * Actualizar estatus_operaciones de un arte para TODAS las reservas que comparten
    * el mismo archivo dentro de la campaña. El campo es del arte (no de la reserva
    * individual), así que un solo cambio se propaga a todas las filas que tienen
@@ -6486,7 +6704,8 @@ export class CampanasController {
             where: { id: asignadoIdNum },
             select: { correo_electronico: true, nombre: true },
           }).then(async usuarioAsignado => {
-            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS) {
+            if (usuarioAsignado?.correo_electronico && process.env.SMTP_USER && process.env.SMTP_PASS
+            && await correoPermitido(asignadoIdNum, 'tarea', tipo)) {
               // Coordinador(es) de Diseño en CC para tareas de Diseño (no duplicar si es creador o asignado)
               let ccEmails: string[] = [];
               if (DISENO_TIPOS.includes(tipo || '')) {
@@ -10244,7 +10463,7 @@ export class CampanasController {
         const estadoResult = conservarAprobacionSiIncrementa(
           estadoResultCalcCm,
           { autorizacion_dg: currentCaraFull?.autorizacion_dg, autorizacion_dcm: currentCaraFull?.autorizacion_dcm, costo: Number(currentCaraFull?.costo || 0), caras: Number(currentCaraFull?.caras || 0) },
-          { costo: effCostoCmAuth, caras: effCarasCmAuth }
+          { costo: effCostoCmAuth, caras: effCarasCmAuth, tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : Number(currentCaraFull?.tarifa_publica || 0) }
         );
         autorizacion_dg = estadoResult.autorizacion_dg;
         autorizacion_dcm = estadoResult.autorizacion_dcm;
@@ -10497,6 +10716,18 @@ export class CampanasController {
         return;
       }
 
+      // Bloqueo: no permitir AGREGAR un circuito nuevo si la campaña ya tiene
+      // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
+      // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+      if (pendCmCr.tienePendientes) {
+        res.status(409).json({
+          success: false,
+          error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+        });
+        return;
+      }
+
       // Get solicitud_id for task creation
       const propuesta = await prisma.propuesta.findUnique({
         where: { id: cotizacion.id_propuesta },
@@ -10725,7 +10956,7 @@ export class CampanasController {
             const estadoResult = conservarAprobacionSiIncrementa(
               estadoResultCalcBulk,
               { autorizacion_dg: currentCara?.autorizacion_dg, autorizacion_dcm: currentCara?.autorizacion_dcm, costo: Number(currentCara?.costo || 0), caras: Number(currentCara?.caras || 0) },
-              { costo: effCostoBulkAuth, caras: effCarasBulkAuth }
+              { costo: effCostoBulkAuth, caras: effCarasBulkAuth, tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : Number(currentCara?.tarifa_publica || 0) }
             );
             autorizacion_dg = estadoResult.autorizacion_dg;
             autorizacion_dcm = estadoResult.autorizacion_dcm;
@@ -11369,75 +11600,84 @@ export class CampanasController {
         return;
       }
 
-      const placeholders = campanaIds.map(() => '?').join(', ');
+      // Cacheado (TTL corto): las 2 queries hacen GROUP BY con join CAST/COLLATE
+      // (anula el indice de idquote -> full scan de solicitudCaras). El front las
+      // pide repetidamente en batches; cachear por el set de ids ORDENADOS evita
+      // re-escanear. La data es identica; solo se sirve de memoria por <= CACHE_TTL.SHORT.
+      const invCacheKey = `campanas:inversiones-cat:${[...campanaIds].sort((a, b) => a - b).join(',')}`;
+      const result = await cache.getOrSet(invCacheKey, async () => {
+        const placeholders = campanaIds.map(() => '?').join(', ');
 
-      // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
-      //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
-      const perCatorcenaQuery = `
-        SELECT /*+ MAX_EXECUTION_TIME(30000) */
-          cm.id AS campania_id,
-          cat.numero_catorcena,
-          cat.año AS anio_catorcena,
-          COALESCE(SUM(
-            sc.costo
-            * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
-            / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
-          ), 0) AS inversion
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN catorcenas cat
-            ON sc.inicio_periodo <= cat.fecha_fin
-           AND sc.fin_periodo    >= cat.fecha_inicio
-        WHERE cm.id IN (${placeholders})
-        GROUP BY cm.id, cat.numero_catorcena, cat.año
-      `;
+        // 1) Per-catorcena PRORRATEADO por días: solo cuenta la porción de días de la cara
+        //    que cae dentro de cada catorcena. Sumar todas las catorcenas de una cara = su costo total.
+        const perCatorcenaQuery = `
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
+            cm.id AS campania_id,
+            cat.numero_catorcena,
+            cat.año AS anio_catorcena,
+            COALESCE(SUM(
+              sc.costo
+              * (DATEDIFF(LEAST(sc.fin_periodo, cat.fecha_fin), GREATEST(sc.inicio_periodo, cat.fecha_inicio)) + 1)
+              / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+            ), 0) AS inversion
+          FROM campania cm
+            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+            INNER JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN catorcenas cat
+              ON sc.inicio_periodo <= cat.fecha_fin
+             AND sc.fin_periodo    >= cat.fecha_inicio
+          WHERE cm.id IN (${placeholders})
+          GROUP BY cm.id, cat.numero_catorcena, cat.año
+        `;
 
-      // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
-      const totalQuery = `
-        SELECT /*+ MAX_EXECUTION_TIME(30000) */
-          cm.id AS campania_id,
-          COALESCE(SUM(sc.costo), 0) AS inversion
-        FROM campania cm
-          INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
-          INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
-          LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-        WHERE cm.id IN (${placeholders})
-        GROUP BY cm.id
-      `;
+        // 2) Total real sin duplicar: SUM de todas las caras de la propuesta.
+        const totalQuery = `
+          SELECT /*+ MAX_EXECUTION_TIME(30000) */
+            cm.id AS campania_id,
+            COALESCE(SUM(sc.costo), 0) AS inversion
+          FROM campania cm
+            INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+            INNER JOIN propuesta pr ON pr.id = ct.id_propuesta
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+          WHERE cm.id IN (${placeholders})
+          GROUP BY cm.id
+        `;
 
-      const [perCatorcenaRows, totalRows] = await Promise.all([
-        prisma.$queryRawUnsafe<Array<{
-          campania_id: number;
-          numero_catorcena: number | null;
-          anio_catorcena: number | null;
-          inversion: bigint | number;
-        }>>(perCatorcenaQuery, ...campanaIds),
-        prisma.$queryRawUnsafe<Array<{
-          campania_id: number;
-          inversion: bigint | number;
-        }>>(totalQuery, ...campanaIds),
-      ]);
+        const [perCatorcenaRows, totalRows] = await Promise.all([
+          prisma.$queryRawUnsafe<Array<{
+            campania_id: number;
+            numero_catorcena: number | null;
+            anio_catorcena: number | null;
+            inversion: bigint | number;
+          }>>(perCatorcenaQuery, ...campanaIds),
+          prisma.$queryRawUnsafe<Array<{
+            campania_id: number;
+            inversion: bigint | number;
+          }>>(totalQuery, ...campanaIds),
+        ]);
 
-      const result: Record<number, Record<string, { inversion: number }>> = {};
+        const out: Record<number, Record<string, { inversion: number }>> = {};
 
-      for (const row of perCatorcenaRows) {
-        const cid = Number(row.campania_id);
-        if (!result[cid]) result[cid] = {};
-        const inv = Number(row.inversion || 0);
-        if (row.numero_catorcena != null && row.anio_catorcena != null) {
-          const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
-          if (!result[cid][catKey]) result[cid][catKey] = { inversion: 0 };
-          result[cid][catKey].inversion += inv;
+        for (const row of perCatorcenaRows) {
+          const cid = Number(row.campania_id);
+          if (!out[cid]) out[cid] = {};
+          const inv = Number(row.inversion || 0);
+          if (row.numero_catorcena != null && row.anio_catorcena != null) {
+            const catKey = `${row.numero_catorcena}:${row.anio_catorcena}`;
+            if (!out[cid][catKey]) out[cid][catKey] = { inversion: 0 };
+            out[cid][catKey].inversion += inv;
+          }
         }
-      }
 
-      for (const row of totalRows) {
-        const cid = Number(row.campania_id);
-        if (!result[cid]) result[cid] = {};
-        result[cid]['total'] = { inversion: Number(row.inversion || 0) };
-      }
+        for (const row of totalRows) {
+          const cid = Number(row.campania_id);
+          if (!out[cid]) out[cid] = {};
+          out[cid]['total'] = { inversion: Number(row.inversion || 0) };
+        }
+
+        return out;
+      }, CACHE_TTL.SHORT);
 
       res.json({ success: true, data: result });
     } catch (error) {

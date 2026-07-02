@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
+import { cache } from '../utils/cache';
 import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
 import {
@@ -9,6 +10,7 @@ import {
   depurarTareasAutorizacionResueltas,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { logHistorial } from '../utils/historial';
 
@@ -288,16 +290,37 @@ export class NotificacionesController {
         .filter((id): id is number => id !== null && !isNaN(id))
       )];
 
-      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }> = {};
+      const solicitudMap: Record<number, { asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; notas_direccion_bitacora_count: number; descripcion_trafico: string | null }> = {};
       if (solicitudIds.length > 0) {
-        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; descripcion_trafico: string | null }[]>`
-          SELECT s.id, s.asesor, s.nombre_usuario, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre, s.notas AS notas_direccion, s.descripcion AS descripcion_trafico
+        // notas_direccion = ultima nota de la bitacora si existe, si no la nota
+        // inicial de solicitud.notas. bitacora_count = cuantas notas hay en la
+        // tabla nueva (permite al front mostrar "Ver historial (N)").
+        const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; notas_direccion_bitacora_count: bigint | number; descripcion_trafico: string | null }[]>`
+          SELECT s.id, s.asesor, s.nombre_usuario,
+                 COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre,
+                 COALESCE(
+                   (SELECT snd.texto FROM solicitud_nota_direccion snd
+                     WHERE snd.id_solicitud = s.id
+                     ORDER BY snd.created_at DESC, snd.id DESC
+                     LIMIT 1),
+                   s.notas
+                 ) AS notas_direccion,
+                 (SELECT COUNT(*) FROM solicitud_nota_direccion snd
+                   WHERE snd.id_solicitud = s.id) AS notas_direccion_bitacora_count,
+                 s.descripcion AS descripcion_trafico
           FROM solicitud s
           LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
           WHERE s.id IN (${Prisma.join(solicitudIds)})
         `;
         for (const s of solicitudes) {
-          solicitudMap[s.id] = { asesor: s.asesor, nombre_usuario: s.nombre_usuario, cliente_nombre: s.cliente_nombre, notas_direccion: s.notas_direccion, descripcion_trafico: s.descripcion_trafico };
+          solicitudMap[s.id] = {
+            asesor: s.asesor,
+            nombre_usuario: s.nombre_usuario,
+            cliente_nombre: s.cliente_nombre,
+            notas_direccion: s.notas_direccion,
+            notas_direccion_bitacora_count: Number(s.notas_direccion_bitacora_count) || 0,
+            descripcion_trafico: s.descripcion_trafico,
+          };
         }
       }
 
@@ -401,6 +424,7 @@ export class NotificacionesController {
           : (solData?.nombre_usuario || null),
         cliente: solData?.cliente_nombre || null,
         notas_direccion: solData?.notas_direccion || null,
+        notas_direccion_bitacora_count: solData?.notas_direccion_bitacora_count ?? 0,
         descripcion_trafico: solData?.descripcion_trafico || null,
         formatos: formatosByTareaId[tarea.id] || null,
       };
@@ -532,6 +556,7 @@ export class NotificacionesController {
         ids_reservas: tarea.ids_reservas,
         comentarios,
         notas_direccion: null as string | null,
+        notas_direccion_bitacora_count: 0 as number,
         descripcion_trafico: null as string | null,
         cliente: null as string | null,
         creador: null as string | null,
@@ -542,15 +567,27 @@ export class NotificacionesController {
       if (tarea.id_solicitud) {
         const solId = parseInt(tarea.id_solicitud);
         if (!isNaN(solId)) {
-          const solRows = await prisma.$queryRaw<{ notas: string | null; descripcion: string | null; cliente_nombre: string | null; nombre_usuario: string | null; asesor: string | null }[]>`
-            SELECT s.notas, s.descripcion, s.nombre_usuario, s.asesor, COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
+          const solRows = await prisma.$queryRaw<{ notas_direccion: string | null; notas_direccion_bitacora_count: bigint | number; descripcion: string | null; cliente_nombre: string | null; nombre_usuario: string | null; asesor: string | null }[]>`
+            SELECT
+              COALESCE(
+                (SELECT snd.texto FROM solicitud_nota_direccion snd
+                  WHERE snd.id_solicitud = s.id
+                  ORDER BY snd.created_at DESC, snd.id DESC
+                  LIMIT 1),
+                s.notas
+              ) AS notas_direccion,
+              (SELECT COUNT(*) FROM solicitud_nota_direccion snd
+                WHERE snd.id_solicitud = s.id) AS notas_direccion_bitacora_count,
+              s.descripcion, s.nombre_usuario, s.asesor,
+              COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
             FROM solicitud s
             LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
             WHERE s.id = ${solId}
             LIMIT 1
           `;
           if (solRows.length > 0) {
-            notificacion.notas_direccion = solRows[0].notas || null;
+            notificacion.notas_direccion = solRows[0].notas_direccion || null;
+            notificacion.notas_direccion_bitacora_count = Number(solRows[0].notas_direccion_bitacora_count) || 0;
             notificacion.descripcion_trafico = solRows[0].descripcion || null;
             notificacion.cliente = solRows[0].cliente_nombre || null;
             notificacion.creador = (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo'))
@@ -740,7 +777,8 @@ export class NotificacionesController {
                 },
               });
 
-              if (usuarioTrafico.correo_electronico) {
+              if (usuarioTrafico.correo_electronico
+                  && await correoPermitido(usuarioTrafico.id, 'notificacion', 'cambio_estatus')) {
                 const nombrePropuesta = nombreCampaniaAjuste;
                 const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
                 <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
@@ -826,7 +864,8 @@ export class NotificacionesController {
                 where: { id: solicitudCreador.usuario_id },
                 select: { nombre: true, correo_electronico: true },
               });
-              if (creador?.correo_electronico) {
+              if (creador?.correo_electronico
+                  && await correoPermitido(solicitudCreador.usuario_id, 'notificacion', 'cambio_estatus')) {
                 const nombrePropuesta = nombreCampaniaAjuste;
                 const htmlBody = `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
                 <body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
@@ -1070,12 +1109,18 @@ export class NotificacionesController {
       const userId = req.user?.userId;
       const userRole = req.user?.rol;
 
+      // Cache corto por usuario+rol: colapsa la tormenta de refetch (cada evento
+      // global hacía que los ~20 clientes recalcularan 5 agregados full-scan).
+      const statsCacheKey = `notificaciones:stats:${userId ?? 'anon'}:${userRole ?? ''}`;
+      const statsCached = cache.get(statsCacheKey);
+      if (statsCached !== undefined) {
+        res.json({ success: true, data: statsCached });
+        return;
+      }
+
       const where: Record<string, unknown> = {};
       if (userId) {
-        const orConditions: Record<string, unknown>[] = [
-          { id_responsable: userId },
-          ...idAsignadoMatch(userId),
-        ];
+        const ids: number[] = [userId];
 
         // Coordinador de Diseño también ve stats de Diseñadores
         if (userRole === 'Coordinador de Diseño') {
@@ -1083,10 +1128,7 @@ export class NotificacionesController {
             where: { user_role: 'Diseñadores', deleted_at: null },
             select: { id: true },
           });
-          for (const d of disenadores) {
-            orConditions.push({ id_responsable: d.id });
-            orConditions.push(...idAsignadoMatch(d.id));
-          }
+          ids.push(...disenadores.map(d => d.id));
         }
 
         // Gerente Digital (Operaciones) también ve stats de Jefe de Operaciones Digital
@@ -1095,13 +1137,17 @@ export class NotificacionesController {
             where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
             select: { id: true },
           });
-          for (const j of jefesDigital) {
-            orConditions.push({ id_responsable: j.id });
-            orConditions.push(...idAsignadoMatch(j.id));
-          }
+          ids.push(...jefesDigital.map(j => j.id));
         }
 
-        where.OR = orConditions;
+        const asignadoConds = ids.flatMap(id => idAsignadoMatch(id));
+        where.OR = [
+          ...ids.map(id => ({ id_responsable: id })),
+          // En las NOTIFICACIONES, id_asignado es el AUTOR (no el destinatario),
+          // así que el match por asignado solo aplica a TAREAS reales. Si no, el
+          // badge se inflaba contando notificaciones que el propio usuario generó.
+          { AND: [{ tipo: { not: 'Notificación' } }, { OR: asignadoConds }] },
+        ];
       }
 
       // Diseñadores y Coord de Diseño: solo cuentan tareas de Diseño (mismo
@@ -1179,19 +1225,21 @@ export class NotificacionesController {
         por_estatus[estatus] = e._count.estatus;
       });
 
-      res.json({
-        success: true,
-        data: {
-          total,
-          no_leidas: activas,
-          activas,
-          atendidas: total - activas,
-          // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
-          badge_count: badgeCount,
-          por_tipo,
-          por_estatus,
-        },
-      });
+      const data = {
+        total,
+        no_leidas: activas,
+        activas,
+        atendidas: total - activas,
+        // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
+        badge_count: badgeCount,
+        por_tipo,
+        por_estatus,
+      };
+      // TTL 30s: colapsa las ráfagas de eventos (ocurren en segundos) sin dejar
+      // el badge muy stale (máx ~30s de retraso). Sin invalidación en escritura
+      // por ahora — si el retraso molesta, se busta la key del usuario al mutar.
+      cache.set(statsCacheKey, data, 30 * 1000);
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadísticas';
       res.status(500).json({
