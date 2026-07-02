@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
+import { cache } from '../utils/cache';
 import { Prisma } from '@prisma/client';
 import { AuthRequest } from '../types';
 import {
@@ -1108,6 +1109,15 @@ export class NotificacionesController {
       const userId = req.user?.userId;
       const userRole = req.user?.rol;
 
+      // Cache corto por usuario+rol: colapsa la tormenta de refetch (cada evento
+      // global hacía que los ~20 clientes recalcularan 5 agregados full-scan).
+      const statsCacheKey = `notificaciones:stats:${userId ?? 'anon'}:${userRole ?? ''}`;
+      const statsCached = cache.get(statsCacheKey);
+      if (statsCached !== undefined) {
+        res.json({ success: true, data: statsCached });
+        return;
+      }
+
       const where: Record<string, unknown> = {};
       if (userId) {
         const ids: number[] = [userId];
@@ -1215,19 +1225,21 @@ export class NotificacionesController {
         por_estatus[estatus] = e._count.estatus;
       });
 
-      res.json({
-        success: true,
-        data: {
-          total,
-          no_leidas: activas,
-          activas,
-          atendidas: total - activas,
-          // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
-          badge_count: badgeCount,
-          por_tipo,
-          por_estatus,
-        },
-      });
+      const data = {
+        total,
+        no_leidas: activas,
+        activas,
+        atendidas: total - activas,
+        // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
+        badge_count: badgeCount,
+        por_tipo,
+        por_estatus,
+      };
+      // TTL 30s: colapsa las ráfagas de eventos (ocurren en segundos) sin dejar
+      // el badge muy stale (máx ~30s de retraso). Sin invalidación en escritura
+      // por ahora — si el retraso molesta, se busta la key del usuario al mutar.
+      cache.set(statsCacheKey, data, 30 * 1000);
+      res.json({ success: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener estadísticas';
       res.status(500).json({
