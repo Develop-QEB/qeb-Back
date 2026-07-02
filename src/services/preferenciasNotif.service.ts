@@ -1,9 +1,12 @@
 /**
- * Servicio de preferencias de notificaciones por usuario (Fase 1).
+ * Servicio de preferencias de notificaciones por usuario.
  *
- * Semántica OPT-OUT: si no hay fila, la notificación/correo está habilitado.
- * Solo se persisten las EXCEPCIONES (lo que el usuario apaga) y los toggles
- * maestros por canal.
+ * Default POR CANAL:
+ *  - email → ON por defecto (opt-out): llega salvo que el usuario lo apague.
+ *  - popup → OFF por defecto (opt-in): NO sale salvo que el usuario lo encienda.
+ *
+ * Resolución por herencia: fila específica → master de clase → master de canal
+ * → default del canal.
  */
 import prisma from '../utils/prisma';
 import {
@@ -52,24 +55,33 @@ export async function getPreferenciasUsuario(usuarioId: number): Promise<MatrizP
     );
 
   const construirCanal = (canal: CanalNotif): MatrizCanal => {
-    const masterRow = buscar(canal, CLASE_GLOBAL, normalizarClave(CLAVE_MASTER));
-    const master = masterRow ? masterRow.habilitado : true;
+    const canalDefault = canal === 'email'; // email ON por defecto, popup OFF
 
-    const masterNotifRow = buscar(canal, 'notificacion', normalizarClave(CLAVE_MASTER));
-    const masterNotificacion = masterNotifRow ? masterNotifRow.habilitado : true;
-    const masterTareaRow = buscar(canal, 'tarea', normalizarClave(CLAVE_MASTER));
-    const masterTarea = masterTareaRow ? masterTareaRow.habilitado : true;
+    const valorMaster = (): boolean => {
+      const r = buscar(canal, CLASE_GLOBAL, normalizarClave(CLAVE_MASTER));
+      return r ? r.habilitado : canalDefault;
+    };
+    const valorClaseMaster = (clase: 'notificacion' | 'tarea'): boolean => {
+      const r = buscar(canal, clase, normalizarClave(CLAVE_MASTER));
+      return r ? r.habilitado : valorMaster();
+    };
+    const valorEspecifico = (clase: 'notificacion' | 'tarea', clave: string): boolean => {
+      const r = buscar(canal, clase, normalizarClave(clave));
+      return r ? r.habilitado : valorClaseMaster(clase);
+    };
+
+    const master = valorMaster();
+    const masterNotificacion = valorClaseMaster('notificacion');
+    const masterTarea = valorClaseMaster('tarea');
 
     const notificacion: Record<string, boolean> = {};
     for (const cat of CATEGORIAS_NOTIFICACION) {
-      const row = buscar(canal, 'notificacion', normalizarClave(cat.clave));
-      notificacion[cat.clave] = row ? row.habilitado : true;
+      notificacion[cat.clave] = valorEspecifico('notificacion', cat.clave);
     }
 
     const tarea: Record<string, boolean> = {};
     for (const t of TIPOS_TAREA) {
-      const row = buscar(canal, 'tarea', normalizarClave(t.clave));
-      tarea[t.clave] = row ? row.habilitado : true;
+      tarea[t.clave] = valorEspecifico('tarea', t.clave);
     }
 
     return { master, masterNotificacion, masterTarea, notificacion, tarea };
@@ -112,9 +124,8 @@ export async function setPreferencias(
 
 /**
  * ¿Está permitido enviar por `canal` una notificación/tarea de (clase, clave)?
- * Honra el master del canal y la excepción específica. Default: true (opt-out).
- *
- * Lo usarán las fases siguientes (popups dirigidos y filtrado de correos).
+ * Resolución por herencia: específica → master de clase → master de canal →
+ * default del canal (email ON, popup OFF).
  */
 export async function isPermitido(
   usuarioId: number,
@@ -125,21 +136,24 @@ export async function isPermitido(
   const filas = await prisma.usuario_preferencias_notif.findMany({
     where: { usuario_id: usuarioId, canal },
   });
-
-  // Master del canal (todo popup / todo email)
-  const master = filas.find((f) => f.clase === CLASE_GLOBAL && f.clave === CLAVE_MASTER);
-  if (master && !master.habilitado) return false;
-
-  // Master de la clase (todas las notificaciones / todas las tareas del canal)
-  const masterClase = filas.find((f) => f.clase === clase && f.clave === CLAVE_MASTER);
-  if (masterClase && !masterClase.habilitado) return false;
+  const canalDefault = canal === 'email'; // email ON por defecto, popup OFF
 
   // Regla específica por categoría/tipo
   const claveNorm = normalizarClave(clave);
   const especifica = filas.find(
     (f) => f.clase === clase && f.clave !== CLAVE_MASTER && normalizarClave(f.clave) === claveNorm
   );
-  return especifica ? especifica.habilitado : true;
+  if (especifica) return especifica.habilitado;
+
+  // Master de la clase (todas las notificaciones / todas las tareas del canal)
+  const masterClase = filas.find((f) => f.clase === clase && f.clave === CLAVE_MASTER);
+  if (masterClase) return masterClase.habilitado;
+
+  // Master del canal (todo popup / todo email)
+  const master = filas.find((f) => f.clase === CLASE_GLOBAL && f.clave === CLAVE_MASTER);
+  if (master) return master.habilitado;
+
+  return canalDefault;
 }
 
 /** Validación: canales y clases aceptadas. */
