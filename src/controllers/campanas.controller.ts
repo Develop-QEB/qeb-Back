@@ -2020,6 +2020,20 @@ export class CampanasController {
 
       console.log('Fetching inventario for campana:', campanaId);
 
+      // Resolver el id_propuesta de la campaña con un lookup indexado (campania PK →
+      // cotizacion PK). Así las queries de inventario filtran por sc.idquote = ? (índice
+      // idquote usable) en vez de unir cotizacion con CAST(id_propuesta AS CHAR) COLLATE,
+      // que era no-sargable y forzaba scans de tablas completas (llamadas de 26s).
+      const cotRow = await prisma.$queryRawUnsafe<{ id_propuesta: number | null }[]>(
+        `SELECT ct.id_propuesta FROM campania cm INNER JOIN cotizacion ct ON cm.cotizacion_id = ct.id WHERE cm.id = ? LIMIT 1`,
+        campanaId
+      );
+      const idPropuesta = cotRow?.[0]?.id_propuesta != null ? String(cotRow[0].id_propuesta) : null;
+      if (!idPropuesta) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
       const query = `
         SELECT
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
@@ -2065,15 +2079,13 @@ export class CampanasController {
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
           CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
           CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+        FROM solicitudCaras sc
+          INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+          INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
+          INNER JOIN inventarios i ON i.id = epIn.inventario_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
-          cm.id = ?
+          sc.idquote = ?
           AND (rsv.APS IS NULL OR rsv.APS = 0)
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
         ORDER BY MIN(rsv.id) DESC
@@ -2126,20 +2138,18 @@ export class CampanasController {
           cat.año as anio_catorcena,
           sc.caras AS caras_totales
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
-          cm.id = ?
+          sc.idquote = ?
           AND UPPER(sc.articulo) LIKE 'IM%'
           AND rsv.id IS NULL
       `;
 
       const [inventario, tareas, imArticulos] = await Promise.all([
-        prisma.$queryRawUnsafe(query, campanaId),
+        prisma.$queryRawUnsafe(query, idPropuesta),
         prisma.$queryRawUnsafe(tareasQuery, campanaId),
-        prisma.$queryRawUnsafe(imQuery, campanaId),
+        prisma.$queryRawUnsafe(imQuery, idPropuesta),
       ]);
 
       const inventarioArr = inventario as any[];
@@ -2250,7 +2260,19 @@ export class CampanasController {
       const { id } = req.params;
       const campanaId = parseInt(id);
 
-      // Query principal con subquery para id_propuesta (elimina 1 round trip a DB)
+      // Resolver id_propuesta con lookup indexado para filtrar por sc.idquote = ? (índice
+      // idquote) en vez del join no-sargable a cotizacion con CAST+COLLATE. Ver nota en
+      // getInventarioReservado.
+      const cotRow = await prisma.$queryRawUnsafe<{ id_propuesta: number | null }[]>(
+        `SELECT ct.id_propuesta FROM campania cm INNER JOIN cotizacion ct ON cm.cotizacion_id = ct.id WHERE cm.id = ? LIMIT 1`,
+        campanaId
+      );
+      const idPropuesta = cotRow?.[0]?.id_propuesta != null ? String(cotRow[0].id_propuesta) : null;
+      if (!idPropuesta) {
+        res.json({ success: true, data: [] });
+        return;
+      }
+
       const query = `
         SELECT /*+ MAX_EXECUTION_TIME(30000) */
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
@@ -2304,8 +2326,6 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           LEFT JOIN (
             SELECT id_reserva,
                    CAST(
@@ -2317,7 +2337,7 @@ export class CampanasController {
             GROUP BY id_reserva
           ) at_grp ON at_grp.id_reserva = rsv.id
         WHERE
-          cm.id = ?
+          sc.idquote = ?
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
@@ -2387,11 +2407,9 @@ export class CampanasController {
           sc.ciudad as ciudad,
           sc.estados as estados
         FROM solicitudCaras sc
-          INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          INNER JOIN campania cm ON cm.cotizacion_id = ct.id
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
-          cm.id = ?
+          sc.idquote = ?
           AND UPPER(sc.articulo) LIKE 'IM%'
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
@@ -2400,10 +2418,10 @@ export class CampanasController {
 
       const [inventario, tareas, catorcenas, imAPSArticulos] = await Promise.race([
         Promise.all([
-          prisma.$queryRawUnsafe(query, campanaId),
+          prisma.$queryRawUnsafe(query, idPropuesta),
           prisma.$queryRawUnsafe(tareasQuery, campanaId),
           prisma.$queryRawUnsafe(catorcenasQuery),
-          prisma.$queryRawUnsafe(imAPSQuery, campanaId),
+          prisma.$queryRawUnsafe(imAPSQuery, idPropuesta),
         ]),
         timeoutPromise as never,
       ]);
