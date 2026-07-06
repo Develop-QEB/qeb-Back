@@ -21,6 +21,271 @@ function multiClause(values: string[]): unknown {
   return { in: values };
 }
 
+// Parametros normalizados para getInventoryDetail. Se comparten entre la
+// implementacion legacy y la SQL para poder correr ambas con el mismo input
+// desde scripts/validate_inventory_detail_v2.ts.
+export type InventoryDetailParams = {
+  estados: string[];
+  ciudades: string[];
+  formatos: string[];
+  nses: string[];
+  tipos: string[];
+  catorcena_id: string | undefined;
+  fecha_inicio: string | undefined;
+  fecha_fin: string | undefined;
+  estatusFiltro: string | undefined;
+  pageNum: number;
+  limitNum: number;
+  skip: number;
+  wantCoords: boolean;
+};
+
+export type InventoryDetailItem = {
+  id: number;
+  codigo_unico: string | null;
+  plaza: string | null;
+  mueble: string | null;
+  tipo_de_mueble: string | null;
+  tradicional_digital: string | null;
+  municipio: string | null;
+  estado: string | null;
+  latitud: number | null;
+  longitud: number | null;
+  estatus: string;
+  cliente_nombre: string | null;
+  cuic: number | null;
+  marca: string | null;
+  cliente: string | null;
+  propuesta_id: number | null;
+  nombre_campania: string | null;
+  APS: number | null;
+  campana_id: number | null;
+};
+
+export type InventoryDetailResult = {
+  items: InventoryDetailItem[];
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+  byPlaza: Array<{ plaza: string; count: number; lat: number | null; lng: number | null }>;
+  allCoords: Array<{ id: number; lat: number; lng: number; plaza: string | null; estatus: string }>;
+};
+
+function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
+  const {
+    catorcena_id,
+    fecha_inicio,
+    fecha_fin,
+    estatus: estatusFiltro,
+    page = '1',
+    limit = '50',
+    includeCoords,
+  } = req.query;
+
+  const pageNum = parseInt(page as string) || 1;
+  const limitNum = parseInt(limit as string) || 50;
+
+  return {
+    estados: toMultiValue(req.query.estado),
+    ciudades: toMultiValue(req.query.ciudad),
+    formatos: toMultiValue(req.query.formato),
+    nses: toMultiValue(req.query.nse),
+    tipos: toMultiValue(req.query.tipo),
+    catorcena_id: catorcena_id as string | undefined,
+    fecha_inicio: fecha_inicio as string | undefined,
+    fecha_fin: fecha_fin as string | undefined,
+    estatusFiltro: estatusFiltro as string | undefined,
+    pageNum,
+    limitNum,
+    skip: (pageNum - 1) * limitNum,
+    wantCoords: includeCoords === 'true',
+  };
+}
+
+// Resuelve el rango de fechas al fragmento SQL `AND rsv.calendario_id IN (...)`.
+// Se comparte entre las dos implementaciones para garantizar que ambas ven el
+// mismo universo de reservas. Preserva el detalle historico: reserva.calendario_id
+// puede apuntar a filas de calendario O de catorcenas (los IDs viven en tablas
+// distintas pero se juntan aca — es como lo hacia el codigo legacy).
+async function resolveCalendarioClauseSql(params: InventoryDetailParams): Promise<string> {
+  let fechaInicio: Date | null = null;
+  let fechaFin: Date | null = null;
+
+  if (params.catorcena_id) {
+    const catorcena = await prisma.catorcenas.findUnique({
+      where: { id: parseInt(params.catorcena_id) },
+    });
+    if (catorcena) {
+      fechaInicio = catorcena.fecha_inicio;
+      fechaFin = catorcena.fecha_fin;
+    }
+  } else if (params.fecha_inicio && params.fecha_fin) {
+    fechaInicio = new Date(params.fecha_inicio);
+    fechaFin = new Date(params.fecha_fin);
+  }
+
+  if (!fechaInicio || !fechaFin) return '';
+
+  const [calendarios, catorcenasMatch] = await Promise.all([
+    prisma.calendario.findMany({
+      where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      select: { id: true },
+    }),
+    prisma.catorcenas.findMany({
+      where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      select: { id: true },
+    }),
+  ]);
+  const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
+  if (allIds.length === 0) return '';
+  return `AND rsv.calendario_id IN (${allIds.join(',')})`;
+}
+
+// Enriquece un lote de items con cliente/campana/marca via la cadena
+// solicitudCaras -> cotizacion/propuesta -> campania/solicitud -> cliente.
+// Se llama con SOLO los items de la pagina actual (50 tipicos) para que la
+// cadena procese pocos IDs en vez de la tabla entera. Refleja exactamente la
+// misma logica de resolucion del codigo legacy.
+type EnrichmentSource = {
+  top_solicitudCaras_id: number | null;
+  top_cliente_id: number | null;
+  top_APS: number | null;
+  estatus_efectivo: string;
+};
+type EnrichmentResult = {
+  cliente_nombre: string | null;
+  cuic: number | null;
+  marca: string | null;
+  cliente: string | null;
+  propuesta_id: number | null;
+  nombre_campania: string | null;
+  APS: number | null;
+  campana_id: number | null;
+};
+async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<number, EnrichmentResult>> {
+  // El fallback por cliente_id solo necesita las fuentes → corre en paralelo con toda la cadena.
+  const clienteIdsForFallback = [...new Set(sources.map(s => s.top_cliente_id).filter((id): id is number => !!id && id > 0))];
+  const clientesFallbackPromise = clienteIdsForFallback.length > 0
+    ? prisma.cliente.findMany({
+        where: { CUIC: { in: clienteIdsForFallback } },
+        select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      })
+    : Promise.resolve([]);
+
+  const solicitudCarasIds = [...new Set(sources.map(s => s.top_solicitudCaras_id).filter((id): id is number => !!id))];
+  const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
+    where: { id: { in: solicitudCarasIds } },
+    select: { id: true, idquote: true },
+  }) : [];
+  const idquoteValues = solicitudCarasList
+    .map(sc => parseInt(sc.idquote || ''))
+    .filter(v => !isNaN(v));
+
+  const [cotizaciones, propuestas] = await Promise.all([
+    idquoteValues.length > 0 ? prisma.cotizacion.findMany({
+      where: { id_propuesta: { in: idquoteValues } },
+      select: { id: true, id_propuesta: true, nombre_campania: true },
+    }) : [],
+    idquoteValues.length > 0 ? prisma.propuesta.findMany({
+      where: { id: { in: idquoteValues } },
+      select: { id: true, solicitud_id: true },
+    }) : [],
+  ]);
+  const cotizacionIds = cotizaciones.map(c => c.id);
+  const solicitudIds = [...new Set(propuestas.map(p => p.solicitud_id))];
+
+  const [campanas, solicitudes] = await Promise.all([
+    cotizacionIds.length > 0 ? prisma.campania.findMany({
+      where: { cotizacion_id: { in: cotizacionIds } },
+      select: { id: true, cotizacion_id: true },
+    }) : [],
+    solicitudIds.length > 0 ? prisma.solicitud.findMany({
+      where: { id: { in: solicitudIds } },
+      select: { id: true, razon_social: true, cuic: true },
+    }) : [],
+  ]);
+
+  const idquoteToCotizacion = new Map(cotizaciones.map(c => [c.id_propuesta, c.id]));
+  const idquoteToNombreCampania = new Map(cotizaciones.map(c => [c.id_propuesta, c.nombre_campania || '']));
+  const cotizacionToCampana = new Map(campanas.map(c => [c.cotizacion_id!, c]));
+
+  const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
+  const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
+    where: { CUIC: { in: cuicValues } },
+    select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+  }) : [];
+  const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
+    nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
+    marca: c.T2_U_Marca || '',
+    cliente: c.T0_U_Cliente || '',
+  }]));
+  const solicitudInfoMap = new Map(solicitudes.map(s => {
+    const cuicNum = parseInt(s.cuic || '');
+    const cuicInfo = !isNaN(cuicNum) ? cuicToInfo.get(cuicNum) || null : null;
+    return [s.id, {
+      cliente_nombre: cuicInfo?.nombre || s.razon_social || null,
+      cuic: !isNaN(cuicNum) ? cuicNum : null,
+      marca: cuicInfo?.marca || null,
+      cliente: cuicInfo?.cliente || null,
+    }];
+  }));
+  const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
+
+  const solicitudToCampana = new Map(
+    solicitudCarasList.map(sc => {
+      const idquote = parseInt(sc.idquote || '');
+      const cotizId = idquoteToCotizacion.get(idquote);
+      const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+      const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
+      const nombreCampania = !isNaN(idquote) ? idquoteToNombreCampania.get(idquote) || null : null;
+      return [sc.id, {
+        campana_id: campana?.id ?? null,
+        propuesta_id: !isNaN(idquote) ? idquote : null,
+        nombre_campania: nombreCampania,
+        cliente_nombre: solInfo?.cliente_nombre || null,
+        cuic: solInfo?.cuic || null,
+        marca: solInfo?.marca || null,
+        cliente: solInfo?.cliente || null,
+      }];
+    })
+  );
+
+  const clienteNombreMap = new Map<number, string>();
+  const clientesFallback = await clientesFallbackPromise;
+  for (const cl of clientesFallback) {
+    if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
+  }
+
+  // Un item que llego como 'Bloqueado' del inventario (no via reserva ganadora)
+  // tiene top_solicitudCaras_id = null → no aporta enrichment. La respuesta
+  // aparece con todos los campos de enrichment en null. Coincide con legacy.
+  const out = new Map<number, EnrichmentResult>();
+  for (const src of sources) {
+    if (src.top_solicitudCaras_id == null) continue;
+    const solInfo = solicitudToCampana.get(src.top_solicitudCaras_id);
+    const clienteNombre = (src.top_cliente_id ? clienteNombreMap.get(src.top_cliente_id) || null : null) || solInfo?.cliente_nombre || null;
+    out.set(src.top_solicitudCaras_id, {
+      cliente_nombre: clienteNombre,
+      cuic: solInfo?.cuic || null,
+      marca: solInfo?.marca || null,
+      cliente: solInfo?.cliente || null,
+      propuesta_id: solInfo?.propuesta_id ?? null,
+      nombre_campania: solInfo?.nombre_campania || null,
+      APS: src.top_APS,
+      campana_id: solInfo?.campana_id ?? null,
+    });
+  }
+  return out;
+}
+
+// Traduce ?estatus=X al set de valores efectivos que deben matchear en la
+// respuesta. Mismo mapeo que tiene el .filter() del codigo legacy — cambiarlo
+// aca rompe el deep-diff.
+function expandEstatusFilter(estatusFiltro: string | undefined): string[] | null {
+  if (!estatusFiltro) return null;
+  if (estatusFiltro === 'Reservado') return ['Reservado', 'Bonificado'];
+  if (estatusFiltro === 'Vendido') return ['Vendido', 'Vendido bonificado', 'Con Arte'];
+  return [estatusFiltro];
+}
+
 export class DashboardController {
   // Obtener estadisticas del dashboard con filtros (cached 10min)
   async getStats(req: AuthRequest, res: Response): Promise<void> {
@@ -679,377 +944,19 @@ export class DashboardController {
     }
   }
 
-  // Obtener inventario detallado con info de campañas/propuestas
+  // Obtener inventario detallado con info de campañas/propuestas.
+  // Wrapper HTTP: parsea params, cachea y delega en computeInventoryDetailSql.
+  // La implementacion legacy se conserva en computeInventoryDetailLegacy para
+  // que scripts/validate_inventory_detail_v2.ts pueda hacer deep-diff SQL vs JS.
   async getInventoryDetail(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const {
-        catorcena_id,
-        fecha_inicio,
-        fecha_fin,
-        estatus: estatusFiltro,
-        page = '1',
-        limit = '50',
-        includeCoords,
-      } = req.query;
-      const wantCoords = includeCoords === 'true';
-
-      const estados = toMultiValue(req.query.estado);
-      const ciudades = toMultiValue(req.query.ciudad);
-      const formatos = toMultiValue(req.query.formato);
-      const nses = toMultiValue(req.query.nse);
-      const tipos = toMultiValue(req.query.tipo);
-
-      const pageNum = parseInt(page as string) || 1;
-      const limitNum = parseInt(limit as string) || 50;
-      const skip = (pageNum - 1) * limitNum;
-
-      const cacheKey = CACHE_KEYS.INVENTORY_DETAIL(
-        JSON.stringify({ estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin, estatus: estatusFiltro, page, limit, includeCoords })
+      const params = parseInventoryDetailParams(req);
+      const cacheKey = CACHE_KEYS.INVENTORY_DETAIL(JSON.stringify(params));
+      const data = await cache.getOrSet(
+        cacheKey,
+        () => this.computeInventoryDetailSql(params),
+        CACHE_TTL.INVENTORY_DETAIL,
       );
-
-      const data = await cache.getOrSet(cacheKey, async () => {
-      // Construir filtro base para inventarios
-      const inventarioWhere: Record<string, unknown> = {};
-
-      const estadoClause = multiClause(estados);
-      if (estadoClause !== undefined) inventarioWhere.estado = estadoClause;
-
-      const ciudadClause = multiClause(ciudades);
-      if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
-
-      const formatoClause = multiClause(formatos);
-      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
-
-      const nseClause = multiClause(nses);
-      if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
-
-      const tipoClause = multiClause(tipos);
-      if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
-
-      // Obtener TODOS los inventarios para calcular estatus
-      const inventarios = await prisma.inventarios.findMany({
-        where: inventarioWhere,
-        select: {
-          id: true,
-          codigo_unico: true,
-          plaza: true,
-          mueble: true,
-          tipo_de_mueble: true,
-          tradicional_digital: true,
-          municipio: true,
-          estado: true,
-          nivel_socioeconomico: true,
-          latitud: true,
-          longitud: true,
-          estatus: true,
-        },
-      });
-
-      const inventarioIds = inventarios.map((i) => i.id);
-
-      // Filtro de fechas para calendario
-      let fechaInicio: Date | null = null;
-      let fechaFin: Date | null = null;
-
-      if (catorcena_id) {
-        const catorcena = await prisma.catorcenas.findUnique({
-          where: { id: parseInt(catorcena_id as string) },
-        });
-        if (catorcena) {
-          fechaInicio = catorcena.fecha_inicio;
-          fechaFin = catorcena.fecha_fin;
-        }
-      } else if (fecha_inicio && fecha_fin) {
-        fechaInicio = new Date(fecha_inicio as string);
-        fechaFin = new Date(fecha_fin as string);
-      }
-
-      let calendarioClause = '';
-      if (fechaInicio && fechaFin) {
-        const [calendarios, catorcenasMatch] = await Promise.all([
-          prisma.calendario.findMany({
-            where: {
-              deleted_at: null,
-              fecha_inicio: { lte: fechaFin },
-              fecha_fin: { gte: fechaInicio },
-            },
-            select: { id: true },
-          }),
-          prisma.catorcenas.findMany({
-            where: {
-              fecha_inicio: { lte: fechaFin },
-              fecha_fin: { gte: fechaInicio },
-            },
-            select: { id: true },
-          }),
-        ]);
-        const allIds = [
-          ...calendarios.map(c => c.id),
-          ...catorcenasMatch.map(c => c.id),
-        ];
-        if (allIds.length > 0) {
-          calendarioClause = `AND rsv.calendario_id IN (${allIds.join(',')})`;
-        }
-      }
-
-      // Obtener reservas via raw query (JOIN directo evita IN masivo que MySQL trunca)
-      type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
-      const inventarioIdsSet = new Set(inventarioIds);
-      const allReservas: ReservaRaw[] = await prisma.$queryRawUnsafe(`
-        SELECT
-          ei.inventario_id as inventario_id,
-          rsv.estatus,
-          rsv.cliente_id,
-          rsv.APS,
-          rsv.solicitudCaras_id
-        FROM reservas rsv
-        INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
-        WHERE rsv.deleted_at IS NULL
-        ${calendarioClause}
-      `);
-      const reservas = allReservas.filter(r => inventarioIdsSet.has(Number(r.inventario_id)));
-
-      // Construir mapa solicitudCaras_id → propuesta_id y campana_id
-      const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
-
-      // Fallback cliente_id → nombre: solo depende de reservas, corre 100% en
-      // paralelo con la cadena solicitudCaras→cotizacion→propuesta→cliente y se
-      // resuelve mas abajo justo antes de armar el resultado.
-      const clienteIdsForFallback = [...new Set(reservas.map(r => r.cliente_id).filter(id => id && id > 0))];
-      const clientesFallbackPromise = clienteIdsForFallback.length > 0
-        ? prisma.cliente.findMany({
-            where: { CUIC: { in: clienteIdsForFallback } },
-            select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
-          })
-        : Promise.resolve([]);
-
-      const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
-        where: { id: { in: solicitudCarasIds } },
-        select: { id: true, idquote: true },
-      }) : [];
-      const idquoteValues = solicitudCarasList
-        .map((sc) => parseInt(sc.idquote || ''))
-        .filter((v) => !isNaN(v));
-
-      // cotizaciones y propuestas dependen solo de idquoteValues → paralelo.
-      const [cotizaciones, propuestas] = await Promise.all([
-        idquoteValues.length > 0 ? prisma.cotizacion.findMany({
-          where: { id_propuesta: { in: idquoteValues } },
-          select: { id: true, id_propuesta: true, nombre_campania: true },
-        }) : [],
-        idquoteValues.length > 0 ? prisma.propuesta.findMany({
-          where: { id: { in: idquoteValues } },
-          select: { id: true, solicitud_id: true },
-        }) : [],
-      ]);
-      const cotizacionIds = cotizaciones.map((c) => c.id);
-      const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
-
-      // campanas depende de cotizacionIds; solicitudes de solicitudIds → paralelo.
-      const [campanas, solicitudes] = await Promise.all([
-        cotizacionIds.length > 0 ? prisma.campania.findMany({
-          where: { cotizacion_id: { in: cotizacionIds } },
-          select: { id: true, cotizacion_id: true },
-        }) : [],
-        solicitudIds.length > 0 ? prisma.solicitud.findMany({
-          where: { id: { in: solicitudIds } },
-          select: { id: true, razon_social: true, cuic: true },
-        }) : [],
-      ]);
-
-      const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
-      const idquoteToNombreCampania = new Map(cotizaciones.map((c) => [c.id_propuesta, c.nombre_campania || '']));
-      const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
-
-      const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
-      const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
-        where: { CUIC: { in: cuicValues } },
-        select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
-      }) : [];
-      const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
-        nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
-        marca: c.T2_U_Marca || '',
-        cliente: c.T0_U_Cliente || '',
-      }]));
-      const solicitudInfoMap = new Map(solicitudes.map((s) => {
-        const cuicNum = parseInt(s.cuic || '');
-        const cuicInfo = !isNaN(cuicNum) ? cuicToInfo.get(cuicNum) || null : null;
-        return [s.id, {
-          cliente_nombre: cuicInfo?.nombre || s.razon_social || null,
-          cuic: !isNaN(cuicNum) ? cuicNum : null,
-          marca: cuicInfo?.marca || null,
-          cliente: cuicInfo?.cliente || null,
-        }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
-      }));
-      const propuestaToSolicitudInfo = new Map(propuestas.map((p) => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
-
-      // solicitudCaras_id → { campana_id, cliente_nombre, cuic, marca, cliente }
-      const solicitudToCampana = new Map(
-        solicitudCarasList.map((sc) => {
-          const idquote = parseInt(sc.idquote || '');
-          const cotizId = idquoteToCotizacion.get(idquote);
-          const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
-          const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
-          const nombreCampania = !isNaN(idquote) ? idquoteToNombreCampania.get(idquote) || null : null;
-          return [sc.id, {
-            campana_id: campana?.id ?? null,
-            propuesta_id: !isNaN(idquote) ? idquote : null,
-            nombre_campania: nombreCampania,
-            cliente_nombre: solInfo?.cliente_nombre || null,
-            cuic: solInfo?.cuic || null,
-            marca: solInfo?.marca || null,
-            cliente: solInfo?.cliente || null,
-          }] as [number, { campana_id: number | null; propuesta_id: number | null; nombre_campania: string | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
-        })
-      );
-
-      // Fallback: resolver cliente_nombre via cliente_id de la reserva cuando la
-      // cadena propuesta→solicitud falla. La query se lanzo arriba en paralelo,
-      // aqui solo consumimos su resultado.
-      const clienteNombreMap = new Map<number, string>();
-      const clientesFallback = await clientesFallbackPromise;
-      for (const cl of clientesFallback) {
-        if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
-      }
-
-      // Mapear info de reserva por inventario
-      const inventarioInfo: Record<number, {
-        estatus: string;
-        cliente_nombre: string | null;
-        cuic: number | null;
-        marca: string | null;
-        cliente: string | null;
-        propuesta_id: number | null;
-        nombre_campania: string | null;
-        APS: number | null;
-        campana_id: number | null;
-        solicitudCaras_id: number;
-      }> = {};
-
-      reservas.forEach((r) => {
-        const invId = Number(r.inventario_id);
-        if (!invId) return;
-        const current = inventarioInfo[invId];
-        const prioridad: Record<string, number> = {
-          'Vendido': 5,
-          'Vendido bonificado': 4,
-          'Con Arte': 3,
-          'Reservado': 2,
-          'Bloqueado': 1,
-        };
-        const currentPrioridad = current ? (prioridad[current.estatus] || 0) : 0;
-        const newPrioridad = prioridad[r.estatus] || 0;
-
-        if (newPrioridad > currentPrioridad) {
-          const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
-          const clienteNombre = (r.cliente_id ? clienteNombreMap.get(r.cliente_id) || null : null) || solInfo?.cliente_nombre || null;
-          inventarioInfo[invId] = {
-            estatus: r.estatus,
-            cliente_nombre: clienteNombre,
-            cuic: solInfo?.cuic || null,
-            marca: solInfo?.marca || null,
-            cliente: solInfo?.cliente || null,
-            propuesta_id: solInfo?.propuesta_id ?? null,
-            nombre_campania: solInfo?.nombre_campania || null,
-            APS: r.APS,
-            campana_id: solInfo?.campana_id ?? null,
-            solicitudCaras_id: r.solicitudCaras_id,
-          };
-        }
-      });
-
-      // Construir resultado con filtro de estatus
-      // Bloqueado del inventario manda sobre cualquier reserva
-      const allResults = inventarios
-        .map((inv) => {
-          const info = inventarioInfo[inv.id];
-          const estatusActual = inv.estatus === 'Bloqueado'
-            ? 'Bloqueado'
-            : info?.estatus || 'Disponible';
-
-          return {
-            id: inv.id,
-            codigo_unico: inv.codigo_unico,
-            plaza: inv.plaza,
-            mueble: inv.mueble,
-            tipo_de_mueble: inv.tipo_de_mueble,
-            tradicional_digital: inv.tradicional_digital,
-            municipio: inv.municipio,
-            estado: inv.estado,
-            latitud: inv.latitud,
-            longitud: inv.longitud,
-            estatus: estatusActual,
-            cliente_nombre: info?.cliente_nombre || null,
-            cuic: info?.cuic || null,
-            marca: info?.marca || null,
-            cliente: info?.cliente || null,
-            propuesta_id: info?.propuesta_id || null,
-            nombre_campania: info?.nombre_campania || null,
-            APS: info?.APS || null,
-            campana_id: info?.campana_id ?? null,
-          };
-        })
-        .filter((inv) => {
-          if (!estatusFiltro) return true;
-
-          // Reservado = solo estatus Reservado o Bonificado (propuestas sin pase a ventas)
-          if (estatusFiltro === 'Reservado') {
-            return inv.estatus === 'Reservado' || inv.estatus === 'Bonificado';
-          } else if (estatusFiltro === 'Vendido') {
-            return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' || inv.estatus === 'Con Arte';
-          }
-          return inv.estatus === estatusFiltro;
-        });
-
-      // Paginación
-      const total = allResults.length;
-      const totalPages = Math.ceil(total / limitNum);
-      const paginatedResults = allResults.slice(skip, skip + limitNum);
-
-      // Coordenadas solo si se solicitan explícitamente (evita respuestas de 1.5MB+)
-      const allCoords = wantCoords
-        ? allResults
-            .filter((inv) => inv.latitud && inv.longitud)
-            .map((inv) => ({
-              id: inv.id,
-              lat: inv.latitud as number,
-              lng: inv.longitud as number,
-              plaza: inv.plaza,
-              estatus: inv.estatus,
-            }))
-        : [];
-
-      return {
-          items: paginatedResults,
-          pagination: {
-            page: pageNum,
-            limit: limitNum,
-            total,
-            totalPages,
-          },
-          byPlaza: Object.entries(
-            allResults.reduce((acc, inv) => {
-              const plaza = inv.plaza || 'Sin plaza';
-              if (!acc[plaza]) {
-                acc[plaza] = { count: 0, lat: inv.latitud, lng: inv.longitud };
-              }
-              acc[plaza].count++;
-              if (!acc[plaza].lat && inv.latitud) {
-                acc[plaza].lat = inv.latitud;
-                acc[plaza].lng = inv.longitud;
-              }
-              return acc;
-            }, {} as Record<string, { count: number; lat: number | null; lng: number | null }>)
-          ).map(([plaza, data]) => ({
-            plaza,
-            count: data.count,
-            lat: data.lat,
-            lng: data.lng,
-          })).sort((a, b) => b.count - a.count),
-          allCoords,
-      };
-      }, CACHE_TTL.INVENTORY_DETAIL);
-
       res.json({ success: true, data });
     } catch (error) {
       const message =
@@ -1059,6 +966,468 @@ export class DashboardController {
         error: message,
       });
     }
+  }
+
+  // Implementacion nueva: mueve el filtrado por estatus_efectivo y la
+  // paginacion a MariaDB/MySQL (window function ROW_NUMBER), enriquece solo
+  // los ~50 items de la pagina, y computa byPlaza/allCoords/total en Node
+  // desde un scan lean (5 columnas) del set filtrado — para preservar la
+  // logica de "primer lat/lng no cero por plaza" byte-a-byte con el legacy.
+  async computeInventoryDetailSql(params: InventoryDetailParams): Promise<InventoryDetailResult> {
+    const calendarioClause = await resolveCalendarioClauseSql(params);
+
+    // Filtros de columna con placeholders parametrizados (no interpolamos strings de query).
+    const colFilterParts: string[] = [];
+    const colFilterVals: string[] = [];
+    const addIn = (col: string, values: string[]) => {
+      if (values.length === 0) return;
+      const placeholders = values.map(() => '?').join(',');
+      colFilterParts.push(values.length === 1 ? `${col} = ?` : `${col} IN (${placeholders})`);
+      colFilterVals.push(...values);
+    };
+    addIn('i.estado', params.estados);
+    addIn('i.plaza', params.ciudades);
+    addIn('i.mueble', params.formatos);
+    addIn('i.nivel_socioeconomico', params.nses);
+    addIn('i.tradicional_digital', params.tipos);
+    const columnFiltersClause = colFilterParts.length > 0 ? 'AND ' + colFilterParts.join(' AND ') : '';
+
+    const estatusTargets = expandEstatusFilter(params.estatusFiltro);
+    const estatusFilterClause = estatusTargets
+      ? `AND t.estatus_efectivo IN (${estatusTargets.map(() => '?').join(',')})`
+      : '';
+    const estatusFilterVals = estatusTargets ?? [];
+
+    // Subquery derivada compartida por items y scan. Calcula estatus_efectivo
+    // y la reserva ganadora (top_*) via ROW_NUMBER partitioned by inventario_id.
+    // Tie-break por rsv.id ASC para determinismo.
+    const filteredSubquery = `
+      SELECT
+        i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
+        i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
+        CASE
+          WHEN i.estatus = 'Bloqueado' THEN 'Bloqueado'
+          WHEN r.top_estatus IS NULL   THEN 'Disponible'
+          ELSE r.top_estatus
+        END AS estatus_efectivo,
+        r.top_solicitudCaras_id, r.top_cliente_id, r.top_APS
+      FROM inventarios i
+      LEFT JOIN (
+        SELECT inventario_id, estatus AS top_estatus,
+               cliente_id AS top_cliente_id, APS AS top_APS,
+               solicitudCaras_id AS top_solicitudCaras_id
+        FROM (
+          SELECT ei.inventario_id, rsv.estatus,
+                 rsv.cliente_id, rsv.APS, rsv.solicitudCaras_id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ei.inventario_id
+                   ORDER BY
+                     CASE rsv.estatus
+                       WHEN 'Vendido' THEN 5
+                       WHEN 'Vendido bonificado' THEN 4
+                       WHEN 'Con Arte' THEN 3
+                       WHEN 'Reservado' THEN 2
+                       WHEN 'Bloqueado' THEN 1
+                       ELSE 0
+                     END DESC,
+                     rsv.id ASC
+                 ) AS rn
+          FROM reservas rsv
+          INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+          WHERE rsv.deleted_at IS NULL
+            ${calendarioClause}
+        ) ranked
+        WHERE rn = 1
+      ) r ON r.inventario_id = i.id
+      WHERE 1=1
+        ${columnFiltersClause}
+    `;
+
+    // Q_items: 50 filas con todos los campos de display + reserva ganadora
+    const itemsSql = `
+      SELECT * FROM (${filteredSubquery}) t
+      WHERE 1=1 ${estatusFilterClause}
+      ORDER BY t.id
+      LIMIT ? OFFSET ?
+    `;
+    // Q_scan: id/plaza/lat/lng/estatus del set completo filtrado (5 cols)
+    // Ordenado por id para reproducir la logica "primer lat/lng no cero" del legacy.
+    const scanSql = `
+      SELECT t.id, t.plaza, t.latitud, t.longitud, t.estatus_efectivo
+      FROM (${filteredSubquery}) t
+      WHERE 1=1 ${estatusFilterClause}
+      ORDER BY t.id
+    `;
+
+    type ItemRow = {
+      id: number;
+      codigo_unico: string | null;
+      plaza: string | null;
+      mueble: string | null;
+      tipo_de_mueble: string | null;
+      tradicional_digital: string | null;
+      municipio: string | null;
+      estado: string | null;
+      latitud: number | null;
+      longitud: number | null;
+      estatus_efectivo: string;
+      top_solicitudCaras_id: number | null;
+      top_cliente_id: number | null;
+      top_APS: number | null;
+    };
+    type ScanRow = {
+      id: number;
+      plaza: string | null;
+      latitud: number | null;
+      longitud: number | null;
+      estatus_efectivo: string;
+    };
+
+    const [itemRows, scanRows] = await Promise.all([
+      prisma.$queryRawUnsafe<ItemRow[]>(
+        itemsSql,
+        ...colFilterVals,
+        ...estatusFilterVals,
+        params.limitNum,
+        params.skip,
+      ),
+      prisma.$queryRawUnsafe<ScanRow[]>(
+        scanSql,
+        ...colFilterVals,
+        ...estatusFilterVals,
+      ),
+    ]);
+
+    // Enriquecimiento SOLO para los items paginados (~50). Aca esta la gran
+    // reduccion de trabajo: la cadena solicitudCaras→...→cliente antes procesaba
+    // TODAS las reservas del set filtrado; ahora procesa 50.
+    const enrichmentSources: EnrichmentSource[] = itemRows.map(r => ({
+      top_solicitudCaras_id: r.top_solicitudCaras_id,
+      top_cliente_id: r.top_cliente_id,
+      top_APS: r.top_APS,
+      estatus_efectivo: r.estatus_efectivo,
+    }));
+    const enrichmentMap = await buildEnrichmentMap(enrichmentSources);
+
+    const items: InventoryDetailItem[] = itemRows.map(r => {
+      const info = r.top_solicitudCaras_id != null ? enrichmentMap.get(r.top_solicitudCaras_id) : undefined;
+      return {
+        id: r.id,
+        codigo_unico: r.codigo_unico,
+        plaza: r.plaza,
+        mueble: r.mueble,
+        tipo_de_mueble: r.tipo_de_mueble,
+        tradicional_digital: r.tradicional_digital,
+        municipio: r.municipio,
+        estado: r.estado,
+        latitud: r.latitud,
+        longitud: r.longitud,
+        estatus: r.estatus_efectivo,
+        cliente_nombre: info?.cliente_nombre || null,
+        cuic: info?.cuic || null,
+        marca: info?.marca || null,
+        cliente: info?.cliente || null,
+        propuesta_id: info?.propuesta_id || null,
+        nombre_campania: info?.nombre_campania || null,
+        APS: info?.APS || null,
+        campana_id: info?.campana_id ?? null,
+      };
+    });
+
+    // total, byPlaza y allCoords derivan del scan lean. La reduce replica el
+    // comportamiento exacto del legacy (primer lat/lng NO cero por plaza).
+    const total = scanRows.length;
+    const totalPages = Math.ceil(total / params.limitNum);
+
+    const byPlazaAcc = scanRows.reduce((acc, inv) => {
+      const plaza = inv.plaza || 'Sin plaza';
+      if (!acc[plaza]) {
+        acc[plaza] = { count: 0, lat: inv.latitud, lng: inv.longitud };
+      }
+      acc[plaza].count++;
+      if (!acc[plaza].lat && inv.latitud) {
+        acc[plaza].lat = inv.latitud;
+        acc[plaza].lng = inv.longitud;
+      }
+      return acc;
+    }, {} as Record<string, { count: number; lat: number | null; lng: number | null }>);
+    const byPlaza = Object.entries(byPlazaAcc)
+      .map(([plaza, data]) => ({ plaza, count: data.count, lat: data.lat, lng: data.lng }))
+      .sort((a, b) => b.count - a.count);
+
+    const allCoords = params.wantCoords
+      ? scanRows
+          .filter(inv => inv.latitud && inv.longitud)
+          .map(inv => ({
+            id: inv.id,
+            lat: inv.latitud as number,
+            lng: inv.longitud as number,
+            plaza: inv.plaza,
+            estatus: inv.estatus_efectivo,
+          }))
+      : [];
+
+    return {
+      items,
+      pagination: { page: params.pageNum, limit: params.limitNum, total, totalPages },
+      byPlaza,
+      allCoords,
+    };
+  }
+
+  // Implementacion legacy: findMany completo de inventarios + priority en JS
+  // + slice() en memoria. Se conserva SOLO para validacion side-by-side —
+  // no la llama la ruta HTTP. Cuando el deep-diff pase en DEV y MySQL 8, se
+  // borra en un commit de cleanup.
+  async computeInventoryDetailLegacy(params: InventoryDetailParams): Promise<InventoryDetailResult> {
+    const {
+      estados, ciudades, formatos, nses, tipos,
+      catorcena_id, fecha_inicio, fecha_fin,
+      estatusFiltro, pageNum, limitNum, skip, wantCoords,
+    } = params;
+
+    const inventarioWhere: Record<string, unknown> = {};
+
+    const estadoClause = multiClause(estados);
+    if (estadoClause !== undefined) inventarioWhere.estado = estadoClause;
+
+    const ciudadClause = multiClause(ciudades);
+    if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
+
+    const formatoClause = multiClause(formatos);
+    if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
+
+    const nseClause = multiClause(nses);
+    if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
+
+    const tipoClause = multiClause(tipos);
+    if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
+
+    const inventarios = await prisma.inventarios.findMany({
+      where: inventarioWhere,
+      select: {
+        id: true, codigo_unico: true, plaza: true, mueble: true,
+        tipo_de_mueble: true, tradicional_digital: true, municipio: true,
+        estado: true, nivel_socioeconomico: true, latitud: true, longitud: true, estatus: true,
+      },
+    });
+    const inventarioIds = inventarios.map(i => i.id);
+
+    let fechaInicio: Date | null = null;
+    let fechaFin: Date | null = null;
+    if (catorcena_id) {
+      const catorcena = await prisma.catorcenas.findUnique({ where: { id: parseInt(catorcena_id) } });
+      if (catorcena) { fechaInicio = catorcena.fecha_inicio; fechaFin = catorcena.fecha_fin; }
+    } else if (fecha_inicio && fecha_fin) {
+      fechaInicio = new Date(fecha_inicio); fechaFin = new Date(fecha_fin);
+    }
+
+    let calendarioClause = '';
+    if (fechaInicio && fechaFin) {
+      const [calendarios, catorcenasMatch] = await Promise.all([
+        prisma.calendario.findMany({
+          where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          select: { id: true },
+        }),
+        prisma.catorcenas.findMany({
+          where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          select: { id: true },
+        }),
+      ]);
+      const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
+      if (allIds.length > 0) calendarioClause = `AND rsv.calendario_id IN (${allIds.join(',')})`;
+    }
+
+    type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
+    const inventarioIdsSet = new Set(inventarioIds);
+    const allReservas: ReservaRaw[] = await prisma.$queryRawUnsafe(`
+      SELECT ei.inventario_id as inventario_id, rsv.estatus, rsv.cliente_id, rsv.APS, rsv.solicitudCaras_id
+      FROM reservas rsv
+      INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+      WHERE rsv.deleted_at IS NULL
+      ${calendarioClause}
+    `);
+    const reservas = allReservas.filter(r => inventarioIdsSet.has(Number(r.inventario_id)));
+
+    const solicitudCarasIds = [...new Set(reservas.map(r => r.solicitudCaras_id))];
+    const clienteIdsForFallback = [...new Set(reservas.map(r => r.cliente_id).filter(id => id && id > 0))];
+    const clientesFallbackPromise = clienteIdsForFallback.length > 0
+      ? prisma.cliente.findMany({
+          where: { CUIC: { in: clienteIdsForFallback } },
+          select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+        })
+      : Promise.resolve([]);
+
+    const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
+      where: { id: { in: solicitudCarasIds } },
+      select: { id: true, idquote: true },
+    }) : [];
+    const idquoteValues = solicitudCarasList.map(sc => parseInt(sc.idquote || '')).filter(v => !isNaN(v));
+
+    const [cotizaciones, propuestas] = await Promise.all([
+      idquoteValues.length > 0 ? prisma.cotizacion.findMany({
+        where: { id_propuesta: { in: idquoteValues } },
+        select: { id: true, id_propuesta: true, nombre_campania: true },
+      }) : [],
+      idquoteValues.length > 0 ? prisma.propuesta.findMany({
+        where: { id: { in: idquoteValues } },
+        select: { id: true, solicitud_id: true },
+      }) : [],
+    ]);
+    const cotizacionIds = cotizaciones.map(c => c.id);
+    const solicitudIds = [...new Set(propuestas.map(p => p.solicitud_id))];
+
+    const [campanas, solicitudes] = await Promise.all([
+      cotizacionIds.length > 0 ? prisma.campania.findMany({
+        where: { cotizacion_id: { in: cotizacionIds } },
+        select: { id: true, cotizacion_id: true },
+      }) : [],
+      solicitudIds.length > 0 ? prisma.solicitud.findMany({
+        where: { id: { in: solicitudIds } },
+        select: { id: true, razon_social: true, cuic: true },
+      }) : [],
+    ]);
+
+    const idquoteToCotizacion = new Map(cotizaciones.map(c => [c.id_propuesta, c.id]));
+    const idquoteToNombreCampania = new Map(cotizaciones.map(c => [c.id_propuesta, c.nombre_campania || '']));
+    const cotizacionToCampana = new Map(campanas.map(c => [c.cotizacion_id!, c]));
+
+    const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
+    const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
+      where: { CUIC: { in: cuicValues } },
+      select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+    }) : [];
+    const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
+      nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
+      marca: c.T2_U_Marca || '',
+      cliente: c.T0_U_Cliente || '',
+    }]));
+    const solicitudInfoMap = new Map(solicitudes.map(s => {
+      const cuicNum = parseInt(s.cuic || '');
+      const cuicInfo = !isNaN(cuicNum) ? cuicToInfo.get(cuicNum) || null : null;
+      return [s.id, {
+        cliente_nombre: cuicInfo?.nombre || s.razon_social || null,
+        cuic: !isNaN(cuicNum) ? cuicNum : null,
+        marca: cuicInfo?.marca || null,
+        cliente: cuicInfo?.cliente || null,
+      }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+    }));
+    const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
+
+    const solicitudToCampana = new Map(
+      solicitudCarasList.map(sc => {
+        const idquote = parseInt(sc.idquote || '');
+        const cotizId = idquoteToCotizacion.get(idquote);
+        const campana = cotizId !== undefined ? cotizacionToCampana.get(cotizId) : undefined;
+        const solInfo = !isNaN(idquote) ? propuestaToSolicitudInfo.get(idquote) : null;
+        const nombreCampania = !isNaN(idquote) ? idquoteToNombreCampania.get(idquote) || null : null;
+        return [sc.id, {
+          campana_id: campana?.id ?? null,
+          propuesta_id: !isNaN(idquote) ? idquote : null,
+          nombre_campania: nombreCampania,
+          cliente_nombre: solInfo?.cliente_nombre || null,
+          cuic: solInfo?.cuic || null,
+          marca: solInfo?.marca || null,
+          cliente: solInfo?.cliente || null,
+        }] as [number, { campana_id: number | null; propuesta_id: number | null; nombre_campania: string | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+      })
+    );
+
+    const clienteNombreMap = new Map<number, string>();
+    const clientesFallback = await clientesFallbackPromise;
+    for (const cl of clientesFallback) {
+      if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
+    }
+
+    const inventarioInfo: Record<number, {
+      estatus: string; cliente_nombre: string | null; cuic: number | null;
+      marca: string | null; cliente: string | null; propuesta_id: number | null;
+      nombre_campania: string | null; APS: number | null; campana_id: number | null;
+      solicitudCaras_id: number;
+    }> = {};
+
+    reservas.forEach(r => {
+      const invId = Number(r.inventario_id);
+      if (!invId) return;
+      const current = inventarioInfo[invId];
+      const prioridad: Record<string, number> = {
+        'Vendido': 5, 'Vendido bonificado': 4, 'Con Arte': 3, 'Reservado': 2, 'Bloqueado': 1,
+      };
+      const currentPrioridad = current ? (prioridad[current.estatus] || 0) : 0;
+      const newPrioridad = prioridad[r.estatus] || 0;
+      if (newPrioridad > currentPrioridad) {
+        const solInfo = solicitudToCampana.get(r.solicitudCaras_id);
+        const clienteNombre = (r.cliente_id ? clienteNombreMap.get(r.cliente_id) || null : null) || solInfo?.cliente_nombre || null;
+        inventarioInfo[invId] = {
+          estatus: r.estatus, cliente_nombre: clienteNombre,
+          cuic: solInfo?.cuic || null, marca: solInfo?.marca || null, cliente: solInfo?.cliente || null,
+          propuesta_id: solInfo?.propuesta_id ?? null, nombre_campania: solInfo?.nombre_campania || null,
+          APS: r.APS, campana_id: solInfo?.campana_id ?? null, solicitudCaras_id: r.solicitudCaras_id,
+        };
+      }
+    });
+
+    const allResults: InventoryDetailItem[] = inventarios.map(inv => {
+      const info = inventarioInfo[inv.id];
+      const estatusActual = inv.estatus === 'Bloqueado' ? 'Bloqueado' : info?.estatus || 'Disponible';
+      return {
+        id: inv.id,
+        codigo_unico: inv.codigo_unico,
+        plaza: inv.plaza,
+        mueble: inv.mueble,
+        tipo_de_mueble: inv.tipo_de_mueble,
+        tradicional_digital: inv.tradicional_digital,
+        municipio: inv.municipio,
+        estado: inv.estado,
+        latitud: inv.latitud,
+        longitud: inv.longitud,
+        estatus: estatusActual,
+        cliente_nombre: info?.cliente_nombre || null,
+        cuic: info?.cuic || null,
+        marca: info?.marca || null,
+        cliente: info?.cliente || null,
+        propuesta_id: info?.propuesta_id || null,
+        nombre_campania: info?.nombre_campania || null,
+        APS: info?.APS || null,
+        campana_id: info?.campana_id ?? null,
+      };
+    }).filter(inv => {
+      if (!estatusFiltro) return true;
+      if (estatusFiltro === 'Reservado') {
+        return inv.estatus === 'Reservado' || inv.estatus === 'Bonificado';
+      } else if (estatusFiltro === 'Vendido') {
+        return inv.estatus === 'Vendido' || inv.estatus === 'Vendido bonificado' || inv.estatus === 'Con Arte';
+      }
+      return inv.estatus === estatusFiltro;
+    });
+
+    const total = allResults.length;
+    const totalPages = Math.ceil(total / limitNum);
+    const paginatedResults = allResults.slice(skip, skip + limitNum);
+
+    const allCoords = wantCoords
+      ? allResults.filter(inv => inv.latitud && inv.longitud).map(inv => ({
+          id: inv.id, lat: inv.latitud as number, lng: inv.longitud as number,
+          plaza: inv.plaza, estatus: inv.estatus,
+        }))
+      : [];
+
+    const byPlaza = Object.entries(allResults.reduce((acc, inv) => {
+      const plaza = inv.plaza || 'Sin plaza';
+      if (!acc[plaza]) acc[plaza] = { count: 0, lat: inv.latitud, lng: inv.longitud };
+      acc[plaza].count++;
+      if (!acc[plaza].lat && inv.latitud) { acc[plaza].lat = inv.latitud; acc[plaza].lng = inv.longitud; }
+      return acc;
+    }, {} as Record<string, { count: number; lat: number | null; lng: number | null }>))
+      .map(([plaza, data]) => ({ plaza, count: data.count, lat: data.lat, lng: data.lng }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      items: paginatedResults,
+      pagination: { page: pageNum, limit: limitNum, total, totalPages },
+      byPlaza,
+      allCoords,
+    };
   }
 
   // Reporte "Pase a ventas": CSV con cada propuesta que cambio a "Pase a ventas",
