@@ -147,21 +147,35 @@ async function resolveCalendarioClauseSql(params: InventoryDetailParams): Promis
 type EnrichmentSource = {
   top_solicitudCaras_id: number | null;
   top_cliente_id: number | null;
-  top_APS: number | null;
-  estatus_efectivo: string;
 };
-type EnrichmentResult = {
-  cliente_nombre: string | null;
+// Campos COMPARTIDOS por todas las reservas que apuntan al mismo solicitudCaras_id:
+// vienen de la cadena propuesta→solicitud→cuic→cliente. Son atributos "de la
+// solicitud", no de la reserva individual.
+type SolicitudSharedInfo = {
+  campana_id: number | null;
+  propuesta_id: number | null;
+  nombre_campania: string | null;
+  cliente_nombre_fallback: string | null;
   cuic: number | null;
   marca: string | null;
   cliente: string | null;
-  propuesta_id: number | null;
-  nombre_campania: string | null;
-  APS: number | null;
-  campana_id: number | null;
 };
-async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<number, EnrichmentResult>> {
-  // El fallback por cliente_id solo necesita las fuentes → corre en paralelo con toda la cadena.
+type EnrichmentContext = {
+  // Info compartida por solicitudCaras_id (marca, cuic, cliente, etc — mismos
+  // para cualquier reserva que apunte a esa solicitud).
+  solicitudInfoMap: Map<number, SolicitudSharedInfo>;
+  // Nombre de cliente por reserva.cliente_id (via cliente.CUIC). Se usa como
+  // fuente primaria de cliente_nombre; si el cliente_id no matchea, se
+  // fallbackea al cliente_nombre_fallback de la solicitud.
+  clienteNombreMap: Map<number, string>;
+};
+// Bug fix (validation ronda 2): antes esta funcion devolvia un solo Map keyed
+// por solicitudCaras_id con APS y cliente_nombre metidos adentro. Eso pisaba
+// datos cuando 2+ inventarios distintos tenian reservas apuntando al mismo
+// solicitudCaras (caso comun — una campaña cubre varios inventarios). APS y
+// cliente_nombre son por-RESERVA, no por-solicitud. Ahora la funcion devuelve
+// las 2 fuentes crudas y la resolucion per-item la hace el caller.
+async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<EnrichmentContext> {
   const clienteIdsForFallback = [...new Set(sources.map(s => s.top_cliente_id).filter((id): id is number => !!id && id > 0))];
   const clientesFallbackPromise = clienteIdsForFallback.length > 0
     ? prisma.cliente.findMany({
@@ -217,7 +231,7 @@ async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<numb
     marca: c.T2_U_Marca || '',
     cliente: c.T0_U_Cliente || '',
   }]));
-  const solicitudInfoMap = new Map(solicitudes.map(s => {
+  const solicitudSideInfoMap = new Map(solicitudes.map(s => {
     const cuicNum = parseInt(s.cuic || '');
     const cuicInfo = !isNaN(cuicNum) ? cuicToInfo.get(cuicNum) || null : null;
     return [s.id, {
@@ -227,9 +241,9 @@ async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<numb
       cliente: cuicInfo?.cliente || null,
     }];
   }));
-  const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
+  const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudSideInfoMap.get(p.solicitud_id) || null]));
 
-  const solicitudToCampana = new Map(
+  const solicitudInfoMap = new Map<number, SolicitudSharedInfo>(
     solicitudCarasList.map(sc => {
       const idquote = parseInt(sc.idquote || '');
       const cotizId = idquoteToCotizacion.get(idquote);
@@ -240,7 +254,7 @@ async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<numb
         campana_id: campana?.id ?? null,
         propuesta_id: !isNaN(idquote) ? idquote : null,
         nombre_campania: nombreCampania,
-        cliente_nombre: solInfo?.cliente_nombre || null,
+        cliente_nombre_fallback: solInfo?.cliente_nombre || null,
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,
         cliente: solInfo?.cliente || null,
@@ -254,26 +268,7 @@ async function buildEnrichmentMap(sources: EnrichmentSource[]): Promise<Map<numb
     if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
   }
 
-  // Un item que llego como 'Bloqueado' del inventario (no via reserva ganadora)
-  // tiene top_solicitudCaras_id = null → no aporta enrichment. La respuesta
-  // aparece con todos los campos de enrichment en null. Coincide con legacy.
-  const out = new Map<number, EnrichmentResult>();
-  for (const src of sources) {
-    if (src.top_solicitudCaras_id == null) continue;
-    const solInfo = solicitudToCampana.get(src.top_solicitudCaras_id);
-    const clienteNombre = (src.top_cliente_id ? clienteNombreMap.get(src.top_cliente_id) || null : null) || solInfo?.cliente_nombre || null;
-    out.set(src.top_solicitudCaras_id, {
-      cliente_nombre: clienteNombre,
-      cuic: solInfo?.cuic || null,
-      marca: solInfo?.marca || null,
-      cliente: solInfo?.cliente || null,
-      propuesta_id: solInfo?.propuesta_id ?? null,
-      nombre_campania: solInfo?.nombre_campania || null,
-      APS: src.top_APS,
-      campana_id: solInfo?.campana_id ?? null,
-    });
-  }
-  return out;
+  return { solicitudInfoMap, clienteNombreMap };
 }
 
 // Traduce ?estatus=X al set de valores efectivos que deben matchear en la
@@ -1035,6 +1030,12 @@ export class DashboardController {
           FROM reservas rsv
           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
           WHERE rsv.deleted_at IS NULL
+            -- Whitelist EXACTA de los 5 estatus mapeados en el CASE de prioridad.
+            -- Reservas fuera de esta lista (ej. Bonificado a secas, o cualquier
+            -- estatus futuro no clasificado) NO participan del ranking — igual
+            -- que en el legacy, donde prioridad[X] || 0 daba 0 y el mayor-que
+            -- estricto nunca las dejaba ganar, colapsando el efectivo a Disponible.
+            AND rsv.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Reservado', 'Bloqueado')
             ${calendarioClause}
         ) ranked
         WHERE rn = 1
@@ -1104,13 +1105,16 @@ export class DashboardController {
     const enrichmentSources: EnrichmentSource[] = itemRows.map(r => ({
       top_solicitudCaras_id: r.top_solicitudCaras_id,
       top_cliente_id: r.top_cliente_id,
-      top_APS: r.top_APS,
-      estatus_efectivo: r.estatus_efectivo,
     }));
-    const enrichmentMap = await buildEnrichmentMap(enrichmentSources);
+    const { solicitudInfoMap, clienteNombreMap } = await buildEnrichmentContext(enrichmentSources);
 
+    // Resolucion per-item: APS y cliente_nombre son atributos de la RESERVA
+    // ganadora (vienen crudos en r.top_APS y r.top_cliente_id). El resto
+    // (marca, cuic, cliente, propuesta_id, nombre_campania, campana_id) es
+    // compartido por solicitudCaras_id y sale del solicitudInfoMap.
     const items: InventoryDetailItem[] = itemRows.map(r => {
-      const info = r.top_solicitudCaras_id != null ? enrichmentMap.get(r.top_solicitudCaras_id) : undefined;
+      const solInfo = r.top_solicitudCaras_id != null ? solicitudInfoMap.get(r.top_solicitudCaras_id) : undefined;
+      const clienteNombre = (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
       return {
         id: r.id,
         codigo_unico: r.codigo_unico,
@@ -1123,14 +1127,14 @@ export class DashboardController {
         latitud: r.latitud,
         longitud: r.longitud,
         estatus: r.estatus_efectivo,
-        cliente_nombre: info?.cliente_nombre || null,
-        cuic: info?.cuic || null,
-        marca: info?.marca || null,
-        cliente: info?.cliente || null,
-        propuesta_id: info?.propuesta_id || null,
-        nombre_campania: info?.nombre_campania || null,
-        APS: info?.APS || null,
-        campana_id: info?.campana_id ?? null,
+        cliente_nombre: clienteNombre,
+        cuic: solInfo?.cuic || null,
+        marca: solInfo?.marca || null,
+        cliente: solInfo?.cliente || null,
+        propuesta_id: solInfo?.propuesta_id || null,
+        nombre_campania: solInfo?.nombre_campania || null,
+        APS: r.top_APS,
+        campana_id: solInfo?.campana_id ?? null,
       };
     });
 
@@ -1240,12 +1244,18 @@ export class DashboardController {
 
     type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
     const inventarioIdsSet = new Set(inventarioIds);
+    // ORDER BY rsv.id ASC: hace determinista el tie-break del legacy. Sin esto,
+    // MariaDB devuelve reservas en el orden que decida el planner (por join
+    // order), y como el reduce usa mayor-que estricto, el "first-seen" depende
+    // del orden de la DB. Con el ORDER BY, "first-seen por inventario" = reserva
+    // con menor rsv.id — mismo criterio que ROW_NUMBER en computeInventoryDetailSql.
     const allReservas: ReservaRaw[] = await prisma.$queryRawUnsafe(`
       SELECT ei.inventario_id as inventario_id, rsv.estatus, rsv.cliente_id, rsv.APS, rsv.solicitudCaras_id
       FROM reservas rsv
       INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
       WHERE rsv.deleted_at IS NULL
       ${calendarioClause}
+      ORDER BY rsv.id ASC
     `);
     const reservas = allReservas.filter(r => inventarioIdsSet.has(Number(r.inventario_id)));
 
