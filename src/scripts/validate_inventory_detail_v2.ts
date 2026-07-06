@@ -17,8 +17,32 @@
 // estatus='Inactivo' del inventario, cuando getStats si lo hace. Es una
 // inconsistencia preexistente. Se preserva aca; se arregla en el follow-up.
 //
-// Correr: npx ts-node src/scripts/validate_inventory_detail_v2.ts
-// (Usa la DB que apunta .env — normalmente DEV/PRUEBAS Hostinger.)
+// ------- Como configurar la DB destino -------
+// La DB se resuelve por la env var DATABASE_URL (via prisma/schema.prisma y
+// src/utils/prisma.ts). El script NO tiene credenciales hardcodeadas. Al
+// arrancar, utils/prisma.ts logea la URL con creds enmascaradas para que
+// visualmente confirmes contra que DB estas pegando:
+//   [Prisma] Using datasource URL: mysql://***@host:3306/dbname?...
+//
+// Opciones para pegarle a otra DB (ej. un preview de MySQL 8 para validar prod):
+//
+//   A) Override inline por shell (no persiste):
+//      # Git Bash / bash
+//      DATABASE_URL="mysql://user:pass@host-mysql8:3306/db" \
+//        npx ts-node src/scripts/validate_inventory_detail_v2.ts
+//      # PowerShell
+//      $env:DATABASE_URL="mysql://..."; npx ts-node src/scripts/validate_inventory_detail_v2.ts
+//
+//   B) Archivo .env aparte + dotenv-cli:
+//      cp .env .env.mysql8 && edita DATABASE_URL en .env.mysql8
+//      npx dotenv -e .env.mysql8 -- ts-node src/scripts/validate_inventory_detail_v2.ts
+//
+// Si no se sobre-escribe, cae al DATABASE_URL de .env (normalmente DEV/PRUEBAS
+// Hostinger — MariaDB 11.8). Para validar prod, apunta a un ambiente MySQL 8
+// aparte (no directamente a prod).
+//
+// Correr basico: npx ts-node src/scripts/validate_inventory_detail_v2.ts
+import 'dotenv/config';
 import { DashboardController, InventoryDetailParams, InventoryDetailResult } from '../controllers/dashboard.controller';
 import prisma from '../utils/prisma';
 
