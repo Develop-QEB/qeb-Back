@@ -64,6 +64,14 @@ model inventarios {
   cto                  String?  @db.VarChar(20)
 
   @@index([archivos_id], map: "idx_archivos_id")
+  // Indices aditivos para dashboard.controller.ts (getStats/getInventoryDetail):
+  // se filtra sobre estas columnas y hoy causan full-scan en un findMany masivo.
+  @@index([estado], map: "idx_inv_estado")
+  @@index([plaza], map: "idx_inv_plaza")
+  @@index([mueble], map: "idx_inv_mueble")
+  @@index([nivel_socioeconomico], map: "idx_inv_nse")
+  @@index([tradicional_digital], map: "idx_inv_tipo")
+  @@index([estatus], map: "idx_inv_estatus")
   @@map("inventarios")
 }
 
@@ -326,6 +334,9 @@ model reservas {
   // WHERE inventario_id = ? AND deleted_at IS NULL AND estatus IN (...). Importante
   // bajo el nuevo paralelismo de reservas (lotes de 5). Crear con scripts/add_idx_rsv_conflict.cjs.
   @@index([inventario_id, deleted_at, estatus], map: "idx_rsv_conflict")
+  // Usado por el JOIN raw de getInventoryDetail cuando se filtra por catorcena/fecha
+  // (rsv.calendario_id IN (...)).
+  @@index([calendario_id], map: "idx_rsv_calendario")
 }
 
 model session_locks {

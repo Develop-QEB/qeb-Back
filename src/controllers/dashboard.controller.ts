@@ -811,6 +811,18 @@ export class DashboardController {
 
       // Construir mapa solicitudCaras_id → propuesta_id y campana_id
       const solicitudCarasIds = [...new Set(reservas.map((r) => r.solicitudCaras_id))];
+
+      // Fallback cliente_id → nombre: solo depende de reservas, corre 100% en
+      // paralelo con la cadena solicitudCaras→cotizacion→propuesta→cliente y se
+      // resuelve mas abajo justo antes de armar el resultado.
+      const clienteIdsForFallback = [...new Set(reservas.map(r => r.cliente_id).filter(id => id && id > 0))];
+      const clientesFallbackPromise = clienteIdsForFallback.length > 0
+        ? prisma.cliente.findMany({
+            where: { CUIC: { in: clienteIdsForFallback } },
+            select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+          })
+        : Promise.resolve([]);
+
       const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: solicitudCarasIds } },
         select: { id: true, idquote: true },
@@ -819,30 +831,36 @@ export class DashboardController {
         .map((sc) => parseInt(sc.idquote || ''))
         .filter((v) => !isNaN(v));
 
-      // Obtener campana_id via cotizacion (para el link de APS))
-      const cotizaciones = idquoteValues.length > 0 ? await prisma.cotizacion.findMany({
-        where: { id_propuesta: { in: idquoteValues } },
-        select: { id: true, id_propuesta: true, nombre_campania: true },
-      }) : [];
+      // cotizaciones y propuestas dependen solo de idquoteValues → paralelo.
+      const [cotizaciones, propuestas] = await Promise.all([
+        idquoteValues.length > 0 ? prisma.cotizacion.findMany({
+          where: { id_propuesta: { in: idquoteValues } },
+          select: { id: true, id_propuesta: true, nombre_campania: true },
+        }) : [],
+        idquoteValues.length > 0 ? prisma.propuesta.findMany({
+          where: { id: { in: idquoteValues } },
+          select: { id: true, solicitud_id: true },
+        }) : [],
+      ]);
       const cotizacionIds = cotizaciones.map((c) => c.id);
-      const campanas = cotizacionIds.length > 0 ? await prisma.campania.findMany({
-        where: { cotizacion_id: { in: cotizacionIds } },
-        select: { id: true, cotizacion_id: true },
-      }) : [];
+      const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
+
+      // campanas depende de cotizacionIds; solicitudes de solicitudIds → paralelo.
+      const [campanas, solicitudes] = await Promise.all([
+        cotizacionIds.length > 0 ? prisma.campania.findMany({
+          where: { cotizacion_id: { in: cotizacionIds } },
+          select: { id: true, cotizacion_id: true },
+        }) : [],
+        solicitudIds.length > 0 ? prisma.solicitud.findMany({
+          where: { id: { in: solicitudIds } },
+          select: { id: true, razon_social: true, cuic: true },
+        }) : [],
+      ]);
+
       const idquoteToCotizacion = new Map(cotizaciones.map((c) => [c.id_propuesta, c.id]));
       const idquoteToNombreCampania = new Map(cotizaciones.map((c) => [c.id_propuesta, c.nombre_campania || '']));
       const cotizacionToCampana = new Map(campanas.map((c) => [c.cotizacion_id!, c]));
 
-      // Obtener nombre del cliente via propuesta → solicitud → CUIC → cliente.T2_U_Marca
-      const propuestas = idquoteValues.length > 0 ? await prisma.propuesta.findMany({
-        where: { id: { in: idquoteValues } },
-        select: { id: true, solicitud_id: true },
-      }) : [];
-      const solicitudIds = [...new Set(propuestas.map((p) => p.solicitud_id))];
-      const solicitudes = solicitudIds.length > 0 ? await prisma.solicitud.findMany({
-        where: { id: { in: solicitudIds } },
-        select: { id: true, razon_social: true, cuic: true },
-      }) : [];
       const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
       const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
         where: { CUIC: { in: cuicValues } },
@@ -885,17 +903,13 @@ export class DashboardController {
         })
       );
 
-      // Fallback: resolver cliente_nombre via cliente_id de la reserva cuando la cadena propuesta→solicitud falla
-      const clienteIdsForFallback = [...new Set(reservas.map(r => r.cliente_id).filter(id => id && id > 0))];
+      // Fallback: resolver cliente_nombre via cliente_id de la reserva cuando la
+      // cadena propuesta→solicitud falla. La query se lanzo arriba en paralelo,
+      // aqui solo consumimos su resultado.
       const clienteNombreMap = new Map<number, string>();
-      if (clienteIdsForFallback.length > 0) {
-        const clientes = await prisma.cliente.findMany({
-          where: { CUIC: { in: clienteIdsForFallback } },
-          select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
-        });
-        for (const cl of clientes) {
-          if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
-        }
+      const clientesFallback = await clientesFallbackPromise;
+      for (const cl of clientesFallback) {
+        if (cl.CUIC) clienteNombreMap.set(cl.CUIC, cl.T0_U_RazonSocial || cl.T0_U_Cliente || '');
       }
 
       // Mapear info de reserva por inventario
@@ -1034,7 +1048,7 @@ export class DashboardController {
           })).sort((a, b) => b.count - a.count),
           allCoords,
       };
-      }, CACHE_TTL.SHORT); // 2 min cache for inventory detail
+      }, CACHE_TTL.INVENTORY_DETAIL);
 
       res.json({ success: true, data });
     } catch (error) {
