@@ -145,6 +145,9 @@ export const CACHE_TTL = {
   // Datos que cambian moderadamente
   DASHBOARD_STATS: 10 * 60 * 1000, // 10 minutos — reduce DB hits con 150 usuarios
   INVENTORY_COUNTS: 10 * 60 * 1000, // 10 minutos
+  // Detalle de inventario del dashboard (getInventoryDetail): procesa toda la tabla
+  // en memoria, tarda ~9s con MISS. Con TTL corto (2min) casi siempre era MISS.
+  INVENTORY_DETAIL: 10 * 60 * 1000, // 10 minutos
 
   // Datos que cambian frecuentemente
   NOTIFICATIONS_STATS: 5 * 60 * 1000, // 5 minutos
