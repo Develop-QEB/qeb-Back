@@ -27,7 +27,10 @@ const ctrl = new DashboardController();
 type TestCase = {
   name: string;
   params: Partial<InventoryDetailParams>;
-  meta?: Record<string, unknown>;
+  // Si esta seteado, la validacion falla si el id NO aparece en items de
+  // legacy Y sql. Sirve para asegurar que el fixture de tie-break realmente
+  // entra en el set comparado (sino da OK en falso).
+  expectContainsId?: number;
 };
 
 const base: InventoryDetailParams = {
@@ -149,14 +152,18 @@ function buildCases(fx: Fixtures): TestCase[] {
   cases.push({ name: 'limitNum=1 - page 100',          params: { limitNum: 1, pageNum: 100 } });
   cases.push({ name: 'limitNum=500 - page 1',          params: { limitNum: 500 } });
 
-  // (6) Tie-break: pedimos la plaza del inventario con reservas empatadas para
-  //     obligar a que aparezca en el set. Si legacy y SQL desempatan distinto
-  //     va a fallar el diff sobre los campos de enrichment (cliente_nombre, APS...).
+  // (6) Tie-break: filtramos por la plaza del inventario empatado Y pedimos
+  //     limit=100000 para GARANTIZAR que ese inventario esta en la comparacion
+  //     (con limit=50 podia quedar fuera si su id no era de los mas bajos).
+  //     expectContainsId hace que si el inventario no aparece en items — de
+  //     legacy o de sql — el caso falle explicitamente en vez de dar OK falso.
+  //     Si legacy y SQL desempatan distinto para ese inventario, el deep-diff
+  //     lo revela como diferencia en cliente_nombre/APS/propuesta_id/campana_id.
   if (fx.tieBreakInvId && fx.tieBreakPlaza) {
     cases.push({
       name: `tie-break: inv ${fx.tieBreakInvId} (${fx.tieBreakCount} reservas ${fx.tieBreakEstatus}, plaza ${fx.tieBreakPlaza})`,
-      params: { ciudades: [fx.tieBreakPlaza] },
-      meta: { tieBreakInvId: fx.tieBreakInvId },
+      params: { ciudades: [fx.tieBreakPlaza], limitNum: 100000 },
+      expectContainsId: fx.tieBreakInvId,
     });
   } else {
     console.log('  (advertencia: no se encontraron inventarios con reservas empatadas — caso tie-break omitido)');
@@ -231,6 +238,22 @@ async function runCase(tc: TestCase) {
   const tSql = Date.now() - tSqlStart;
 
   const diffs: Diff[] = [];
+
+  // Chequeo previo: el fixture (ej. tie-break) tiene que ESTAR en items de
+  // ambas implementaciones. Si no esta, el resto del deep-diff podria dar OK
+  // sin realmente probar nada del caso. Falla ruidoso.
+  if (tc.expectContainsId != null) {
+    const legacyHas = legacy.items.some(i => i.id === tc.expectContainsId);
+    const sqlHas = sql.items.some(i => i.id === tc.expectContainsId);
+    if (!legacyHas || !sqlHas) {
+      diffs.push({
+        path: `EXPECT_CONTAINS_ID[${tc.expectContainsId}]`,
+        legacy: legacyHas ? 'present' : 'MISSING (fixture no entro al set — caso invalido)',
+        sql: sqlHas ? 'present' : 'MISSING (fixture no entro al set — caso invalido)',
+      });
+    }
+  }
+
   diff('items', legacy.items, sql.items, diffs);
   diff('pagination', legacy.pagination, sql.pagination, diffs);
   diff('byPlaza', normalize(legacy).byPlaza, normalize(sql).byPlaza, diffs);
