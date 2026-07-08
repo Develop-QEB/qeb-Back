@@ -3927,7 +3927,17 @@ export class SolicitudesController {
         res.status(400).json({ success: false, error: 'texto requerido' });
         return;
       }
-      const rolesPermitidos = ['Director General', 'Director Comercial', 'Administrador', 'DEV'];
+      // Notas de Direccion las escriben quienes DISPARAN la autorizacion (asesor
+      // / analista / coordinador). Direccion (DG/DCM) solo LEE la nota mas
+      // reciente en su modal de autorizacion, no agrega — feedback de Jos 2026-07-08.
+      const rolesPermitidos = [
+        'Asesor Comercial', 'Asesor Analista', 'Analista de Servicio al Cliente',
+        'Asesor Comercial Aeropuerto', 'Analista de Aeropuerto',
+        'Coordinador de Facturación y Cobranza', 'Analista de Facturación y Cobranza',
+        'Mesa de Control',
+        'Coordinador de Facturación', 'Especialista de Facturación',
+        'Administrador', 'DEV',
+      ];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para agregar notas de direccion' });
         return;
