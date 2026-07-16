@@ -9,7 +9,7 @@ import {
   crearTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -4261,31 +4261,63 @@ export class PropuestasController {
       const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
       const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
-      const updatedCara = await prisma.solicitudCaras.update({
-        where: { id: parseInt(caraId) },
-        data: {
-          ciudad,
-          estados,
-          tipo,
-          flujo,
-          bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
-          caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
-          nivel_socioeconomico,
-          formato,
-          costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
-          tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
-          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
-          fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
-          caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
-          caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
-          articulo,
-          descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
-          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
-          autorizacion_dg,
-          autorizacion_dcm,
-          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
-        },
-      });
+      // Cambio de periodo con reservas: liberar el circuito completo (cara +
+      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      const periodoCambioUp = (
+        (!!inicio_periodo && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+        (!!fin_periodo && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+      );
+
+      let updatedCara;
+      let reservasLiberadasUp = 0;
+      try {
+        updatedCara = await prisma.$transaction(async (tx) => {
+          if (periodoCambioUp) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            reservasLiberadasUp = liberadas;
+          }
+          return tx.solicitudCaras.update({
+            where: { id: parseInt(caraId) },
+            data: {
+              ciudad,
+              estados,
+              tipo,
+              flujo,
+              bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
+              caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
+              nivel_socioeconomico,
+              formato,
+              costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
+              tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
+              inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
+              fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+              caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
+              caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
+              articulo,
+              descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
+              grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
+              autorizacion_dg,
+              autorizacion_dcm,
+              cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+            },
+          });
+        });
+      } catch (e: any) {
+        res.status(400).json({ success: false, error: e?.message || 'No se pudo actualizar el circuito' });
+        return;
+      }
+
+      if (reservasLiberadasUp > 0 && currentCara.idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: parseInt(currentCara.idquote) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: reservasLiberadasUp }),
+          },
+        });
+      }
 
       // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
       // cara — el equipo pidió tenerla deshabilitada por un rato.
@@ -4700,14 +4732,30 @@ export class PropuestasController {
       // Run all updates in a single transaction.
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
+      let totalReservasLiberadas = 0;
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
+        // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
+        // en el post-pass de redistribución (ya no tienen reservas activas).
+        const gruposLiberados = new Set<number>();
 
         for (const item of carasToUpdate) {
           const { caraId, data } = item;
 
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
+
+          // Cambio de periodo con reservas: liberar el circuito completo (cara +
+          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo.
+          const periodoCambioP = !!currentCara && (
+            (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+            (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+          );
+          if (periodoCambioP) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            totalReservasLiberadas += liberadas;
+            if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
+          }
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
           const decimalEqP = (a: unknown, b: unknown) =>
@@ -4821,6 +4869,7 @@ export class PropuestasController {
         const gruposRedistribuidos = new Set<number>();
         for (const result of results) {
           if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (gruposLiberados.has(result.grupo_rt_bf)) continue; // reservas liberadas por cambio de periodo
           if (!isCircuitoDigital(result.articulo || '')) continue;
           gruposRedistribuidos.add(result.grupo_rt_bf);
           try {
@@ -4835,6 +4884,19 @@ export class PropuestasController {
 
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
+
+      // Historial: reservas liberadas por cambio de periodo
+      if (totalReservasLiberadas > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: parseInt(id as string) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: totalReservasLiberadas }),
+          },
+        });
+      }
 
       // After ALL updates: check for pending authorizations ONCE and create ONE task
       const autorizacion = await verificarCarasPendientes(String(id));

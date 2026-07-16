@@ -11,7 +11,7 @@ import {
   crearTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -10532,10 +10532,44 @@ export class CampanasController {
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
       if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
-      const cara = await prisma.solicitudCaras.update({
-        where: { id: parseInt(caraId) },
-        data: updateData,
-      });
+      // Cambio de periodo con reservas: liberar el circuito completo (cara +
+      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      // Respeta candado APS: la helper lanza si el grupo tiene APS y se rechaza
+      // sin mutar el periodo.
+      const periodoCambioUpd = !!currentCaraFull && (
+        (!!data.inicio_periodo && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
+        (!!data.fin_periodo && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
+      );
+
+      let cara;
+      let reservasLiberadasUpd = 0;
+      try {
+        cara = await prisma.$transaction(async (tx) => {
+          if (periodoCambioUpd) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            reservasLiberadasUpd = liberadas;
+          }
+          return tx.solicitudCaras.update({
+            where: { id: parseInt(caraId) },
+            data: updateData,
+          });
+        });
+      } catch (e: any) {
+        res.status(400).json({ success: false, error: e?.message || 'No se pudo actualizar el circuito' });
+        return;
+      }
+
+      if (reservasLiberadasUpd > 0 && currentCara.idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: parseInt(currentCara.idquote) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: reservasLiberadasUpd }),
+          },
+        });
+      }
 
       // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
       // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
@@ -10914,14 +10948,31 @@ export class CampanasController {
       // Run all updates in a single transaction.
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
+      let totalReservasLiberadas = 0;
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
+        // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
+        // en el post-pass de redistribución (ya no tienen reservas activas).
+        const gruposLiberados = new Set<number>();
 
         for (const item of carasToUpdate) {
           const { caraId, data } = item;
 
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
+
+          // Cambio de periodo con reservas: liberar el circuito completo (cara +
+          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo. Respeta candado APS
+          // (la helper lanza si el grupo tiene APS asignado).
+          const periodoCambioBk = !!currentCara && (
+            (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+            (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+          );
+          if (periodoCambioBk) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            totalReservasLiberadas += liberadas;
+            if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
+          }
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
           const decimalEqB = (a: unknown, b: unknown) =>
@@ -11046,6 +11097,7 @@ export class CampanasController {
         const gruposRedistribuidos = new Set<number>();
         for (const result of results) {
           if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (gruposLiberados.has(result.grupo_rt_bf)) continue; // reservas liberadas por cambio de periodo
           if (!isCircuitoDigital(result.articulo || '')) continue;
           gruposRedistribuidos.add(result.grupo_rt_bf);
           try {
@@ -11062,6 +11114,19 @@ export class CampanasController {
       const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });
       const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
       if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
+
+      // Historial: reservas liberadas por cambio de periodo
+      if (totalReservasLiberadas > 0 && refIdHist) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: refIdHist,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: totalReservasLiberadas }),
+          },
+        });
+      }
 
       // After ALL updates: get idquote from first cara to check pending authorizations ONCE
       const firstCara = await prisma.solicitudCaras.findUnique({

@@ -400,3 +400,55 @@ export async function redistribuirReservasCircuito(
 
   return { movidas };
 }
+
+/**
+ * Libera (soft-delete) las reservas de un circuito cuando se cambia su periodo.
+ * Se aplica sobre la cara editada Y su pareja RT/BF (todo el grupo), dejando el
+ * circuito con reservas en 0 en el nuevo periodo. Reutiliza el mismo mecanismo
+ * de soft-delete (`deleted_at`) que la eliminación de circuito.
+ *
+ * Regla APS: si alguna reserva activa del grupo tiene APS asignado (APS > 0),
+ * NO se puede cambiar el periodo — lanza un Error para que el caller lo rechace.
+ *
+ * Devuelve la cantidad de reservas liberadas y los ids de caras afectados.
+ * Idempotente: si el grupo no tiene reservas activas, no hace nada (liberadas 0).
+ */
+export async function liberarReservasCircuitoPorCambioPeriodo(
+  tx: Prisma.TransactionClient,
+  caraId: number
+): Promise<{ liberadas: number; caraIds: number[] }> {
+  const cara = await tx.solicitudCaras.findUnique({
+    where: { id: caraId },
+    select: { id: true, grupo_rt_bf: true },
+  });
+  if (!cara) return { liberadas: 0, caraIds: [] };
+
+  // Resolver el grupo completo (cara + pareja RT/BF) para liberar el circuito entero.
+  let caraIds = [caraId];
+  if (cara.grupo_rt_bf) {
+    const grupo = await tx.solicitudCaras.findMany({
+      where: { grupo_rt_bf: cara.grupo_rt_bf },
+      select: { id: true },
+    });
+    if (grupo.length > 0) caraIds = grupo.map((c) => c.id);
+  }
+
+  // Candado APS: no se puede reubicar un circuito que ya tiene APS asignado.
+  const conAPS = await tx.reservas.count({
+    where: { solicitudCaras_id: { in: caraIds }, deleted_at: null, APS: { gt: 0 } },
+  });
+  if (conAPS > 0) {
+    throw new Error('No se puede cambiar el periodo: el circuito tiene APS asignado.');
+  }
+
+  const liberadas = await tx.reservas.count({
+    where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+  });
+  if (liberadas > 0) {
+    await tx.reservas.updateMany({
+      where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
+      data: { deleted_at: new Date() },
+    });
+  }
+  return { liberadas, caraIds };
+}
