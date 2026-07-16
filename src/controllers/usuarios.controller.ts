@@ -465,19 +465,17 @@ export class UsuariosController {
       }
 
       const targetId = parseInt(req.params.id);
-      const target = await prisma.usuario.findFirst({ where: { id: targetId }, select: { id: true, nombre: true, user_role: true } });
       const result = await authService.impersonate(targetId);
 
-      await logHistorial({
-        tipo: 'usuario',
-        refId: targetId,
-        accion: `Suplantó identidad de "${target?.nombre || `usuario ${targetId}`}" (rol ${target?.user_role || '?'})`,
-        usuario: req.user?.nombre || 'Sistema',
-        usuarioId: req.user?.userId,
-        usuarioRol: req.user?.rol,
-        origen: 'admin_usuarios_impersonate',
-        extras: { suplantado: { id: targetId, nombre: target?.nombre, rol: target?.user_role } },
-      });
+      // No registramos "Suplantó identidad de ..." en historial — feedback
+      // 2026-07-15: los usuarios finales no deben ver ese evento. La puertita
+      // es una herramienta interna del rol DEV. Las acciones que se realicen
+      // dentro de la sesion impersonada quedan a nombre del usuario objetivo
+      // (el JWT emitido lleva su userId/nombre), asi que se ven como si el
+      // usuario mismo las hubiera hecho.
+      // Si en algun momento se necesita auditoria de impersonaciones, moverla
+      // a una tabla dedicada (no al historial visible por usuarios).
+      console.log('[impersonate] DEV', req.user?.nombre, '(id', req.user?.userId, ') asumio identidad de userId', targetId);
 
       res.json({
         success: true,

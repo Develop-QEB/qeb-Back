@@ -10,6 +10,11 @@ router.use(authMiddleware);
 // Evaluar autorización - requiere autenticación para identificar al usuario
 router.post('/evaluar-autorizacion', solicitudesController.evaluarAutorizacion.bind(solicitudesController));
 
+// Filtro DG (Director General Adjunto): decisión sobre la tarea de filtro
+// antes de que la autorización llegue al Director General.
+router.post('/filtro-dg/:tareaId/aprobar', solicitudesController.aprobarFiltroDg.bind(solicitudesController));
+router.post('/filtro-dg/:tareaId/rechazar', solicitudesController.rechazarFiltroDg.bind(solicitudesController));
+
 router.get('/', solicitudesController.getAll.bind(solicitudesController));
 router.get('/stats', solicitudesController.getStats.bind(solicitudesController));
 router.get('/catorcenas', solicitudesController.getCatorcenas.bind(solicitudesController));

@@ -8,7 +8,9 @@ import {
   verificarCarasRechazadas,
   crearTareasAutorizacion,
   obtenerResumenAutorizacion,
-  conservarAprobacionSiIncrementa
+  conservarAprobacionSiIncrementa,
+  aprobarFiltroDg,
+  rechazarFiltroDgComoCorreccion,
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -3927,7 +3929,17 @@ export class SolicitudesController {
         res.status(400).json({ success: false, error: 'texto requerido' });
         return;
       }
-      const rolesPermitidos = ['Director General', 'Director Comercial', 'Administrador', 'DEV'];
+      // Notas de Direccion las escriben quienes DISPARAN la autorizacion (asesor
+      // / analista / coordinador). Direccion (DG/DCM) solo LEE la nota mas
+      // reciente en su modal de autorizacion, no agrega — feedback de Jos 2026-07-08.
+      const rolesPermitidos = [
+        'Asesor Comercial', 'Asesor Analista', 'Analista de Servicio al Cliente',
+        'Asesor Comercial Aeropuerto', 'Analista de Aeropuerto',
+        'Coordinador de Facturación y Cobranza', 'Analista de Facturación y Cobranza',
+        'Mesa de Control',
+        'Coordinador de Facturación', 'Especialista de Facturación',
+        'Administrador', 'DEV',
+      ];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para agregar notas de direccion' });
         return;
@@ -3956,6 +3968,62 @@ export class SolicitudesController {
     } catch (error) {
       console.error('Error addNotaDireccion:', error);
       const message = error instanceof Error ? error.message : 'Error al agregar nota de direccion';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // ============ FILTRO DG (Director General Adjunto) ============
+  // Feedback 2026-07-15: paso extra donde el DGA revisa antes de que la
+  // autorización llegue al DG. Puede aprobar (→ crea Autorización DG real)
+  // o rechazar como Corrección (→ crea Corrección al creador).
+
+  async aprobarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const userName = req.user?.nombre || 'Director General Adjunto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DG' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      const result = await aprobarFiltroDg(tareaId, userName);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error aprobarFiltroDg:', error);
+      const message = error instanceof Error ? error.message : 'Error al aprobar filtro DG';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async rechazarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { motivo } = req.body as { motivo?: string };
+      const userName = req.user?.nombre || 'Director General Adjunto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DG' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      if (!motivo || !motivo.trim()) {
+        res.status(400).json({ success: false, error: 'Motivo requerido' });
+        return;
+      }
+      const result = await rechazarFiltroDgComoCorreccion(tareaId, userName, motivo.trim());
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error rechazarFiltroDg:', error);
+      const message = error instanceof Error ? error.message : 'Error al rechazar filtro DG';
       res.status(500).json({ success: false, error: message });
     }
   }
