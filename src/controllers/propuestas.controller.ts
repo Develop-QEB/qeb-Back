@@ -4648,6 +4648,11 @@ export class PropuestasController {
       // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
       // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
       // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
+      // EXCEPCIÓN par RT/BF: al crear la BF/CF de un par (se crea ANTES que su RT), el
+      // total queda impar un instante y marcaría pendiente a OTROS circuitos, envenenando
+      // la propuesta y provocando 409 en la RT. La paridad se evalúa cuando llega la RT
+      // que completa el par (o en una cara suelta), no en la BF/CF intermedia.
+      const esBonifDePar = !!grupoRtBfCreate && (artUpperCrP.startsWith('BF') || artUpperCrP.startsWith('CF'));
       const todasCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: id },
         select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
@@ -4657,7 +4662,7 @@ export class PropuestasController {
         return !isDigital;
       });
       const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (totalCarasGlobal % 2 !== 0) {
+      if (!esBonifDePar && totalCarasGlobal % 2 !== 0) {
         const idsNoDigitales = noDigitales.map(c => c.id);
         const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
         if (carasNoP.length > 0) {
