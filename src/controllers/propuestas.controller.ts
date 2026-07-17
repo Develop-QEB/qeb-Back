@@ -4519,13 +4519,32 @@ export class PropuestasController {
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      //
+      // EXCEPCIÓN pareja RT/BF: una bonificada crea su cara BF y su cara RT en la
+      // misma acción (dos POST consecutivos con el mismo grupo_rt_bf; el front crea
+      // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
+      // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
+      // está creando ahora (grupoRtBfCreate).
       const pendCrP = await verificarCarasPendientes(id);
       if (pendCrP.tienePendientes) {
-        res.status(409).json({
-          success: false,
-          error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
-        });
-        return;
+        const grupoActualCrP = grupoRtBfCreate ? parseInt(grupoRtBfCreate) : null;
+        const idsPendientesCrP = [...new Set([...pendCrP.pendientesDg, ...pendCrP.pendientesDcm])];
+        let hayPendientesExternas = idsPendientesCrP.length > 0;
+        if (grupoActualCrP != null && idsPendientesCrP.length > 0) {
+          const pendientesRows = await prisma.solicitudCaras.findMany({
+            where: { id: { in: idsPendientesCrP } },
+            select: { grupo_rt_bf: true },
+          });
+          // Externa = pendiente que no es de la pareja RT/BF que se crea ahora.
+          hayPendientesExternas = pendientesRows.some(c => c.grupo_rt_bf !== grupoActualCrP);
+        }
+        if (hayPendientesExternas) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
       }
 
       // Calculate authorization state — use BF pair's bonificacion for RT rows

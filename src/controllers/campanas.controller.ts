@@ -10771,13 +10771,32 @@ export class CampanasController {
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la campaña ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      //
+      // EXCEPCIÓN pareja RT/BF: una bonificada crea su cara BF y su cara RT en la
+      // misma acción (dos POST consecutivos con el mismo grupo_rt_bf; el front crea
+      // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
+      // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
+      // está creando ahora (data.grupo_rt_bf).
       const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
       if (pendCmCr.tienePendientes) {
-        res.status(409).json({
-          success: false,
-          error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
-        });
-        return;
+        const grupoActualCr = data.grupo_rt_bf ? parseInt(data.grupo_rt_bf) : null;
+        const idsPendientesCr = [...new Set([...pendCmCr.pendientesDg, ...pendCmCr.pendientesDcm])];
+        let hayPendientesExternasCm = idsPendientesCr.length > 0;
+        if (grupoActualCr != null && idsPendientesCr.length > 0) {
+          const pendientesRowsCm = await prisma.solicitudCaras.findMany({
+            where: { id: { in: idsPendientesCr } },
+            select: { grupo_rt_bf: true },
+          });
+          // Externa = pendiente que no es de la pareja RT/BF que se crea ahora.
+          hayPendientesExternasCm = pendientesRowsCm.some(c => c.grupo_rt_bf !== grupoActualCr);
+        }
+        if (hayPendientesExternasCm) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
       }
 
       // Get solicitud_id for task creation
