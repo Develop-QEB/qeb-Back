@@ -1386,38 +1386,11 @@ export async function rechazarFiltroDgComoCorreccion(
       where: { id: tareaFiltroId },
       data: { estatus: 'Atendido' },
     });
-
-    // Marcar las caras que estaban pendientes DG como 'correccion' para que
-    // en la UI aparezcan con badge naranja "Corrección", plumita habilitada
-    // y boton de reenviar. Feedback Jos 2026-07-17.
-    let carasCorregidas = 0;
-    if (filtro.id_propuesta) {
-      const upd = await tx.solicitudCaras.updateMany({
-        where: { idquote: filtro.id_propuesta, autorizacion_dg: 'pendiente' },
-        data: { autorizacion_dg: 'correccion' },
-      });
-      carasCorregidas = upd.count;
-    } else if (solId && !isNaN(solId)) {
-      // Solicitud sin propuesta aun: buscar caras via solicitudCaras.
-      // (Caso raro; solicitudes tienen sus caras vinculadas por idquote.)
-      const propuestas = await tx.propuesta.findMany({
-        where: { solicitud_id: solId },
-        select: { id: true },
-      });
-      for (const p of propuestas) {
-        const upd = await tx.solicitudCaras.updateMany({
-          where: { idquote: String(p.id), autorizacion_dg: 'pendiente' },
-          data: { autorizacion_dg: 'correccion' },
-        });
-        carasCorregidas += upd.count;
-      }
-    }
-
     const tareaCorreccion = await tx.tareas.create({
       data: {
         tipo: 'Corrección Autorización',
         titulo: `Corrección Autorización DG - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `El Gerente Comercial (${rechazadorNombre}) devolvió esta ${etiquetaOrigen.toLowerCase()} para corrección antes de enviarla a Dirección General.\n\nMotivo: ${motivo}\n\n${carasCorregidas} circuito(s) en estado de corrección — edita y reenvía a autorización.`,
+        descripcion: `El Gerente Comercial (${rechazadorNombre}) devolvió esta ${etiquetaOrigen.toLowerCase()} para corrección antes de enviarla a Dirección General.\n\nMotivo: ${motivo}`,
         estatus: 'Pendiente',
         id_responsable: creadorId,
         responsable: creadorNombre,
@@ -1434,11 +1407,11 @@ export async function rechazarFiltroDgComoCorreccion(
       data: {
         tipo: `autorizacion_solicitud_${origen}`,
         ref_id: idOrigen,
-        accion: `${rechazadorNombre} (Gerente Comercial) devolvió para corrección — ${carasCorregidas} circuito(s) marcados`,
-        detalles: JSON.stringify({ tareaFiltroId, tareaCorreccionId: tareaCorreccion.id, motivo, creadorId, creadorNombre, carasCorregidas }),
+        accion: `${rechazadorNombre} (Gerente Comercial) devolvió para corrección`,
+        detalles: JSON.stringify({ tareaFiltroId, tareaCorreccionId: tareaCorreccion.id, motivo, creadorId, creadorNombre }),
       },
     });
-    return { tareaCorreccionId: tareaCorreccion.id, carasCorregidas };
+    return { tareaCorreccionId: tareaCorreccion.id };
   });
 
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
