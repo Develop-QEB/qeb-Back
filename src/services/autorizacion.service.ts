@@ -45,83 +45,6 @@ function quitarAcentos(str: string): string {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// Roles que act\u00faan como Gerente Comercial (filtro DG).
-const GERENTE_COMERCIAL_ROLES = [
-  'Gerente Comercial V\u00eda P\u00fablica',
-  'Gerente Comercial Via Publica',
-  'Gerente Comercial Plazas',
-  'Gerente Comercial (Plazas)',
-  'Gerente Comercial',
-];
-
-/**
- * Encuentra el Gerente Comercial l\u00edder del equipo al que pertenece el asesor
- * de una solicitud. La relaci\u00f3n se determina por la tabla usuario_equipo:
- * el equipo del asesor debe tener otro miembro cuyo user_role est\u00e9 en
- * GERENTE_COMERCIAL_ROLES.
- *
- * Estrategia de b\u00fasqueda del asesor:
- *   1. Match por solicitud.asesor (nombre exacto en usuario.nombre).
- *   2. Fallback a solicitud.usuario_id (creador).
- *
- * Devuelve null si no se puede resolver \u2014 el flujo hace fallback a DG directo.
- * Feedback 2026-07-17.
- */
-async function getGerenteComercialParaSolicitud(
-  solicitudId: number
-): Promise<{ id: number; nombre: string } | null> {
-  const sol = await prisma.solicitud.findFirst({
-    where: { id: solicitudId, deleted_at: null },
-    select: { asesor: true, usuario_id: true, nombre_usuario: true },
-  });
-  if (!sol) return null;
-
-  // 1) Resolver asesorId
-  let asesorId: number | null = null;
-  const asesorNombre = (sol.asesor || '').trim();
-  if (asesorNombre) {
-    const u = await prisma.usuario.findFirst({
-      where: {
-        deleted_at: null,
-        nombre: { equals: asesorNombre },
-      },
-      select: { id: true },
-    });
-    if (u) asesorId = u.id;
-  }
-  if (!asesorId && sol.usuario_id) {
-    asesorId = sol.usuario_id;
-  }
-  if (!asesorId) return null;
-
-  // 2) Equipos del asesor
-  const equiposDelAsesor = await prisma.usuario_equipo.findMany({
-    where: { usuario_id: asesorId, equipo: { deleted_at: null } },
-    select: { equipo_id: true },
-  });
-  if (equiposDelAsesor.length === 0) return null;
-
-  // 3) Buscar miembro del mismo equipo con user_role de Gerente Comercial
-  for (const eq of equiposDelAsesor) {
-    const gerenteMembership = await prisma.usuario_equipo.findFirst({
-      where: {
-        equipo_id: eq.equipo_id,
-        usuario: {
-          deleted_at: null,
-          user_role: { in: GERENTE_COMERCIAL_ROLES },
-        },
-      },
-      include: {
-        usuario: { select: { id: true, nombre: true, user_role: true } },
-      },
-    });
-    if (gerenteMembership?.usuario) {
-      return { id: gerenteMembership.usuario.id, nombre: gerenteMembership.usuario.nombre };
-    }
-  }
-  return null;
-}
-
 /**
  * Normaliza el nombre de la plaza para buscar en criterios
  * Para Ciudad de México usa el estado (porque las ciudades son alcaldías)
@@ -707,16 +630,25 @@ export async function crearTareasAutorizacion(
     select: { id: true, nombre: true, correo_electronico: true }
   });
 
-  // Gerente Comercial del asesor de la solicitud — filtro previo a DG.
-  // Feedback 2026-07-17: cada asesor está en un equipo cuyo líder es su
-  // Gerente Comercial (Vía Pública o Plazas). El Filtro Autorización DG va
-  // a ESE Gerente específico según quién es el asesor. Solo aplica a DG.
-  const gerenteComercial = await getGerenteComercialParaSolicitud(solicitudId);
+  // Director General Adjunto — filtro previo a DG. Feedback 2026-07-15:
+  // toda autorización DG pasa PRIMERO por el DGA que decide "Enviar a DG"
+  // o "Rechazar como Corrección". Solo aplica a DG (no a DCM).
+  const usuariosDga = await prisma.usuario.findMany({
+    where: {
+      deleted_at: null,
+      OR: [
+        { puesto: 'Director General Adjunto' },
+        { puesto: 'Directora General Adjunta' },
+        { user_role: 'Director General Adjunto' },
+      ],
+    },
+    select: { id: true, nombre: true, correo_electronico: true }
+  });
 
   console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
     usuariosDg,
     usuariosDcm,
-    gerenteComercial
+    usuariosDga
   });
 
   const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -827,17 +759,17 @@ export async function crearTareasAutorizacion(
       });
     }
 
-    // 3. Tarea Filtro DG — va al Gerente Comercial del asesor (paso previo a DG).
-    // Feedback 2026-07-17: el flujo DG ahora tiene 2 pasos. Primero el Gerente
-    // Comercial revisa y decide "Enviar a DG" (crea Autorización DG real) o
-    // "Rechazar como Corrección" (crea tarea Corrección al asesor).
-    // Fallback: si el asesor no tiene Gerente Comercial asignado (matriz de
-    // equipos incompleta), va directo al DG (mantiene compatibilidad).
+    // 3. Tarea Filtro DG — va al Director General Adjunto (paso previo a DG).
+    // Feedback 2026-07-15: el flujo DG ahora tiene 2 pasos. Primero el DGA
+    // revisa y decide "Enviar a DG" (crea Autorización DG real) o
+    // "Rechazar como Corrección" (crea tarea Corrección al creador).
+    // Fallback: si no hay usuario DGA configurado, va directo al DG (mantiene
+    // compatibilidad con instalaciones que aún no tienen el rol asignado).
     let tareaDgId: number | null = null;
     let tareaDgTipo: 'Filtro Autorización DG' | 'Autorización DG' = 'Autorización DG';
     if (pendientesDg.length > 0 && !existeTareaDg) {
-      const usarFiltro = gerenteComercial !== null;
-      const asignados = usarFiltro ? [gerenteComercial!] : usuariosDg;
+      const usarFiltro = usuariosDga.length > 0;
+      const asignados = usarFiltro ? usuariosDga : usuariosDg;
       if (asignados.length > 0) {
         tareaDgTipo = usarFiltro ? 'Filtro Autorización DG' : 'Autorización DG';
         const desc = usarFiltro
@@ -1087,30 +1019,42 @@ export async function aprobarCaras(
         solicitudId: propuesta.solicitud_id
       });
 
-      // Además del asesor/creador, notificar al Gerente Comercial que filtró
-      // (feedback 2026-07-17). Solo aplica a DG.
+      // Además del asesor/creador, notificar también al Director General Adjunto
+      // cuando la aprobación es DG — feedback 2026-07-15: el DGA que filtró
+      // debe enterarse del resultado final.
       if (tipoAutorizacion === 'dg') {
-        const gerente = await getGerenteComercialParaSolicitud(propuesta.solicitud_id);
-        if (gerente && gerente.id !== destinatarioId) {
-          const notifGerente = await prisma.tareas.create({
+        const usuariosDga = await prisma.usuario.findMany({
+          where: {
+            deleted_at: null,
+            OR: [
+              { puesto: 'Director General Adjunto' },
+              { puesto: 'Directora General Adjunta' },
+              { user_role: 'Director General Adjunto' },
+            ],
+          },
+          select: { id: true, nombre: true }
+        });
+        for (const dga of usuariosDga) {
+          if (dga.id === destinatarioId) continue; // No duplicar si coincidiera
+          const notifDga = await prisma.tareas.create({
             data: {
               tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
               titulo: `${etiquetaOrigen} #${idOrigen} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
               descripcion: `${result.count} circuito(s) que enviaste a Dirección General fueron aprobados por ${aprobadorNombre}.`,
               estatus: 'Pendiente',
-              id_responsable: gerente.id,
-              responsable: gerente.nombre,
+              id_responsable: dga.id,
+              responsable: dga.nombre,
               id_solicitud: propuesta.solicitud_id.toString(),
               id_propuesta: propuestaId,
               campania_id: tareaOriginal?.campania_id || null,
               contenido: origen,
-              id_asignado: gerente.id.toString(),
-              asignado: gerente.nombre,
+              id_asignado: dga.id.toString(),
+              asignado: dga.nombre,
               fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
               fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
             }
           });
-          emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifGerente.id, tipo: `Aprobación DG` });
+          emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifDga.id, tipo: `Aprobación DG` });
         }
       }
     }
@@ -1221,30 +1165,41 @@ export async function rechazarSolicitud(
       solicitudId
     });
 
-    // Además del asesor/creador, notificar al Gerente Comercial que filtró
-    // cuando el rechazo es DG (feedback 2026-07-17). El rechazo DCM sigue igual.
+    // Además del asesor/creador, notificar al Director General Adjunto cuando
+    // el rechazo es DG (feedback 2026-07-15). El rechazo DCM sigue igual.
     if (tipoAutorizacion === 'dg') {
-      const gerente = await getGerenteComercialParaSolicitud(solicitudId);
-      if (gerente && gerente.id !== destinatarioId) {
-        const notifGerente = await prisma.tareas.create({
+      const usuariosDga = await prisma.usuario.findMany({
+        where: {
+          deleted_at: null,
+          OR: [
+            { puesto: 'Director General Adjunto' },
+            { puesto: 'Directora General Adjunta' },
+            { user_role: 'Director General Adjunto' },
+          ],
+        },
+        select: { id: true, nombre: true }
+      });
+      for (const dga of usuariosDga) {
+        if (dga.id === destinatarioId) continue;
+        const notifDga = await prisma.tareas.create({
           data: {
             tipo: `Rechazo ${tipoAutorizacion.toUpperCase()}`,
             titulo: `${etiquetaOrigen} #${idOrigen} - Rechazo DG`,
             descripcion: `La ${etiquetaOrigen.toLowerCase()} que enviaste a Dirección General fue rechazada por ${rechazadorNombre}. Motivo: ${comentario}`,
             estatus: 'Pendiente',
-            id_responsable: gerente.id,
-            responsable: gerente.nombre,
+            id_responsable: dga.id,
+            responsable: dga.nombre,
             id_solicitud: solicitudId.toString(),
             id_propuesta: idquote,
             campania_id: tareaOriginal?.campania_id || null,
             contenido: origen,
-            id_asignado: gerente.id.toString(),
-            asignado: gerente.nombre,
+            id_asignado: dga.id.toString(),
+            asignado: dga.nombre,
             fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
             fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
           }
         });
-        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifGerente.id, tipo: 'Rechazo DG' });
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifDga.id, tipo: 'Rechazo DG' });
       }
     }
   }
@@ -1314,7 +1269,7 @@ export async function aprobarFiltroDg(
       data: {
         tipo: `autorizacion_solicitud_${filtro.contenido || 'solicitud'}`,
         ref_id: filtro.campania_id || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0) || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0),
-        accion: `${aprobadorNombre} (Gerente Comercial) aprobó filtro y envió a Dirección General`,
+        accion: `${aprobadorNombre} (Director General Adjunto) aprobó filtro y envió a Dirección General`,
         detalles: JSON.stringify({ tareaFiltroId, tareaDgId: tareaDg.id, aprobadorNombre }),
       },
     });
@@ -1388,9 +1343,9 @@ export async function rechazarFiltroDgComoCorreccion(
     });
     const tareaCorreccion = await tx.tareas.create({
       data: {
-        tipo: 'Corrección Autorización',
-        titulo: `Corrección Autorización DG - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `El Gerente Comercial (${rechazadorNombre}) devolvió esta ${etiquetaOrigen.toLowerCase()} para corrección antes de enviarla a Dirección General.\n\nMotivo: ${motivo}`,
+        tipo: 'Corrección',
+        titulo: `Corrección DG - ${etiquetaOrigen} #${idOrigen}`,
+        descripcion: `El Director General Adjunto (${rechazadorNombre}) devolvió esta ${etiquetaOrigen.toLowerCase()} para corrección antes de enviarla a Dirección General.\n\nMotivo: ${motivo}`,
         estatus: 'Pendiente',
         id_responsable: creadorId,
         responsable: creadorNombre,
@@ -1407,7 +1362,7 @@ export async function rechazarFiltroDgComoCorreccion(
       data: {
         tipo: `autorizacion_solicitud_${origen}`,
         ref_id: idOrigen,
-        accion: `${rechazadorNombre} (Gerente Comercial) devolvió para corrección`,
+        accion: `${rechazadorNombre} (Director General Adjunto) devolvió para corrección`,
         detalles: JSON.stringify({ tareaFiltroId, tareaCorreccionId: tareaCorreccion.id, motivo, creadorId, creadorNombre }),
       },
     });
@@ -1416,11 +1371,11 @@ export async function rechazarFiltroDgComoCorreccion(
 
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
     tareaId: result.tareaCorreccionId,
-    tipo: 'Corrección Autorización',
+    tipo: 'Corrección',
   });
   emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
     tareaId: result.tareaCorreccionId,
-    tipo: 'Corrección Autorización',
+    tipo: 'Corrección',
   });
 
   return result;

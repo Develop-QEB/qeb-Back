@@ -3980,17 +3980,9 @@ export class SolicitudesController {
   async aprobarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
-      const userName = req.user?.nombre || 'Gerente Comercial';
+      const userName = req.user?.nombre || 'Director General Adjunto';
       const userRol = req.user?.rol;
-      const rolesPermitidos = [
-        'Gerente Comercial Vía Pública',
-        'Gerente Comercial Via Publica',
-        'Gerente Comercial Plazas',
-        'Gerente Comercial (Plazas)',
-        'Gerente Comercial',
-        'Administrador',
-        'DEV',
-      ];
+      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DG' });
         return;
@@ -4012,17 +4004,9 @@ export class SolicitudesController {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { motivo } = req.body as { motivo?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial';
+      const userName = req.user?.nombre || 'Director General Adjunto';
       const userRol = req.user?.rol;
-      const rolesPermitidos = [
-        'Gerente Comercial Vía Pública',
-        'Gerente Comercial Via Publica',
-        'Gerente Comercial Plazas',
-        'Gerente Comercial (Plazas)',
-        'Gerente Comercial',
-        'Administrador',
-        'DEV',
-      ];
+      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DG' });
         return;
