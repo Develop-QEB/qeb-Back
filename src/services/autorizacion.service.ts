@@ -570,6 +570,23 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
 
   console.log('[verificarCarasPendientes] Caras encontradas:', caras);
 
+  // Caras en estado 'correccion' — significa que el asesor esta reenviando
+  // tras corrección del Gerente Comercial. Se transicionan a 'pendiente' aqui
+  // para que crearTareasAutorizacion las tome y cree la nueva Filtro DG.
+  // Feedback Jos 2026-07-20 — el circuito se quedaba atorado en 'correccion'.
+  const enCorreccion = caras.filter(c => c.autorizacion_dg === 'correccion').map(c => c.id);
+  if (enCorreccion.length > 0) {
+    console.log('[verificarCarasPendientes] Transitionando', enCorreccion.length, 'caras correccion → pendiente');
+    await prisma.solicitudCaras.updateMany({
+      where: { id: { in: enCorreccion } },
+      data: { autorizacion_dg: 'pendiente' },
+    });
+    // Ajustar snapshot local
+    caras.forEach(c => {
+      if (enCorreccion.includes(c.id)) c.autorizacion_dg = 'pendiente';
+    });
+  }
+
   // Caras que tienen DG pendiente
   const pendientesDg = caras
     .filter(c => c.autorizacion_dg === 'pendiente')
