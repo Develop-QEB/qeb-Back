@@ -9,6 +9,7 @@ import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
   crearTareasAutorizacion,
+  reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
@@ -10694,6 +10695,11 @@ export class CampanasController {
           );
         }
       }
+      // Reconciliar: si ya NO quedan caras pendientes, cerrar tareas de
+      // autorización huérfanas (fantasmas) — ver reconciliarCierreTareasAutorizacion.
+      if (userId) {
+        await reconciliarCierreTareasAutorizacion(idquote, campanaId, autorizacion.pendientesDg, autorizacion.pendientesDcm);
+      }
 
       // Build response message
       let mensaje = 'Circuito actualizado exitosamente';
@@ -11173,6 +11179,10 @@ export class CampanasController {
             campanaId
           );
         }
+      }
+      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+      if (userId) {
+        await reconciliarCierreTareasAutorizacion(idquote, campanaId, autorizacion.pendientesDg, autorizacion.pendientesDcm);
       }
 
       let mensaje = `${updatedCaras.length} circuito(s) actualizados exitosamente`;

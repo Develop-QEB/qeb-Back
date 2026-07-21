@@ -635,6 +635,50 @@ export async function verificarCarasRechazadas(idquote: string): Promise<{
 }
 
 /**
+ * Reconciliación / cierre de tareas de autorización huérfanas ("fantasmas").
+ *
+ * Simétrico al guard de creación: si una dimensión (DG/DCM) ya NO tiene caras
+ * pendientes, cerramos (marca 'Atendido') sus tareas de autorización abiertas.
+ * El bug que resuelve: al editar/reprocesar una campaña/propuesta se creaba la
+ * tarea de autorización, y luego el flujo "conservar aprobación al editar"
+ * dejaba las caras en 'aprobado' SIN cerrar la tarea → quedaba una tarea
+ * Pendiente sobre caras ya aprobadas que Dirección no podía aprobar (caso 80931).
+ *
+ * IMPORTANTE: `pendientesDg`/`pendientesDcm` deben venir de
+ * `verificarCarasPendientes` (estado COMPLETO del origen), no de una sola cara.
+ * Por eso se llama solo desde los flujos de EDICIÓN, no de alta de cara nueva.
+ */
+export async function reconciliarCierreTareasAutorizacion(
+  idquote: string | number,
+  campaniaId: number | undefined,
+  pendientesDg: number[],
+  pendientesDcm: number[]
+): Promise<void> {
+  const sinDg = pendientesDg.length === 0;
+  const sinDcm = pendientesDcm.length === 0;
+  if (!sinDg && !sinDcm) return; // ambas tienen pendientes: nada que cerrar
+
+  const tiposCerrar: string[] = [];
+  if (sinDg) tiposCerrar.push('Autorización DG', 'Filtro Autorización DG');
+  if (sinDcm) tiposCerrar.push('Autorización DCM');
+
+  const cerradas = await prisma.tareas.updateMany({
+    where: {
+      OR: [
+        { id_propuesta: idquote.toString() },
+        ...(campaniaId ? [{ campania_id: campaniaId }] : []),
+      ],
+      tipo: { in: tiposCerrar },
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+    },
+    data: { estatus: 'Atendido' },
+  });
+  if (cerradas.count > 0) {
+    console.log(`[reconciliarCierreTareasAutorizacion] idquote=${idquote} cam=${campaniaId ?? '-'} → cerradas ${cerradas.count} tarea(s) sin pendientes (${tiposCerrar.join(', ')})`);
+  }
+}
+
+/**
  * Crea tareas de autorización para DG y/o DCM
  */
 export async function crearTareasAutorizacion(
