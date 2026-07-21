@@ -7,6 +7,7 @@ import {
   verificarCarasPendientes,
   verificarCarasRechazadas,
   crearTareasAutorizacion,
+  reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
@@ -4413,6 +4414,10 @@ export class PropuestasController {
           );
         }
       }
+      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+      if (userId) {
+        await reconciliarCierreTareasAutorizacion(idquote, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
+      }
 
       // Build response message
       let mensaje = 'Circuito actualizado exitosamente';
@@ -4642,6 +4647,10 @@ export class PropuestasController {
           );
         }
       }
+      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+      if (userId) {
+        await reconciliarCierreTareasAutorizacion(id, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
+      }
 
       // Build response message
       let mensaje = 'Circuito creado exitosamente';
@@ -4855,6 +4864,10 @@ export class PropuestasController {
             'propuesta'
           );
         }
+      }
+      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+      if (userId) {
+        await reconciliarCierreTareasAutorizacion(String(id), undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
       }
 
       // Build response
