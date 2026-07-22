@@ -939,6 +939,90 @@ export class DashboardController {
     }
   }
 
+  // Widget: estado de POST a SAP de las campañas aprobadas (cached 10min).
+  // Divide en "pendientes por postear" vs "posteadas", cada una con su conteo
+  // y su monto ($). Definiciones (mismas que usa el resto del sistema):
+  //   - Universo: campañas con status != 'inactiva' (las 'inactiva' son
+  //     propuestas no aprobadas — no aplican a POST).
+  //   - Posteada: posted_to_sap = 1 (marca la campaña entera). Una campaña con
+  //     POST parcial (algunos posted_aps pero posted_to_sap=0) sigue contando
+  //     como PENDIENTE porque aún tiene caras sin postear.
+  //   - Monto: SUM(solicitudCaras.costo) de la propuesta ligada (misma fuente
+  //     que la inversión del listado de campañas).
+  // Respeta el filtro de periodo del dashboard (catorcena_id o fecha_inicio/
+  // fecha_fin) por solape de fechas de la campaña. Los filtros de inventario
+  // (estado/plaza/formato/nse/tipo) no aplican aquí — el POST es a nivel campaña.
+  async getPosteoStats(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { catorcena_id, fecha_inicio, fecha_fin } = req.query;
+      const cacheKey = `dashboard:posteo:${JSON.stringify({ catorcena_id, fecha_inicio, fecha_fin })}`;
+
+      const data = await cache.getOrSet(cacheKey, async () => {
+        // Resolver rango de fechas (igual que el resto de endpoints).
+        let fi: Date | null = null;
+        let ff: Date | null = null;
+        if (catorcena_id) {
+          const cat = await prisma.catorcenas.findUnique({ where: { id: parseInt(catorcena_id as string) } });
+          if (cat) { fi = cat.fecha_inicio; ff = cat.fecha_fin; }
+        } else if (fecha_inicio && fecha_fin) {
+          fi = new Date(fecha_inicio as string);
+          ff = new Date(fecha_fin as string);
+        }
+
+        // Solape de periodo: la campaña se toca con el rango si empieza antes de
+        // que el rango termine y termina después de que el rango empiece.
+        const periodoClause = fi && ff ? 'AND c.fecha_inicio <= ? AND c.fecha_fin >= ?' : '';
+        const periodoParams = fi && ff ? [ff, fi] : [];
+
+        type Row = { posted_to_sap: number | null; monto: number };
+        const rows = await prisma.$queryRawUnsafe<Row[]>(
+          `
+          SELECT c.posted_to_sap AS posted_to_sap,
+                 COALESCE(inv.monto, 0) AS monto
+          FROM campania c
+          INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+          LEFT JOIN (
+            SELECT sc.idquote AS idquote, SUM(sc.costo) AS monto
+            FROM solicitudCaras sc
+            GROUP BY sc.idquote
+          ) inv ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          WHERE c.status != 'inactiva'
+            ${periodoClause}
+          `,
+          ...periodoParams,
+        );
+
+        let pendientesCount = 0, pendientesMonto = 0, posteadasCount = 0, posteadasMonto = 0;
+        for (const r of rows) {
+          const monto = Number(r.monto) || 0;
+          if (r.posted_to_sap === 1) {
+            posteadasCount++;
+            posteadasMonto += monto;
+          } else {
+            pendientesCount++;
+            pendientesMonto += monto;
+          }
+        }
+
+        const round2 = (n: number) => Math.round(n * 100) / 100;
+        return {
+          pendientes: { count: pendientesCount, monto: round2(pendientesMonto) },
+          posteadas: { count: posteadasCount, monto: round2(posteadasMonto) },
+          total: {
+            count: pendientesCount + posteadasCount,
+            monto: round2(pendientesMonto + posteadasMonto),
+          },
+        };
+      }, CACHE_TTL.DASHBOARD_STATS);
+
+      res.json({ success: true, data });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error al obtener estado de posteo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Obtener inventario detallado con info de campañas/propuestas.
   // Wrapper HTTP: parsea params, cachea y delega en computeInventoryDetailSql.
   // La implementacion legacy se conserva en computeInventoryDetailLegacy para
