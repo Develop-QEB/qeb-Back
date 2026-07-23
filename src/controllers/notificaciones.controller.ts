@@ -33,6 +33,21 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false },
 });
 
+// Roles autorizados a crear "Actividad Comercial" (tarea manual comercial).
+// Admin/DEV siempre pueden.
+const ROLES_ACTIVIDAD_COMERCIAL = new Set([
+  'Asesor Comercial',
+  'Asesor Comercial Aeropuerto',
+  'Gerente Comercial',
+  'Director Comercial',
+  'Administrador',
+  'DEV',
+]);
+
+function puedeCrearActividadComercial(rol?: string | null): boolean {
+  return !!rol && ROLES_ACTIVIDAD_COMERCIAL.has(rol);
+}
+
 export class NotificacionesController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -1926,6 +1941,286 @@ export class NotificacionesController {
       res.json({ success: true, data: { finalizadas } });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al depurar autorizaciones';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // ============================================================
+  // ACTIVIDAD COMERCIAL - Tarea manual del asesor comercial
+  // Reemplaza a la "acción manual" que vivía en Historial de Acciones.
+  // Guardada en tabla `tareas` con tipo='Actividad Comercial' y
+  // categoria='Actividad Comercial' para diferenciarla en la UI.
+  // ============================================================
+
+  // Lista campañas donde el usuario aparece como asignado/creador (via propuesta).
+  // Solo status distinto de "inactiva"/"Rechazada" para reducir ruido en el dropdown.
+  async getCampanasParaActividad(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.userId;
+      const rol = req.user?.rol;
+      if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+      if (!puedeCrearActividadComercial(rol)) {
+        res.status(403).json({ success: false, error: 'Rol no autorizado' });
+        return;
+      }
+      const search = (req.query.search as string || '').trim();
+      const userIdStr = String(userId);
+      const like = search ? `%${search}%` : null;
+
+      // Match "propio" del asesor: propuesta.id_asignado contiene su id
+      // (comma-separated) o solicitud.usuario_id == su id.
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        id: number; nombre: string; status: string;
+        cliente: string | null; marca: string | null;
+      }>>(`
+        SELECT DISTINCT
+          c.id, c.nombre, c.status,
+          COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+          s.marca_nombre AS marca
+        FROM campania c
+        LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
+        LEFT JOIN propuesta p ON p.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = p.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = c.cliente_id
+        WHERE
+          c.status <> 'Rechazada'
+          AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
+          )
+          ${like ? 'AND (c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
+        ORDER BY c.fecha_inicio DESC
+        LIMIT 100
+      `, ...(like
+        ? [userIdStr, userId, like, like, like]
+        : [userIdStr, userId]));
+
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener campañas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Lista propuestas del asesor (id_asignado contiene su id, no descartadas).
+  async getPropuestasParaActividad(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.userId;
+      const rol = req.user?.rol;
+      if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+      if (!puedeCrearActividadComercial(rol)) {
+        res.status(403).json({ success: false, error: 'Rol no autorizado' });
+        return;
+      }
+      const search = (req.query.search as string || '').trim();
+      const userIdStr = String(userId);
+      const like = search ? `%${search}%` : null;
+
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        id: number; status: string;
+        cliente: string | null; marca: string | null;
+      }>>(`
+        SELECT
+          p.id, p.status,
+          COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+          s.marca_nombre AS marca
+        FROM propuesta p
+        LEFT JOIN solicitud s ON s.id = p.solicitud_id
+        LEFT JOIN cliente cl ON cl.id = p.cliente_id
+        WHERE
+          p.deleted_at IS NULL
+          AND p.status NOT IN ('Descartada','Rechazada')
+          AND (
+            FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
+            OR s.usuario_id = ?
+          )
+          ${like ? 'AND (CAST(p.id AS CHAR) LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
+        ORDER BY p.updated_at DESC, p.id DESC
+        LIMIT 100
+      `, ...(like
+        ? [userIdStr, userId, like, like, like]
+        : [userIdStr, userId]));
+
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener propuestas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Crea una tarea de tipo "Actividad Comercial" para el asesor.
+  // El servidor deriva cliente/marca desde el ref_id para evitar spoofing del front.
+  async crearActividadComercial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const rol = req.user?.rol;
+      if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+      if (!puedeCrearActividadComercial(rol)) {
+        res.status(403).json({ success: false, error: 'Rol no autorizado' });
+        return;
+      }
+
+      const {
+        subtipo,
+        ref_id,
+        descripcion,
+        fecha_fin,
+        activar_recordatorio,
+        recordar_dias_antes,
+      } = req.body as {
+        subtipo?: string;
+        ref_id?: number | string;
+        descripcion?: string;
+        fecha_fin?: string;
+        activar_recordatorio?: boolean;
+        recordar_dias_antes?: number;
+      };
+
+      if (!subtipo || !['Campaña', 'Propuesta'].includes(subtipo)) {
+        res.status(400).json({ success: false, error: 'Subtipo debe ser "Campaña" o "Propuesta"' });
+        return;
+      }
+      const refIdNum = Number(ref_id);
+      if (!refIdNum || Number.isNaN(refIdNum)) {
+        res.status(400).json({ success: false, error: 'ref_id inválido' });
+        return;
+      }
+      const descripcionTrim = (descripcion || '').trim();
+      if (!descripcionTrim) {
+        res.status(400).json({ success: false, error: 'Descripción requerida' });
+        return;
+      }
+
+      // Derivar cliente/marca desde el ref
+      let cliente: string | null = null;
+      let marca: string | null = null;
+      let campaniaId: number | null = null;
+      let idPropuestaStr: string | null = null;
+      let idSolicitud = '';
+
+      if (subtipo === 'Campaña') {
+        const rows = await prisma.$queryRawUnsafe<Array<{
+          cliente: string | null; marca: string | null; solicitud_id: number | null;
+        }>>(`
+          SELECT
+            COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+            s.marca_nombre AS marca,
+            s.id AS solicitud_id
+          FROM campania c
+          LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
+          LEFT JOIN propuesta p ON p.id = ct.id_propuesta
+          LEFT JOIN solicitud s ON s.id = p.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = c.cliente_id
+          WHERE c.id = ?
+          LIMIT 1
+        `, refIdNum);
+        if (!rows.length) {
+          res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+          return;
+        }
+        cliente = rows[0].cliente;
+        marca = rows[0].marca;
+        campaniaId = refIdNum;
+        idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+      } else {
+        const rows = await prisma.$queryRawUnsafe<Array<{
+          cliente: string | null; marca: string | null; solicitud_id: number | null;
+        }>>(`
+          SELECT
+            COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+            s.marca_nombre AS marca,
+            s.id AS solicitud_id
+          FROM propuesta p
+          LEFT JOIN solicitud s ON s.id = p.solicitud_id
+          LEFT JOIN cliente cl ON cl.id = p.cliente_id
+          WHERE p.id = ?
+          LIMIT 1
+        `, refIdNum);
+        if (!rows.length) {
+          res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+          return;
+        }
+        cliente = rows[0].cliente;
+        marca = rows[0].marca;
+        idPropuestaStr = String(refIdNum);
+        idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+      }
+
+      const nowMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      // Default fecha_fin: +7 dias (misma convencion que create() existente).
+      const defaultFin = new Date(nowMx); defaultFin.setDate(defaultFin.getDate() + 7);
+
+      const contenido = JSON.stringify({
+        cliente,
+        marca,
+        subtipo,
+        ref_id: refIdNum,
+        activar_recordatorio: !!activar_recordatorio,
+        recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
+          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
+          : null,
+      });
+
+      const titulo = `Actividad Comercial · ${subtipo} #${refIdNum}`;
+
+      const tarea = await prisma.tareas.create({
+        data: {
+          titulo,
+          descripcion: descripcionTrim,
+          tipo: 'Actividad Comercial',
+          categoria: 'Actividad Comercial',
+          estatus: 'Activo',
+          fecha_inicio: nowMx,
+          fecha_fin: fecha_fin ? new Date(fecha_fin) : defaultFin,
+          id_responsable: userId,
+          responsable: userName,
+          asignado: userName,
+          id_asignado: String(userId),
+          id_solicitud: idSolicitud,
+          id_propuesta: idPropuestaStr,
+          campania_id: campaniaId,
+          contenido,
+        },
+      });
+
+      await logHistorial({
+        tipo: 'Tarea',
+        refId: tarea.id,
+        accion: `Creó actividad comercial (${subtipo} #${refIdNum})`,
+        usuario: userName,
+        usuarioId: userId,
+        usuarioRol: rol,
+        origen: 'notificaciones_actividad_comercial',
+        extras: { cliente, marca, subtipo, ref_id: refIdNum },
+      });
+
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tareaId: tarea.id,
+        tipo: tarea.tipo,
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: tarea.id,
+          titulo: tarea.titulo,
+          descripcion: tarea.descripcion,
+          tipo: tarea.tipo,
+          categoria: tarea.categoria,
+          estatus: tarea.estatus,
+          fecha_creacion: tarea.fecha_inicio,
+          fecha_fin: tarea.fecha_fin,
+          responsable: tarea.responsable,
+          asignado: tarea.asignado,
+          cliente,
+          marca,
+          subtipo,
+          ref_id: refIdNum,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al crear actividad comercial';
       res.status(500).json({ success: false, error: message });
     }
   }

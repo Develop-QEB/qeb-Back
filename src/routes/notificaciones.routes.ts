@@ -19,6 +19,11 @@ router.patch('/bulk-estatus', notificacionesController.bulkUpdateEstatus.bind(no
 // Depuración de tareas de autorización resueltas
 router.post('/autorizacion/depurar', notificacionesController.depurarAutorizaciones.bind(notificacionesController));
 
+// Actividad Comercial (tarea manual del asesor). ANTES de rutas con :id.
+router.get('/actividad-comercial/campanas', notificacionesController.getCampanasParaActividad.bind(notificacionesController));
+router.get('/actividad-comercial/propuestas', notificacionesController.getPropuestasParaActividad.bind(notificacionesController));
+router.post('/actividad-comercial', notificacionesController.crearActividadComercial.bind(notificacionesController));
+
 // Autorización (ANTES de rutas con :id para evitar conflictos)
 router.get('/autorizacion/:idquote/resumen', notificacionesController.getResumenAutorizacion.bind(notificacionesController));
 router.get('/autorizacion/:idquote/caras', notificacionesController.getCarasAutorizacion.bind(notificacionesController));
