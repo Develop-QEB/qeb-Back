@@ -969,26 +969,46 @@ export class DashboardController {
           ff = new Date(fecha_fin as string);
         }
 
+        const periodoActivo = !!(fi && ff);
+
         // Solape de periodo: la campaña se toca con el rango si empieza antes de
         // que el rango termine y termina después de que el rango empiece.
-        const periodoClause = fi && ff ? 'AND c.fecha_inicio <= ? AND c.fecha_fin >= ?' : '';
-        const periodoParams = fi && ff ? [ff, fi] : [];
+        const periodoClause = periodoActivo ? 'AND c.fecha_inicio <= ? AND c.fecha_fin >= ?' : '';
+        const periodoParams = periodoActivo ? [ff, fi] : [];
+
+        // Monto: cuando hay periodo activo se prorratea cada circuito por los
+        // días que solapan con el rango (misma fórmula que el listado de
+        // campañas → así el $ del dashboard cuadra con lo que se ve por
+        // catorcena). Sin periodo, suma el total completo de la campaña.
+        const montoSubquery = periodoActivo
+          ? `SELECT sc.idquote AS idquote, SUM(
+               sc.costo
+               * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+               / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+             ) AS monto
+             FROM solicitudCaras sc
+             WHERE sc.inicio_periodo <= ? AND sc.fin_periodo >= ?
+             GROUP BY sc.idquote`
+          : `SELECT sc.idquote AS idquote, SUM(sc.costo) AS monto
+             FROM solicitudCaras sc
+             GROUP BY sc.idquote`;
+        const montoParams = periodoActivo ? [ff, fi, ff, fi] : [];
 
         type Row = { posted_to_sap: number | null; monto: number };
+        // Orden de params = placeholders en el SQL final: primero los de la
+        // subquery de monto (va en el LEFT JOIN), luego los del periodoClause.
         const rows = await prisma.$queryRawUnsafe<Row[]>(
           `
           SELECT c.posted_to_sap AS posted_to_sap,
                  COALESCE(inv.monto, 0) AS monto
           FROM campania c
           INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
-          LEFT JOIN (
-            SELECT sc.idquote AS idquote, SUM(sc.costo) AS monto
-            FROM solicitudCaras sc
-            GROUP BY sc.idquote
-          ) inv ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          LEFT JOIN (${montoSubquery}) inv
+            ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE c.status != 'inactiva'
             ${periodoClause}
           `,
+          ...montoParams,
           ...periodoParams,
         );
 
