@@ -7,6 +7,7 @@ import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResuelt
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
 import { finalizarCampanasPorIniciarVencidas } from './services/campania-status.service';
+import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -132,6 +133,17 @@ async function main() {
       // Tambien corre al arrancar para alinear las que ya estaban vencidas (idempotente).
       finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
         console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
+      });
+
+      // Liberacion de reservas por Criterio 1 (30 dias). Cada dia a las 2am CDMX
+      // (hora valle) libera las reservas de inventario de las propuestas creadas
+      // hace >=30 dias que NO se mandaron a ventas/campañas y cuyo inventario aun
+      // no cae en las 2 catorcenas inmediatas siguientes. Las pasa a 'Liberada'
+      // (no las cancela ni borra). Idempotente + con historial.
+      programarDiario(2, 'LiberacionReservas 02:00', async () => { await liberarReservasPropuestasVencidas(); });
+      // Tambien corre al arrancar para procesar las ya vencidas (idempotente).
+      liberarReservasPropuestasVencidas().catch((err: unknown) => {
+        console.error('[LiberacionReservas] Error en ejecucion inicial:', err);
       });
     }
   } catch (error) {

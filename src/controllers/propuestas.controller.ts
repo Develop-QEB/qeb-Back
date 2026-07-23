@@ -968,12 +968,18 @@ export class PropuestasController {
 
       const statusAnterior = propuestaAnterior.status;
 
+      // Contador de liberación automática (Criterio 30 días): SOLO al salir de
+      // 'Liberada' hacia otro status (retoman la propuesta) se reinicia el conteo
+      // desde ahora. Cualquier otro cambio de status NO lo toca.
+      const reiniciaContadorLiberacion = statusAnterior === 'Liberada' && status !== 'Liberada';
+
       const propuesta = await prisma.propuesta.update({
         where: { id: propuestaId },
         data: {
           status,
           comentario_cambio_status: comentario_cambio_status || '',
           updated_at: new Date(),
+          ...(reiniciaContadorLiberacion ? { contador_liberacion_desde: new Date() } : {}),
         },
       });
 

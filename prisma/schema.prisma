@@ -296,6 +296,11 @@ model propuesta {
   articulo                 String    @db.VarChar(255)
   updated_at               DateTime? @default(now()) @db.Timestamp(0)
   archivo                  String?   @db.VarChar(255)
+  // Ancla del contador de liberación automática de reservas (Criterio 30 días).
+  // NULL = usar `fecha` (creación) → primera liberación. Se setea a NOW() SOLO
+  // cuando el status pasa de 'Liberada' a otro (retoman la propuesta): reinicia
+  // los 30 días desde esa transición. Cualquier otro cambio de status no lo toca.
+  contador_liberacion_desde DateTime? @db.DateTime(0)
 
   @@index([deleted_at, status], map: "idx_propuesta_deleted_status")
   @@index([solicitud_id], map: "idx_propuesta_solicitud")
