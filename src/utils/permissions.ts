@@ -34,6 +34,9 @@ const FULL_VISIBILITY_ROLES = [
   // (Ajuste por CSV: "debe estar en todos los equipos" — implementado a
   // nivel de codigo en vez de tener que añadirlo a cada equipo en DB.)
   'Coordinador de Diseño',
+  // Rol mixto BI + Tráfico (2026-07-23): unión de Coordinador de trafico +
+  // Especialista de BI. Comparte visibilidad total.
+  'Bi Trafico',
   'DEV',
 ];
 
