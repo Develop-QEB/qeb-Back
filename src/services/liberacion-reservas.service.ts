@@ -227,11 +227,15 @@ async function liberarUnaPropuesta(
       data: { status: STATUS_LIBERADA, updated_at: new Date() },
     });
 
+    // accion 'Cambio de estado' (no 'Liberación de reservas') para que el filtro
+    // de historial por estatus (getAll: accion='Cambio de estado' + detalles LIKE
+    // '%"despues":"Liberada"%') pueda encontrar estas liberaciones por rango de
+    // fechas. El detalle conserva la info de la liberación (origen/criterio/reservas).
     await tx.historial.create({
       data: {
         tipo: 'Propuesta',
         ref_id: prop.id,
-        accion: 'Liberación de reservas',
+        accion: 'Cambio de estado',
         fecha_hora: new Date(),
         detalles: JSON.stringify({
           usuario: 'Sistema',
