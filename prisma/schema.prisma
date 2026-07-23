@@ -635,6 +635,12 @@ model tickets {
   imagen              String?           @db.LongText
   status              String            @default("Nuevo") @db.VarChar(255)
   prioridad           String            @default("Normal") @db.VarChar(255)
+  // Categoría (opcional) — clasifica el ticket para enrutamiento TI/QEB.
+  // Categorías TI (Desposteo SAP, Posteo SAP, Ajuste de Usuario) → area='TI'.
+  // Cualquier otra o null → area='QEB'.
+  categoria           String?           @db.VarChar(255)
+  // Área derivada de la categoría — controla quién ve/administra el ticket.
+  area                String            @default("QEB") @db.VarChar(50)
   usuario_id          Int
   usuario_nombre      String            @db.VarChar(255)
   usuario_email       String            @db.VarChar(255)
@@ -649,6 +655,7 @@ model tickets {
   chat                ticket_chat[]
   chat_vistas         ticket_chat_vistas[]
 
+  @@index([area])
   @@map("tickets")
 }
 

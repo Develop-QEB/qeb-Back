@@ -7,6 +7,27 @@ import Anthropic from '@anthropic-ai/sdk';
 import { chatbotController } from './chatbot.controller';
 import { logHistorial } from '../utils/historial';
 
+// Categorias hardcoded que enrutan a TI. Cualquier otra (o null) => QEB.
+const CATEGORIAS_TI = ['Desposteo SAP', 'Posteo SAP', 'Ajuste de Usuario'] as const;
+type AreaTicket = 'TI' | 'QEB';
+
+function deriveAreaFromCategoria(categoria?: string | null): AreaTicket {
+  if (!categoria) return 'QEB';
+  return (CATEGORIAS_TI as readonly string[]).includes(categoria) ? 'TI' : 'QEB';
+}
+
+// Roles TI: solo ven tickets area='TI'. Roles QEB (DEV/Admin): solo area='QEB'.
+// Un rol puede tener acceso global via ROLES_AREA_GLOBAL (ve ambas areas).
+const ROLES_AREA_TI = new Set(['Gerente de TI', 'Especialista de TI', 'Analista de TI']);
+const ROLES_AREA_GLOBAL = new Set(['Administrador', 'DEV']);
+
+function getAreaFilterForRol(rol?: string | null): AreaTicket | null {
+  if (!rol) return null;
+  if (ROLES_AREA_GLOBAL.has(rol)) return null;
+  if (ROLES_AREA_TI.has(rol)) return 'TI';
+  return 'QEB';
+}
+
 // Configurar transporter de nodemailer
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -28,6 +49,12 @@ export const getAllTickets = async (req: AuthRequest, res: Response) => {
     const skip = (Number(page) - 1) * Number(limit);
 
     const where: any = {};
+
+    // Filtrar por area segun rol del usuario (TI vs QEB)
+    const areaFilter = getAreaFilterForRol(req.user?.rol);
+    if (areaFilter) {
+      where.area = areaFilter;
+    }
 
     if (status && status !== 'Todos') {
       where.status = status;
@@ -130,7 +157,7 @@ export const getTicketById = async (req: AuthRequest, res: Response) => {
 // Crear un nuevo ticket
 export const createTicket = async (req: AuthRequest, res: Response) => {
   try {
-    const { titulo, descripcion, imagen, prioridad } = req.body;
+    const { titulo, descripcion, imagen, prioridad, categoria } = req.body;
     const userId = req.user?.userId;
     const userName = req.user?.nombre || 'Usuario';
     const userEmail = req.user?.email || '';
@@ -143,12 +170,17 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ message: 'Titulo y descripcion son requeridos' });
     }
 
+    const categoriaNorm = categoria && typeof categoria === 'string' ? categoria.trim() || null : null;
+    const area = deriveAreaFromCategoria(categoriaNorm);
+
     const ticket = await prisma.tickets.create({
       data: {
         titulo,
         descripcion,
         imagen: imagen || null,
         prioridad: prioridad || 'Normal',
+        categoria: categoriaNorm,
+        area,
         usuario_id: userId,
         usuario_nombre: userName,
         usuario_email: userEmail,
@@ -173,8 +205,11 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Enviar email de notificacion a los programadores
-    const devEmail = process.env.DEV_EMAIL || 'Develop@qeb.mx';
+    // Enviar email de notificacion (a TI o al equipo QEB segun area del ticket)
+    // Fallbacks: TI_EMAIL para area='TI', DEV_EMAIL para area='QEB'.
+    const devEmail = area === 'TI'
+      ? (process.env.TI_EMAIL || process.env.DEV_EMAIL || 'Develop@qeb.mx')
+      : (process.env.DEV_EMAIL || 'Develop@qeb.mx');
 
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
       const htmlBody = `
@@ -187,7 +222,7 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
         <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none;">
           <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px;">
             <p style="margin: 0; color: #92400e; font-size: 14px;">
-              <strong>Prioridad: ${prioridad || 'Normal'}</strong>
+              <strong>Prioridad: ${prioridad || 'Normal'}</strong>${categoriaNorm ? ` &nbsp;|&nbsp; <strong>Categoría:</strong> ${categoriaNorm} <span style="opacity:.7">(${area})</span>` : ` &nbsp;|&nbsp; <strong>Área:</strong> ${area}`}
             </p>
           </div>
 
@@ -398,6 +433,11 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
     const { status, prioridad, search } = req.query;
 
     const where: any = {};
+
+    // Filtrar por area segun rol (TI vs QEB); Admin/DEV ven ambas.
+    const areaFilter = getAreaFilterForRol(req.user?.rol);
+    if (areaFilter) where.area = areaFilter;
+
     if (status && status !== 'Todos') where.status = status;
     if (prioridad && prioridad !== 'Todos') where.prioridad = prioridad;
     if (search) {
@@ -462,6 +502,8 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
         imagen: t.imagen,
         status: t.status,
         prioridad: t.prioridad,
+        categoria: t.categoria,
+        area: t.area,
         usuario_id: t.usuario_id,
         usuario_nombre: t.usuario_nombre,
         usuario_email: t.usuario_email,
