@@ -21,7 +21,22 @@ function deriveAreaFromCategoria(categoria?: string | null): AreaTicket {
 const ROLES_AREA_TI = new Set(['Gerente de TI', 'Especialista de TI', 'Analista de TI']);
 const ROLES_AREA_GLOBAL = new Set(['Administrador', 'DEV']);
 
-function getAreaFilterForRol(rol?: string | null): AreaTicket | null {
+// Determina si el ticket debe filtrarse por area segun el usuario.
+// Regla principal: usuarios con area='TI' en su perfil ven solo tickets TI,
+// aunque tengan user_role='Administrador' (feedback Jos 2026-07-23: Marco
+// Antonio es Gerente de TI con rol Administrador y veia todos los tickets).
+// Fallback por rol para robustez.
+async function getAreaFilterForUser(
+  userId: number | undefined,
+  rol: string | null | undefined,
+): Promise<AreaTicket | null> {
+  if (userId) {
+    const u = await prisma.usuario.findUnique({
+      where: { id: userId },
+      select: { area: true },
+    });
+    if (u?.area === 'TI') return 'TI';
+  }
   if (!rol) return null;
   if (ROLES_AREA_GLOBAL.has(rol)) return null;
   if (ROLES_AREA_TI.has(rol)) return 'TI';
@@ -50,8 +65,10 @@ export const getAllTickets = async (req: AuthRequest, res: Response) => {
 
     const where: any = {};
 
-    // Filtrar por area segun rol del usuario (TI vs QEB)
-    const areaFilter = getAreaFilterForRol(req.user?.rol);
+    // Filtrar por area segun perfil del usuario (TI vs QEB). Ve por area
+    // primero: si el usuario es del area TI, aunque tenga rol Administrador
+    // solo ve tickets TI.
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
     if (areaFilter) {
       where.area = areaFilter;
     }
@@ -434,8 +451,9 @@ export const getTicketsHistorial = async (req: AuthRequest, res: Response) => {
 
     const where: any = {};
 
-    // Filtrar por area segun rol (TI vs QEB); Admin/DEV ven ambas.
-    const areaFilter = getAreaFilterForRol(req.user?.rol);
+    // Filtrar por area segun perfil (TI vs QEB). Prioriza area del usuario:
+    // Marco Antonio (Gerente de TI con rol Administrador) solo debe ver TI.
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
     if (areaFilter) where.area = areaFilter;
 
     if (status && status !== 'Todos') where.status = status;
