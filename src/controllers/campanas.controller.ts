@@ -668,6 +668,18 @@ export class CampanasController {
         });
       }
 
+      // has_post por campaña (para el filtro rápido "Con/Sin POST" del versionario,
+      // a nivel campaña — sin cargar inventario). "Tiene POST" = la campaña se marcó
+      // como ENVIADA COMPLETA a SAP (posted_to_sap = 1). NO cuenta posted_aps: ese
+      // se llena casi para toda campaña con APS y no distingue el POST real.
+      if (campanas.length > 0) {
+        const postedIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM campania WHERE posted_to_sap = 1`
+        ).catch(() => [] as { id: number }[]);
+        const postedSet = new Set(postedIds.map(r => Number(r.id)));
+        campanas.forEach((c: any) => { c.has_post = postedSet.has(Number(c.id)) ? 1 : 0; });
+      }
+
       // Convert BigInt to Number for JSON serialization
       const campanasSerializable = serializeBigInt(campanas);
 
@@ -2485,6 +2497,22 @@ export class CampanasController {
         return null;
       }
 
+      // posted_aps/posted_to_sap de la campaña (columna puede no existir en prod).
+      // Un item se marca `posted` si su APS ya se posteó a SAP: la campaña entera
+      // (posted_to_sap=1) o su APS específico está en posted_aps.
+      let postedAll = false;
+      let postedApsSet = new Set<number>();
+      try {
+        const pr = await prisma.$queryRawUnsafe<{ posted_aps: string | null; posted_to_sap: number | null }[]>(
+          `SELECT posted_aps, posted_to_sap FROM campania WHERE id = ?`, campanaId
+        );
+        if (pr[0]?.posted_to_sap === 1) postedAll = true;
+        if (pr[0]?.posted_aps) {
+          const arr = JSON.parse(pr[0].posted_aps);
+          if (Array.isArray(arr)) postedApsSet = new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)));
+        }
+      } catch { /* columna ausente o JSON inválido — sin posted */ }
+
       // Calcular estatus_arte y catorcena en código
       const inventarioConEstatus = combinedArr.map((row: any) => {
         const isIM = String(row.rsv_ids).startsWith('sc_');
@@ -2550,7 +2578,10 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+        const apsNum = Number(row.aps);
+        const posted = apsNum > 0 && (postedAll || postedApsSet.has(apsNum));
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales), posted };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
@@ -2848,15 +2879,32 @@ export class CampanasController {
         ORDER BY fecha_inicio
       `;
 
-      // Execute all 6 queries in parallel (only 6 connections instead of N*4)
-      const [sinAPSRows, conAPSRows, tareasRows, imSinAPSRows, imConAPSRows, catorcenasRows] = await Promise.all([
+      // Execute all queries in parallel. Incluye posted_aps/posted_to_sap por
+      // campaña (columna puede no existir en prod → .catch) para marcar `posted`.
+      const [sinAPSRows, conAPSRows, tareasRows, imSinAPSRows, imConAPSRows, catorcenasRows, postedRows] = await Promise.all([
         prisma.$queryRawUnsafe(sinAPSQuery, ...ids),
         prisma.$queryRawUnsafe(conAPSQuery, ...ids),
         prisma.$queryRawUnsafe(tareasQuery, ...ids),
         prisma.$queryRawUnsafe(imSinAPSQuery, ...ids),
         prisma.$queryRawUnsafe(imConAPSQuery, ...ids),
         prisma.$queryRawUnsafe(catorcenasQuery),
+        prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null; posted_to_sap: number | null }[]>(
+          `SELECT id, posted_aps, posted_to_sap FROM campania WHERE id IN (${placeholders})`, ...ids
+        ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[]),
       ]);
+
+      // campania_id → { all, apsSet } para marcar `posted` por item.
+      const postedByCampana = new Map<number, { all: boolean; apsSet: Set<number> }>();
+      for (const r of (postedRows as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])) {
+        let apsSet = new Set<number>();
+        try {
+          if (r.posted_aps) {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) apsSet = new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)));
+          }
+        } catch { /* JSON inválido — ignorar */ }
+        postedByCampana.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
 
       // ── Pre-compute catorcena ranges for binary search ──
       const catorcenaRanges = (catorcenasRows as any[]).map((cat: any) => ({
@@ -2970,7 +3018,10 @@ export class CampanasController {
         }
 
         const { campana_id, ...rest } = row;
-        return { ...rest, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+        const apsNum = Number(row.aps);
+        const postedInfo = postedByCampana.get(Number(campana_id));
+        const posted = apsNum > 0 && !!postedInfo && (postedInfo.all || postedInfo.apsSet.has(apsNum));
+        return { ...rest, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales), posted };
       }
 
       // Initialize result map
