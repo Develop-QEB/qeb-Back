@@ -40,6 +40,25 @@ const CAMPANIA_SAFE_SELECT = {
   posted_to_sap: true,
 } as const;
 
+// Una entrada de la bitácora de POST a SAP (ver campania_post_log en schema.prisma).
+// El front manda una por cada APS enviado, con el snapshot del destino.
+interface PostLogEntry {
+  aps: number | string;
+  card_code?: string | null;
+  cuic?: number | string | null;
+  razon_social?: string | null;
+  marca?: string | null;
+  cliente_nombre?: string | null;
+  sap_database?: string | null;
+  salesperson_code?: number | string | null;
+  solicitud_caras_ids?: string | number[] | null;
+  success?: boolean;
+  doc_entry?: number | string | null;
+  doc_num?: number | string | null;
+  error_msg?: string | null;
+  payload_json?: string | unknown | null;
+}
+
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -7980,6 +7999,94 @@ export class CampanasController {
     } catch (error) {
       console.error('Error en markPostedAPS:', error);
       res.status(500).json({ success: false, error: 'Error al marcar APS como enviados' });
+    }
+  }
+
+  // Bitácora de POSTs a SAP: registra una fila por APS enviado con el SNAPSHOT
+  // del destino (card_code/cuic/razón social/marca) al momento del envío.
+  // Se llama desde el front justo después de postear, con el resultado de SAP.
+  // Append-only a propósito: si luego le cambian el cliente a la campaña, el
+  // histórico de a quién se mandó cada APS se conserva.
+  async registrarPostLog(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { entries } = req.body as { entries?: PostLogEntry[] };
+      const userId = req.user?.userId ?? null;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!Array.isArray(entries) || entries.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay entradas para registrar' });
+        return;
+      }
+
+      const num = (v: unknown): number | null => {
+        if (v === undefined || v === null || v === '') return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const str = (v: unknown, max: number): string | null => {
+        if (v === undefined || v === null) return null;
+        const s = String(v).trim();
+        return s === '' ? null : s.slice(0, max);
+      };
+
+      let creadas = 0;
+      for (const e of entries) {
+        const aps = num(e.aps);
+        if (aps === null) continue; // sin APS no hay nada que registrar
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO campania_post_log
+            (campania_id, aps, card_code, cuic, razon_social, marca, cliente_nombre,
+             sap_database, salesperson_code, solicitud_caras_ids, success, doc_entry,
+             doc_num, error_msg, payload_json, usuario_id, usuario_nombre, posted_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())`,
+          campanaId,
+          aps,
+          str(e.card_code, 50),
+          num(e.cuic),
+          str(e.razon_social, 255),
+          str(e.marca, 255),
+          str(e.cliente_nombre, 255),
+          str(e.sap_database, 20),
+          num(e.salesperson_code),
+          str(Array.isArray(e.solicitud_caras_ids) ? e.solicitud_caras_ids.join(',') : e.solicitud_caras_ids, 65000),
+          e.success ? 1 : 0,
+          num(e.doc_entry),
+          num(e.doc_num),
+          str(e.error_msg, 65000),
+          typeof e.payload_json === 'string' ? e.payload_json : (e.payload_json ? JSON.stringify(e.payload_json) : null),
+          userId,
+          userName,
+        );
+        creadas++;
+      }
+
+      res.json({ success: true, registradas: creadas });
+    } catch (error) {
+      console.error('Error en registrarPostLog:', error);
+      res.status(500).json({ success: false, error: 'Error al registrar la bitácora de POST' });
+    }
+  }
+
+  // Devuelve la bitácora de POSTs de una campaña (más reciente primero).
+  async getPostLog(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const rows = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, campania_id, aps, card_code, cuic, razon_social, marca,
+                cliente_nombre, sap_database, salesperson_code, solicitud_caras_ids,
+                success, doc_entry, doc_num, error_msg, usuario_id, usuario_nombre, posted_at
+         FROM campania_post_log
+         WHERE campania_id = ?
+         ORDER BY posted_at DESC, id DESC`,
+        campanaId
+      );
+      // success viene como 0/1 desde MySQL — normalizar a boolean para el front.
+      const data = rows.map(r => ({ ...r, success: !!r.success }));
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getPostLog:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener la bitácora de POST' });
     }
   }
 
