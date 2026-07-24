@@ -125,6 +125,52 @@ model campania {
   @@index([id, fecha_inicio, fecha_fin], map: "idx_campania_fechas")
 }
 
+// Bitácora de POSTs de APS a SAP (Delivery Notes). Append-only: una fila por
+// cada APS posteado, con SNAPSHOT del destino al momento del envío.
+//
+// Por qué snapshot y no leer la campaña: el payload del Delivery Note se arma
+// con los datos del cliente que tiene la campaña EN ESE INSTANTE (card_code,
+// cuic, razón social, marca). Si después le cambian el cliente a la campaña
+// (ej. de SABA a Chevrolet para las siguientes catorcenas), se perdía el rastro
+// de a quién se había mandado lo ya posteado. `campania.posted_aps` solo dice
+// QUÉ APS se postearon, no A QUIÉN.
+//
+// Guarda también doc_entry/doc_num que devuelve SAP — habilita idempotencia
+// (detectar re-posts) además de la trazabilidad.
+model campania_post_log {
+  id          Int @id @default(autoincrement())
+  campania_id Int
+  aps         Int
+
+  // --- Snapshot del destino al momento del POST ---
+  card_code        String? @db.VarChar(50)
+  cuic             Int?
+  razon_social     String? @db.VarChar(255)
+  marca            String? @db.VarChar(255)
+  cliente_nombre   String? @db.VarChar(255)
+  sap_database     String? @db.VarChar(20)
+  salesperson_code Int?
+
+  // Circuitos (solicitudCaras) que abarcó este APS, separados por coma.
+  solicitud_caras_ids String? @db.Text
+
+  // --- Resultado del envío a SAP ---
+  success   Boolean @default(false)
+  doc_entry Int?
+  doc_num   Int?
+  error_msg String? @db.Text
+  // Payload completo del Delivery Note enviado (auditoría).
+  payload_json String? @db.LongText
+
+  // --- Quién y cuándo ---
+  usuario_id     Int?
+  usuario_nombre String?  @db.VarChar(255)
+  posted_at      DateTime @default(now()) @db.DateTime(0)
+
+  @@index([campania_id], map: "idx_cpl_campania")
+  @@index([campania_id, aps], map: "idx_cpl_campania_aps")
+}
+
 // Persiste cada arte subido a una campaña. Independiente de las filas vivas
 // en artes_tradicionales/imagenes_digitales/reservas.archivo, así un arte
 // desasignado de inventarios sigue visible en la "Biblioteca de artes".
