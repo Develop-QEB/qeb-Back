@@ -15,11 +15,10 @@
 //   - Fecha de liberación = fecha de creación de la propuesta + 30 días naturales.
 //   - Solo si la propuesta NO se mandó a ventas/campañas (status en
 //     Abierto/Atendido/Ajuste Cto-Cliente/Ajuste Comercial; se excluyen
-//     'Pase a ventas' y 'Aprobada').
-//   - Solo si la propuesta "todavía no forma parte de las dos catorcenas
-//     inmediatas siguientes": se PROTEGE (no se libera) si CUALQUIER circuito
-//     arranca dentro de esa ventana; se libera solo cuando TODO su inventario
-//     arranca después.
+//     'Pase a ventas' y 'Aprobada'). Que a los 30 días siga "en propuestas" con
+//     inventario reservado es la señal de que se estancó → se libera el 100%.
+//   - NO se mira catorcena: si cumple los 30 días y sigue en propuestas, se libera
+//     todo lo que tuviera reservado, sin importar en qué período esté el inventario.
 
 import prisma from '../utils/prisma';
 import {
@@ -53,11 +52,6 @@ function hoyCDMX(): string {
   return `${mx.getFullYear()}-${String(mx.getMonth() + 1).padStart(2, '0')}-${String(mx.getDate()).padStart(2, '0')}`;
 }
 
-// 'YYYY-MM-DD' de una fecha @db.Date de Prisma (viene como medianoche UTC).
-function dbDateToYMD(d: Date): string {
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-}
-
 interface ResultadoLiberacion {
   propuestasLiberadas: number;
   reservasLiberadas: number;
@@ -80,22 +74,10 @@ export async function liberarReservasPropuestasVencidas(
   const dryRun = opts?.dryRun ?? (process.env.LIBERACION_RESERVAS_DRY_RUN === 'true');
   const hoy = hoyCDMX();
 
-  // Ventana = las 2 catorcenas inmediatas siguientes (la vigente/próxima + la que
-  // sigue). windowEnd = fecha_fin de la 2da. Si un circuito arranca en/antes de
-  // windowEnd, la propuesta está "dentro" de la ventana y se protege.
-  const cats = await prisma.$queryRawUnsafe<{ fecha_fin: Date }[]>(
-    `SELECT fecha_fin FROM catorcenas WHERE fecha_fin >= ? ORDER BY fecha_inicio ASC LIMIT 2`,
-    hoy
-  );
-  if (cats.length === 0) {
-    console.warn('[LiberacionReservas] No hay catorcenas futuras; no se puede calcular la ventana. Se omite la corrida.');
-    return { propuestasLiberadas: 0, reservasLiberadas: 0, omitidasPorAps: 0 };
-  }
-  const windowEnd = dbDateToYMD(cats[cats.length - 1].fecha_fin);
-
-  // Candidatas: status elegible, ancla del contador hace ≥30 días, TODO su
-  // inventario arranca después de la ventana (NOT EXISTS circuito que arranque
-  // dentro), y que tengan al menos una reserva activa que liberar.
+  // Candidatas: propuesta que sigue "en propuestas" (status elegible = no avanzó a
+  // ventas/campaña), con ancla del contador hace ≥30 días, y con al menos una
+  // reserva activa que liberar. Si a los 30 días sigue reservando, es señal de que
+  // se estancó → se libera el 100% de su inventario reservado. NO se mira catorcena.
   //
   // Ancla = COALESCE(contador_liberacion_desde, fecha): la primera vez cuenta
   // desde la creación (`fecha`); si ya se liberó antes y la retomaron (status
@@ -108,11 +90,6 @@ export async function liberarReservasPropuestasVencidas(
      WHERE pr.deleted_at IS NULL
        AND pr.status IN (${STATUS_ELEGIBLES.map(() => '?').join(',')})
        AND DATE(COALESCE(pr.contador_liberacion_desde, pr.fecha)) <= DATE_SUB(?, INTERVAL ${DIAS_LIBERACION} DAY)
-       AND NOT EXISTS (
-         SELECT 1 FROM solicitudCaras sc
-         WHERE sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
-           AND sc.inicio_periodo <= ?
-       )
        AND EXISTS (
          SELECT 1 FROM reservas rv
          INNER JOIN solicitudCaras sc2 ON sc2.id = rv.solicitudCaras_id
@@ -122,7 +99,6 @@ export async function liberarReservasPropuestasVencidas(
        )`,
     ...STATUS_ELEGIBLES,
     hoy,
-    windowEnd,
     ...ESTATUS_RESERVA_ACTIVOS
   );
 
@@ -146,7 +122,7 @@ export async function liberarReservasPropuestasVencidas(
 
   const prefijo = dryRun ? '[LiberacionReservas][DRY-RUN] Liberaría' : '[LiberacionReservas] Criterio 30 días:';
   console.log(
-    `${prefijo} (hoy CDMX ${hoy}, ventana hasta ${windowEnd}): ` +
+    `${prefijo} (hoy CDMX ${hoy}): ` +
     `${propuestasLiberadas} propuesta(s), ${reservasLiberadas} reserva(s); ` +
     `${omitidasPorAps} omitida(s) por tener reservas con APS.`
   );
