@@ -4505,7 +4505,15 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf: grupoRtBfCreate,
+        // Direcciones/autorización: cuando el circuito se agrega DURANTE la edición
+        // de una propuesta (modal), el front manda deferAuth=true para que la cara
+        // se persista (necesita id para reservas) PERO no se dispare la autorización
+        // todavía: no se contamina a otras caras (impar→DCM) ni se crea la tarea de
+        // autorización. Todo eso se evalúa una sola vez al dar "Guardar Cambios"
+        // (bulkUpdateCaras). Así se respeta que editar no mande a autorización.
+        deferAuth: deferAuthRaw,
       } = req.body;
+      const deferAuth = deferAuthRaw === true || deferAuthRaw === 'true';
 
       // Validar fechas obligatorias.
       if (!inicio_periodo || !fin_periodo) {
@@ -4656,69 +4664,79 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
-      // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
-      // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
-      // EXCEPCIÓN par RT/BF: al crear la BF/CF de un par (se crea ANTES que su RT), el
-      // total queda impar un instante y marcaría pendiente a OTROS circuitos, envenenando
-      // la propuesta y provocando 409 en la RT. La paridad se evalúa cuando llega la RT
-      // que completa el par (o en una cara suelta), no en la BF/CF intermedia.
-      const esBonifDePar = !!grupoRtBfCreate && (artUpperCrP.startsWith('BF') || artUpperCrP.startsWith('CF'));
-      const todasCaras = await prisma.solicitudCaras.findMany({
-        where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
-      });
-      const noDigitales = todasCaras.filter(c => {
-        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
-        return !isDigital;
-      });
-      const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (!esBonifDePar && totalCarasGlobal % 2 !== 0) {
-        const idsNoDigitales = noDigitales.map(c => c.id);
-        const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
-        if (carasNoP.length > 0) {
-          await prisma.solicitudCaras.updateMany({
-            where: {
-              id: { in: idsNoDigitales },
-              autorizacion_dcm: { not: 'pendiente' }
-            },
-            data: { autorizacion_dcm: 'pendiente' }
-          });
-          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
-        }
-      }
-
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(id);
-      if (autorizacion.tienePendientes && userId) {
-        // Get solicitud_id from propuesta
-        const propuesta = await prisma.propuesta.findUnique({
-          where: { id: parseInt(id) },
-          select: { solicitud_id: true }
-        });
-
-        if (propuesta?.solicitud_id) {
-          await crearTareasAutorizacion(
-            propuesta.solicitud_id,
-            parseInt(id),
-            userId,
-            userName,
-            autorizacion.pendientesDg,
-            autorizacion.pendientesDcm,
-            'propuesta'
-          );
-        }
-      }
-      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
-      if (userId) {
-        await reconciliarCierreTareasAutorizacion(id, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
-      }
-
-      // Build response message
       let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
+      // Default vacío para la respuesta cuando se difiere la autorización (deferAuth).
+      let autorizacion: { tienePendientes: boolean; pendientesDg: number[]; pendientesDcm: number[] } =
+        { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
+      // [deferAuth] Cuando el circuito se agrega durante la edición (modal), NO se
+      // dispara la autorización aquí: ni la contaminación impar→DCM a otras caras
+      // (que congelaba toda la propuesta), ni la creación de la tarea. Todo se evalúa
+      // al guardar (bulkUpdateCaras hace verificarCarasPendientes + crearTareasAutorizacion
+      // una sola vez). La cara ya quedó persistida (con id para reservas); si el usuario
+      // sale sin guardar, el front hace rollback.
+      if (!deferAuth) {
+        // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
+        // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
+        // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
+        // EXCEPCIÓN par RT/BF: al crear la BF/CF de un par (se crea ANTES que su RT), el
+        // total queda impar un instante y marcaría pendiente a OTROS circuitos, envenenando
+        // la propuesta y provocando 409 en la RT. La paridad se evalúa cuando llega la RT
+        // que completa el par (o en una cara suelta), no en la BF/CF intermedia.
+        const esBonifDePar = !!grupoRtBfCreate && (artUpperCrP.startsWith('BF') || artUpperCrP.startsWith('CF'));
+        const todasCaras = await prisma.solicitudCaras.findMany({
+          where: { idquote: id },
+          select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
+        });
+        const noDigitales = todasCaras.filter(c => {
+          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+          return !isDigital;
+        });
+        const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+        if (!esBonifDePar && totalCarasGlobal % 2 !== 0) {
+          const idsNoDigitales = noDigitales.map(c => c.id);
+          const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
+          if (carasNoP.length > 0) {
+            await prisma.solicitudCaras.updateMany({
+              where: {
+                id: { in: idsNoDigitales },
+                autorizacion_dcm: { not: 'pendiente' }
+              },
+              data: { autorizacion_dcm: 'pendiente' }
+            });
+            console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
+          }
+        }
+
+        // Check for pending authorizations and create tasks if needed
+        autorizacion = await verificarCarasPendientes(id);
+        if (autorizacion.tienePendientes && userId) {
+          // Get solicitud_id from propuesta
+          const propuesta = await prisma.propuesta.findUnique({
+            where: { id: parseInt(id) },
+            select: { solicitud_id: true }
+          });
+
+          if (propuesta?.solicitud_id) {
+            await crearTareasAutorizacion(
+              propuesta.solicitud_id,
+              parseInt(id),
+              userId,
+              userName,
+              autorizacion.pendientesDg,
+              autorizacion.pendientesDcm,
+              'propuesta'
+            );
+          }
+        }
+        // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+        if (userId) {
+          await reconciliarCierreTareasAutorizacion(id, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
+        }
+
+        if (autorizacion.tienePendientes) {
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
+        }
       }
 
       res.json({
@@ -4935,6 +4953,31 @@ export class PropuestasController {
             detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: totalReservasLiberadas }),
           },
         });
+      }
+
+      // Regla global "impar → DCM": si el total de caras NO-digitales de la propuesta
+      // es impar, TODAS requieren autorización DCM. Antes vivía SOLO en createCara y
+      // se disparaba al agregar (durante la edición). Ahora que createCara la difiere
+      // (deferAuth), se evalúa AQUÍ, al guardar, que es el momento correcto. Mismo
+      // criterio que createCara (idéntico cálculo y exclusión de digitales).
+      const todasCarasBk = await prisma.solicitudCaras.findMany({
+        where: { idquote: String(id) },
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
+      });
+      const noDigitalesBk = todasCarasBk.filter(c => {
+        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+        return !isDigital;
+      });
+      const totalCarasGlobalBk = noDigitalesBk.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      if (totalCarasGlobalBk % 2 !== 0) {
+        const idsNoDigBk = noDigitalesBk.filter(c => c.autorizacion_dcm !== 'pendiente').map(c => c.id);
+        if (idsNoDigBk.length > 0) {
+          await prisma.solicitudCaras.updateMany({
+            where: { id: { in: idsNoDigBk }, autorizacion_dcm: { not: 'pendiente' } },
+            data: { autorizacion_dcm: 'pendiente' }
+          });
+          console.log(`[bulkUpdateCaras] Total caras NO-digitales impar (${totalCarasGlobalBk}), ${idsNoDigBk.length} caras -> pendiente DCM`);
+        }
       }
 
       // After ALL updates: check for pending authorizations ONCE and create ONE task
