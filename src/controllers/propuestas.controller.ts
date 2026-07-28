@@ -4544,7 +4544,14 @@ export class PropuestasController {
       // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
       // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
       // está creando ahora (grupoRtBfCreate).
-      const pendCrP = await verificarCarasPendientes(id);
+      // [deferAuth] Durante la edición (modal) NO se aplica este candado: el asesor
+      // debe poder agregar VARIOS circuitos aunque los recién agregados queden
+      // 'pendiente' (su badge Pend. DG/DCM es informativo). La autorización real —y
+      // este bloqueo— se resuelve al guardar. Sin esto, el primer circuito bonificado
+      // dejaba una cara pendiente que bloqueaba agregar el segundo con "Error al guardar".
+      const pendCrP = deferAuth
+        ? { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] }
+        : await verificarCarasPendientes(id);
       if (pendCrP.tienePendientes) {
         const grupoActualCrP = grupoRtBfCreate ? parseInt(grupoRtBfCreate) : null;
         const idsPendientesCrP = [...new Set([...pendCrP.pendientesDg, ...pendCrP.pendientesDcm])];
