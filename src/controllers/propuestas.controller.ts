@@ -5042,6 +5042,8 @@ export class PropuestasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
@@ -5057,6 +5059,12 @@ export class PropuestasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Snapshot antes de borrar para poder loguear qué se elimino.
+      const carasSnapshot = await prisma.solicitudCaras.findMany({
+        where: { id: { in: idsToDelete } },
+        select: { id: true, idquote: true, articulo: true, ciudad: true, formato: true, tipo: true, caras: true, costo: true, autorizacion_dg: true, autorizacion_dcm: true },
+      });
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
           where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
@@ -5066,6 +5074,21 @@ export class PropuestasController {
           where: { id: { in: idsToDelete } },
         }),
       ]);
+
+      // Log al historial de la propuesta involucrada para auditoria.
+      const propuestaId = carasSnapshot[0]?.idquote ? parseInt(carasSnapshot[0].idquote) : NaN;
+      if (!Number.isNaN(propuestaId)) {
+        await logHistorial({
+          tipo: 'Propuesta',
+          refId: propuestaId,
+          accion: `Eliminación de ${carasSnapshot.length} circuito(s) desde el modal de propuesta`,
+          usuario: userName,
+          usuarioId: userId,
+          usuarioRol: req.user?.rol,
+          origen: 'propuesta_delete_cara',
+          extras: { caras_eliminadas: carasSnapshot, eliminarGrupo },
+        });
+      }
 
       res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {
