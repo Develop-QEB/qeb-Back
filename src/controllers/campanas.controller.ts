@@ -1651,6 +1651,26 @@ export class CampanasController {
             WHERE ct.id = ${cotizacionId}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
           `;
+
+          // CANDADO anti-desfase: tras mover el periodo, liberar (soft-delete)
+          // las reservas cuyo calendario quedó FUERA de su propio periodo (sc).
+          // Antes se quedaban "tatuadas" en la catorcena vieja (bug
+          // periodo↔calendario, caso BAIT jul-2026): este flujo de campaña movía
+          // el periodo pero NO tocaba las reservas, y quedaban invisibles en su
+          // catorcena real → la cara salía "libre" y se generaba el duplicado.
+          // Solo toca las genuinamente desfasadas (misma condición que el
+          // detector de auditoria); una reserva dentro de su periodo NO se toca.
+          await prisma.$executeRaw`
+            UPDATE reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            INNER JOIN calendario cl ON cl.id = rs.calendario_id
+            SET rs.deleted_at = NOW()
+            WHERE ct.id = ${cotizacionId}
+              AND rs.deleted_at IS NULL
+              AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
+          `;
         }
       }
 

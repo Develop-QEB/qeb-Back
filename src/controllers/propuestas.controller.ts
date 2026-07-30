@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -3138,6 +3138,17 @@ export class PropuestasController {
         }
       }
 
+      // CANDADO anti-desfase: la fecha debe caer dentro del periodo (catorcena)
+      // de la cara. Antes el server no lo validaba y se colaban reservas en una
+      // catorcena distinta a la del circuito (bug periodo↔calendario).
+      if (solicitudCaraId) {
+        const errPeriodo = await validarFechaEnPeriodoCara(solicitudCaraId, fechaInicio);
+        if (errPeriodo) {
+          res.status(400).json({ success: false, error: errPeriodo });
+          return;
+        }
+      }
+
       // Create calendario entry
       const calendario = await prisma.calendario.create({
         data: {
@@ -3724,6 +3735,15 @@ export class PropuestasController {
       if (!propuesta) {
         res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
         return;
+      }
+
+      // CANDADO anti-desfase: validar que la fecha caiga dentro del periodo de la cara.
+      if (solicitudCaraId) {
+        const errPeriodo = await validarFechaEnPeriodoCara(solicitudCaraId, fechaInicio);
+        if (errPeriodo) {
+          res.status(400).json({ success: false, error: errPeriodo });
+          return;
+        }
       }
 
       let calendario = await prisma.calendario.findFirst({

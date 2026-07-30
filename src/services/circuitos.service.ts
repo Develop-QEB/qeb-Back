@@ -452,3 +452,40 @@ export async function liberarReservasCircuitoPorCambioPeriodo(
   }
   return { liberadas, caraIds };
 }
+
+/**
+ * CANDADO anti-desfase (bug periodo↔calendario, jul-2026).
+ * Valida que la fecha de una reserva caiga DENTRO del periodo (catorcena del
+ * circuito) de su cara. Devuelve un mensaje de error si la fecha se sale del
+ * periodo, o null si está OK.
+ *
+ * El front ya restringe esto en el selector de fechas (invalidCaras), pero el
+ * server nunca lo validaba: por ahí se colaban reservas en una catorcena distinta
+ * a la del circuito (p.ej. cambiar el periodo y re-reservar con la fecha vieja).
+ * Al ponerlo en el server, ninguna vía (re-reserva, clon, API directa) puede
+ * volver a colar una reserva "fuera de rango".
+ */
+export async function validarFechaEnPeriodoCara(
+  solicitudCaraId: number | string,
+  fechaInicio: Date | string,
+): Promise<string | null> {
+  const id = Number(solicitudCaraId);
+  if (!id || Number.isNaN(id)) return null;
+  const cara = await prisma.solicitudCaras.findUnique({
+    where: { id },
+    select: { inicio_periodo: true, fin_periodo: true },
+  });
+  // Sin periodo definido en la cara: no bloquear (no hay contra qué validar).
+  if (!cara?.inicio_periodo || !cara?.fin_periodo) return null;
+  const fi = new Date(fechaInicio);
+  if (Number.isNaN(fi.getTime())) return null;
+  // Comparar a nivel día (YYYY-MM-DD) para evitar ruido de zona horaria.
+  const toDay = (d: Date | string) => new Date(d).toISOString().slice(0, 10);
+  const fiDay = toDay(fi);
+  const iniDay = toDay(cara.inicio_periodo);
+  const finDay = toDay(cara.fin_periodo);
+  if (fiDay < iniDay || fiDay > finDay) {
+    return `La fecha de reserva (${fiDay}) está fuera del periodo de la cara (${iniDay} a ${finDay}). Selecciona una catorcena dentro del circuito.`;
+  }
+  return null;
+}
