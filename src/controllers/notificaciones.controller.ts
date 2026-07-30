@@ -2064,6 +2064,8 @@ export class NotificacionesController {
       const {
         subtipo,
         ref_id,
+        cliente: clienteInput,
+        marca: marcaInput,
         descripcion,
         fecha_fin,
         activar_recordatorio,
@@ -2071,80 +2073,87 @@ export class NotificacionesController {
       } = req.body as {
         subtipo?: string;
         ref_id?: number | string;
+        cliente?: string;
+        marca?: string;
         descripcion?: string;
         fecha_fin?: string;
         activar_recordatorio?: boolean;
         recordar_dias_antes?: number;
       };
 
-      if (!subtipo || !['Campaña', 'Propuesta'].includes(subtipo)) {
-        res.status(400).json({ success: false, error: 'Subtipo debe ser "Campaña" o "Propuesta"' });
-        return;
-      }
-      const refIdNum = Number(ref_id);
-      if (!refIdNum || Number.isNaN(refIdNum)) {
-        res.status(400).json({ success: false, error: 'ref_id inválido' });
-        return;
-      }
       const descripcionTrim = (descripcion || '').trim();
       if (!descripcionTrim) {
         res.status(400).json({ success: false, error: 'Descripción requerida' });
         return;
       }
 
-      // Derivar cliente/marca desde el ref
-      let cliente: string | null = null;
-      let marca: string | null = null;
+      // Feedback Jos 2026-07-31: subtipo/ref_id ahora OPCIONALES. Cliente y
+      // marca vienen del payload (el usuario los edita). Si vino ref_id, se
+      // deriva cliente/marca del server como respaldo — pero lo que mandó el
+      // usuario tiene prioridad.
+      let subtipoOut: string | null = null;
+      let refIdOut: number | null = null;
+      let cliente: string | null = (clienteInput || '').trim() || null;
+      let marca: string | null = (marcaInput || '').trim() || null;
       let campaniaId: number | null = null;
       let idPropuestaStr: string | null = null;
       let idSolicitud = '';
 
-      if (subtipo === 'Campaña') {
-        const rows = await prisma.$queryRawUnsafe<Array<{
-          cliente: string | null; marca: string | null; solicitud_id: number | null;
-        }>>(`
-          SELECT
-            COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
-            s.marca_nombre AS marca,
-            s.id AS solicitud_id
-          FROM campania c
-          LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
-          LEFT JOIN propuesta p ON p.id = ct.id_propuesta
-          LEFT JOIN solicitud s ON s.id = p.solicitud_id
-          LEFT JOIN cliente cl ON cl.id = c.cliente_id
-          WHERE c.id = ?
-          LIMIT 1
-        `, refIdNum);
-        if (!rows.length) {
-          res.status(404).json({ success: false, error: 'Campaña no encontrada' });
-          return;
+      const refIdNum = ref_id != null ? Number(ref_id) : NaN;
+      const hasRef = subtipo && ['Campaña', 'Propuesta'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
+
+      if (hasRef) {
+        subtipoOut = subtipo as string;
+        refIdOut = refIdNum;
+
+        // Derivar cliente/marca desde el ref (solo si el usuario no los mandó)
+        if (subtipo === 'Campaña') {
+          const rows = await prisma.$queryRawUnsafe<Array<{
+            cliente: string | null; marca: string | null; solicitud_id: number | null;
+          }>>(`
+            SELECT
+              COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+              s.marca_nombre AS marca,
+              s.id AS solicitud_id
+            FROM campania c
+            LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
+            LEFT JOIN propuesta p ON p.id = ct.id_propuesta
+            LEFT JOIN solicitud s ON s.id = p.solicitud_id
+            LEFT JOIN cliente cl ON cl.id = c.cliente_id
+            WHERE c.id = ?
+            LIMIT 1
+          `, refIdNum);
+          if (!rows.length) {
+            res.status(404).json({ success: false, error: 'Campaña no encontrada' });
+            return;
+          }
+          if (!cliente) cliente = rows[0].cliente;
+          if (!marca) marca = rows[0].marca;
+          campaniaId = refIdNum;
+          idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+        } else {
+          const rows = await prisma.$queryRawUnsafe<Array<{
+            cliente: string | null; marca: string | null; solicitud_id: number | null;
+          }>>(`
+            SELECT
+              COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+              s.marca_nombre AS marca,
+              s.id AS solicitud_id
+            FROM propuesta p
+            LEFT JOIN solicitud s ON s.id = p.solicitud_id
+            LEFT JOIN cliente cl ON cl.id = p.cliente_id
+            WHERE p.id = ?
+            LIMIT 1
+          `, refIdNum);
+          if (!rows.length) {
+            res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+            return;
+          }
+          if (!cliente) cliente = rows[0].cliente;
+          if (!marca) marca = rows[0].marca;
+          idPropuestaStr = String(refIdNum);
+          idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
         }
-        cliente = rows[0].cliente;
-        marca = rows[0].marca;
-        campaniaId = refIdNum;
-        idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
-      } else {
-        const rows = await prisma.$queryRawUnsafe<Array<{
-          cliente: string | null; marca: string | null; solicitud_id: number | null;
-        }>>(`
-          SELECT
-            COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
-            s.marca_nombre AS marca,
-            s.id AS solicitud_id
-          FROM propuesta p
-          LEFT JOIN solicitud s ON s.id = p.solicitud_id
-          LEFT JOIN cliente cl ON cl.id = p.cliente_id
-          WHERE p.id = ?
-          LIMIT 1
-        `, refIdNum);
-        if (!rows.length) {
-          res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
-          return;
-        }
-        cliente = rows[0].cliente;
-        marca = rows[0].marca;
-        idPropuestaStr = String(refIdNum);
-        idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
       }
 
       const nowMx = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -2154,15 +2163,19 @@ export class NotificacionesController {
       const contenido = JSON.stringify({
         cliente,
         marca,
-        subtipo,
-        ref_id: refIdNum,
+        subtipo: subtipoOut,
+        ref_id: refIdOut,
         activar_recordatorio: !!activar_recordatorio,
         recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
           ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
           : null,
       });
 
-      const titulo = `Actividad Comercial · ${subtipo} #${refIdNum}`;
+      // Título dinámico según si hay referencia a campaña/propuesta o no.
+      const tituloExtra = [cliente, marca].filter(Boolean).join(' · ');
+      const titulo = hasRef
+        ? `Actividad Comercial · ${subtipoOut} #${refIdOut}`
+        : (tituloExtra ? `Actividad Comercial · ${tituloExtra}` : 'Actividad Comercial');
 
       const tarea = await prisma.tareas.create({
         data: {
@@ -2187,12 +2200,14 @@ export class NotificacionesController {
       await logHistorial({
         tipo: 'Tarea',
         refId: tarea.id,
-        accion: `Creó actividad comercial (${subtipo} #${refIdNum})`,
+        accion: hasRef
+          ? `Creó actividad comercial (${subtipoOut} #${refIdOut})`
+          : `Creó actividad comercial (sin campaña/propuesta)`,
         usuario: userName,
         usuarioId: userId,
         usuarioRol: rol,
         origen: 'notificaciones_actividad_comercial',
-        extras: { cliente, marca, subtipo, ref_id: refIdNum },
+        extras: { cliente, marca, subtipo: subtipoOut, ref_id: refIdOut },
       });
 
       emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
@@ -2215,8 +2230,8 @@ export class NotificacionesController {
           asignado: tarea.asignado,
           cliente,
           marca,
-          subtipo,
-          ref_id: refIdNum,
+          subtipo: subtipoOut,
+          ref_id: refIdOut,
         },
       });
     } catch (error) {
