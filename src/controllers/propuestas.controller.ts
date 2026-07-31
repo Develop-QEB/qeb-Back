@@ -4006,6 +4006,22 @@ export class PropuestasController {
           where: { id_propuesta: parseInt(id) },
           data: { clientes_id: cliente_id_final },
         });
+
+        // CANDADO cliente: propagar el cliente TAMBIEN a la campania. Antes este
+        // flujo actualizaba solicitud/propuesta/cotizacion pero NO la campania, y
+        // esta se quedaba con el cliente viejo/generico (p.ej. el placeholder cuya
+        // razon_social es '123' y card_code/sap NULL, que luego se posteaba a SAP).
+        // Se localiza igual que el espejo de nombre_campania (cotizacion_id).
+        const cotForCliente = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: parseInt(id) },
+          select: { id: true },
+        });
+        if (cotForCliente) {
+          await prisma.campania.updateMany({
+            where: { cotizacion_id: cotForCliente.id },
+            data: { cliente_id: cliente_id_final },
+          });
+        }
       }
 
       // Update cotizacion nombre_campania if provided
