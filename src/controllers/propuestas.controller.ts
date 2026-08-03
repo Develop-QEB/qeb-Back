@@ -842,6 +842,20 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD: 'Liberada' lo asigna ÚNICAMENTE el job de liberación automática
+      // (liberacion-reservas.service.ts, criterio 30 días). No es un estatus que
+      // se elija: es el registro de que el sistema quitó las reservas. Ponerlo a
+      // mano dejaría propuestas marcadas como liberadas sin que se haya liberado
+      // nada (y sin historial ni notificación que lo respalde). SALIR de
+      // 'Liberada' hacia otro estatus sí está permitido — eso es retomarla.
+      if (status === 'Liberada') {
+        res.status(400).json({
+          success: false,
+          error: 'El estatus "Liberada" lo asigna únicamente el sistema cuando libera las reservas por el criterio de 30 días. No se puede establecer manualmente.',
+        });
+        return;
+      }
+
       // GUARD: si la propuesta ya tiene una campaña activa ligada, NO permitir
       // ningun cambio de status sobre la propuesta. La invariante es: una propuesta
       // con campaña activa esta congelada en 'Aprobada'. Si se quiere cancelar el
@@ -4718,37 +4732,9 @@ export class PropuestasController {
       // una sola vez). La cara ya quedó persistida (con id para reservas); si el usuario
       // sale sin guardar, el front hace rollback.
       if (!deferAuth) {
-        // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
-        // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
-        // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
-        // EXCEPCIÓN par RT/BF: al crear la BF/CF de un par (se crea ANTES que su RT), el
-        // total queda impar un instante y marcaría pendiente a OTROS circuitos, envenenando
-        // la propuesta y provocando 409 en la RT. La paridad se evalúa cuando llega la RT
-        // que completa el par (o en una cara suelta), no en la BF/CF intermedia.
-        const esBonifDePar = !!grupoRtBfCreate && (artUpperCrP.startsWith('BF') || artUpperCrP.startsWith('CF'));
-        const todasCaras = await prisma.solicitudCaras.findMany({
-          where: { idquote: id },
-          select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
-        });
-        const noDigitales = todasCaras.filter(c => {
-          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
-          return !isDigital;
-        });
-        const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-        if (!esBonifDePar && totalCarasGlobal % 2 !== 0) {
-          const idsNoDigitales = noDigitales.map(c => c.id);
-          const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
-          if (carasNoP.length > 0) {
-            await prisma.solicitudCaras.updateMany({
-              where: {
-                id: { in: idsNoDigitales },
-                autorizacion_dcm: { not: 'pendiente' }
-              },
-              data: { autorizacion_dcm: 'pendiente' }
-            });
-            console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
-          }
-        }
+        // [Regla GLOBAL de paridad ELIMINADA] La oddness se evalúa POR CIRCUITO en
+        // calcularEstadoAutorizacion (renta + bonificación del par), no sobre el total
+        // de toda la propuesta — así no se re-envenenan circuitos ya aprobados.
 
         // Check for pending authorizations and create tasks if needed
         autorizacion = await verificarCarasPendientes(id);
@@ -4998,30 +4984,13 @@ export class PropuestasController {
         });
       }
 
-      // Regla global "impar → DCM": si el total de caras NO-digitales de la propuesta
-      // es impar, TODAS requieren autorización DCM. Antes vivía SOLO en createCara y
-      // se disparaba al agregar (durante la edición). Ahora que createCara la difiere
-      // (deferAuth), se evalúa AQUÍ, al guardar, que es el momento correcto. Mismo
-      // criterio que createCara (idéntico cálculo y exclusión de digitales).
-      const todasCarasBk = await prisma.solicitudCaras.findMany({
-        where: { idquote: String(id) },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
-      });
-      const noDigitalesBk = todasCarasBk.filter(c => {
-        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
-        return !isDigital;
-      });
-      const totalCarasGlobalBk = noDigitalesBk.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (totalCarasGlobalBk % 2 !== 0) {
-        const idsNoDigBk = noDigitalesBk.filter(c => c.autorizacion_dcm !== 'pendiente').map(c => c.id);
-        if (idsNoDigBk.length > 0) {
-          await prisma.solicitudCaras.updateMany({
-            where: { id: { in: idsNoDigBk }, autorizacion_dcm: { not: 'pendiente' } },
-            data: { autorizacion_dcm: 'pendiente' }
-          });
-          console.log(`[bulkUpdateCaras] Total caras NO-digitales impar (${totalCarasGlobalBk}), ${idsNoDigBk.length} caras -> pendiente DCM`);
-        }
-      }
+      // [Regla GLOBAL de paridad ELIMINADA]
+      // Antes: si el total de caras NO-digitales de TODA la propuesta era impar, se
+      // mandaban TODAS las caras (incluidas las ya APROBADAS) a DCM pendiente —
+      // envenenando la propuesta al Guardar. La oddness se evalúa AHORA solo POR
+      // CIRCUITO en calcularEstadoAutorizacion (totalCaras = caras renta + bonificación
+      // del par RT/BF), igual que en campañas. Ej: 69 renta + 1 bonif = 70 = PAR → NO
+      // va a DCM por impar, y los circuitos ya aprobados no se re-envenenan.
 
       // After ALL updates: check for pending authorizations ONCE and create ONE task
       const autorizacion = await verificarCarasPendientes(String(id));
