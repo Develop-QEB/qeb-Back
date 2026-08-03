@@ -842,6 +842,20 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD: 'Liberada' lo asigna ÚNICAMENTE el job de liberación automática
+      // (liberacion-reservas.service.ts, criterio 30 días). No es un estatus que
+      // se elija: es el registro de que el sistema quitó las reservas. Ponerlo a
+      // mano dejaría propuestas marcadas como liberadas sin que se haya liberado
+      // nada (y sin historial ni notificación que lo respalde). SALIR de
+      // 'Liberada' hacia otro estatus sí está permitido — eso es retomarla.
+      if (status === 'Liberada') {
+        res.status(400).json({
+          success: false,
+          error: 'El estatus "Liberada" lo asigna únicamente el sistema cuando libera las reservas por el criterio de 30 días. No se puede establecer manualmente.',
+        });
+        return;
+      }
+
       // GUARD: si la propuesta ya tiene una campaña activa ligada, NO permitir
       // ningun cambio de status sobre la propuesta. La invariante es: una propuesta
       // con campaña activa esta congelada en 'Aprobada'. Si se quiere cancelar el
