@@ -746,16 +746,20 @@ export class DashboardController {
             }),
           ]);
 
-          // Buscar catorcena actual por separado. Se compara contra la FECHA
-          // de hoy (medianoche UTC, igual que se guardan fecha_inicio/fecha_fin)
-          // y no contra el timestamp: con `new Date()` el ultimo dia de la
-          // catorcena fallaba (fecha_fin 00:00 < ahora) y venia null.
+          // Buscar catorcena actual por separado. Dos ajustes vs comparar con
+          // `new Date()` directo:
+          //  1. Se compara contra una FECHA a medianoche UTC (igual que se
+          //     guardan fecha_inicio/fecha_fin), no contra el timestamp.
+          //  2. Las fechas de la tabla estan corridas +1 dia respecto a la
+          //     operacion real (la catorcena inicia en lunes pero la tabla
+          //     guarda el martes), asi que la vigente es la que contiene
+          //     MANANA en terminos de la tabla.
           const ahora = new Date();
-          const hoy = new Date(Date.UTC(ahora.getFullYear(), ahora.getMonth(), ahora.getDate()));
+          const ref = new Date(Date.UTC(ahora.getFullYear(), ahora.getMonth(), ahora.getDate() + 1));
           const catorcenaActual = await prisma.catorcenas.findFirst({
             where: {
-              fecha_inicio: { lte: hoy },
-              fecha_fin: { gte: hoy },
+              fecha_inicio: { lte: ref },
+              fecha_fin: { gte: ref },
             },
           });
 
