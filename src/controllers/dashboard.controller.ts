@@ -746,11 +746,20 @@ export class DashboardController {
             }),
           ]);
 
-          // Buscar catorcena actual por separado
+          // Buscar catorcena actual por separado. Dos ajustes vs comparar con
+          // `new Date()` directo:
+          //  1. Se compara contra una FECHA a medianoche UTC (igual que se
+          //     guardan fecha_inicio/fecha_fin), no contra el timestamp.
+          //  2. Las fechas de la tabla estan corridas +1 dia respecto a la
+          //     operacion real (la catorcena inicia en lunes pero la tabla
+          //     guarda el martes), asi que la vigente es la que contiene
+          //     MANANA en terminos de la tabla.
+          const ahora = new Date();
+          const ref = new Date(Date.UTC(ahora.getFullYear(), ahora.getMonth(), ahora.getDate() + 1));
           const catorcenaActual = await prisma.catorcenas.findFirst({
             where: {
-              fecha_inicio: { lte: new Date() },
-              fecha_fin: { gte: new Date() },
+              fecha_inicio: { lte: ref },
+              fecha_fin: { gte: ref },
             },
           });
 
@@ -941,12 +950,14 @@ export class DashboardController {
 
   // Widget: estado de POST a SAP de las campañas aprobadas (cached 10min).
   // Divide en "pendientes por postear" vs "posteadas", cada una con su conteo
-  // y su monto ($). Definiciones (mismas que usa el resto del sistema):
+  // y su monto ($). Definiciones (mismas que CampanaDetailPage y el reporte
+  // de catorcena: campanas.controller):
   //   - Universo: campañas con status != 'inactiva' (las 'inactiva' son
   //     propuestas no aprobadas — no aplican a POST).
-  //   - Posteada: posted_to_sap = 1 (marca la campaña entera). Una campaña con
-  //     POST parcial (algunos posted_aps pero posted_to_sap=0) sigue contando
-  //     como PENDIENTE porque aún tiene caras sin postear.
+  //   - Posteada: todos los APS de la campaña (reservas.APS de las caras de su
+  //     propuesta) están en posted_aps, o posted_to_sap = 1 (marca manual de
+  //     campaña completa). POST parcial o campaña sin APS asignados cuenta
+  //     como PENDIENTE porque aún hay caras sin postear.
   //   - Monto: SUM(solicitudCaras.costo) de la propuesta ligada (misma fuente
   //     que la inversión del listado de campañas).
   // Respeta el filtro de periodo del dashboard (catorcena_id o fecha_inicio/
@@ -994,28 +1005,87 @@ export class DashboardController {
              GROUP BY sc.idquote`;
         const montoParams = periodoActivo ? [ff, fi, ff, fi] : [];
 
-        type Row = { posted_to_sap: number | null; monto: number };
+        type Row = { id: number; posted_to_sap: number | null; monto: number };
+        type ApsRow = { campania_id: number; aps: number };
         // Orden de params = placeholders en el SQL final: primero los de la
         // subquery de monto (va en el LEFT JOIN), luego los del periodoClause.
-        const rows = await prisma.$queryRawUnsafe<Row[]>(
-          `
-          SELECT c.posted_to_sap AS posted_to_sap,
-                 COALESCE(inv.monto, 0) AS monto
-          FROM campania c
-          INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
-          LEFT JOIN (${montoSubquery}) inv
-            ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          WHERE c.status != 'inactiva'
-            ${periodoClause}
-          `,
-          ...montoParams,
-          ...periodoParams,
-        );
+        const [rows, apsRows, postedApsRows] = await Promise.all([
+          prisma.$queryRawUnsafe<Row[]>(
+            `
+            SELECT c.id AS id,
+                   c.posted_to_sap AS posted_to_sap,
+                   COALESCE(inv.monto, 0) AS monto
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            LEFT JOIN (${montoSubquery}) inv
+              ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE c.status != 'inactiva'
+              ${periodoClause}
+            `,
+            ...montoParams,
+            ...periodoParams,
+          ),
+          // APS reales de cada campaña: reservas.APS de las caras de su
+          // propuesta. Contra esto se compara posted_aps para saber si la
+          // campaña quedó completamente posteada.
+          prisma.$queryRawUnsafe<ApsRow[]>(
+            `
+            SELECT c.id AS campania_id, rsv.APS AS aps
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+            WHERE c.status != 'inactiva'
+              AND rsv.deleted_at IS NULL
+              AND rsv.APS IS NOT NULL
+              ${periodoClause}
+            GROUP BY c.id, rsv.APS
+            `,
+            ...periodoParams,
+          ),
+          // posted_aps en query aparte con catch: la columna puede no existir
+          // en producción (mismo patrón que campanas.controller).
+          prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null }[]>(
+            `SELECT c.id AS id, c.posted_aps AS posted_aps
+             FROM campania c
+             WHERE c.status != 'inactiva'
+               ${periodoClause}`,
+            ...periodoParams,
+          ).catch(() => [] as { id: number; posted_aps: string | null }[]),
+        ]);
+
+        const apsByCampana = new Map<number, Set<number>>();
+        for (const r of apsRows) {
+          const k = Number(r.campania_id);
+          const aps = Number(r.aps);
+          if (isNaN(aps)) continue;
+          const set = apsByCampana.get(k);
+          if (set) set.add(aps); else apsByCampana.set(k, new Set([aps]));
+        }
+
+        const postedApsByCampana = new Map<number, Set<number>>();
+        for (const r of postedApsRows) {
+          if (!r.posted_aps) continue;
+          try {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) {
+              postedApsByCampana.set(
+                Number(r.id),
+                new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)))
+              );
+            }
+          } catch { /* JSON inválido — sin posted por APS */ }
+        }
 
         let pendientesCount = 0, pendientesMonto = 0, posteadasCount = 0, posteadasMonto = 0;
         for (const r of rows) {
           const monto = Number(r.monto) || 0;
-          if (r.posted_to_sap === 1) {
+          const apsSet = apsByCampana.get(Number(r.id));
+          const postedSet = postedApsByCampana.get(Number(r.id));
+          const postedByAps = !!apsSet && apsSet.size > 0 && !!postedSet &&
+            [...apsSet].every((a) => postedSet.has(a));
+          if (r.posted_to_sap === 1 || postedByAps) {
             posteadasCount++;
             posteadasMonto += monto;
           } else {
