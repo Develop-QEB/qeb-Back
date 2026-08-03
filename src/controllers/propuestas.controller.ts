@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -968,12 +968,18 @@ export class PropuestasController {
 
       const statusAnterior = propuestaAnterior.status;
 
+      // Contador de liberación automática (Criterio 30 días): SOLO al salir de
+      // 'Liberada' hacia otro status (retoman la propuesta) se reinicia el conteo
+      // desde ahora. Cualquier otro cambio de status NO lo toca.
+      const reiniciaContadorLiberacion = statusAnterior === 'Liberada' && status !== 'Liberada';
+
       const propuesta = await prisma.propuesta.update({
         where: { id: propuestaId },
         data: {
           status,
           comentario_cambio_status: comentario_cambio_status || '',
           updated_at: new Date(),
+          ...(reiniciaContadorLiberacion ? { contador_liberacion_desde: new Date() } : {}),
         },
       });
 
@@ -3132,6 +3138,17 @@ export class PropuestasController {
         }
       }
 
+      // CANDADO anti-desfase: la fecha debe caer dentro del periodo (catorcena)
+      // de la cara. Antes el server no lo validaba y se colaban reservas en una
+      // catorcena distinta a la del circuito (bug periodo↔calendario).
+      if (solicitudCaraId) {
+        const errPeriodo = await validarFechaEnPeriodoCara(solicitudCaraId, fechaInicio);
+        if (errPeriodo) {
+          res.status(400).json({ success: false, error: errPeriodo });
+          return;
+        }
+      }
+
       // Create calendario entry
       const calendario = await prisma.calendario.create({
         data: {
@@ -3720,6 +3737,15 @@ export class PropuestasController {
         return;
       }
 
+      // CANDADO anti-desfase: validar que la fecha caiga dentro del periodo de la cara.
+      if (solicitudCaraId) {
+        const errPeriodo = await validarFechaEnPeriodoCara(solicitudCaraId, fechaInicio);
+        if (errPeriodo) {
+          res.status(400).json({ success: false, error: errPeriodo });
+          return;
+        }
+      }
+
       let calendario = await prisma.calendario.findFirst({
         where: {
           fecha_inicio: new Date(fechaInicio),
@@ -3980,6 +4006,22 @@ export class PropuestasController {
           where: { id_propuesta: parseInt(id) },
           data: { clientes_id: cliente_id_final },
         });
+
+        // CANDADO cliente: propagar el cliente TAMBIEN a la campania. Antes este
+        // flujo actualizaba solicitud/propuesta/cotizacion pero NO la campania, y
+        // esta se quedaba con el cliente viejo/generico (p.ej. el placeholder cuya
+        // razon_social es '123' y card_code/sap NULL, que luego se posteaba a SAP).
+        // Se localiza igual que el espejo de nombre_campania (cotizacion_id).
+        const cotForCliente = await prisma.cotizacion.findFirst({
+          where: { id_propuesta: parseInt(id) },
+          select: { id: true },
+        });
+        if (cotForCliente) {
+          await prisma.campania.updateMany({
+            where: { cotizacion_id: cotForCliente.id },
+            data: { cliente_id: cliente_id_final },
+          });
+        }
       }
 
       // Update cotizacion nombre_campania if provided
@@ -4262,31 +4304,63 @@ export class PropuestasController {
       const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
       const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
-      const updatedCara = await prisma.solicitudCaras.update({
-        where: { id: parseInt(caraId) },
-        data: {
-          ciudad,
-          estados,
-          tipo,
-          flujo,
-          bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
-          caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
-          nivel_socioeconomico,
-          formato,
-          costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
-          tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
-          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
-          fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
-          caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
-          caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
-          articulo,
-          descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
-          grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
-          autorizacion_dg,
-          autorizacion_dcm,
-          cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
-        },
-      });
+      // Cambio de periodo con reservas: liberar el circuito completo (cara +
+      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      const periodoCambioUp = (
+        (!!inicio_periodo && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+        (!!fin_periodo && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+      );
+
+      let updatedCara;
+      let reservasLiberadasUp = 0;
+      try {
+        updatedCara = await prisma.$transaction(async (tx) => {
+          if (periodoCambioUp) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            reservasLiberadasUp = liberadas;
+          }
+          return tx.solicitudCaras.update({
+            where: { id: parseInt(caraId) },
+            data: {
+              ciudad,
+              estados,
+              tipo,
+              flujo,
+              bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
+              caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
+              nivel_socioeconomico,
+              formato,
+              costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
+              tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
+              inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
+              fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+              caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
+              caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
+              articulo,
+              descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
+              grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
+              autorizacion_dg,
+              autorizacion_dcm,
+              cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+            },
+          });
+        });
+      } catch (e: any) {
+        res.status(400).json({ success: false, error: e?.message || 'No se pudo actualizar el circuito' });
+        return;
+      }
+
+      if (reservasLiberadasUp > 0 && currentCara.idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: parseInt(currentCara.idquote) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: reservasLiberadasUp }),
+          },
+        });
+      }
 
       // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
       // cara — el equipo pidió tenerla deshabilitada por un rato.
@@ -4467,7 +4541,15 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf: grupoRtBfCreate,
+        // Direcciones/autorización: cuando el circuito se agrega DURANTE la edición
+        // de una propuesta (modal), el front manda deferAuth=true para que la cara
+        // se persista (necesita id para reservas) PERO no se dispare la autorización
+        // todavía: no se contamina a otras caras (impar→DCM) ni se crea la tarea de
+        // autorización. Todo eso se evalúa una sola vez al dar "Guardar Cambios"
+        // (bulkUpdateCaras). Así se respeta que editar no mande a autorización.
+        deferAuth: deferAuthRaw,
       } = req.body;
+      const deferAuth = deferAuthRaw === true || deferAuthRaw === 'true';
 
       // Validar fechas obligatorias.
       if (!inicio_periodo || !fin_periodo) {
@@ -4492,13 +4574,39 @@ export class PropuestasController {
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
-      const pendCrP = await verificarCarasPendientes(id);
+      //
+      // EXCEPCIÓN pareja RT/BF: una bonificada crea su cara BF y su cara RT en la
+      // misma acción (dos POST consecutivos con el mismo grupo_rt_bf; el front crea
+      // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
+      // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
+      // está creando ahora (grupoRtBfCreate).
+      // [deferAuth] Durante la edición (modal) NO se aplica este candado: el asesor
+      // debe poder agregar VARIOS circuitos aunque los recién agregados queden
+      // 'pendiente' (su badge Pend. DG/DCM es informativo). La autorización real —y
+      // este bloqueo— se resuelve al guardar. Sin esto, el primer circuito bonificado
+      // dejaba una cara pendiente que bloqueaba agregar el segundo con "Error al guardar".
+      const pendCrP = deferAuth
+        ? { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] }
+        : await verificarCarasPendientes(id);
       if (pendCrP.tienePendientes) {
-        res.status(409).json({
-          success: false,
-          error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
-        });
-        return;
+        const grupoActualCrP = grupoRtBfCreate ? parseInt(grupoRtBfCreate) : null;
+        const idsPendientesCrP = [...new Set([...pendCrP.pendientesDg, ...pendCrP.pendientesDcm])];
+        let hayPendientesExternas = idsPendientesCrP.length > 0;
+        if (grupoActualCrP != null && idsPendientesCrP.length > 0) {
+          const pendientesRows = await prisma.solicitudCaras.findMany({
+            where: { id: { in: idsPendientesCrP } },
+            select: { grupo_rt_bf: true },
+          });
+          // Externa = pendiente que no es de la pareja RT/BF que se crea ahora.
+          hayPendientesExternas = pendientesRows.some(c => c.grupo_rt_bf !== grupoActualCrP);
+        }
+        if (hayPendientesExternas) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la propuesta tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
       }
 
       // Calculate authorization state — use BF pair's bonificacion for RT rows
@@ -4599,64 +4707,79 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
-      // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
-      // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
-      // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
-      const todasCaras = await prisma.solicitudCaras.findMany({
-        where: { idquote: id },
-        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
-      });
-      const noDigitales = todasCaras.filter(c => {
-        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
-        return !isDigital;
-      });
-      const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
-      if (totalCarasGlobal % 2 !== 0) {
-        const idsNoDigitales = noDigitales.map(c => c.id);
-        const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
-        if (carasNoP.length > 0) {
-          await prisma.solicitudCaras.updateMany({
-            where: {
-              id: { in: idsNoDigitales },
-              autorizacion_dcm: { not: 'pendiente' }
-            },
-            data: { autorizacion_dcm: 'pendiente' }
-          });
-          console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
-        }
-      }
-
-      // Check for pending authorizations and create tasks if needed
-      const autorizacion = await verificarCarasPendientes(id);
-      if (autorizacion.tienePendientes && userId) {
-        // Get solicitud_id from propuesta
-        const propuesta = await prisma.propuesta.findUnique({
-          where: { id: parseInt(id) },
-          select: { solicitud_id: true }
-        });
-
-        if (propuesta?.solicitud_id) {
-          await crearTareasAutorizacion(
-            propuesta.solicitud_id,
-            parseInt(id),
-            userId,
-            userName,
-            autorizacion.pendientesDg,
-            autorizacion.pendientesDcm,
-            'propuesta'
-          );
-        }
-      }
-      // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
-      if (userId) {
-        await reconciliarCierreTareasAutorizacion(id, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
-      }
-
-      // Build response message
       let mensaje = 'Circuito creado exitosamente';
-      if (autorizacion.tienePendientes) {
-        const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-        mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
+      // Default vacío para la respuesta cuando se difiere la autorización (deferAuth).
+      let autorizacion: { tienePendientes: boolean; pendientesDg: number[]; pendientesDcm: number[] } =
+        { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
+      // [deferAuth] Cuando el circuito se agrega durante la edición (modal), NO se
+      // dispara la autorización aquí: ni la contaminación impar→DCM a otras caras
+      // (que congelaba toda la propuesta), ni la creación de la tarea. Todo se evalúa
+      // al guardar (bulkUpdateCaras hace verificarCarasPendientes + crearTareasAutorizacion
+      // una sola vez). La cara ya quedó persistida (con id para reservas); si el usuario
+      // sale sin guardar, el front hace rollback.
+      if (!deferAuth) {
+        // Regla: si el total global de caras es impar, TODAS requieren autorización DCM
+        // (impar → DCM, alineado con calcularEstadoAutorizacion/oddCarasNeedsDcm).
+        // EXCEPCIÓN: las caras digitales (tipo='Digital' o circuitos) NO cuentan ni se ven afectadas.
+        // EXCEPCIÓN par RT/BF: al crear la BF/CF de un par (se crea ANTES que su RT), el
+        // total queda impar un instante y marcaría pendiente a OTROS circuitos, envenenando
+        // la propuesta y provocando 409 en la RT. La paridad se evalúa cuando llega la RT
+        // que completa el par (o en una cara suelta), no en la BF/CF intermedia.
+        const esBonifDePar = !!grupoRtBfCreate && (artUpperCrP.startsWith('BF') || artUpperCrP.startsWith('CF'));
+        const todasCaras = await prisma.solicitudCaras.findMany({
+          where: { idquote: id },
+          select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
+        });
+        const noDigitales = todasCaras.filter(c => {
+          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+          return !isDigital;
+        });
+        const totalCarasGlobal = noDigitales.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+        if (!esBonifDePar && totalCarasGlobal % 2 !== 0) {
+          const idsNoDigitales = noDigitales.map(c => c.id);
+          const carasNoP = noDigitales.filter(c => c.autorizacion_dcm !== 'pendiente');
+          if (carasNoP.length > 0) {
+            await prisma.solicitudCaras.updateMany({
+              where: {
+                id: { in: idsNoDigitales },
+                autorizacion_dcm: { not: 'pendiente' }
+              },
+              data: { autorizacion_dcm: 'pendiente' }
+            });
+            console.log(`[createCara] Total caras NO-digitales impar (${totalCarasGlobal}), ${carasNoP.length} caras actualizadas a pendiente DCM`);
+          }
+        }
+
+        // Check for pending authorizations and create tasks if needed
+        autorizacion = await verificarCarasPendientes(id);
+        if (autorizacion.tienePendientes && userId) {
+          // Get solicitud_id from propuesta
+          const propuesta = await prisma.propuesta.findUnique({
+            where: { id: parseInt(id) },
+            select: { solicitud_id: true }
+          });
+
+          if (propuesta?.solicitud_id) {
+            await crearTareasAutorizacion(
+              propuesta.solicitud_id,
+              parseInt(id),
+              userId,
+              userName,
+              autorizacion.pendientesDg,
+              autorizacion.pendientesDcm,
+              'propuesta'
+            );
+          }
+        }
+        // Reconciliar: cerrar tareas de autorización huérfanas si ya no hay pendientes.
+        if (userId) {
+          await reconciliarCierreTareasAutorizacion(id, undefined, autorizacion.pendientesDg, autorizacion.pendientesDcm);
+        }
+
+        if (autorizacion.tienePendientes) {
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
+        }
       }
 
       res.json({
@@ -4709,14 +4832,30 @@ export class PropuestasController {
       // Run all updates in a single transaction.
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
+      let totalReservasLiberadas = 0;
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
+        // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
+        // en el post-pass de redistribución (ya no tienen reservas activas).
+        const gruposLiberados = new Set<number>();
 
         for (const item of carasToUpdate) {
           const { caraId, data } = item;
 
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
+
+          // Cambio de periodo con reservas: liberar el circuito completo (cara +
+          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo.
+          const periodoCambioP = !!currentCara && (
+            (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+            (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+          );
+          if (periodoCambioP) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            totalReservasLiberadas += liberadas;
+            if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
+          }
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
           const decimalEqP = (a: unknown, b: unknown) =>
@@ -4830,6 +4969,7 @@ export class PropuestasController {
         const gruposRedistribuidos = new Set<number>();
         for (const result of results) {
           if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (gruposLiberados.has(result.grupo_rt_bf)) continue; // reservas liberadas por cambio de periodo
           if (!isCircuitoDigital(result.articulo || '')) continue;
           gruposRedistribuidos.add(result.grupo_rt_bf);
           try {
@@ -4844,6 +4984,44 @@ export class PropuestasController {
 
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
+
+      // Historial: reservas liberadas por cambio de periodo
+      if (totalReservasLiberadas > 0) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: parseInt(id as string) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: totalReservasLiberadas }),
+          },
+        });
+      }
+
+      // Regla global "impar → DCM": si el total de caras NO-digitales de la propuesta
+      // es impar, TODAS requieren autorización DCM. Antes vivía SOLO en createCara y
+      // se disparaba al agregar (durante la edición). Ahora que createCara la difiere
+      // (deferAuth), se evalúa AQUÍ, al guardar, que es el momento correcto. Mismo
+      // criterio que createCara (idéntico cálculo y exclusión de digitales).
+      const todasCarasBk = await prisma.solicitudCaras.findMany({
+        where: { idquote: String(id) },
+        select: { id: true, caras: true, bonificacion: true, autorizacion_dcm: true, tipo: true, articulo: true }
+      });
+      const noDigitalesBk = todasCarasBk.filter(c => {
+        const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
+        return !isDigital;
+      });
+      const totalCarasGlobalBk = noDigitalesBk.reduce((acc, c) => acc + (c.caras || 0) + (Number(c.bonificacion) || 0), 0);
+      if (totalCarasGlobalBk % 2 !== 0) {
+        const idsNoDigBk = noDigitalesBk.filter(c => c.autorizacion_dcm !== 'pendiente').map(c => c.id);
+        if (idsNoDigBk.length > 0) {
+          await prisma.solicitudCaras.updateMany({
+            where: { id: { in: idsNoDigBk }, autorizacion_dcm: { not: 'pendiente' } },
+            data: { autorizacion_dcm: 'pendiente' }
+          });
+          console.log(`[bulkUpdateCaras] Total caras NO-digitales impar (${totalCarasGlobalBk}), ${idsNoDigBk.length} caras -> pendiente DCM`);
+        }
+      }
 
       // After ALL updates: check for pending authorizations ONCE and create ONE task
       const autorizacion = await verificarCarasPendientes(String(id));
@@ -4900,6 +5078,8 @@ export class PropuestasController {
   async deleteCara(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { caraId } = req.params;
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
 
@@ -4915,6 +5095,12 @@ export class PropuestasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Snapshot antes de borrar para poder loguear qué se elimino.
+      const carasSnapshot = await prisma.solicitudCaras.findMany({
+        where: { id: { in: idsToDelete } },
+        select: { id: true, idquote: true, articulo: true, ciudad: true, formato: true, tipo: true, caras: true, costo: true, autorizacion_dg: true, autorizacion_dcm: true },
+      });
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
           where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
@@ -4924,6 +5110,21 @@ export class PropuestasController {
           where: { id: { in: idsToDelete } },
         }),
       ]);
+
+      // Log al historial de la propuesta involucrada para auditoria.
+      const propuestaId = carasSnapshot[0]?.idquote ? parseInt(carasSnapshot[0].idquote) : NaN;
+      if (!Number.isNaN(propuestaId)) {
+        await logHistorial({
+          tipo: 'Propuesta',
+          refId: propuestaId,
+          accion: `Eliminación de ${carasSnapshot.length} circuito(s) desde el modal de propuesta`,
+          usuario: userName,
+          usuarioId: userId,
+          usuarioRol: req.user?.rol,
+          origen: 'propuesta_delete_cara',
+          extras: { caras_eliminadas: carasSnapshot, eliminarGrupo },
+        });
+      }
 
       res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {

@@ -12,7 +12,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -666,6 +666,18 @@ export class CampanasController {
             c.inversion = fresh;
           }
         });
+      }
+
+      // has_post por campaña (para el filtro rápido "Con/Sin POST" del versionario,
+      // a nivel campaña — sin cargar inventario). "Tiene POST" = la campaña se marcó
+      // como ENVIADA COMPLETA a SAP (posted_to_sap = 1). NO cuenta posted_aps: ese
+      // se llena casi para toda campaña con APS y no distingue el POST real.
+      if (campanas.length > 0) {
+        const postedIds = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT id FROM campania WHERE posted_to_sap = 1`
+        ).catch(() => [] as { id: number }[]);
+        const postedSet = new Set(postedIds.map(r => Number(r.id)));
+        campanas.forEach((c: any) => { c.has_post = postedSet.has(Number(c.id)) ? 1 : 0; });
       }
 
       // Convert BigInt to Number for JSON serialization
@@ -1620,6 +1632,26 @@ export class CampanasController {
             WHERE ct.id = ${cotizacionId}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
           `;
+
+          // CANDADO anti-desfase: tras mover el periodo, liberar (soft-delete)
+          // las reservas cuyo calendario quedó FUERA de su propio periodo (sc).
+          // Antes se quedaban "tatuadas" en la catorcena vieja (bug
+          // periodo↔calendario, caso BAIT jul-2026): este flujo de campaña movía
+          // el periodo pero NO tocaba las reservas, y quedaban invisibles en su
+          // catorcena real → la cara salía "libre" y se generaba el duplicado.
+          // Solo toca las genuinamente desfasadas (misma condición que el
+          // detector de auditoria); una reserva dentro de su periodo NO se toca.
+          await prisma.$executeRaw`
+            UPDATE reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            INNER JOIN calendario cl ON cl.id = rs.calendario_id
+            SET rs.deleted_at = NOW()
+            WHERE ct.id = ${cotizacionId}
+              AND rs.deleted_at IS NULL
+              AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
+          `;
         }
       }
 
@@ -2485,6 +2517,22 @@ export class CampanasController {
         return null;
       }
 
+      // posted_aps/posted_to_sap de la campaña (columna puede no existir en prod).
+      // Un item se marca `posted` si su APS ya se posteó a SAP: la campaña entera
+      // (posted_to_sap=1) o su APS específico está en posted_aps.
+      let postedAll = false;
+      let postedApsSet = new Set<number>();
+      try {
+        const pr = await prisma.$queryRawUnsafe<{ posted_aps: string | null; posted_to_sap: number | null }[]>(
+          `SELECT posted_aps, posted_to_sap FROM campania WHERE id = ?`, campanaId
+        );
+        if (pr[0]?.posted_to_sap === 1) postedAll = true;
+        if (pr[0]?.posted_aps) {
+          const arr = JSON.parse(pr[0].posted_aps);
+          if (Array.isArray(arr)) postedApsSet = new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)));
+        }
+      } catch { /* columna ausente o JSON inválido — sin posted */ }
+
       // Calcular estatus_arte y catorcena en código
       const inventarioConEstatus = combinedArr.map((row: any) => {
         const isIM = String(row.rsv_ids).startsWith('sc_');
@@ -2550,7 +2598,10 @@ export class CampanasController {
           } catch { /* ignore parse errors */ }
         }
 
-        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+        const apsNum = Number(row.aps);
+        const posted = apsNum > 0 && (postedAll || postedApsSet.has(apsNum));
+
+        return { ...row, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales), posted };
       });
 
       // Convertir BigInt a Number para que JSON.stringify funcione
@@ -2848,15 +2899,32 @@ export class CampanasController {
         ORDER BY fecha_inicio
       `;
 
-      // Execute all 6 queries in parallel (only 6 connections instead of N*4)
-      const [sinAPSRows, conAPSRows, tareasRows, imSinAPSRows, imConAPSRows, catorcenasRows] = await Promise.all([
+      // Execute all queries in parallel. Incluye posted_aps/posted_to_sap por
+      // campaña (columna puede no existir en prod → .catch) para marcar `posted`.
+      const [sinAPSRows, conAPSRows, tareasRows, imSinAPSRows, imConAPSRows, catorcenasRows, postedRows] = await Promise.all([
         prisma.$queryRawUnsafe(sinAPSQuery, ...ids),
         prisma.$queryRawUnsafe(conAPSQuery, ...ids),
         prisma.$queryRawUnsafe(tareasQuery, ...ids),
         prisma.$queryRawUnsafe(imSinAPSQuery, ...ids),
         prisma.$queryRawUnsafe(imConAPSQuery, ...ids),
         prisma.$queryRawUnsafe(catorcenasQuery),
+        prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null; posted_to_sap: number | null }[]>(
+          `SELECT id, posted_aps, posted_to_sap FROM campania WHERE id IN (${placeholders})`, ...ids
+        ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[]),
       ]);
+
+      // campania_id → { all, apsSet } para marcar `posted` por item.
+      const postedByCampana = new Map<number, { all: boolean; apsSet: Set<number> }>();
+      for (const r of (postedRows as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])) {
+        let apsSet = new Set<number>();
+        try {
+          if (r.posted_aps) {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) apsSet = new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)));
+          }
+        } catch { /* JSON inválido — ignorar */ }
+        postedByCampana.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
 
       // ── Pre-compute catorcena ranges for binary search ──
       const catorcenaRanges = (catorcenasRows as any[]).map((cat: any) => ({
@@ -2970,7 +3038,10 @@ export class CampanasController {
         }
 
         const { campana_id, ...rest } = row;
-        return { ...rest, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales) };
+        const apsNum = Number(row.aps);
+        const postedInfo = postedByCampana.get(Number(campana_id));
+        const posted = apsNum > 0 && !!postedInfo && (postedInfo.all || postedInfo.apsSet.has(apsNum));
+        return { ...rest, estatus_arte, numero_catorcena, anio_catorcena, indicaciones_programacion, indicaciones_instalacion, caras_totales: Number(row.caras_totales), posted };
       }
 
       // Initialize result map
@@ -10533,10 +10604,44 @@ export class CampanasController {
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
       if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
-      const cara = await prisma.solicitudCaras.update({
-        where: { id: parseInt(caraId) },
-        data: updateData,
-      });
+      // Cambio de periodo con reservas: liberar el circuito completo (cara +
+      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      // Respeta candado APS: la helper lanza si el grupo tiene APS y se rechaza
+      // sin mutar el periodo.
+      const periodoCambioUpd = !!currentCaraFull && (
+        (!!data.inicio_periodo && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
+        (!!data.fin_periodo && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
+      );
+
+      let cara;
+      let reservasLiberadasUpd = 0;
+      try {
+        cara = await prisma.$transaction(async (tx) => {
+          if (periodoCambioUpd) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            reservasLiberadasUpd = liberadas;
+          }
+          return tx.solicitudCaras.update({
+            where: { id: parseInt(caraId) },
+            data: updateData,
+          });
+        });
+      } catch (e: any) {
+        res.status(400).json({ success: false, error: e?.message || 'No se pudo actualizar el circuito' });
+        return;
+      }
+
+      if (reservasLiberadasUpd > 0 && currentCara.idquote) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: parseInt(currentCara.idquote) || 0,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: reservasLiberadasUpd }),
+          },
+        });
+      }
 
       // [APAGADO TEMPORAL 2026-05-07] Auto-reserva circuito digital al editar
       // cara en campañas — el equipo pidió tenerla deshabilitada por un rato.
@@ -10743,13 +10848,32 @@ export class CampanasController {
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la campaña ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
+      //
+      // EXCEPCIÓN pareja RT/BF: una bonificada crea su cara BF y su cara RT en la
+      // misma acción (dos POST consecutivos con el mismo grupo_rt_bf; el front crea
+      // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
+      // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
+      // está creando ahora (data.grupo_rt_bf).
       const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
       if (pendCmCr.tienePendientes) {
-        res.status(409).json({
-          success: false,
-          error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
-        });
-        return;
+        const grupoActualCr = data.grupo_rt_bf ? parseInt(data.grupo_rt_bf) : null;
+        const idsPendientesCr = [...new Set([...pendCmCr.pendientesDg, ...pendCmCr.pendientesDcm])];
+        let hayPendientesExternasCm = idsPendientesCr.length > 0;
+        if (grupoActualCr != null && idsPendientesCr.length > 0) {
+          const pendientesRowsCm = await prisma.solicitudCaras.findMany({
+            where: { id: { in: idsPendientesCr } },
+            select: { grupo_rt_bf: true },
+          });
+          // Externa = pendiente que no es de la pareja RT/BF que se crea ahora.
+          hayPendientesExternasCm = pendientesRowsCm.some(c => c.grupo_rt_bf !== grupoActualCr);
+        }
+        if (hayPendientesExternasCm) {
+          res.status(409).json({
+            success: false,
+            error: 'No se puede agregar un circuito: la campaña tiene circuito(s) pendientes de autorización de dirección (DG/DCM). Espera la aprobación o rechazo antes de agregar nuevos.',
+          });
+          return;
+        }
       }
 
       // Get solicitud_id for task creation
@@ -10920,14 +11044,31 @@ export class CampanasController {
       // Run all updates in a single transaction.
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
+      let totalReservasLiberadas = 0;
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
+        // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
+        // en el post-pass de redistribución (ya no tienen reservas activas).
+        const gruposLiberados = new Set<number>();
 
         for (const item of carasToUpdate) {
           const { caraId, data } = item;
 
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
+
+          // Cambio de periodo con reservas: liberar el circuito completo (cara +
+          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo. Respeta candado APS
+          // (la helper lanza si el grupo tiene APS asignado).
+          const periodoCambioBk = !!currentCara && (
+            (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+            (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+          );
+          if (periodoCambioBk) {
+            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+            totalReservasLiberadas += liberadas;
+            if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
+          }
 
           // Decimales con toFixed(2) para evitar falsos positivos por precisión float.
           const decimalEqB = (a: unknown, b: unknown) =>
@@ -11052,6 +11193,7 @@ export class CampanasController {
         const gruposRedistribuidos = new Set<number>();
         for (const result of results) {
           if (!result.grupo_rt_bf || gruposRedistribuidos.has(result.grupo_rt_bf)) continue;
+          if (gruposLiberados.has(result.grupo_rt_bf)) continue; // reservas liberadas por cambio de periodo
           if (!isCircuitoDigital(result.articulo || '')) continue;
           gruposRedistribuidos.add(result.grupo_rt_bf);
           try {
@@ -11068,6 +11210,19 @@ export class CampanasController {
       const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });
       const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
       if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
+
+      // Historial: reservas liberadas por cambio de periodo
+      if (totalReservasLiberadas > 0 && refIdHist) {
+        await prisma.historial.create({
+          data: {
+            tipo: 'Campaña',
+            ref_id: refIdHist,
+            accion: 'Liberación de reservas por cambio de periodo',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: totalReservasLiberadas }),
+          },
+        });
+      }
 
       // After ALL updates: get idquote from first cara to check pending authorizations ONCE
       const firstCara = await prisma.solicitudCaras.findUnique({

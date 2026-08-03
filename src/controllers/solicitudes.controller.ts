@@ -3364,39 +3364,98 @@ export class SolicitudesController {
           });
         }
 
-        // Delete existing caras and recreate with authorization status
+        // Diff-based upsert de caras (fix 2026-07-29): antes se hacía
+        // "delete all + recreate", lo que borraba caras cuando el front (por
+        // cualquier bug) omitía alguna del payload. Ejemplo real: solicitud
+        // 81311 perdió las caras 16812 y 16813 en ediciones sucesivas.
+        //
+        // Ahora:
+        //   - cara con `id` que existe en oldCaras -> UPDATE en sitio
+        //   - cara con `id` no existente o sin `id` -> intenta match por clave
+        //     natural (articulo+ciudad+formato+tipo+inicio_periodo). Si match
+        //     con una old no reclamada, UPDATE; si no, CREATE.
+        //   - oldCaras que ninguna incoming reclamó -> DELETE (con log al
+        //     historial) y sus reservas se soft-delete.
         if (propuesta) {
-          // Eliminar reservas asociadas antes del deleteMany de caras
-          // (evita reservas huérfanas y conflictos fantasma al re-auto-reservar circuitos)
           const oldCaras = await tx.solicitudCaras.findMany({
             where: { idquote: propuesta.id.toString() },
-            select: {
-              id: true, articulo: true, ciudad: true, formato: true, tipo: true,
-              inicio_periodo: true, costo: true, caras: true,
-              autorizacion_dg: true, autorizacion_dcm: true,
-            },
           });
-          if (oldCaras.length > 0) {
-            await tx.reservas.deleteMany({
-              where: { solicitudCaras_id: { in: oldCaras.map(c => c.id) } },
-            });
-          }
+
           // Direcciones Aprobadas: mapa de caras VIEJAS por llave natural para
-          // poder conservar la aprobación si la edición solo sube costo/caras
-          // (la cara se borra y recrea, así que guardamos su estado previo aquí).
+          // fallback cuando el front no manda id.
           const keyCaraAuth = (c: { articulo?: string | null; ciudad?: string | null; formato?: string | null; tipo?: string | null; inicio_periodo?: Date | string | null }) => {
             const ini = c.inicio_periodo ? new Date(c.inicio_periodo).toISOString().slice(0, 10) : '';
             return [c.articulo || '', c.ciudad || '', c.formato || '', c.tipo || '', ini].join('|');
           };
-          const oldByKeyAuth = new Map<string, typeof oldCaras>();
+          const oldById = new Map<number, typeof oldCaras[number]>(oldCaras.map(c => [c.id, c]));
+          const oldByKeyRemaining = new Map<string, typeof oldCaras>();
           for (const oc of oldCaras) {
             const k = keyCaraAuth(oc);
-            if (!oldByKeyAuth.has(k)) oldByKeyAuth.set(k, []);
-            oldByKeyAuth.get(k)!.push(oc);
+            if (!oldByKeyRemaining.has(k)) oldByKeyRemaining.set(k, []);
+            oldByKeyRemaining.get(k)!.push(oc);
           }
-          await tx.solicitudCaras.deleteMany({
-            where: { idquote: propuesta.id.toString() },
-          });
+
+          // Resolver match old<->incoming (por id primero, luego por clave)
+          const claimedOldIds = new Set<number>();
+          const carasToUpdate: Array<{ oldCara: typeof oldCaras[number]; cara: any }> = [];
+          const carasToCreate: any[] = [];
+          for (const cara of caras) {
+            const incomingId = cara.id != null ? Number(cara.id) : NaN;
+            let matched: typeof oldCaras[number] | undefined;
+            if (!Number.isNaN(incomingId) && oldById.has(incomingId) && !claimedOldIds.has(incomingId)) {
+              matched = oldById.get(incomingId);
+            } else {
+              const k = keyCaraAuth({ articulo: cara.articulo, ciudad: cara.ciudad, formato: cara.formato, tipo: cara.tipo, inicio_periodo: cara.inicio_periodo });
+              const bucket = oldByKeyRemaining.get(k);
+              if (bucket) {
+                const idx = bucket.findIndex(oc => !claimedOldIds.has(oc.id));
+                if (idx >= 0) matched = bucket[idx];
+              }
+            }
+            if (matched) {
+              claimedOldIds.add(matched.id);
+              carasToUpdate.push({ oldCara: matched, cara });
+            } else {
+              carasToCreate.push(cara);
+            }
+          }
+          const idsToDelete = oldCaras.filter(oc => !claimedOldIds.has(oc.id)).map(oc => oc.id);
+
+          // Log al historial ANTES de borrar (para que quede rastro).
+          if (idsToDelete.length > 0) {
+            const carasDeleted = oldCaras.filter(oc => idsToDelete.includes(oc.id));
+            await tx.historial.create({
+              data: {
+                tipo: 'Propuesta',
+                ref_id: propuesta.id,
+                accion: `Eliminación de ${carasDeleted.length} circuito(s) en edición de solicitud`,
+                fecha_hora: new Date(),
+                detalles: JSON.stringify({
+                  usuario: userName,
+                  origen: 'update_solicitud',
+                  caras_eliminadas: carasDeleted.map(oc => ({
+                    id: oc.id,
+                    articulo: oc.articulo,
+                    ciudad: oc.ciudad,
+                    formato: oc.formato,
+                    tipo: oc.tipo,
+                    caras: oc.caras,
+                    costo: oc.costo,
+                    autorizacion_dg: oc.autorizacion_dg,
+                    autorizacion_dcm: oc.autorizacion_dcm,
+                  })),
+                }),
+              },
+            });
+            // Soft-delete de reservas de esas caras (deleted_at) y hard-delete de las caras.
+            await tx.reservas.updateMany({
+              where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
+              data: { deleted_at: new Date() },
+            });
+            await tx.solicitudCaras.deleteMany({
+              where: { id: { in: idsToDelete } },
+            });
+          }
 
           // Pre-compute BF bonificacion per grupo_rt_bf for RT auth evaluation
           const bfBonifByGrupoUpd: Record<number, number> = {};
@@ -3407,20 +3466,18 @@ export class SolicitudesController {
             }
           }
 
-          // Create new caras - use frontend authorization if provided, otherwise recalculate
-          const recreatedCaras = [];
-          for (const cara of caras) {
+          const recreatedCaras: any[] = [];
+
+          // Helper: computa autorizacion y overrides de BF/CF/CT para una cara.
+          const buildDataCara = async (cara: any, oldMatch: typeof oldCaras[number] | undefined) => {
             let autorizacion_dg = cara.autorizacion_dg || '';
             let autorizacion_dcm = cara.autorizacion_dcm || '';
-
-            // If frontend didn't send authorization, recalculate
             if (!autorizacion_dg && !autorizacion_dcm) {
               const artUpdUpper = (cara.articulo || '').toUpperCase();
               const isRtUpd = !!cara.grupo_rt_bf && !artUpdUpper.startsWith('BF') && !artUpdUpper.startsWith('CF');
               const bonifForAuthUpd = isRtUpd
                 ? (bfBonifByGrupoUpd[cara.grupo_rt_bf] || cara.bonificacion || 0)
                 : (cara.bonificacion || 0);
-
               const estadoResult = await calcularEstadoAutorizacion({
                 ciudad: cara.ciudad,
                 estado: cara.estado,
@@ -3430,17 +3487,11 @@ export class SolicitudesController {
                 bonificacion: bonifForAuthUpd,
                 costo: cara.costo,
                 tarifa_publica: cara.tarifa_publica || 0,
-                articulo: cara.articulo || null
+                articulo: cara.articulo || null,
               }, userId);
               autorizacion_dg = estadoResult.autorizacion_dg;
               autorizacion_dcm = estadoResult.autorizacion_dcm;
             }
-
-            // Direcciones Aprobadas: igual que en propuesta/campaña — si esta cara
-            // YA estaba aprobada (match contra la cara vieja por llave natural) y
-            // costo/caras NO bajan, se conserva la aprobación (sin nueva autorización).
-            const oldMatchArr = oldByKeyAuth.get(keyCaraAuth({ articulo: cara.articulo, ciudad: cara.ciudad, formato: cara.formato, tipo: cara.tipo, inicio_periodo: cara.inicio_periodo }));
-            const oldMatch = oldMatchArr && oldMatchArr.length > 0 ? oldMatchArr.shift() : undefined;
             if (oldMatch) {
               const conserved = conservarAprobacionSiIncrementa(
                 { autorizacion_dg: autorizacion_dg as any, autorizacion_dcm: autorizacion_dcm as any },
@@ -3450,15 +3501,69 @@ export class SolicitudesController {
               autorizacion_dg = conserved.autorizacion_dg;
               autorizacion_dcm = conserved.autorizacion_dcm;
             }
-
-            // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0.
             const bonifOvUpd = bonifCaraOverride(cara.articulo || articulo, cara.caras, cara.bonificacion, cara.caras_flujo, cara.caras_contraflujo);
+            return {
+              autorizacion_dg,
+              autorizacion_dcm,
+              bonifOvUpd,
+            };
+          };
+
+          // UPDATE de caras existentes reclamadas
+          for (const { oldCara, cara } of carasToUpdate) {
+            const { autorizacion_dg, autorizacion_dcm, bonifOvUpd } = await buildDataCara(cara, oldCara);
+            // Si cambia articulo, ciudad, formato, tipo o periodo -> liberar reservas (mismo criterio que propuestas bulkUpdateCaras).
+            const articuloChanged = (cara.articulo || articulo) !== oldCara.articulo;
+            const inicioChanged = new Date(cara.inicio_periodo).getTime() !== (oldCara.inicio_periodo?.getTime() || 0);
+            const finChanged = new Date(cara.fin_periodo).getTime() !== (oldCara.fin_periodo?.getTime() || 0);
+            if (articuloChanged || inicioChanged || finChanged) {
+              await tx.reservas.updateMany({
+                where: { solicitudCaras_id: oldCara.id, deleted_at: null },
+                data: { deleted_at: new Date() },
+              });
+            }
+            const updated = await tx.solicitudCaras.update({
+              where: { id: oldCara.id },
+              data: {
+                ciudad: cara.ciudad,
+                estados: cara.estado,
+                tipo: cara.tipo,
+                flujo: cara.flujo || 'Ambos',
+                bonificacion: bonifOvUpd ? bonifOvUpd.bonificacion : (cara.bonificacion || 0),
+                caras: bonifOvUpd ? bonifOvUpd.caras : cara.caras,
+                nivel_socioeconomico: cara.nivel_socioeconomico,
+                formato: cara.formato,
+                costo: cara.costo,
+                tarifa_publica: cara.tarifa_publica || 0,
+                inicio_periodo: new Date(cara.inicio_periodo),
+                fin_periodo: new Date(cara.fin_periodo),
+                caras_flujo: bonifOvUpd ? bonifOvUpd.caras_flujo : (cara.caras_flujo || 0),
+                caras_contraflujo: bonifOvUpd ? bonifOvUpd.caras_contraflujo : (cara.caras_contraflujo || 0),
+                articulo: cara.articulo || articulo,
+                descuento: cara.descuento || 0,
+                autorizacion_dg,
+                autorizacion_dcm,
+                grupo_rt_bf: cara.grupo_rt_bf || null,
+              },
+            });
+            if (cara.grupo_masivo_id) {
+              await tx.$executeRawUnsafe(
+                `UPDATE solicitudCaras SET grupo_masivo_id = ? WHERE id = ?`,
+                cara.grupo_masivo_id, updated.id
+              );
+            }
+            recreatedCaras.push(updated);
+          }
+
+          // CREATE de caras nuevas (sin id / sin match natural)
+          for (const cara of carasToCreate) {
+            const { autorizacion_dg, autorizacion_dcm, bonifOvUpd } = await buildDataCara(cara, undefined);
             const createdCara = await tx.solicitudCaras.create({
               data: {
                 idquote: propuesta.id.toString(),
                 ciudad: cara.ciudad,
                 estados: cara.estado,
-                tipo: cara.tipo, // validado al inicio del handler (Digital/Tradicional)
+                tipo: cara.tipo,
                 flujo: cara.flujo || 'Ambos',
                 bonificacion: bonifOvUpd ? bonifOvUpd.bonificacion : (cara.bonificacion || 0),
                 caras: bonifOvUpd ? bonifOvUpd.caras : cara.caras,
@@ -3980,9 +4085,17 @@ export class SolicitudesController {
   async aprobarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
-      const userName = req.user?.nombre || 'Director General Adjunto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
-      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
+      const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
+        'Administrador',
+        'DEV',
+      ];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DG' });
         return;
@@ -4004,9 +4117,17 @@ export class SolicitudesController {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { motivo } = req.body as { motivo?: string };
-      const userName = req.user?.nombre || 'Director General Adjunto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
-      const rolesPermitidos = ['Director General Adjunto', 'Administrador', 'DEV'];
+      const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
+        'Administrador',
+        'DEV',
+      ];
       if (!userRol || !rolesPermitidos.includes(userRol)) {
         res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DG' });
         return;
