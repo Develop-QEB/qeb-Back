@@ -1191,12 +1191,12 @@ export async function rechazarSolicitud(
   rechazadorNombre: string,
   comentario: string,
   tipoAutorizacion: 'dg' | 'dcm'
-): Promise<void> {
+): Promise<{ carasRechazadas: number }> {
   const columna = tipoAutorizacion === 'dg' ? 'autorizacion_dg' : 'autorizacion_dcm';
 
   // Marcar solo las caras con autorización pendiente del tipo correspondiente como rechazadas
   // NO cambiamos el status de la solicitud, solo de las caras
-  await prisma.solicitudCaras.updateMany({
+  const updateResult = await prisma.solicitudCaras.updateMany({
     where: {
       idquote,
       [columna]: 'pendiente'
@@ -1205,6 +1205,12 @@ export async function rechazarSolicitud(
       [columna]: 'rechazado'
     }
   });
+
+  // Idempotencia: si no habia caras pendientes, este es un retry (doble-click).
+  // No cambiar tareas ni crear notificaciones — el primer request ya lo hizo.
+  if (updateResult.count === 0) {
+    return { carasRechazadas: 0 };
+  }
 
   // Marcar solo la tarea del tipo específico como rechazada
   const tipoTarea = tipoAutorizacion === 'dg' ? 'Autorización DG' : 'Autorización DCM';
@@ -1309,6 +1315,8 @@ export async function rechazarSolicitud(
       }
     }
   }
+
+  return { carasRechazadas: updateResult.count };
 }
 
 /**
