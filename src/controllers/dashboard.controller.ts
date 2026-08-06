@@ -753,11 +753,20 @@ export class DashboardController {
             }),
           ]);
 
-          // Buscar catorcena actual por separado
+          // Buscar catorcena actual por separado. Dos ajustes vs comparar con
+          // `new Date()` directo:
+          //  1. Se compara contra una FECHA a medianoche UTC (igual que se
+          //     guardan fecha_inicio/fecha_fin), no contra el timestamp.
+          //  2. Las fechas de la tabla estan corridas +1 dia respecto a la
+          //     operacion real (la catorcena inicia en lunes pero la tabla
+          //     guarda el martes), asi que la vigente es la que contiene
+          //     MANANA en terminos de la tabla.
+          const ahora = new Date();
+          const ref = new Date(Date.UTC(ahora.getFullYear(), ahora.getMonth(), ahora.getDate() + 1));
           const catorcenaActual = await prisma.catorcenas.findFirst({
             where: {
-              fecha_inicio: { lte: new Date() },
-              fecha_fin: { gte: new Date() },
+              fecha_inicio: { lte: ref },
+              fecha_fin: { gte: ref },
             },
           });
 
@@ -946,19 +955,21 @@ export class DashboardController {
     }
   }
 
-  // Widget: estado de POST a SAP de las campañas aprobadas (cached 10min).
-  // Divide en "pendientes por postear" vs "posteadas", cada una con su conteo
-  // y su monto ($). Definiciones (mismas que usa el resto del sistema):
-  //   - Universo: campañas con status != 'inactiva' (las 'inactiva' son
-  //     propuestas no aprobadas — no aplican a POST).
-  //   - Posteada: posted_to_sap = 1 (marca la campaña entera). Una campaña con
-  //     POST parcial (algunos posted_aps pero posted_to_sap=0) sigue contando
-  //     como PENDIENTE porque aún tiene caras sin postear.
-  //   - Monto: SUM(solicitudCaras.costo) de la propuesta ligada (misma fuente
-  //     que la inversión del listado de campañas).
+  // Widget: estado de POST a SAP (cached 10min). Cuenta a nivel CIRCUITO
+  // (fila de solicitudCaras): una campaña puede tener unos circuitos ya
+  // posteados y otros no, y cada circuito cae en su propio bucket con su monto.
+  // Definiciones (misma regla de "posted" que CampanaDetailPage y el reporte
+  // de catorcena en campanas.controller, pero por circuito):
+  //   - Universo: circuitos de campañas con status != 'inactiva' (las
+  //     'inactiva' son propuestas no aprobadas — no aplican a POST).
+  //   - Circuito posteado: posted_to_sap = 1 (marca manual de campaña
+  //     completa), o todos los APS del circuito (reservas.APS de sus reservas)
+  //     están en posted_aps. Circuito sin APS asignados cuenta como PENDIENTE.
+  //   - Monto: solicitudCaras.costo (misma fuente que la inversión del listado
+  //     de campañas), prorrateado por días de solape cuando hay periodo activo.
   // Respeta el filtro de periodo del dashboard (catorcena_id o fecha_inicio/
-  // fecha_fin) por solape de fechas de la campaña. Los filtros de inventario
-  // (estado/plaza/formato/nse/tipo) no aplican aquí — el POST es a nivel campaña.
+  // fecha_fin) por solape de fechas de campaña y de circuito. Los filtros de
+  // inventario (estado/plaza/formato/nse/tipo) no aplican aquí.
   async getPosteoStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { catorcena_id, fecha_inicio, fecha_fin } = req.query;
@@ -983,46 +994,111 @@ export class DashboardController {
         const periodoClause = periodoActivo ? 'AND c.fecha_inicio <= ? AND c.fecha_fin >= ?' : '';
         const periodoParams = periodoActivo ? [ff, fi] : [];
 
-        // Monto: cuando hay periodo activo se prorratea cada circuito por los
-        // días que solapan con el rango (misma fórmula que el listado de
-        // campañas → así el $ del dashboard cuadra con lo que se ve por
-        // catorcena). Sin periodo, suma el total completo de la campaña.
-        const montoSubquery = periodoActivo
-          ? `SELECT sc.idquote AS idquote, SUM(
-               sc.costo
-               * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
-               / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
-             ) AS monto
-             FROM solicitudCaras sc
-             WHERE sc.inicio_periodo <= ? AND sc.fin_periodo >= ?
-             GROUP BY sc.idquote`
-          : `SELECT sc.idquote AS idquote, SUM(sc.costo) AS monto
-             FROM solicitudCaras sc
-             GROUP BY sc.idquote`;
-        const montoParams = periodoActivo ? [ff, fi, ff, fi] : [];
+        // Circuitos (filas de solicitudCaras) de campañas activas, con monto
+        // prorrateado por los días que solapan con el rango (misma fórmula que
+        // el listado de campañas → así el $ del dashboard cuadra con lo que se
+        // ve por catorcena). Sin periodo, el costo completo del circuito.
+        const circuitosSql = periodoActivo
+          ? `
+            SELECT c.id AS campania_id, sc.id AS sc_id,
+                   sc.costo
+                   * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                   / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1) AS monto
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE c.status != 'inactiva'
+              AND c.fecha_inicio <= ? AND c.fecha_fin >= ?
+              AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?
+            `
+          : `
+            SELECT c.id AS campania_id, sc.id AS sc_id, sc.costo AS monto
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE c.status != 'inactiva'
+            `;
+        const circuitosParams = periodoActivo ? [ff, fi, ff, fi, ff, fi] : [];
 
-        type Row = { posted_to_sap: number | null; monto: number };
-        // Orden de params = placeholders en el SQL final: primero los de la
-        // subquery de monto (va en el LEFT JOIN), luego los del periodoClause.
-        const rows = await prisma.$queryRawUnsafe<Row[]>(
-          `
-          SELECT c.posted_to_sap AS posted_to_sap,
-                 COALESCE(inv.monto, 0) AS monto
-          FROM campania c
-          INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
-          LEFT JOIN (${montoSubquery}) inv
-            ON inv.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-          WHERE c.status != 'inactiva'
-            ${periodoClause}
-          `,
-          ...montoParams,
-          ...periodoParams,
-        );
+        type CircuitoRow = { campania_id: number; sc_id: number; monto: number };
+        type ApsRow = { sc_id: number; aps: number };
+        const [circuitos, apsRows, campRows, postedApsRows] = await Promise.all([
+          prisma.$queryRawUnsafe<CircuitoRow[]>(circuitosSql, ...circuitosParams),
+          // APS de cada circuito (reservas.APS de sus reservas). Contra esto se
+          // compara posted_aps para saber si el circuito ya se posteó.
+          prisma.$queryRawUnsafe<ApsRow[]>(
+            `
+            SELECT sc.id AS sc_id, rsv.APS AS aps
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+            WHERE c.status != 'inactiva'
+              AND rsv.deleted_at IS NULL
+              AND rsv.APS IS NOT NULL
+              ${periodoClause}
+            GROUP BY sc.id, rsv.APS
+            `,
+            ...periodoParams,
+          ),
+          // posted_to_sap por campaña (columna estable, sin catch).
+          prisma.$queryRawUnsafe<{ id: number; posted_to_sap: number | null }[]>(
+            `SELECT c.id AS id, c.posted_to_sap AS posted_to_sap
+             FROM campania c
+             WHERE c.status != 'inactiva'
+               ${periodoClause}`,
+            ...periodoParams,
+          ),
+          // posted_aps en query aparte con catch: la columna puede no existir
+          // en producción (mismo patrón que campanas.controller).
+          prisma.$queryRawUnsafe<{ id: number; posted_aps: string | null }[]>(
+            `SELECT c.id AS id, c.posted_aps AS posted_aps
+             FROM campania c
+             WHERE c.status != 'inactiva'
+               ${periodoClause}`,
+            ...periodoParams,
+          ).catch(() => [] as { id: number; posted_aps: string | null }[]),
+        ]);
+
+        const apsByCircuito = new Map<number, Set<number>>();
+        for (const r of apsRows) {
+          const k = Number(r.sc_id);
+          const aps = Number(r.aps);
+          if (isNaN(aps)) continue;
+          const set = apsByCircuito.get(k);
+          if (set) set.add(aps); else apsByCircuito.set(k, new Set([aps]));
+        }
+
+        const postedAllByCampana = new Set<number>();
+        for (const r of campRows) {
+          if (r.posted_to_sap === 1) postedAllByCampana.add(Number(r.id));
+        }
+
+        const postedApsByCampana = new Map<number, Set<number>>();
+        for (const r of postedApsRows) {
+          if (!r.posted_aps) continue;
+          try {
+            const arr = JSON.parse(r.posted_aps);
+            if (Array.isArray(arr)) {
+              postedApsByCampana.set(
+                Number(r.id),
+                new Set(arr.map((a: any) => Number(a)).filter((n: number) => !isNaN(n)))
+              );
+            }
+          } catch { /* JSON inválido — sin posted por APS */ }
+        }
 
         let pendientesCount = 0, pendientesMonto = 0, posteadasCount = 0, posteadasMonto = 0;
-        for (const r of rows) {
+        for (const r of circuitos) {
           const monto = Number(r.monto) || 0;
-          if (r.posted_to_sap === 1) {
+          const apsSet = apsByCircuito.get(Number(r.sc_id));
+          const postedSet = postedApsByCampana.get(Number(r.campania_id));
+          const postedByAps = !!apsSet && apsSet.size > 0 && !!postedSet &&
+            [...apsSet].every((a) => postedSet.has(a));
+          if (postedAllByCampana.has(Number(r.campania_id)) || postedByAps) {
             posteadasCount++;
             posteadasMonto += monto;
           } else {
