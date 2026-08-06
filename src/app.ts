@@ -6,6 +6,7 @@ import path from 'path';
 import routes from './routes';
 import { errorMiddleware, notFoundMiddleware } from './middleware/error.middleware';
 import { maintenanceGuard } from './middleware/maintenance.middleware';
+import { requestTimeout } from './middleware/timeout.middleware';
 
 const app = express();
 
@@ -93,6 +94,9 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Pragma', 'no-cache');
   next();
 });
+// Timeout por ruta: 503 recuperable en vez de requests colgadas acumulándose
+// cuando la BD se satura (ver timeout.middleware.ts).
+app.use('/api', requestTimeout);
 // Guard de mantenimiento programado. Salta /auth/* (login/refresh/logout/etc)
 // y /public/* (vista de propuesta para clientes). Bloquea el resto si el rol
 // del JWT no es DEV o de Trafico.

@@ -11,6 +11,8 @@ interface CacheEntry<T> {
 class MemoryCache {
   private cache: Map<string, CacheEntry<unknown>> = new Map();
   private cleanupInterval: NodeJS.Timeout | null = null;
+  // Promesas en vuelo por llave (single-flight): ver getOrSet.
+  private inflight: Map<string, Promise<unknown>> = new Map();
 
   constructor() {
     // Limpiar entradas expiradas cada 5 minutos
@@ -90,7 +92,18 @@ class MemoryCache {
   }
 
   /**
-   * Obtener o calcular valor (helper para uso común)
+   * Obtener o calcular valor (helper para uso común), con single-flight:
+   * si N llamadas concurrentes piden la misma llave con cache frío, solo la
+   * PRIMERA ejecuta el fetcher; las demás esperan y comparten su resultado.
+   *
+   * Antes cada MISS concurrente corría la query pesada por su cuenta (cache
+   * stampede): al expirar el cache del dashboard con varios usuarios
+   * conectados, la misma query de ~10s corría 2-5 veces en paralelo y
+   * contribuía a saturar el pool (caídas de main con CPU 100%).
+   *
+   * Si el fetcher falla, la promesa se limpia para que el siguiente intento
+   * reintente (los que ya esperaban reciben el error, sin cachearlo).
+   *
    * @param key Clave del cache
    * @param fetcher Función para obtener el valor si no está en cache
    * @param ttlMs Tiempo de vida en milisegundos
@@ -106,10 +119,24 @@ class MemoryCache {
       return cached;
     }
 
+    const pending = this.inflight.get(key) as Promise<T> | undefined;
+    if (pending) {
+      console.log(`[Cache] JOIN: ${key}`);
+      return pending;
+    }
+
     console.log(`[Cache] MISS: ${key}`);
-    const data = await fetcher();
-    this.set(key, data, ttlMs);
-    return data;
+    const promise = (async () => {
+      try {
+        const data = await fetcher();
+        this.set(key, data, ttlMs);
+        return data;
+      } finally {
+        this.inflight.delete(key);
+      }
+    })();
+    this.inflight.set(key, promise);
+    return promise;
   }
 
   /**

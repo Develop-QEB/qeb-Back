@@ -2301,33 +2301,11 @@ export class SolicitudesController {
           }
         }
 
-        // Regla: si el total global de caras NO-digitales es impar, todas las
-        // NO-digitales requieren autorización DCM (impar → DCM, alineado con
-        // calcularEstadoAutorizacion/oddCarasNeedsDcm). Los digitales/circuitos quedan exentos.
-        const noDigitalesPayload = caras.filter((c: any) => {
-          const isDigital = (c.tipo || '').toLowerCase() === 'digital' || isCircuitoDigital(c.articulo);
-          return !isDigital;
-        });
-        const totalCarasGlobal = noDigitalesPayload.reduce(
-          (acc: number, c: any) => acc + (c.caras || 0) + (c.bonificacion || 0),
-          0
-        );
-        if (totalCarasGlobal % 2 !== 0) {
-          // Identificar las caras creadas que son NO-digitales
-          const isCaraNoDigital = (cara: any) => {
-            const tipo = (cara.tipo || '').toLowerCase();
-            return tipo !== 'digital' && !isCircuitoDigital(cara.articulo);
-          };
-          for (const createdCara of createdCaras) {
-            if (createdCara.autorizacion_dcm !== 'pendiente' && isCaraNoDigital(createdCara)) {
-              await tx.solicitudCaras.update({
-                where: { id: createdCara.id },
-                data: { autorizacion_dcm: 'pendiente' },
-              });
-            }
-          }
-          console.log(`[create] Total caras NO-digitales impar (${totalCarasGlobal}), tradicionales actualizadas a pendiente DCM`);
-        }
+        // [Regla GLOBAL de paridad ELIMINADA] Antes: si el total de caras NO-digitales
+        // de TODA la solicitud era impar, se mandaban todas las tradicionales a DCM.
+        // La oddness se evalúa AHORA solo POR CIRCUITO en calcularEstadoAutorizacion
+        // (renta + bonificación del par), igual que en propuestas/campañas. Ej: 69+1=70
+        // = PAR → no va a DCM por impar.
 
         return {
           solicitud,
