@@ -17,6 +17,7 @@ const getAllowedOrigins = (): string[] => {
     'https://front-qeb-pi.vercel.app',
     'https://front-16yzokren-qeb.vercel.app',
     'https://app.qeb.mx',
+    'https://jos.qeb.mx',
   ];
 
   const envUrl = process.env.FRONTEND_URL;
