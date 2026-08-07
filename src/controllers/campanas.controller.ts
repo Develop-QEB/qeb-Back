@@ -9118,7 +9118,7 @@ export class CampanasController {
       const campaniaIdsCat = [...new Set(scRows.map(s => Number(s.campania_id)).filter(Boolean))];
       const phCamp = campaniaIdsCat.map(() => '?').join(',');
 
-      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr, postedRows] = await Promise.all([
+      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr, postedRows, postLogRows] = await Promise.all([
         prisma.$queryRawUnsafe<ResRow[]>(
           `SELECT
              rsv.id AS rsv_id,
@@ -9154,6 +9154,16 @@ export class CampanasController {
               ...campaniaIdsCat
             ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])
           : Promise.resolve([] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[]),
+        // campania_post_log: BD SAP congelada por (campania, aps) al postear.
+        // La tabla puede no existir en algún ambiente → catch a [].
+        campaniaIdsCat.length > 0
+          ? prisma.$queryRawUnsafe<{ campania_id: number; aps: number; sap_database: string | null }[]>(
+              `SELECT campania_id, aps, sap_database FROM campania_post_log
+               WHERE success = 1 AND sap_database IS NOT NULL AND campania_id IN (${phCamp})
+               ORDER BY posted_at DESC`,
+              ...campaniaIdsCat
+            ).catch(() => [] as { campania_id: number; aps: number; sap_database: string | null }[])
+          : Promise.resolve([] as { campania_id: number; aps: number; sap_database: string | null }[]),
       ]);
 
       // municipio → plaza canónica (toma la primera por orden alfabético, igual
@@ -9174,6 +9184,16 @@ export class CampanasController {
           }
         } catch { /* JSON inválido — ignorar */ }
         postedByCampana.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
+
+      // (campania_id, aps) → BD SAP del POST (snapshot). Primero = más reciente
+      // (ORDER BY posted_at DESC). El circuito hereda la BD de su APS posteado,
+      // independiente del cliente/BD actual de la campaña (por eso "congelado").
+      const postLogSapByCampAps = new Map<string, string>();
+      for (const p of postLogRows) {
+        if (!p.sap_database) continue;
+        const key = `${Number(p.campania_id)}::${Number(p.aps)}`;
+        if (!postLogSapByCampAps.has(key)) postLogSapByCampAps.set(key, p.sap_database);
       }
 
       // Index reservas por solicitudCaras_id
@@ -9300,6 +9320,15 @@ export class CampanasController {
           (apsList.length > 0 && apsList.every(a => postedInfo.apsSet.has(Number(a))))
         );
 
+        // BD SAP CONGELADA a la que se posteó el circuito (por su APS). Vacío si el
+        // circuito aún no tiene POST. Una misma campaña puede tener 2 bases → se unen.
+        const bdSapPostSet = new Set<string>();
+        for (const a of apsList) {
+          const v = postLogSapByCampAps.get(`${Number(sc.campania_id)}::${Number(a)}`);
+          if (v) bdSapPostSet.add(v);
+        }
+        const bd_sap_post = bdSapPostSet.size === 0 ? null : [...bdSapPostSet].sort().join('/');
+
         const base = {
           plaza,
           tipo: sc.formato,
@@ -9315,6 +9344,7 @@ export class CampanasController {
           marca: cliente?.T2_U_Marca ?? null,
           cuic: cliente?.CUIC != null ? Number(cliente.CUIC) : null,
           sap_database,
+          bd_sap_post, // BD SAP congelada del POST (por circuito); null si sin post
           unidad_negocio: sc.unidad_negocio,
           campania: sc.campania_nombre,
           numero_articulo: sc.articulo,
@@ -9481,6 +9511,22 @@ export class CampanasController {
         postedByCampanaInvian.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
       }
 
+      // BD SAP congelada por (campania, aps) del POST — igual criterio que CAT.
+      const postLogRowsInvian = campIdsInvian.length > 0
+        ? await prisma.$queryRawUnsafe<{ campania_id: number; aps: number; sap_database: string | null }[]>(
+            `SELECT campania_id, aps, sap_database FROM campania_post_log
+             WHERE success = 1 AND sap_database IS NOT NULL AND campania_id IN (${phCampInvian})
+             ORDER BY posted_at DESC`,
+            ...campIdsInvian
+          ).catch(() => [] as { campania_id: number; aps: number; sap_database: string | null }[])
+        : [];
+      const postLogSapByCampApsInvian = new Map<string, string>();
+      for (const p of postLogRowsInvian) {
+        if (!p.sap_database) continue;
+        const key = `${Number(p.campania_id)}::${Number(p.aps)}`;
+        if (!postLogSapByCampApsInvian.has(key)) postLogSapByCampApsInvian.set(key, p.sap_database);
+      }
+
       // PASO 3: Pre-fetch clientes (sólo los relevantes), catorcenas y
       // propuestas. Las usamos en JS para evitar JOINs costosos: cliente con
       // OR (cliente.id OR cliente.CUIC mata el índice y dispara fullscan),
@@ -9634,6 +9680,11 @@ export class CampanasController {
         const apsRowNum = r.rsv_aps != null ? Number(r.rsv_aps) : null;
         const posted = !!postedInfoI && (postedInfoI.all || (apsRowNum != null && postedInfoI.apsSet.has(apsRowNum)));
 
+        // BD SAP congelada del POST de este circuito (por su APS). Vacío si sin post.
+        const bd_sap_post = (camp?.id != null && apsRowNum != null)
+          ? (postLogSapByCampApsInvian.get(`${Number(camp.id)}::${apsRowNum}`) ?? null)
+          : null;
+
         return {
           Campania: camp?.nombre || null,
           Anunciante: cliente?.T1_U_Cliente || null,
@@ -9664,6 +9715,7 @@ export class CampanasController {
           formato: r.sc_formato ? String(r.sc_formato) : null,
           tipo_periodo: camp?.tipo_periodo || 'catorcena',
           sap_database: cliente?.sap_database || null,
+          bd_sap_post, // BD SAP congelada del POST (por circuito); null si sin post
           TipoDistribucion: tipoDist,
           Reproducciones: null,
           fecha_inicio: r.inicio_periodo,
