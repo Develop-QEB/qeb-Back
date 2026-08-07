@@ -3695,57 +3695,60 @@ export class CampanasController {
   async removeAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { reservaIds } = req.body;
+      const { reservaIds, solicitudCarasIds } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const campanaId = id ? parseInt(id) : null;
 
-      if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
+      // reservaIds: reservas normales (una fila puede agrupar varias). solicitudCarasIds:
+      // items IM (Impresión) que en la lista van como "sc_<caraId>" y NO tienen rsv id
+      // directo → se limpian por cara. Antes solo se aceptaba reservaIds y el front
+      // hacía parseInt() sobre "sc_..."/"a,b,c" → NaN / se perdían ids (ticket 80531/80969).
+      const rIds = Array.isArray(reservaIds) ? reservaIds.map(Number).filter(n => Number.isFinite(n)) : [];
+      const scIds = Array.isArray(solicitudCarasIds) ? solicitudCarasIds.map(Number).filter(n => Number.isFinite(n)) : [];
+
+      if (rIds.length === 0 && scIds.length === 0) {
         res.status(400).json({
           success: false,
-          error: 'Se requiere un array de reservaIds',
+          error: 'Se requiere reservaIds o solicitudCarasIds',
         });
         return;
       }
 
-      console.log('removeAPS - reservaIds recibidos:', reservaIds);
+      console.log('removeAPS - reservaIds:', rIds, '| solicitudCarasIds:', scIds);
 
-      // Obtener los grupo_completo_id de las reservas seleccionadas
-      const placeholders = reservaIds.map(() => '?').join(',');
+      let totalAffected = 0;
 
-      const gruposQuery = `
-        SELECT DISTINCT grupo_completo_id
-        FROM reservas
-        WHERE id IN (${placeholders})
-        AND grupo_completo_id IS NOT NULL
-      `;
+      // Reservas normales (por id) + su grupo_completo.
+      if (rIds.length > 0) {
+        const placeholders = rIds.map(() => '?').join(',');
+        const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(
+          `SELECT DISTINCT grupo_completo_id FROM reservas WHERE id IN (${placeholders}) AND grupo_completo_id IS NOT NULL`,
+          ...rIds
+        );
+        const grupoIds = grupos.map(g => g.grupo_completo_id);
 
-      const grupos = await prisma.$queryRawUnsafe<{ grupo_completo_id: number }[]>(gruposQuery, ...reservaIds);
-      const grupoIds = grupos.map(g => g.grupo_completo_id);
-      console.log('removeAPS - grupos encontrados:', grupoIds);
+        const affDirect = await prisma.$executeRawUnsafe(
+          `UPDATE reservas SET APS = NULL WHERE id IN (${placeholders})`, ...rIds);
+        totalAffected += Number(affDirect) || 0;
 
-      // Actualizar reservas directamente seleccionadas (poner APS = NULL)
-      const updateDirectQuery = `
-        UPDATE reservas
-        SET APS = NULL
-        WHERE id IN (${placeholders})
-      `;
-
-      await prisma.$executeRawUnsafe(updateDirectQuery, ...reservaIds);
-      console.log('removeAPS - actualizadas reservas directas');
-
-      // Actualizar reservas del mismo grupo_completo (si hay grupos)
-      if (grupoIds.length > 0) {
-        const grupoPlaceholders = grupoIds.map(() => '?').join(',');
-        const updateGruposQuery = `
-          UPDATE reservas
-          SET APS = NULL
-          WHERE grupo_completo_id IN (${grupoPlaceholders})
-        `;
-
-        await prisma.$executeRawUnsafe(updateGruposQuery, ...grupoIds);
-        console.log('removeAPS - actualizadas reservas de grupos');
+        if (grupoIds.length > 0) {
+          const grupoPlaceholders = grupoIds.map(() => '?').join(',');
+          const affGrupos = await prisma.$executeRawUnsafe(
+            `UPDATE reservas SET APS = NULL WHERE grupo_completo_id IN (${grupoPlaceholders})`, ...grupoIds);
+          totalAffected += Number(affGrupos) || 0;
+        }
       }
+
+      // IM (Impresión) / items sin rsv id directo: limpiar APS por cara.
+      if (scIds.length > 0) {
+        const scPlaceholders = scIds.map(() => '?').join(',');
+        const affSc = await prisma.$executeRawUnsafe(
+          `UPDATE reservas SET APS = NULL WHERE solicitudCaras_id IN (${scPlaceholders}) AND APS IS NOT NULL`,
+          ...scIds);
+        totalAffected += Number(affSc) || 0;
+      }
+      console.log('removeAPS - filas afectadas:', totalAffected);
 
       // Crear notificaciones para usuarios involucrados
       if (campanaId) {
@@ -3778,7 +3781,7 @@ export class CampanasController {
                 await prisma.tareas.create({
                   data: {
                     titulo: 'APS removido de reservas',
-                    descripcion: `${userName} ha removido APS de ${reservaIds.length} reserva(s) en la campaña "${campana.nombre || campanaId}"`,
+                    descripcion: `${userName} ha removido APS de ${totalAffected} reserva(s) en la campaña "${campana.nombre || campanaId}"`,
                     tipo: 'Notificación',
                     estatus: 'Pendiente',
                     id_responsable: responsableId,
@@ -3800,7 +3803,7 @@ export class CampanasController {
                   ref_id: campanaId,
                   accion: 'Remoción de APS',
                   fecha_hora: now,
-                  detalles: `${userName} removió APS de ${reservaIds.length} reserva(s)`,
+                  detalles: `${userName} removió APS de ${totalAffected} reserva(s)`,
                 },
               });
             }
@@ -3811,8 +3814,8 @@ export class CampanasController {
       res.json({
         success: true,
         data: {
-          message: `APS eliminado de ${reservaIds.length} reserva(s)`,
-          affected: reservaIds.length,
+          message: `APS eliminado de ${totalAffected} reserva(s)`,
+          affected: totalAffected,
         },
       });
     } catch (error) {
