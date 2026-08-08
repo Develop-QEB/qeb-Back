@@ -239,8 +239,10 @@ export class UsuariosController {
 
       // El rol DEV no se puede asignar ni quitar desde el screen de usuarios
       // (politica: nadie). Si se requiere cambiar, hacerlo via DB directamente.
+      // Nota: isSettingDev solo aplica cuando el usuario NO era DEV, para permitir
+      // editar otros campos (nombre, email, area) de un DEV existente sin bloquear.
       if (rol !== undefined) {
-        const isSettingDev = rol === 'DEV';
+        const isSettingDev = rol === 'DEV' && usuario.user_role !== 'DEV';
         const isRemovingDev = usuario.user_role === 'DEV' && rol !== 'DEV';
         if (isSettingDev || isRemovingDev) {
           res.status(403).json({
