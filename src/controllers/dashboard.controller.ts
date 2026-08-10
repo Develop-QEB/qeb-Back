@@ -125,18 +125,25 @@ async function resolveCalendarioClauseSql(params: InventoryDetailParams): Promis
 
   if (!fechaInicio || !fechaFin) return '';
 
+  // Solo lo CONTENIDO en el periodo filtrado: calendarios/catorcenas cuyo
+  // inicio y fin caen completos dentro del rango. Con una catorcena
+  // seleccionada equivale a coincidencia exacta (nada mas cabe completo);
+  // una ocupacion que solo solapa (p.ej. mensual sobre una catorcena) NO
+  // se muestra.
   const [calendarios, catorcenasMatch] = await Promise.all([
     prisma.calendario.findMany({
-      where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      where: { deleted_at: null, fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
       select: { id: true },
     }),
     prisma.catorcenas.findMany({
-      where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      where: { fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
       select: { id: true },
     }),
   ]);
   const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
-  if (allIds.length === 0) return '';
+  // Con periodo activo y sin calendarios que coincidan, NO mostrar ninguna
+  // reserva (antes se devolvia '' y eso dejaba pasar todo el historico).
+  if (allIds.length === 0) return 'AND rsv.calendario_id IN (-1)';
   return `AND rsv.calendario_id IN (${allIds.join(',')})`;
 }
 
@@ -380,13 +387,15 @@ export class DashboardController {
         inventario_id: { in: espacioIds },
       };
 
-      // Si hay filtro de fecha, buscar reservas en calendarios que coincidan
+      // Si hay filtro de fecha, buscar reservas en calendarios contenidos
+      // completos en el periodo (no por solape). Con una catorcena equivale
+      // a coincidencia exacta.
       if (fechaInicio && fechaFin) {
         const calendarios = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            fecha_inicio: { lte: fechaFin },
-            fecha_fin: { gte: fechaInicio },
+            fecha_inicio: { gte: fechaInicio },
+            fecha_fin: { lte: fechaFin },
           },
           select: { id: true },
         });
@@ -609,12 +618,14 @@ export class DashboardController {
         inventario_id: { in: espacioIds },
       };
 
+      // Solo calendarios contenidos completos en el periodo (no solape) —
+      // mismo criterio que getStats.
       if (fechaInicio && fechaFin) {
         const calendarios = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            fecha_inicio: { lte: fechaFin },
-            fecha_fin: { gte: fechaInicio },
+            fecha_inicio: { gte: fechaInicio },
+            fecha_fin: { lte: fechaFin },
           },
           select: { id: true },
         });
@@ -1415,19 +1426,23 @@ export class DashboardController {
     }
 
     let calendarioClause = '';
+    // Solo calendarios contenidos completos en el periodo (no solape) —
+    // mismo criterio que resolveCalendarioClauseSql.
     if (fechaInicio && fechaFin) {
       const [calendarios, catorcenasMatch] = await Promise.all([
         prisma.calendario.findMany({
-          where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          where: { deleted_at: null, fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
           select: { id: true },
         }),
         prisma.catorcenas.findMany({
-          where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          where: { fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
           select: { id: true },
         }),
       ]);
       const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
-      if (allIds.length > 0) calendarioClause = `AND rsv.calendario_id IN (${allIds.join(',')})`;
+      calendarioClause = allIds.length > 0
+        ? `AND rsv.calendario_id IN (${allIds.join(',')})`
+        : 'AND rsv.calendario_id IN (-1)';
     }
 
     type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };
