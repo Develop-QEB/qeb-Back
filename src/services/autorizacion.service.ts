@@ -570,22 +570,17 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
 
   console.log('[verificarCarasPendientes] Caras encontradas:', caras);
 
-  // Caras en estado 'correccion' — significa que el asesor esta reenviando
-  // tras corrección del Gerente Comercial. Se transicionan a 'pendiente' aqui
-  // para que crearTareasAutorizacion las tome y cree la nueva Filtro DG.
-  // Feedback Jos 2026-07-20 — el circuito se quedaba atorado en 'correccion'.
-  const enCorreccion = caras.filter(c => c.autorizacion_dg === 'correccion').map(c => c.id);
-  if (enCorreccion.length > 0) {
-    console.log('[verificarCarasPendientes] Transitionando', enCorreccion.length, 'caras correccion → pendiente');
-    await prisma.solicitudCaras.updateMany({
-      where: { id: { in: enCorreccion } },
-      data: { autorizacion_dg: 'pendiente' },
-    });
-    // Ajustar snapshot local
-    caras.forEach(c => {
-      if (enCorreccion.includes(c.id)) c.autorizacion_dg = 'pendiente';
-    });
-  }
+  // [2026-08-11] IMPORTANTE: esta función es de SOLO LECTURA y se invoca en MUCHOS
+  // flujos (abrir la solicitud, cambiar estatus, guardar, sockets, etc.). Antes tenía
+  // aquí un side-effect que transicionaba las caras 'correccion' → 'pendiente' con un
+  // updateMany (commit 4cdd7ac, feedback Jos 2026-07-20, para que el reenvío creara la
+  // nueva Filtro DG). Pero al correr en cualquier consulta, revertía el estado
+  // "corrección" ANTES de que el asesor reenviara → el circuito quedaba "Pend. DG"
+  // bloqueado y no se podía corregir (caso Campaña 81406). La transición se movió al
+  // MOMENTO CORRECTO: cuando el asesor REENVÍA (guarda la cara), en el recálculo de
+  // updateCara/bulkUpdateCaras (que ya trata 'correccion' como disparador de recálculo,
+  // igual que 'rechazado'). Aquí NO se escribe nada. Las caras 'correccion' no cuentan
+  // como pendientes DG (están esperando al asesor), que es justo lo correcto.
 
   // Caras que tienen DG pendiente
   const pendientesDg = caras
