@@ -4269,9 +4269,12 @@ export class PropuestasController {
       let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
       let autorizacion_dcm = currentCara.autorizacion_dcm || 'aprobado';
 
-      // Recalcular si campos de auth cambiaron, O si la cara está rechazada
-      // (para que al editar un circuito rechazado se resetee a pendiente/aprobado)
-      const wasRejected = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+      // Recalcular si campos de auth cambiaron, O si la cara está rechazada / en corrección
+      // (al editar o REENVIAR un circuito rechazado o devuelto a corrección se resetea a
+      // pendiente/aprobado). 'correccion' aquí es la señal EXPLÍCITA del reenvío tras el
+      // filtro DG: antes esta transición vivía en verificarCarasPendientes y se disparaba
+      // en cualquier consulta, reventando el estado antes de tiempo (caso 81406).
+      const wasRejected = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado' || autorizacion_dg === 'correccion';
       if (authFieldsChanged || wasRejected) {
         const artUpperUpd = ((articulo || currentCara.articulo) || '').toUpperCase();
         const isRtRowUpd = !!(currentCara.grupo_rt_bf) && !artUpperUpd.startsWith('BF') && !artUpperUpd.startsWith('CF');
@@ -4858,9 +4861,11 @@ export class PropuestasController {
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
-          // Recalcular si cambiaron campos de auth O si la cara venía rechazada
-          // (refresh/reenviar a autorización: resetea rechazado -> pendiente/aprobado)
-          const wasRejectedBk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+          // Recalcular si cambiaron campos de auth O si la cara venía rechazada / en corrección
+          // (refresh/reenviar a autorización: resetea rechazado o corrección -> pendiente/aprobado).
+          // 'correccion' = reenvío tras filtro DG (antes se transicionaba en
+          // verificarCarasPendientes y se reventaba en cualquier consulta — caso 81406).
+          const wasRejectedBk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado' || autorizacion_dg === 'correccion';
           if (authFieldsChanged || wasRejectedBk) {
             const artUpperP = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
             const isRtRowP = !!(currentCara?.grupo_rt_bf) && !artUpperP.startsWith('BF') && !artUpperP.startsWith('CF');

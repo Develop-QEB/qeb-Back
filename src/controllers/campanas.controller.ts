@@ -10687,7 +10687,10 @@ export class CampanasController {
       let autorizacion_dg = currentCaraFull?.autorizacion_dg || 'aprobado';
       let autorizacion_dcm = currentCaraFull?.autorizacion_dcm || 'aprobado';
 
-      if (authFieldsChanged) {
+      // 'correccion' dispara recálculo = reenvío tras filtro DG (antes esa transición
+      // vivía en verificarCarasPendientes y se reventaba en cualquier consulta — caso 81406).
+      const wasCorreccionCm = currentCaraFull?.autorizacion_dg === 'correccion';
+      if (authFieldsChanged || wasCorreccionCm) {
         const artUpperUpd = ((data.articulo || currentCaraFull?.articulo) || '').toUpperCase();
         const isRtRowUpd = !!(currentCaraFull?.grupo_rt_bf) && !artUpperUpd.startsWith('BF') && !artUpperUpd.startsWith('CF');
         let bonificacionForAuth = data.bonificacion ? parseFloat(data.bonificacion) : 0;
@@ -11247,9 +11250,11 @@ export class CampanasController {
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
           let autorizacion_dcm = currentCara?.autorizacion_dcm || 'aprobado';
 
-          // Recalcular si cambiaron campos de auth O si la cara venía rechazada
-          // (refresh/reenviar a autorización: resetea rechazado -> pendiente/aprobado)
-          const wasRejectedBulk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado';
+          // Recalcular si cambiaron campos de auth O si la cara venía rechazada / en corrección
+          // (refresh/reenviar a autorización: resetea rechazado o corrección -> pendiente/aprobado).
+          // 'correccion' = reenvío tras filtro DG (antes se transicionaba en
+          // verificarCarasPendientes y se reventaba en cualquier consulta — caso 81406).
+          const wasRejectedBulk = autorizacion_dg === 'rechazado' || autorizacion_dcm === 'rechazado' || autorizacion_dg === 'correccion';
           if (authFieldsChanged || wasRejectedBulk) {
             const artUpperBulk = ((data.articulo || currentCara?.articulo) || '').toUpperCase();
             const isRtRowBulk = !!(currentCara?.grupo_rt_bf) && !artUpperBulk.startsWith('BF') && !artUpperBulk.startsWith('CF');
