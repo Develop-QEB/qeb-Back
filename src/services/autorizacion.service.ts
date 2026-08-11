@@ -1446,9 +1446,14 @@ export async function rechazarFiltroDgComoCorreccion(
   const idOrigen = filtro.campania_id || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0) || solId;
 
   const result = await prisma.$transaction(async (tx) => {
+    // Se marca 'Rechazado' (no 'Atendido') para distinguir en la UI que el Gerente
+    // DEVOLVIÓ el filtro a corrección, no que lo aprobó. El front muestra
+    // "Devuelta a corrección" para tareas 'Filtro Autorización DG' en este estado
+    // (en vez de "Aprobada"). 'Rechazado' ya cuenta como tarea cerrada en
+    // filtros/conteos y el guard de "ya procesada", así que no altera esos flujos.
     await tx.tareas.update({
       where: { id: tareaFiltroId },
-      data: { estatus: 'Atendido' },
+      data: { estatus: 'Rechazado' },
     });
 
     // Marcar las caras que estaban pendientes DG como 'correccion' para que
