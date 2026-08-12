@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { inventariosController } from '../controllers/inventarios.controller';
-import { authMiddleware } from '../middleware/auth.middleware';
+import { authMiddleware, roleMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
@@ -27,6 +27,12 @@ router.get('/nse', inventariosController.getNSE.bind(inventariosController));
 // Espacios digitales
 router.post('/espacios/poblar', inventariosController.poblarEspaciosInventario.bind(inventariosController));
 router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(inventariosController));
+
+// Auditoria de conflictos de ocupacion. Solo DEV: barre el inventario completo
+// y es una herramienta de diagnostico, no de operacion diaria. El guard va aqui
+// y no en un router.use para no afectar al resto de rutas de inventarios.
+// Va antes de las rutas '/:id' y no colisiona con POST '/' ni POST '/bulk'.
+router.post('/conflictos', roleMiddleware('DEV'), inventariosController.getConflictosOcupacion.bind(inventariosController));
 
 // CRUD
 router.post('/bulk-check', inventariosController.bulkCheck.bind(inventariosController));
