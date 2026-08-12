@@ -118,6 +118,10 @@ interface GetEspaciosBloqueadosArgs {
  * de fechas dado, EXCLUYENDO los que corresponden a inventarios digitales
  * (los digitales tienen spots ilimitados — varias campañas comparten pantalla).
  *
+ * Solo cuenta reservas FIRMES (vendidas): las tentativas de propuesta
+ * (Reservado/Bonificado) NO bloquean — varias propuestas pueden apartar la
+ * misma pieza; el ganador se define al vender (ver guardián de aprobación).
+ *
  * Filtra por `solicitudCaras.inicio_periodo`/`fin_periodo` (no por
  * `reservas.calendario_id`) — eso evita que reservas con calendario huérfano
  * o desincronizado escapen al check.
@@ -137,7 +141,7 @@ export async function getEspaciosBloqueados(
      FROM reservas rv
      INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
      WHERE rv.deleted_at IS NULL
-       AND rv.estatus IN (${ESTATUS_QUE_BLOQUEAN_SQL})
+       AND rv.estatus IN (${ESTATUS_FIRME_SQL})
        AND sc.inicio_periodo <= ?
        AND sc.fin_periodo >= ?
        ${excludeFilter}`,
@@ -213,12 +217,15 @@ export async function createReservaConLock(
         const excludeFilter = excludeCaraIds && excludeCaraIds.length > 0
           ? `AND rv.solicitudCaras_id NOT IN (${excludeCaraIds.map(() => '?').join(',')})`
           : '';
+        // Solo choca contra reservas FIRMES (vendidas). Las tentativas de otras
+        // propuestas (Reservado/Bonificado) NO bloquean → se permiten duplicados
+        // en propuestas; el ganador se resuelve al vender.
         const conflict = await tx.$queryRawUnsafe<{ c: bigint }[]>(
           `SELECT COUNT(*) c FROM reservas rv
            INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
            WHERE rv.inventario_id = ?
              AND rv.deleted_at IS NULL
-             AND rv.estatus IN (${ESTATUS_QUE_BLOQUEAN_SQL})
+             AND rv.estatus IN (${ESTATUS_FIRME_SQL})
              AND sc.inicio_periodo <= ?
              AND sc.fin_periodo >= ?
              ${excludeFilter}`,

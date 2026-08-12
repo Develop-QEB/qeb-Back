@@ -3,7 +3,7 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
-import { ESTATUS_QUE_BLOQUEAN } from '../services/inventario-bloqueo.service';
+import { ESTATUS_QUE_BLOQUEAN, ESTATUS_FIRME } from '../services/inventario-bloqueo.service';
 import { logHistorial } from '../utils/historial';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -619,7 +619,9 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] },
+            // Solo FIRMES ocupan: las propuestas (Reservado/Bonificado) NO bloquean
+            // disponibilidad → varias propuestas pueden apartar la misma pieza.
+            estatus: { in: [...ESTATUS_FIRME] },
           },
           select: { inventario_id: true },
         });
@@ -1322,7 +1324,8 @@ export class InventariosController {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
               inventario_id: { in: espacios.map(e => e.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] }
+              // Solo FIRMES ocupan (ver getDisponibles).
+              estatus: { in: [...ESTATUS_FIRME] }
             },
             select: { inventario_id: true }
           });
