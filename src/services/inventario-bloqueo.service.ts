@@ -31,20 +31,74 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
-// Estatus que IMPIDEN reusar un espacio físico tradicional en el mismo período.
-// IMPORTANTE: alinear con `getDisponibles` en inventarios.controller.ts — si
-// agregas un estatus ahí, también va aquí.
-export const ESTATUS_QUE_BLOQUEAN = [
-  'Reservado',
-  'Bonificado',
+// ─────────────────────────────────────────────────────────────────────────────
+// FUENTE CENTRAL de qué OCUPA un espacio físico tradicional en un período.
+//
+// Modelo (2026-08): la ocupación se parte en dos niveles según el estatus de la
+// reserva:
+//   • FIRME (vendido)  → OCUPA: bloquea a TODOS (propuestas y campañas).
+//   • TENTATIVO (hold de propuesta) → NO ocupa: varias propuestas pueden apartar
+//     la misma pieza; se resuelve al vender (pase a ventas / aprobar).
+//
+// Exenciones de ocupación (no bloquean el espacio tradicional):
+//   • Digital: spots ilimitados (se filtra por inventarios.tradicional_digital).
+//   • IM- (impresión): es producción, no renta de la cara — usar
+//     articuloOcupaInventario().
+//
+// PASO 1 (este commit): solo se DEFINE la partición. `ESTATUS_QUE_BLOQUEAN`
+// queda como la UNIÓN firme+tentativo → mismo comportamiento que antes. El
+// bloqueo se apuntará solo a FIRME en el paso 2.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FIRME = vendido: ocupa el espacio, bloquea a todos.
+export const ESTATUS_FIRME = [
   'Vendido',
   'Vendido bonificado',
+  // 'Con Arte'/'Sin Arte' = reserva ya VENDIDA con (o sin) arte; el cliente SIGUE
+  // teniendo el espacio, así que ocupan igual. Su estatus_original es
+  // Vendido/Vendido bonificado; migrarán cuando se limpie la columna estatus
+  // (el estado del arte vive aparte, en reservas.arte_aprobado).
   'Con Arte',
-  // 'Sin Arte' = reserva viva a la que le quitaron/rechazaron el arte; el cliente
-  // SIGUE teniendo el espacio, así que debe bloquear igual. Antes faltaba y el
-  // espacio reaparecía en getDisponibles -> otra campaña lo tomaba -> duplicado.
   'Sin Arte',
 ] as const;
+
+// TENTATIVO = hold de propuesta: NO ocupa, no bloquea (permite duplicados).
+export const ESTATUS_TENTATIVO = [
+  'Reservado',
+  'Bonificado',
+] as const;
+
+// Estatus que HOY impiden reusar un espacio físico tradicional en el mismo
+// período. Unión firme+tentativo = lista histórica → comportamiento sin cambios.
+// IMPORTANTE: alinear con `getDisponibles` en inventarios.controller.ts.
+export const ESTATUS_QUE_BLOQUEAN = [
+  ...ESTATUS_FIRME,
+  ...ESTATUS_TENTATIVO,
+] as const;
+
+// Listas listas para interpolar en SQL raw (valores constantes → sin inyección).
+export const ESTATUS_FIRME_SQL = ESTATUS_FIRME.map((e) => `'${e}'`).join(',');
+export const ESTATUS_QUE_BLOQUEAN_SQL = ESTATUS_QUE_BLOQUEAN.map((e) => `'${e}'`).join(',');
+
+/** ¿El estatus de una reserva OCUPA físicamente el espacio (venta firme)? */
+export function esEstatusFirme(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_FIRME as readonly string[]).includes(estatus);
+}
+
+/** ¿El estatus es un hold tentativo de propuesta (no ocupa)? */
+export function esEstatusTentativo(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_TENTATIVO as readonly string[]).includes(estatus);
+}
+
+/**
+ * ¿El artículo de la cara ocupa el espacio físico? Los IM- (impresión) NO
+ * ocupan (son producción); el resto (RT/BF/CF/CT/IN) sí. Digital se exenta
+ * aparte por inventarios.tradicional_digital.
+ */
+export function articuloOcupaInventario(articulo: string | null | undefined): boolean {
+  if (!articulo) return true; // conservador: sin artículo, asumimos que ocupa
+  return !/^\s*IM-/i.test(articulo);
+}
 
 type TxClient = PrismaClient | Prisma.TransactionClient;
 
@@ -83,7 +137,7 @@ export async function getEspaciosBloqueados(
      FROM reservas rv
      INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
      WHERE rv.deleted_at IS NULL
-       AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+       AND rv.estatus IN (${ESTATUS_QUE_BLOQUEAN_SQL})
        AND sc.inicio_periodo <= ?
        AND sc.fin_periodo >= ?
        ${excludeFilter}`,
@@ -164,7 +218,7 @@ export async function createReservaConLock(
            INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
            WHERE rv.inventario_id = ?
              AND rv.deleted_at IS NULL
-             AND rv.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+             AND rv.estatus IN (${ESTATUS_QUE_BLOQUEAN_SQL})
              AND sc.inicio_periodo <= ?
              AND sc.fin_periodo >= ?
              ${excludeFilter}`,
