@@ -11,7 +11,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -1946,6 +1946,8 @@ export class PropuestasController {
       // Declare outside transaction so post-tx code can use them
       let cotizacion: any = null;
       let campania: any = null;
+      // Reservas de OTRAS propuestas desplazadas por esta venta (para notificar).
+      let desplazadasVenta: DesplazadaInfo[] = [];
 
       // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
@@ -1962,7 +1964,10 @@ export class PropuestasController {
         // (reemplaza al stored proc actualizar_reservas). Lanza VentaConflictoError
         // si alguna pieza tradicional ya está vendida por otra campaña en el período
         // → la tx se revierte y el catch responde 409 (fail-closed, sin sold-dupes).
-        await venderReservasPropuestaConGuardian(tx, propuestaId);
+        // También desplaza (soft-delete) las tentativas de otras propuestas sobre
+        // las piezas ganadas y las devuelve para notificar tras el commit.
+        const ventaResult = await venderReservasPropuestaConGuardian(tx, propuestaId);
+        desplazadasVenta = ventaResult.desplazadas;
 
         // 2. Update tareas status
         await tx.tareas.updateMany({
@@ -2215,6 +2220,48 @@ export class PropuestasController {
           }
         }
       }, { timeout: 30000 });
+
+      // #4b: notificar a los dueños de las propuestas cuyas reservas se
+      // desplazaron (perdieron la pieza porque esta propuesta la vendió). Se hace
+      // tras el commit para no notificar si la aprobación se revierte.
+      if (desplazadasVenta.length > 0) {
+        const porPropuesta = new Map<string, DesplazadaInfo[]>();
+        for (const d of desplazadasVenta) {
+          const arr = porPropuesta.get(d.idquotePerdedora) || [];
+          arr.push(d);
+          porPropuesta.set(d.idquotePerdedora, arr);
+        }
+        const nowN = new Date();
+        const finN = new Date(nowN.getTime() + 24 * 60 * 60 * 1000);
+        for (const [idquote, items] of porPropuesta) {
+          const propPerdedora = await prisma.propuesta.findUnique({ where: { id: parseInt(idquote) } });
+          if (!propPerdedora || propPerdedora.deleted_at) continue;
+          const owners = (propPerdedora.id_asignado || '')
+            .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+          const codigos = [...new Set(items.map(i => i.codigoUnico).filter(Boolean))];
+          for (const ownerId of owners) {
+            await prisma.tareas.create({
+              data: {
+                titulo: 'Reserva desplazada',
+                descripcion: `${items.length} inventario(s) de tu propuesta ${idquote} se vendieron en otra campaña. Edítala para reemplazarlos.`,
+                contenido: codigos.length ? `Piezas: ${codigos.join(', ')}` : '',
+                tipo: 'Notificación',
+                categoria: 'general',
+                estatus: 'Pendiente',
+                id_responsable: ownerId,
+                responsable: '',
+                id_solicitud: String(propPerdedora.solicitud_id),
+                id_propuesta: idquote,
+                campania_id: parseInt(idquote),
+                fecha_inicio: nowN,
+                fecha_fin: finN,
+                asignado: '',
+                id_asignado: '',
+              },
+            });
+          }
+        }
+      }
 
       // Enviar correos a Analistas asignados (Seguimiento Campaña)
       if (campania) {

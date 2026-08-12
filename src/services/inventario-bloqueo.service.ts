@@ -331,6 +331,24 @@ interface TentativaRow {
   codigo_unico: string | null;
 }
 
+// Info de una reserva de OTRA propuesta que se desplaza (pierde la pieza) porque
+// esta propuesta la vendió. La consume el controlador para notificar al dueño.
+export interface DesplazadaInfo {
+  reservaId: number;
+  idquotePerdedora: string; // cotización/propuesta que pierde la pieza
+  espacioId: number;
+  codigoUnico: string | null;
+  inicioPeriodo: string;
+  finPeriodo: string;
+}
+
+interface EvictRow {
+  reserva_id: number;
+  idquote: string;
+  ini: Date;
+  fin: Date;
+}
+
 /**
  * Convierte las reservas tentativas (Reservado/Bonificado) de una propuesta en
  * firmes (Vendido / Vendido bonificado), con guardián de colisión sobre las
@@ -343,7 +361,7 @@ interface TentativaRow {
 export async function venderReservasPropuestaConGuardian(
   tx: Prisma.TransactionClient,
   propuestaId: number,
-): Promise<{ vendidas: number }> {
+): Promise<{ vendidas: number; desplazadas: DesplazadaInfo[] }> {
   // Reservas tentativas de la propuesta. `reservas.inventario_id` es polimórfico
   // (espacio_inventario.id o inventarios.id) → se resuelve por COALESCE para
   // saber si es Digital y su codigo_unico. ORDER BY espacio para bloquear siempre
@@ -369,6 +387,8 @@ export async function venderReservasPropuestaConGuardian(
   const conflictos: ConflictoVenta[] = [];
   const idsVendido: number[] = [];
   const idsVendidoBon: number[] = [];
+  const idsAEvictar = new Set<number>();              // tentativas de OTRAS propuestas a desplazar
+  const desplazadasMap = new Map<number, DesplazadaInfo>(); // dedup por reserva
 
   for (const t of tentativas) {
     const ocupa = !Number(t.es_digital) && !Number(t.es_im);
@@ -398,13 +418,41 @@ export async function venderReservasPropuestaConGuardian(
         });
         continue; // el perdedor no se flipa
       }
+
+      // GANADOR de esta pieza: recopilar las tentativas de OTRAS cotizaciones
+      // sobre el mismo espacio+período para desplazarlas (soft-delete al final,
+      // solo si toda la venta procede — si hay conflicto se revierte todo).
+      const otras = await tx.$queryRawUnsafe<EvictRow[]>(
+        `SELECT r2.id AS reserva_id, sc2.idquote AS idquote,
+                sc2.inicio_periodo AS ini, sc2.fin_periodo AS fin
+         FROM reservas r2
+         INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+         WHERE r2.inventario_id = ?
+           AND r2.deleted_at IS NULL
+           AND r2.estatus IN ('Reservado','Bonificado')
+           AND sc2.inicio_periodo <= ?
+           AND sc2.fin_periodo >= ?
+           AND sc2.idquote <> CAST(? AS CHAR)`,
+        t.espacio_id, t.fin, t.inicio, propuestaId,
+      );
+      for (const o of otras) {
+        idsAEvictar.add(o.reserva_id);
+        desplazadasMap.set(o.reserva_id, {
+          reservaId: o.reserva_id,
+          idquotePerdedora: String(o.idquote),
+          espacioId: t.espacio_id,
+          codigoUnico: t.codigo_unico,
+          inicioPeriodo: new Date(o.ini).toISOString().slice(0, 10),
+          finPeriodo: new Date(o.fin).toISOString().slice(0, 10),
+        });
+      }
     }
 
     if (t.estatus === 'Bonificado') idsVendidoBon.push(t.reserva_id);
     else idsVendido.push(t.reserva_id);
   }
 
-  // Fail-closed: cualquier conflicto aborta TODA la venta (no se flipa nada).
+  // Fail-closed: cualquier conflicto aborta TODA la venta (no se flipa ni desplaza).
   if (conflictos.length > 0) {
     throw new VentaConflictoError(conflictos);
   }
@@ -416,5 +464,16 @@ export async function venderReservasPropuestaConGuardian(
     await tx.reservas.updateMany({ where: { id: { in: idsVendidoBon } }, data: { estatus: 'Vendido bonificado' } });
   }
 
-  return { vendidas: idsVendido.length + idsVendidoBon.length };
+  // Desplazar (soft-delete) las tentativas de OTRAS propuestas sobre las piezas ganadas.
+  if (idsAEvictar.size > 0) {
+    await tx.reservas.updateMany({
+      where: { id: { in: [...idsAEvictar] } },
+      data: { deleted_at: new Date() },
+    });
+  }
+
+  return {
+    vendidas: idsVendido.length + idsVendidoBon.length,
+    desplazadas: [...desplazadasMap.values()],
+  };
 }
