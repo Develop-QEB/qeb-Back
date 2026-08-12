@@ -10432,7 +10432,10 @@ export class CampanasController {
           continue;
         }
 
-        const estatus = (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido';
+        // Reservas de CAMPAÑA = vendidas (firmes). La bonificación de una campaña
+        // es 'Vendido bonificado' (ocupa/bloquea), NO 'Bonificado' (que es el hold
+        // tentativo de una PROPUESTA). Ver ESTATUS_FIRME en inventario-bloqueo.service.
+        const estatus = (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Vendido bonificado' : 'Vendido';
 
         // Fix dups PATSA-style: si ya existe reserva activa para este espacio + sc,
         // NO crear otra. Si hay una soft-deleted previa, reactivarla en vez de

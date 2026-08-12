@@ -142,6 +142,8 @@ export async function getEspaciosBloqueados(
      INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
      WHERE rv.deleted_at IS NULL
        AND rv.estatus IN (${ESTATUS_FIRME_SQL})
+       -- IM (impresión) no ocupa el espacio físico → no bloquea.
+       AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
        AND sc.inicio_periodo <= ?
        AND sc.fin_periodo >= ?
        ${excludeFilter}`,
@@ -226,6 +228,7 @@ export async function createReservaConLock(
            WHERE rv.inventario_id = ?
              AND rv.deleted_at IS NULL
              AND rv.estatus IN (${ESTATUS_FIRME_SQL})
+             AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
              AND sc.inicio_periodo <= ?
              AND sc.fin_periodo >= ?
              ${excludeFilter}`,
