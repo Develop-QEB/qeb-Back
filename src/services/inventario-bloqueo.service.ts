@@ -285,3 +285,136 @@ export async function createReservaConLock(
     throw err;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GUARDIÁN DE VENTA (reemplaza al stored proc `actualizar_reservas`).
+//
+// Al aprobar una propuesta sus reservas tentativas se vuelven firmes:
+//   Reservado  → Vendido      ·      Bonificado → Vendido bonificado
+//
+// Pero ANTES de flipar cada pieza TRADICIONAL (no IM, no digital) se bloquea su
+// espacio (SELECT … FOR UPDATE) y se verifica que ninguna OTRA cotización la
+// tenga ya FIRME en el período. Si alguna choca, se lanza VentaConflictoError:
+// la transacción de aprobación se revierte y NO se flipa nada, para que el
+// usuario re-edite. Así nunca se crean dos ventas de la misma pieza tradicional
+// en la misma catorcena.
+//
+// Gana quien flipa primero: el FOR UPDATE serializa aprobaciones simultáneas.
+// Digital (spots ilimitados) e IM (impresión, no ocupa) se flipan sin chequear.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ConflictoVenta {
+  reservaId: number;
+  espacioId: number;
+  codigoUnico: string | null;
+  inicioPeriodo: string; // YYYY-MM-DD
+  finPeriodo: string;
+}
+
+export class VentaConflictoError extends Error {
+  conflictos: ConflictoVenta[];
+  constructor(conflictos: ConflictoVenta[]) {
+    super(`VENTA_CONFLICTO: ${conflictos.length} pieza(s) ya vendida(s) en el período`);
+    this.name = 'VentaConflictoError';
+    this.conflictos = conflictos;
+  }
+}
+
+interface TentativaRow {
+  reserva_id: number;
+  espacio_id: number;
+  estatus: string;
+  inicio: Date;
+  fin: Date;
+  es_digital: number; // 0/1
+  es_im: number;      // 0/1
+  codigo_unico: string | null;
+}
+
+/**
+ * Convierte las reservas tentativas (Reservado/Bonificado) de una propuesta en
+ * firmes (Vendido / Vendido bonificado), con guardián de colisión sobre las
+ * piezas tradicionales. DEBE llamarse DENTRO de la transacción de aprobación
+ * (necesita mantener los locks hasta el commit).
+ *
+ * Lanza VentaConflictoError si alguna pieza tradicional (no IM) ya está vendida
+ * por otra cotización en el período → no flipa nada (la tx se revierte).
+ */
+export async function venderReservasPropuestaConGuardian(
+  tx: Prisma.TransactionClient,
+  propuestaId: number,
+): Promise<{ vendidas: number }> {
+  // Reservas tentativas de la propuesta. `reservas.inventario_id` es polimórfico
+  // (espacio_inventario.id o inventarios.id) → se resuelve por COALESCE para
+  // saber si es Digital y su codigo_unico. ORDER BY espacio para bloquear siempre
+  // en el mismo orden (evita deadlocks entre aprobaciones concurrentes).
+  const tentativas = await tx.$queryRawUnsafe<TentativaRow[]>(
+    `SELECT r.id AS reserva_id, r.inventario_id AS espacio_id, r.estatus,
+            sc.inicio_periodo AS inicio, sc.fin_periodo AS fin,
+            (COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Digital') AS es_digital,
+            (sc.articulo LIKE 'IM-%') AS es_im,
+            COALESCE(invE.codigo_unico, invD.codigo_unico) AS codigo_unico
+     FROM reservas r
+     INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+     LEFT JOIN espacio_inventario ei ON ei.id = r.inventario_id
+     LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
+     LEFT JOIN inventarios invD ON invD.id = r.inventario_id
+     WHERE sc.idquote = CAST(? AS CHAR)
+       AND r.deleted_at IS NULL
+       AND r.estatus IN ('Reservado','Bonificado')
+     ORDER BY r.inventario_id`,
+    propuestaId,
+  );
+
+  const conflictos: ConflictoVenta[] = [];
+  const idsVendido: number[] = [];
+  const idsVendidoBon: number[] = [];
+
+  for (const t of tentativas) {
+    const ocupa = !Number(t.es_digital) && !Number(t.es_im);
+
+    if (ocupa) {
+      // Lock del espacio → serializa contra otras aprobaciones de la misma pieza.
+      await tx.$executeRawUnsafe('SELECT id FROM espacio_inventario WHERE id = ? FOR UPDATE', t.espacio_id);
+      // ¿ya firme por OTRA cotización en el período (traslape de fechas)?
+      const rows = await tx.$queryRawUnsafe<{ c: bigint }[]>(
+        `SELECT COUNT(*) c FROM reservas r2
+         INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+         WHERE r2.inventario_id = ?
+           AND r2.deleted_at IS NULL
+           AND r2.estatus IN (${ESTATUS_FIRME_SQL})
+           AND sc2.inicio_periodo <= ?
+           AND sc2.fin_periodo >= ?
+           AND sc2.idquote <> CAST(? AS CHAR)`,
+        t.espacio_id, t.fin, t.inicio, propuestaId,
+      );
+      if (Number(rows[0].c) > 0) {
+        conflictos.push({
+          reservaId: t.reserva_id,
+          espacioId: t.espacio_id,
+          codigoUnico: t.codigo_unico,
+          inicioPeriodo: new Date(t.inicio).toISOString().slice(0, 10),
+          finPeriodo: new Date(t.fin).toISOString().slice(0, 10),
+        });
+        continue; // el perdedor no se flipa
+      }
+    }
+
+    if (t.estatus === 'Bonificado') idsVendidoBon.push(t.reserva_id);
+    else idsVendido.push(t.reserva_id);
+  }
+
+  // Fail-closed: cualquier conflicto aborta TODA la venta (no se flipa nada).
+  if (conflictos.length > 0) {
+    throw new VentaConflictoError(conflictos);
+  }
+
+  if (idsVendido.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: idsVendido } }, data: { estatus: 'Vendido' } });
+  }
+  if (idsVendidoBon.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: idsVendidoBon } }, data: { estatus: 'Vendido bonificado' } });
+  }
+
+  return { vendidas: idsVendido.length + idsVendidoBon.length };
+}

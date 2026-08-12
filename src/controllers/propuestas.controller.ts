@@ -11,7 +11,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -1958,8 +1958,11 @@ export class PropuestasController {
           where: { cotizacion_id: cotizacion.id },
         }) : null;
 
-        // 1. Call stored procedure for reservas
-        await tx.$executeRaw`CALL actualizar_reservas(${propuestaId})`;
+        // 1. Flip de reservas tentativas a firmes CON guardián de colisión
+        // (reemplaza al stored proc actualizar_reservas). Lanza VentaConflictoError
+        // si alguna pieza tradicional ya está vendida por otra campaña en el período
+        // → la tx se revierte y el catch responde 409 (fail-closed, sin sold-dupes).
+        await venderReservasPropuestaConGuardian(tx, propuestaId);
 
         // 2. Update tareas status
         await tx.tareas.updateMany({
@@ -2327,6 +2330,15 @@ export class PropuestasController {
         message: 'Propuesta aprobada exitosamente',
       });
     } catch (error) {
+      // Guardián de venta: alguna pieza tradicional ya se vendió en otra campaña.
+      if (error instanceof VentaConflictoError) {
+        res.status(409).json({
+          success: false,
+          error: `No se puede aprobar: ${error.conflictos.length} pieza(s) ya se vendieron en otra campaña en el período. Edita esas caras y reintenta.`,
+          conflictos: error.conflictos,
+        });
+        return;
+      }
       console.error('Error approving propuesta:', error);
       const message = error instanceof Error ? error.message : 'Error al aprobar propuesta';
       res.status(500).json({
