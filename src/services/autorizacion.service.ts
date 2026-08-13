@@ -600,14 +600,25 @@ export async function verificarCarasPendientes(idquote: string): Promise<{
 }
 
 /**
- * Igual que verificarCarasPendientes pero buscando autorizaciones en estado
- * 'rechazado'. Si CUALQUIER cara está rechazada por DG o por DCM, el llamador
- * debe bloquear el avance del flujo (atender solicitud / aprobar propuesta).
+ * Igual que verificarCarasPendientes pero buscando autorizaciones que
+ * BLOQUEAN el avance del flujo (atender solicitud / aprobar propuesta).
+ *
+ * Bloquean:
+ *  - autorizacion_dg / autorizacion_dcm en 'rechazado'.
+ *  - autorizacion_dg / autorizacion_dcm en 'correccion' (feedback 2026-08-13:
+ *    cuando el filtro DG/DCM manda circuitos a corrección, el proceso no
+ *    debe avanzar hasta que todos vuelvan a 'aprobado', igual que con un
+ *    rechazo).
+ *
+ * `tieneRechazadas` refleja el bloqueo total (rechazadas + correccion) para
+ * mantener retrocompatibilidad con los llamadores existentes.
  */
 export async function verificarCarasRechazadas(idquote: string): Promise<{
   tieneRechazadas: boolean;
   rechazadasDg: number[];
   rechazadasDcm: number[];
+  correccionDg: number[];
+  correccionDcm: number[];
 }> {
   const caras = await prisma.solicitudCaras.findMany({
     where: { idquote },
@@ -622,10 +633,26 @@ export async function verificarCarasRechazadas(idquote: string): Promise<{
     .filter(c => c.autorizacion_dcm === 'rechazado')
     .map(c => c.id);
 
+  const correccionDg = caras
+    .filter(c => c.autorizacion_dg === 'correccion')
+    .map(c => c.id);
+
+  const correccionDcm = caras
+    .filter(c => c.autorizacion_dcm === 'correccion')
+    .map(c => c.id);
+
+  const tieneRechazadas =
+    rechazadasDg.length > 0 ||
+    rechazadasDcm.length > 0 ||
+    correccionDg.length > 0 ||
+    correccionDcm.length > 0;
+
   return {
-    tieneRechazadas: rechazadasDg.length > 0 || rechazadasDcm.length > 0,
+    tieneRechazadas,
     rechazadasDg,
-    rechazadasDcm
+    rechazadasDcm,
+    correccionDg,
+    correccionDcm
   };
 }
 
