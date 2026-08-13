@@ -26,6 +26,8 @@ export class InventariosController {
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
       const cto = req.query.cto as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
@@ -66,6 +68,18 @@ export class InventariosController {
 
       if (cto) {
         where.cto = cto;
+      }
+
+      if (tradicional) {
+        where.tradicional_digital = tradicional;
+      }
+
+      // Circuito Mi Macro Periférico: comparte mueble (PARABUS, VIDRIO, MUPIS…)
+      // con el mobiliario de calle pero se distingue por tipo_de_mueble.
+      if (micromacro === 'excluir') {
+        where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      } else if (micromacro === 'solo') {
+        where.tipo_de_mueble = { contains: 'MI MACRO' };
       }
 
       // Filter by campaign: get inventario IDs linked to this campaign
@@ -285,6 +299,8 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       // Build Prisma where filter — same logic as getAll
@@ -310,6 +326,9 @@ export class InventariosController {
       if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
+      if (tradicional) where.tradicional_digital = tradicional;
+      if (micromacro === 'excluir') where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') where.tipo_de_mueble = { contains: 'MI MACRO' };
 
       // Filter by campaign: get inventario IDs linked to this campaign
       if (campanaId) {
@@ -610,6 +629,26 @@ export class InventariosController {
         calendarioIds = calendarios.map(c => c.id);
       }
 
+      // Pareja RT/BF: las caras del MISMO grupo_rt_bf no pueden compartir la pieza
+      // física en el período (un parabús no es RT y BF a la vez). Se excluyen las
+      // reservas de las caras HERMANAS del grupo con CUALQUIER estatus (Reservado/
+      // Bonificado/Vendido/...), aparte de la ocupación FIRME cross-propuesta. Esto
+      // NO aplica entre propuestas distintas (ahí los tentativos siguen sin bloquear).
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId as string) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: parseInt(solicitudCaraId as string) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       // Get ALL reservations once (both espacio-level and inventario-level info)
       let reservedInventarioIds: Set<number> = new Set();
       let reservedEspacioIds: Set<number> = new Set();
@@ -619,9 +658,16 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            // Solo FIRMES ocupan: las propuestas (Reservado/Bonificado) NO bloquean
-            // disponibilidad → varias propuestas pueden apartar la misma pieza.
-            estatus: { in: [...ESTATUS_FIRME] },
+            // Ocupa la pieza si: (a) es FIRME de CUALQUIER propuesta —
+            // Reservado/Bonificado NO bloquean cross-propuesta (duplicados OK); o
+            // (b) es de una cara HERMANA del mismo grupo_rt_bf, con cualquier
+            // estatus (la RT y su BF pareja no comparten pieza en el período).
+            OR: [
+              { estatus: { in: [...ESTATUS_FIRME] } },
+              ...(grupoHermanasCaraIds.length > 0
+                ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                : []),
+            ],
           },
           select: { inventario_id: true },
         });
