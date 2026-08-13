@@ -558,10 +558,10 @@ export class CampanasController {
           COALESCE(s.sap_database, cl.sap_database) as sap_database,
           COALESCE(s.card_code, cl.card_code) as card_code,
           COALESCE(s.salesperson_code, cl.salesperson_code) as salesperson_code,
-          cat_ini.numero_catorcena as catorcena_inicio_num,
-          cat_ini.año as catorcena_inicio_anio,
-          cat_fin.numero_catorcena as catorcena_fin_num,
-          cat_fin.año as catorcena_fin_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
           pr.inversion as propuesta_inversion,
@@ -578,8 +578,6 @@ export class CampanasController {
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
-        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN (
           SELECT
             ct_a.id AS cotizacion_id,
