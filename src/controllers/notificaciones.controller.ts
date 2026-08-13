@@ -14,6 +14,11 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { logHistorial } from '../utils/historial';
 
+// Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
+// al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
+// para que el conteo del header y el de la página no se descuadren.
+const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
+
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
   const id = String(userId);
@@ -62,16 +67,26 @@ export class NotificacionesController {
       const orderDir = req.query.orderDir as string || 'desc';
       const userId = req.user?.userId;
       const quick = req.query.quick as string;
+      const vista = req.query.vista as string;
 
       const where: Record<string, unknown> = {};
       const userRole = req.user?.rol;
 
+      // `vista` alinea esta lista con el criterio EXACTO del badge (getStats).
+      // Antes el front bajaba 200 filas "de todo" y filtraba por destinatario en
+      // el cliente: las filas que caían fuera de esas 200 se volvían invisibles
+      // aunque el badge sí las contara (ej. Autorización DG #97479, posición 276
+      // de 912 para el Director General). Con `vista` el filtro vive en la BD:
+      //  - 'notificaciones': tipo = 'Notificación' y el destinatario es
+      //    id_responsable (en estas filas id_asignado es el AUTOR, no el destino).
+      //  - 'tareas': tipo != 'Notificación', destinatario = responsable o asignado.
+      // Sin `vista` se conserva el comportamiento anterior (retrocompatibilidad).
+      const vistaNotificaciones = vista === 'notificaciones';
+      const vistaTareas = vista === 'tareas';
+
       // Filtrar por usuario responsable o asignado
       if (userId) {
-        const orConditions: Record<string, unknown>[] = [
-          { id_responsable: userId },
-          ...idAsignadoMatch(userId),
-        ];
+        const ids: number[] = [userId];
 
         // Coordinador de Diseño también ve tareas de todos los Diseñadores
         if (userRole === 'Coordinador de Diseño') {
@@ -79,10 +94,7 @@ export class NotificacionesController {
             where: { user_role: 'Diseñadores', deleted_at: null },
             select: { id: true },
           });
-          for (const d of disenadores) {
-            orConditions.push({ id_responsable: d.id });
-            orConditions.push(...idAsignadoMatch(d.id));
-          }
+          ids.push(...disenadores.map(d => d.id));
         }
 
         // Gerente Digital (Operaciones) también ve tareas de todos los Jefe de Operaciones Digital
@@ -91,13 +103,20 @@ export class NotificacionesController {
             where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
             select: { id: true },
           });
-          for (const j of jefesDigital) {
-            orConditions.push({ id_responsable: j.id });
-            orConditions.push(...idAsignadoMatch(j.id));
-          }
+          ids.push(...jefesDigital.map(j => j.id));
         }
 
-        where.OR = orConditions;
+        const porResponsable = ids.map(id => ({ id_responsable: id }));
+        where.OR = vistaNotificaciones
+          ? porResponsable
+          : [...porResponsable, ...ids.flatMap(id => idAsignadoMatch(id))];
+      }
+
+      if (vistaNotificaciones || vistaTareas) {
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
+          vistaNotificaciones ? { tipo: 'Notificación' } : { tipo: { not: 'Notificación' } },
+        ];
       }
 
       // Diseñadores y Coordinador de Diseño solo deben ver tareas/notificaciones
@@ -232,12 +251,18 @@ export class NotificacionesController {
       // filtros rapidos
       if (quick) {
         switch (quick) {
+          // Mismo criterio que badge_count del header: "sin finalizar" / "no
+          // leídas" = estatus NO resuelto. Antes 'no_leidas' era `!= Atendido`
+          // (incluía Rechazado/Cancelado, que el badge no cuenta) y 'leidas' era
+          // solo `= Atendido`, así que ninguno de los dos cuadraba con la campanita.
           case 'no_leidas':
-            where.estatus = { not: 'Atendido' };
+          case 'pendientes':
+            where.estatus = { notIn: ESTATUS_RESUELTOS };
             break;
 
           case 'leidas':
-            where.estatus = 'Atendido';
+          case 'finalizadas':
+            where.estatus = { in: ESTATUS_RESUELTOS };
             break;
 
           case 'hoy': {
@@ -1048,7 +1073,9 @@ export class NotificacionesController {
 
       emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { ids: idsLimpios, estatus });
 
-      res.json({ success: true, affected: result.count });
+      // `data` es obligatorio: el cliente valida `response.data.data` y lanzaba
+      // "Error en bulk update" aunque el UPDATE sí se hubiera aplicado.
+      res.json({ success: true, data: { affected: result.count }, affected: result.count });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar bulk';
       res.status(500).json({ success: false, error: message });
@@ -1063,14 +1090,22 @@ export class NotificacionesController {
       // no de "marcar como leída". Si se incluyen aquí, las caras quedan en pendiente y
       // el director pierde la tarea de su bandeja.
       const where: Record<string, unknown> = {
-        estatus: { not: 'Atendido' },
+        // notIn resueltos, no `!= Atendido`: con `!= Atendido` esto reescribía a
+        // 'Atendido' filas ya Rechazado/Cancelado, perdiendo ese estatus (y sin
+        // efecto en el badge, que ya las consideraba resueltas).
+        estatus: { notIn: ESTATUS_RESUELTOS },
         NOT: { tipo: { contains: 'Autorización' } },
       };
 
       if (userId) {
+        // Mismo criterio de destinatario que el badge (getStats): en las filas
+        // 'Notificación' id_asignado es el AUTOR, no el destinatario. Incluirlo
+        // sin restricción de tipo hacía que "marcar todas leídas" cerrara
+        // notificaciones DE OTROS USUARIOS — las que yo generé — bajando la
+        // campanita de esa gente sin que las hubiera visto.
         where.OR = [
           { id_responsable: userId },
-          ...idAsignadoMatch(userId),
+          { AND: [{ tipo: { not: 'Notificación' } }, { OR: idAsignadoMatch(userId) }] },
         ];
       }
 
@@ -1203,7 +1238,7 @@ export class NotificacionesController {
         ];
       }
 
-      const [total, activas, badgeCount, porTipo, porEstatus] = await Promise.all([
+      const [total, activas, badgeCount, badgeNotif, porTipo, porEstatus] = await Promise.all([
         prisma.tareas.count({ where }),
         prisma.tareas.count({ where: { ...where, estatus: { not: 'Atendido' } } }),
         // badge_count: lo que se muestra en la burbuja roja del header.
@@ -1214,7 +1249,16 @@ export class NotificacionesController {
         // (ej. Rodrigo Margain con 405 registros: el limit se llenaba con
         // Atendidos viejos y el conteo cliente no veia el conjunto completo).
         prisma.tareas.count({
-          where: { ...where, estatus: { notIn: ['Atendido', 'Rechazado', 'Cancelado'] } },
+          where: { ...where, estatus: { notIn: ESTATUS_RESUELTOS } },
+        }),
+        // Parte del badge que corresponde a la pestaña "Notificaciones". Al
+        // combinarse con tipo='Notificación', la rama de id_asignado de `where`
+        // se vuelve imposible, así que esto cuenta exactamente lo mismo que la
+        // vista 'notificaciones' de getAll (destinatario = id_responsable).
+        // El resto (badge_tareas) se deriva por resta, para no pagar un COUNT
+        // extra sobre `tareas` en un endpoint que ya hace varios agregados.
+        prisma.tareas.count({
+          where: { ...where, tipo: 'Notificación', estatus: { notIn: ESTATUS_RESUELTOS } },
         }),
         prisma.tareas.groupBy({
           by: ['tipo'],
@@ -1247,6 +1291,12 @@ export class NotificacionesController {
         atendidas: total - activas,
         // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
         badge_count: badgeCount,
+        // Desglose del badge por pestaña de /notificaciones. Invariante:
+        // badge_count === badge_notificaciones + badge_tareas (son disjuntos por
+        // tipo). Permite que cada pestaña muestre su propio conteo exacto y que
+        // el usuario vea de dónde sale el número de la campanita.
+        badge_notificaciones: badgeNotif,
+        badge_tareas: badgeCount - badgeNotif,
         por_tipo,
         por_estatus,
       };
