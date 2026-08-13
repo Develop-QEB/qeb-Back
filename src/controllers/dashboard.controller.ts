@@ -1299,11 +1299,17 @@ export class DashboardController {
 
     const filteredSubquery = perPairMode ? pairSubquery : perPieceSubquery;
 
+    // En perPairMode el pairSubquery ya restringe a Reservado/Bonificado, así que
+    // el filtro de estatus del outer sobra — y además evita el choque de collation
+    // entre el CASE pair_estatus (COERCIBLE) y los parámetros del IN.
+    const effEstatusFilterClause = perPairMode ? '' : estatusFilterClause;
+    const effEstatusFilterVals = perPairMode ? [] : estatusFilterVals;
+
     // Q_items: filas de la página con todos los campos de display. En perPairMode
     // hay varias filas por pieza (una por cliente) → desempate por top_cliente_id.
     const itemsSql = `
       SELECT * FROM (${filteredSubquery}) t
-      WHERE 1=1 ${estatusFilterClause}
+      WHERE 1=1 ${effEstatusFilterClause}
       ORDER BY t.id, t.top_cliente_id
       LIMIT ? OFFSET ?
     `;
@@ -1312,7 +1318,7 @@ export class DashboardController {
     const scanSql = `
       SELECT t.id, t.plaza, t.latitud, t.longitud, t.estatus_efectivo
       FROM (${filteredSubquery}) t
-      WHERE 1=1 ${estatusFilterClause}
+      WHERE 1=1 ${effEstatusFilterClause}
       ORDER BY t.id
     `;
 
@@ -1344,14 +1350,14 @@ export class DashboardController {
       prisma.$queryRawUnsafe<ItemRow[]>(
         itemsSql,
         ...colFilterVals,
-        ...estatusFilterVals,
+        ...effEstatusFilterVals,
         params.limitNum,
         params.skip,
       ),
       prisma.$queryRawUnsafe<ScanRow[]>(
         scanSql,
         ...colFilterVals,
-        ...estatusFilterVals,
+        ...effEstatusFilterVals,
       ),
     ]);
 
