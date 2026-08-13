@@ -8,6 +8,7 @@ import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
 import { finalizarCampanasPorIniciarVencidas } from './services/campania-status.service';
 import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
+import { ejecutarMonitorConflictos } from './services/conflictos-ocupacion.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -145,6 +146,23 @@ async function main() {
       liberarReservasPropuestasVencidas().catch((err: unknown) => {
         console.error('[LiberacionReservas] Error en ejecucion inicial:', err);
       });
+
+      // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
+      // 7am CDMX, antes de que trafico abra: si una campaña se comio caras ya
+      // vendidas, el aviso llega el mismo dia y no dias despues.
+      // Notifica SOLO lo nuevo (estado en `conflictos_ocupacion`) y en un solo
+      // digest por persona, para no enterrar la campanita.
+      programarDiario(7, 'MonitorConflictos 07:00', async () => {
+        const r = await ejecutarMonitorConflictos();
+        console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`);
+      });
+      // Al arrancar corre SIN notificar: siembra el estado con lo que ya existe
+      // para que el primer aviso real sea solo de lo que aparezca despues.
+      ejecutarMonitorConflictos({ notificar: false })
+        .then(r => console.log(`[MonitorConflictos] siembra inicial: ${r.detectados} conflictos registrados sin notificar`))
+        .catch((err: unknown) => {
+          console.error('[MonitorConflictos] Error en ejecucion inicial:', err);
+        });
     }
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);
