@@ -387,96 +387,121 @@ export async function venderReservasPropuestaConGuardian(
     propuestaId,
   );
 
-  const conflictos: ConflictoVenta[] = [];
+  // Flip para TODAS las tentativas (digital/IM también se venden; solo no ocupan
+  // ni participan del guardián). ocupaEspacios = piezas TRADICIONALES (no IM/digital).
   const idsVendido: number[] = [];
   const idsVendidoBon: number[] = [];
-  const idsAEvictar = new Set<number>();              // tentativas de OTRAS propuestas a desplazar
-  const desplazadasMap = new Map<number, DesplazadaInfo>(); // dedup por reserva
-
+  const ocupaEspacios = new Set<number>();
   for (const t of tentativas) {
-    const ocupa = !Number(t.es_digital) && !Number(t.es_im);
-
-    if (ocupa) {
-      // Lock del espacio → serializa contra otras aprobaciones de la misma pieza.
-      await tx.$executeRawUnsafe('SELECT id FROM espacio_inventario WHERE id = ? FOR UPDATE', t.espacio_id);
-      // ¿ya firme por OTRA cotización en el período (traslape de fechas)?
-      const rows = await tx.$queryRawUnsafe<{ c: bigint }[]>(
-        `SELECT COUNT(*) c FROM reservas r2
-         INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
-         WHERE r2.inventario_id = ?
-           AND r2.deleted_at IS NULL
-           AND r2.estatus IN (${ESTATUS_FIRME_SQL})
-           AND sc2.inicio_periodo <= ?
-           AND sc2.fin_periodo >= ?
-           AND sc2.idquote <> CAST(? AS CHAR)`,
-        t.espacio_id, t.fin, t.inicio, propuestaId,
-      );
-      if (Number(rows[0].c) > 0) {
-        conflictos.push({
-          reservaId: t.reserva_id,
-          espacioId: t.espacio_id,
-          codigoUnico: t.codigo_unico,
-          inicioPeriodo: new Date(t.inicio).toISOString().slice(0, 10),
-          finPeriodo: new Date(t.fin).toISOString().slice(0, 10),
-        });
-        continue; // el perdedor no se flipa
-      }
-
-      // GANADOR de esta pieza: recopilar las tentativas de OTRAS cotizaciones
-      // sobre el mismo espacio+período para desplazarlas (soft-delete al final,
-      // solo si toda la venta procede — si hay conflicto se revierte todo).
-      const otras = await tx.$queryRawUnsafe<EvictRow[]>(
-        `SELECT r2.id AS reserva_id, sc2.idquote AS idquote,
-                sc2.inicio_periodo AS ini, sc2.fin_periodo AS fin
-         FROM reservas r2
-         INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
-         WHERE r2.inventario_id = ?
-           AND r2.deleted_at IS NULL
-           AND r2.estatus IN ('Reservado','Bonificado')
-           AND sc2.inicio_periodo <= ?
-           AND sc2.fin_periodo >= ?
-           AND sc2.idquote <> CAST(? AS CHAR)`,
-        t.espacio_id, t.fin, t.inicio, propuestaId,
-      );
-      for (const o of otras) {
-        idsAEvictar.add(o.reserva_id);
-        desplazadasMap.set(o.reserva_id, {
-          reservaId: o.reserva_id,
-          idquotePerdedora: String(o.idquote),
-          espacioId: t.espacio_id,
-          codigoUnico: t.codigo_unico,
-          inicioPeriodo: new Date(o.ini).toISOString().slice(0, 10),
-          finPeriodo: new Date(o.fin).toISOString().slice(0, 10),
-        });
-      }
-    }
-
     if (t.estatus === 'Bonificado') idsVendidoBon.push(t.reserva_id);
     else idsVendido.push(t.reserva_id);
+    if (!Number(t.es_digital) && !Number(t.es_im)) ocupaEspacios.add(t.espacio_id);
   }
 
-  // Fail-closed: cualquier conflicto aborta TODA la venta (no se flipa ni desplaza).
-  if (conflictos.length > 0) {
-    throw new VentaConflictoError(conflictos);
+  const desplazadas: DesplazadaInfo[] = [];
+  const idsAEvictar: number[] = [];
+
+  // BATCH: en vez de 3 queries por reserva (lock+check+evict) en serie —que a 120
+  // reservas contra BD remota revienta los 30s de la tx— hacemos ~3 queries TOTAL.
+  if (ocupaEspacios.size > 0) {
+    const espacioList = [...ocupaEspacios];
+    const ph = espacioList.map(() => '?').join(',');
+    // 1) Lock masivo de los espacios tradicionales (1 query). ORDER BY id para
+    //    bloquear siempre en el mismo orden (deadlock-safe) y serializar aprobaciones.
+    await tx.$executeRawUnsafe(
+      `SELECT id FROM espacio_inventario WHERE id IN (${ph}) ORDER BY id FOR UPDATE`,
+      ...espacioList,
+    );
+
+    // 2) Conflictos (1 query, self-join): tentativas tradicionales de esta propuesta
+    //    cuya pieza YA está firme por OTRA cotización en el período (traslape).
+    const conflictRows = await tx.$queryRawUnsafe<{
+      reserva_id: number; espacio_id: number; inicio: string; fin: string; codigo_unico: string | null;
+    }[]>(
+      `SELECT DISTINCT r.id AS reserva_id, r.inventario_id AS espacio_id,
+              DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio,
+              DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin,
+              COALESCE(invE.codigo_unico, invD.codigo_unico) AS codigo_unico
+       FROM reservas r
+       INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+       LEFT JOIN espacio_inventario ei ON ei.id = r.inventario_id
+       LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
+       LEFT JOIN inventarios invD ON invD.id = r.inventario_id
+       INNER JOIN reservas r2 ON r2.inventario_id = r.inventario_id
+         AND r2.deleted_at IS NULL AND r2.estatus IN (${ESTATUS_FIRME_SQL})
+       INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+         AND sc2.idquote <> CAST(? AS CHAR)
+         AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
+       WHERE sc.idquote = CAST(? AS CHAR)
+         AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
+         AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
+         AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')`,
+      propuestaId, propuestaId,
+    );
+
+    // Fail-closed: cualquier conflicto aborta TODA la venta (la tx se revierte).
+    if (conflictRows.length > 0) {
+      throw new VentaConflictoError(conflictRows.map(x => ({
+        reservaId: x.reserva_id,
+        espacioId: x.espacio_id,
+        codigoUnico: x.codigo_unico,
+        inicioPeriodo: String(x.inicio),
+        finPeriodo: String(x.fin),
+      })));
+    }
+
+    // 3) Desplazamiento (1 query): tentativas de OTRAS propuestas sobre las piezas
+    //    ganadas → se soft-deletean y se devuelven para notificar.
+    const evictRows = await tx.$queryRawUnsafe<{
+      reserva_id: number; idquote: string; ini: string; fin: string; codigo_unico: string | null; espacio_id: number;
+    }[]>(
+      `SELECT DISTINCT r2.id AS reserva_id, sc2.idquote AS idquote,
+              DATE_FORMAT(sc2.inicio_periodo, '%Y-%m-%d') AS ini,
+              DATE_FORMAT(sc2.fin_periodo, '%Y-%m-%d') AS fin,
+              COALESCE(invE.codigo_unico, invD.codigo_unico) AS codigo_unico,
+              r.inventario_id AS espacio_id
+       FROM reservas r
+       INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+       LEFT JOIN espacio_inventario ei ON ei.id = r.inventario_id
+       LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
+       LEFT JOIN inventarios invD ON invD.id = r.inventario_id
+       INNER JOIN reservas r2 ON r2.inventario_id = r.inventario_id
+         AND r2.deleted_at IS NULL AND r2.estatus IN ('Reservado','Bonificado')
+       INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+         AND sc2.idquote <> CAST(? AS CHAR)
+         AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
+       WHERE sc.idquote = CAST(? AS CHAR)
+         AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
+         AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
+         AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')`,
+      propuestaId, propuestaId,
+    );
+    const evictSeen = new Set<number>();
+    for (const e of evictRows) {
+      if (evictSeen.has(e.reserva_id)) continue;
+      evictSeen.add(e.reserva_id);
+      idsAEvictar.push(e.reserva_id);
+      desplazadas.push({
+        reservaId: e.reserva_id,
+        idquotePerdedora: String(e.idquote),
+        espacioId: e.espacio_id,
+        codigoUnico: e.codigo_unico,
+        inicioPeriodo: String(e.ini),
+        finPeriodo: String(e.fin),
+      });
+    }
   }
 
+  // Flip (batch) + soft-delete de desplazadas (batch).
   if (idsVendido.length > 0) {
     await tx.reservas.updateMany({ where: { id: { in: idsVendido } }, data: { estatus: 'Vendido' } });
   }
   if (idsVendidoBon.length > 0) {
     await tx.reservas.updateMany({ where: { id: { in: idsVendidoBon } }, data: { estatus: 'Vendido bonificado' } });
   }
-
-  // Desplazar (soft-delete) las tentativas de OTRAS propuestas sobre las piezas ganadas.
-  if (idsAEvictar.size > 0) {
-    await tx.reservas.updateMany({
-      where: { id: { in: [...idsAEvictar] } },
-      data: { deleted_at: new Date() },
-    });
+  if (idsAEvictar.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: idsAEvictar } }, data: { deleted_at: new Date() } });
   }
 
-  return {
-    vendidas: idsVendido.length + idsVendidoBon.length,
-    desplazadas: [...desplazadasMap.values()],
-  };
+  return { vendidas: idsVendido.length + idsVendidoBon.length, desplazadas };
 }
