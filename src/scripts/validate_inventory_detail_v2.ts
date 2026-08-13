@@ -58,7 +58,7 @@ type TestCase = {
 };
 
 const base: InventoryDetailParams = {
-  estados: [], ciudades: [], formatos: [], nses: [], tipos: [],
+  estados: [], ciudades: [], formatos: [], nses: [], tipos: [], micromacro: '',
   catorcena_id: undefined, fecha_inicio: undefined, fecha_fin: undefined,
   estatusFiltro: undefined,
   pageNum: 1, limitNum: 50, skip: 0, wantCoords: false,
