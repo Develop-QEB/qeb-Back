@@ -13,7 +13,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -10487,6 +10487,7 @@ export class CampanasController {
       // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
       // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
       const BATCH_SIZE_CAMP = 5;
+      const espaciosFirmados: number[] = [];
       for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
         const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
         const resultados = await Promise.all(lote.map(async (w) => {
@@ -10515,10 +10516,29 @@ export class CampanasController {
         for (const { w, lockResult } of resultados) {
           if (lockResult.ok) {
             reservasCreadas++;
+            espaciosFirmados.push(w.espacioId);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
             reservasOmitidas++;
           }
+        }
+      }
+
+      // Desplazamiento: al FIRMAR inventario en campaña, robarle la pieza a las
+      // propuestas que solo la tenían tentativa (mismo desalojo que el approve #4b)
+      // y avisar a sus dueños. Falla suave: si algo truena aquí las reservas ya
+      // quedaron creadas; solo se pierde el aviso, no la venta.
+      if (espaciosFirmados.length > 0) {
+        try {
+          const desplazadas = await desplazarTentativasEnEspacios(
+            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
+          );
+          if (desplazadas.length > 0) {
+            await notificarReservasDesplazadas(desplazadas);
+            console.log(`[Camp ${campanaId}] desplazadas ${desplazadas.length} reserva(s) tentativa(s) de otras propuestas`);
+          }
+        } catch (err) {
+          console.error(`[Camp ${campanaId}] error en desplazamiento/notificación de tentativas:`, err);
         }
       }
 

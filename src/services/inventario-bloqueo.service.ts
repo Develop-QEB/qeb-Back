@@ -505,3 +505,118 @@ export async function venderReservasPropuestaConGuardian(
 
   return { vendidas: idsVendido.length + idsVendidoBon.length, desplazadas };
 }
+
+/**
+ * Desplaza (soft-delete) las reservas TENTATIVAS (Reservado/Bonificado) de OTRAS
+ * cotizaciones sobre las piezas físicas `espacioIds` que solapan [fechaInicio, fechaFin].
+ * Se usa cuando una campaña FIRMA inventario directamente (createReservas) y debe
+ * "robarle" la pieza a las propuestas que solo la tenían tentativa —el mismo desalojo
+ * que hace el guardián al aprobar, pero para el alta directa en campaña.
+ * Solo aplica a inventario Tradicional (digital comparte; IM no ocupa).
+ * Devuelve las desplazadas para notificar a sus dueños.
+ */
+export async function desplazarTentativasEnEspacios(
+  client: TxClient,
+  espacioIds: number[],
+  fechaInicio: Date,
+  fechaFin: Date,
+  excludeIdquote: string,
+): Promise<DesplazadaInfo[]> {
+  const espacios = [...new Set(espacioIds.map(Number).filter(n => !Number.isNaN(n)))];
+  if (espacios.length === 0) return [];
+  const ph = espacios.map(() => '?').join(',');
+  // El propio idquote de la campaña NO se filtra en SQL (sus reservas son firmes, no
+  // entran en el IN de tentativas); se descarta en JS por seguridad, evitando además
+  // riesgo de colación al comparar idquote contra un parámetro.
+  const rows = await client.$queryRawUnsafe<Array<{
+    reserva_id: number; idquote: string; ini: string; fin: string;
+    codigo_unico: string | null; espacio_id: number;
+  }>>(
+    `SELECT DISTINCT r2.id AS reserva_id, sc2.idquote AS idquote,
+            DATE_FORMAT(sc2.inicio_periodo, '%Y-%m-%d') AS ini,
+            DATE_FORMAT(sc2.fin_periodo, '%Y-%m-%d') AS fin,
+            COALESCE(invE.codigo_unico, invD.codigo_unico) AS codigo_unico,
+            r2.inventario_id AS espacio_id
+     FROM reservas r2
+     INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+     LEFT JOIN espacio_inventario ei ON ei.id = r2.inventario_id
+     LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
+     LEFT JOIN inventarios invD ON invD.id = r2.inventario_id
+     WHERE r2.inventario_id IN (${ph})
+       AND r2.deleted_at IS NULL
+       AND r2.estatus IN ('Reservado', 'Bonificado')
+       AND sc2.inicio_periodo <= ? AND sc2.fin_periodo >= ?
+       AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
+       AND (sc2.articulo IS NULL OR sc2.articulo NOT LIKE 'IM-%')`,
+    ...espacios, fechaFin, fechaInicio,
+  );
+  if (rows.length === 0) return [];
+  const seen = new Set<number>();
+  const ids: number[] = [];
+  const desplazadas: DesplazadaInfo[] = [];
+  for (const r of rows) {
+    if (String(r.idquote) === String(excludeIdquote)) continue;
+    if (seen.has(r.reserva_id)) continue;
+    seen.add(r.reserva_id);
+    ids.push(r.reserva_id);
+    desplazadas.push({
+      reservaId: r.reserva_id,
+      idquotePerdedora: String(r.idquote),
+      espacioId: Number(r.espacio_id),
+      codigoUnico: r.codigo_unico,
+      inicioPeriodo: String(r.ini),
+      finPeriodo: String(r.fin),
+    });
+  }
+  if (ids.length === 0) return [];
+  await client.reservas.updateMany({ where: { id: { in: ids } }, data: { deleted_at: new Date() } });
+  return desplazadas;
+}
+
+/**
+ * Crea la tarea "Reserva desplazada" (una por dueño) para cada propuesta que perdió
+ * piezas y emite el push en vivo (campanita). Compartido por el approve (#4b) y por
+ * createReservas de campañas, para que ambos flujos notifiquen idéntico.
+ */
+export async function notificarReservasDesplazadas(desplazadas: DesplazadaInfo[]): Promise<void> {
+  if (desplazadas.length === 0) return;
+  const porPropuesta = new Map<string, DesplazadaInfo[]>();
+  for (const d of desplazadas) {
+    const arr = porPropuesta.get(d.idquotePerdedora) || [];
+    arr.push(d);
+    porPropuesta.set(d.idquotePerdedora, arr);
+  }
+  const now = new Date();
+  const fin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  for (const [idquote, items] of porPropuesta) {
+    const prop = await defaultPrisma.propuesta.findUnique({ where: { id: parseInt(idquote) } });
+    if (!prop || prop.deleted_at) continue;
+    const owners = (prop.id_asignado || '')
+      .split(',').map(s => parseInt(s.trim())).filter(n => !Number.isNaN(n));
+    const codigos = [...new Set(items.map(i => i.codigoUnico).filter(Boolean))];
+    for (const ownerId of owners) {
+      const tarea = await defaultPrisma.tareas.create({
+        data: {
+          titulo: 'Reserva desplazada',
+          descripcion: `${items.length} inventario(s) de tu propuesta ${idquote} se vendieron en otra campaña. Edítala para reemplazarlos.`,
+          contenido: codigos.length ? `Piezas: ${codigos.join(', ')}` : '',
+          tipo: 'Notificación',
+          categoria: 'general',
+          estatus: 'Pendiente',
+          id_responsable: ownerId,
+          responsable: '',
+          id_solicitud: String(prop.solicitud_id),
+          id_propuesta: idquote,
+          campania_id: parseInt(idquote),
+          fecha_inicio: now,
+          fecha_fin: fin,
+          asignado: '',
+          id_asignado: '',
+        },
+      });
+      try {
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: 'Notificación' });
+      } catch { /* noop */ }
+    }
+  }
+}

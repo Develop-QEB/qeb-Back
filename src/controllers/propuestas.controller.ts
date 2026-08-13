@@ -11,7 +11,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -2223,49 +2223,10 @@ export class PropuestasController {
 
       // #4b: notificar a los dueños de las propuestas cuyas reservas se
       // desplazaron (perdieron la pieza porque esta propuesta la vendió). Se hace
-      // tras el commit para no notificar si la aprobación se revierte.
+      // tras el commit para no notificar si la aprobación se revierte. Comparte el
+      // helper con el alta directa en campaña (createReservas) → aviso idéntico.
       if (desplazadasVenta.length > 0) {
-        const porPropuesta = new Map<string, DesplazadaInfo[]>();
-        for (const d of desplazadasVenta) {
-          const arr = porPropuesta.get(d.idquotePerdedora) || [];
-          arr.push(d);
-          porPropuesta.set(d.idquotePerdedora, arr);
-        }
-        const nowN = new Date();
-        const finN = new Date(nowN.getTime() + 24 * 60 * 60 * 1000);
-        for (const [idquote, items] of porPropuesta) {
-          const propPerdedora = await prisma.propuesta.findUnique({ where: { id: parseInt(idquote) } });
-          if (!propPerdedora || propPerdedora.deleted_at) continue;
-          const owners = (propPerdedora.id_asignado || '')
-            .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-          const codigos = [...new Set(items.map(i => i.codigoUnico).filter(Boolean))];
-          for (const ownerId of owners) {
-            const tareaDesp = await prisma.tareas.create({
-              data: {
-                titulo: 'Reserva desplazada',
-                descripcion: `${items.length} inventario(s) de tu propuesta ${idquote} se vendieron en otra campaña. Edítala para reemplazarlos.`,
-                contenido: codigos.length ? `Piezas: ${codigos.join(', ')}` : '',
-                tipo: 'Notificación',
-                categoria: 'general',
-                estatus: 'Pendiente',
-                id_responsable: ownerId,
-                responsable: '',
-                id_solicitud: String(propPerdedora.solicitud_id),
-                id_propuesta: idquote,
-                campania_id: parseInt(idquote),
-                fecha_inicio: nowN,
-                fecha_fin: finN,
-                asignado: '',
-                id_asignado: '',
-              },
-            });
-            // Push en vivo (campanita) al dueño de la propuesta perdedora —
-            // mismo patrón que el resto de notificaciones del sistema.
-            try {
-              emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tareaDesp.id, tipo: 'Notificación' });
-            } catch { /* noop */ }
-          }
-        }
+        await notificarReservasDesplazadas(desplazadasVenta);
       }
 
       // Enviar correos a Analistas asignados (Seguimiento Campaña)
