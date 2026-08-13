@@ -418,7 +418,9 @@ export class DashboardController {
         'Vendido': 5,
         'Vendido bonificado': 4,
         'Con Arte': 3,
+        'Sin Arte': 3,      // firme (vendido con arte quitado) — antes se perdía
         'Reservado': 2,
+        'Bonificado': 2,    // tentativa (bonificación) — antes se contaba como Disponible
         'Bloqueado': 1,
       };
       reservas.forEach((r) => {
@@ -449,9 +451,9 @@ export class DashboardController {
 
       inventariosBase.forEach((inv) => {
         const estatus = getEstatusEfectivo(inv);
-        if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte') {
+        if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte' || estatus === 'Sin Arte') {
           vendidos++;
-        } else if (estatus === 'Reservado') {
+        } else if (estatus === 'Reservado' || estatus === 'Bonificado') {
           reservados++;
         } else if (estatus === 'Bloqueado') {
           bloqueados++;
@@ -646,7 +648,9 @@ export class DashboardController {
         'Vendido': 5,
         'Vendido bonificado': 4,
         'Con Arte': 3,
+        'Sin Arte': 3,
         'Reservado': 2,
+        'Bonificado': 2,
         'Bloqueado': 1,
       };
       reservas.forEach((r) => {
@@ -671,7 +675,7 @@ export class DashboardController {
         if (estatus_filtro === 'Reservado') {
           return est === 'Reservado' || est === 'Bonificado';
         } else if (estatus_filtro === 'Vendido') {
-          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte';
+          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte' || est === 'Sin Arte';
         }
         return est === estatus_filtro;
       });
@@ -1219,7 +1223,9 @@ export class DashboardController {
                        WHEN 'Vendido' THEN 5
                        WHEN 'Vendido bonificado' THEN 4
                        WHEN 'Con Arte' THEN 3
+                       WHEN 'Sin Arte' THEN 3
                        WHEN 'Reservado' THEN 2
+                       WHEN 'Bonificado' THEN 2
                        WHEN 'Bloqueado' THEN 1
                        ELSE 0
                      END DESC,
@@ -1228,12 +1234,10 @@ export class DashboardController {
           FROM reservas rsv
           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
           WHERE rsv.deleted_at IS NULL
-            -- Whitelist EXACTA de los 5 estatus mapeados en el CASE de prioridad.
-            -- Reservas fuera de esta lista (ej. Bonificado a secas, o cualquier
-            -- estatus futuro no clasificado) NO participan del ranking — igual
-            -- que en el legacy, donde prioridad[X] || 0 daba 0 y el mayor-que
-            -- estricto nunca las dejaba ganar, colapsando el efectivo a Disponible.
-            AND rsv.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Reservado', 'Bloqueado')
+            -- Whitelist de estatus que participan del ranking de estatus_efectivo.
+            -- Incluye 'Bonificado' y 'Sin Arte' (antes se omitían y una pieza con
+            -- solo esos colapsaba a Disponible por error).
+            AND rsv.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte', 'Reservado', 'Bonificado', 'Bloqueado')
             ${calendarioClause}
         ) ranked
         WHERE rn = 1
@@ -1306,13 +1310,43 @@ export class DashboardController {
     }));
     const { solicitudInfoMap, clienteNombreMap } = await buildEnrichmentContext(enrichmentSources);
 
+    // MULTIRESERVAS: una pieza puede tener varias reservas de varios clientes.
+    // Concatenamos TODOS los clientes distintos por pieza (en el período) para que
+    // la tabla y el CSV muestren "APPLE, AEROMEXICO" y no solo la reserva ganadora.
+    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC).
+    const pieceIds = itemRows.map(r => r.id);
+    const clientesPorPieza = new Map<number, string>();
+    if (pieceIds.length > 0) {
+      const ph = pieceIds.map(() => '?').join(',');
+      const clienteRows = await prisma.$queryRawUnsafe<{ inv_id: number; clientes: string | null }[]>(
+        `SELECT ei.inventario_id AS inv_id,
+                GROUP_CONCAT(DISTINCT COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente)
+                             ORDER BY COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente) SEPARATOR ', ') AS clientes
+         FROM reservas rsv
+         INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+         LEFT JOIN cliente clById ON clById.id = rsv.cliente_id
+         LEFT JOIN cliente clByCuic ON clByCuic.CUIC = rsv.cliente_id
+         WHERE rsv.deleted_at IS NULL
+           AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
+           AND ei.inventario_id IN (${ph})
+           ${calendarioClause}
+         GROUP BY ei.inventario_id`,
+        ...pieceIds,
+      );
+      for (const cr of clienteRows) {
+        if (cr.clientes) clientesPorPieza.set(Number(cr.inv_id), cr.clientes);
+      }
+    }
+
     // Resolucion per-item: APS y cliente_nombre son atributos de la RESERVA
     // ganadora (vienen crudos en r.top_APS y r.top_cliente_id). El resto
     // (marca, cuic, cliente, propuesta_id, nombre_campania, campana_id) es
     // compartido por solicitudCaras_id y sale del solicitudInfoMap.
     const items: InventoryDetailItem[] = itemRows.map(r => {
       const solInfo = r.top_solicitudCaras_id != null ? solicitudInfoMap.get(r.top_solicitudCaras_id) : undefined;
-      const clienteNombre = (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
+      // Multi-cliente por pieza (multireservas); fallback al ganador si no hay.
+      const clientesMulti = clientesPorPieza.get(r.id) || null;
+      const clienteNombre = clientesMulti || (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
       return {
         id: r.id,
         codigo_unico: r.codigo_unico,
@@ -1328,7 +1362,7 @@ export class DashboardController {
         cliente_nombre: clienteNombre,
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,
-        cliente: solInfo?.cliente || null,
+        cliente: clientesMulti || solInfo?.cliente || null,
         agencia: solInfo?.agencia || null,
         propuesta_id: solInfo?.propuesta_id || null,
         nombre_campania: solInfo?.nombre_campania || null,
