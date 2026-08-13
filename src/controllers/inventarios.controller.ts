@@ -2177,14 +2177,42 @@ export class InventariosController {
       });
       const calendarioIds = calendariosOverlap.map(c => c.id);
 
+      // Misma regla que getDisponibles: una pieza SOLO cuenta ocupada si está FIRME
+      // (cualquier propuesta) o la tiene una cara HERMANA del mismo grupo_rt_bf
+      // (cualquier estatus). Las reservas tentativas de OTRAS propuestas NO ocupan
+      // (duplicados permitidos). Se incluye también la cara ACTUAL para poder marcar
+      // 'ya_reservado_para_cara'.
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: Number(solicitudCaraId) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: Number(solicitudCaraId) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       const espacioIds = espacios.map(e => e.id);
       const reservasActivas = (espacioIds.length > 0 && calendarioIds.length > 0)
         ? await prisma.reservas.findMany({
             where: {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
-              estatus: { in: [...ESTATUS_QUE_BLOQUEAN] },
               inventario_id: { in: espacioIds },
+              OR: [
+                { estatus: { in: [...ESTATUS_FIRME] } },
+                ...(grupoHermanasCaraIds.length > 0
+                  ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                  : []),
+                ...(solicitudCaraId
+                  ? [{ solicitudCaras_id: Number(solicitudCaraId) }]
+                  : []),
+              ],
             },
             select: { inventario_id: true, solicitudCaras_id: true },
           })
