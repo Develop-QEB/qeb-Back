@@ -1213,10 +1213,16 @@ export class DashboardController {
       : '';
     const estatusFilterVals = estatusTargets ?? [];
 
+    // MULTIRESERVAS: en el filtro 'Reservado' el detalle muestra UNA FILA POR
+    // (pieza, cliente) — una pieza reservada por 2 clientes = 2 filas (el KPI de
+    // getStats sigue contando piezas DISTINTAS). En los demás filtros, una fila
+    // por pieza (reserva ganadora vía ROW_NUMBER).
+    const perPairMode = params.estatusFiltro === 'Reservado';
+
     // Subquery derivada compartida por items y scan. Calcula estatus_efectivo
     // y la reserva ganadora (top_*) via ROW_NUMBER partitioned by inventario_id.
     // Tie-break por rsv.id ASC para determinismo.
-    const filteredSubquery = `
+    const perPieceSubquery = `
       SELECT
         i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
         i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
@@ -1264,11 +1270,41 @@ export class DashboardController {
         ${columnFiltersClause}
     `;
 
-    // Q_items: 50 filas con todos los campos de display + reserva ganadora
+    // Subquery ALTERNATIVA (perPairMode): una fila por (pieza, cliente) sobre las
+    // reservas tentativas. Representante por par: MIN(solicitudCaras_id) para el
+    // enriquecimiento, MAX(APS), y estatus = Reservado si hay renta, si no Bonificado.
+    const pairSubquery = `
+      SELECT
+        i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
+        i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
+        pc.pair_estatus AS estatus_efectivo,
+        pc.top_solicitudCaras_id, pc.top_cliente_id, pc.top_APS
+      FROM inventarios i
+      INNER JOIN (
+        SELECT ei.inventario_id, rsv.cliente_id AS top_cliente_id,
+               MIN(rsv.solicitudCaras_id) AS top_solicitudCaras_id,
+               MAX(rsv.APS) AS top_APS,
+               CASE WHEN SUM(CASE WHEN rsv.estatus = 'Reservado' THEN 1 ELSE 0 END) > 0
+                    THEN 'Reservado' ELSE 'Bonificado' END AS pair_estatus
+        FROM reservas rsv
+        INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus IN ('Reservado', 'Bonificado')
+          ${calendarioClause}
+        GROUP BY ei.inventario_id, rsv.cliente_id
+      ) pc ON pc.inventario_id = i.id
+      WHERE i.estatus <> 'Bloqueado'
+        ${columnFiltersClause}
+    `;
+
+    const filteredSubquery = perPairMode ? pairSubquery : perPieceSubquery;
+
+    // Q_items: filas de la página con todos los campos de display. En perPairMode
+    // hay varias filas por pieza (una por cliente) → desempate por top_cliente_id.
     const itemsSql = `
       SELECT * FROM (${filteredSubquery}) t
       WHERE 1=1 ${estatusFilterClause}
-      ORDER BY t.id
+      ORDER BY t.id, t.top_cliente_id
       LIMIT ? OFFSET ?
     `;
     // Q_scan: id/plaza/lat/lng/estatus del set completo filtrado (5 cols)
@@ -1334,7 +1370,8 @@ export class DashboardController {
     // reservas.cliente_id resuelve por cliente.id (fallback por CUIC).
     const pieceIds = itemRows.map(r => r.id);
     const clientesPorPieza = new Map<number, string>();
-    if (pieceIds.length > 0) {
+    // En perPairMode cada fila ya es (pieza, cliente) → no se concatena.
+    if (!perPairMode && pieceIds.length > 0) {
       const ph = pieceIds.map(() => '?').join(',');
       const clienteRows = await prisma.$queryRawUnsafe<{ inv_id: number; clientes: string | null }[]>(
         `SELECT ei.inventario_id AS inv_id,
@@ -1362,8 +1399,9 @@ export class DashboardController {
     // compartido por solicitudCaras_id y sale del solicitudInfoMap.
     const items: InventoryDetailItem[] = itemRows.map(r => {
       const solInfo = r.top_solicitudCaras_id != null ? solicitudInfoMap.get(r.top_solicitudCaras_id) : undefined;
-      // Multi-cliente por pieza (multireservas); fallback al ganador si no hay.
-      const clientesMulti = clientesPorPieza.get(r.id) || null;
+      // En perPairMode la fila ya trae su cliente (top_cliente_id/solInfo); en
+      // per-pieza, se usa el concat de todos los clientes de la pieza.
+      const clientesMulti = perPairMode ? null : (clientesPorPieza.get(r.id) || null);
       const clienteNombre = clientesMulti || (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
       return {
         id: r.id,
