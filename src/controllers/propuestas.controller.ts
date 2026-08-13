@@ -1920,19 +1920,36 @@ export class PropuestasController {
         return;
       }
 
-      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
-      // Mismo criterio que el guard del atender solicitud.
+      // Bloqueo si existe CUALQUIER circuito rechazado o en correccion por DG/DCM.
+      // Feedback 2026-08-13: mismo criterio que atender solicitud — los circuitos
+      // en 'correccion' derivados del filtro DG/DCM tambien impiden avanzar.
       {
         const rech = await verificarCarasRechazadas(propuestaId.toString());
         if (rech.tieneRechazadas) {
-          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
-          const partes: string[] = [];
-          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
-          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          const totalRech = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const totalCorr = rech.correccionDg.length + rech.correccionDcm.length;
+          const partesEstado: string[] = [];
+          if (totalRech > 0) {
+            const detalle: string[] = [];
+            if (rech.rechazadasDg.length > 0) detalle.push(`${rech.rechazadasDg.length} por DG`);
+            if (rech.rechazadasDcm.length > 0) detalle.push(`${rech.rechazadasDcm.length} por DCM`);
+            partesEstado.push(`${totalRech} rechazado(s) (${detalle.join(', ')})`);
+          }
+          if (totalCorr > 0) {
+            const detalle: string[] = [];
+            if (rech.correccionDg.length > 0) detalle.push(`${rech.correccionDg.length} por DG`);
+            if (rech.correccionDcm.length > 0) detalle.push(`${rech.correccionDcm.length} por DCM`);
+            partesEstado.push(`${totalCorr} en correccion (${detalle.join(', ')})`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede aprobar: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
-            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
+            error: `No se puede aprobar: hay circuitos que impiden el avance — ${partesEstado.join(' y ')}. Corrigelos o quitalos antes de continuar.`,
+            autorizacion: {
+              rechazadasDg: rech.rechazadasDg.length,
+              rechazadasDcm: rech.rechazadasDcm.length,
+              correccionDg: rech.correccionDg.length,
+              correccionDcm: rech.correccionDcm.length,
+            },
           });
           return;
         }
