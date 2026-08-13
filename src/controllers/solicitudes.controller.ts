@@ -1269,6 +1269,16 @@ export class SolicitudesController {
       const catorcenaFin = req.query.catorcenaFin as string;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = { deleted_at: null };
@@ -1321,6 +1331,49 @@ export class SolicitudesController {
         if (orConditions.length > 0) {
           where.OR = orConditions;
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo pre-query de `ref_id` que usa getAll, intersectado como AND para
+      // no pisar el `where.id` que ponen visibilidad y periodo. Sin esto los
+      // KPIs se quedan en el universo sin filtrar y no cuadran con el listado.
+      const addIdFilter = (ids: number[]) => {
+        if (!Array.isArray(where.AND)) where.AND = where.AND ? [where.AND] : [];
+        (where.AND as any[]).push({ id: { in: ids } });
+      };
+      const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+        const qp: any[] = [];
+        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+        if (estatusValor) { conds.push('detalles LIKE ?'); qp.push(`%"despues":"${estatusValor}"%`); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+      if (creacionDesde || creacionHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
+        const qp: any[] = [];
+        if (creacionDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(creacionDesde)); }
+        if (creacionHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(creacionHasta)); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+
+      // tipoPeriodo (catorcena / mensual). getAll lo aplica en JS sobre el
+      // enrichment; aquí no hay filas que enriquecer, así que se resuelve como
+      // pre-query con el mismo COALESCE: sin cotizacion cuenta como catorcena.
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id
+           FROM solicitud s
+           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`,
+          tipoPeriodo);
+        addIdFilter(rows.map(r => Number(r.id)));
       }
 
       // Visibility filter
