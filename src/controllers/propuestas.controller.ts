@@ -1527,13 +1527,23 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
-        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin, excludeRechazadas
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1591,6 +1601,26 @@ export class PropuestasController {
         if (orClauses.length > 0) {
           whereConditions += ` AND (${orClauses.join(' OR ')})`;
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
+      // el universo sin filtrar y no cuadra con el listado.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; statsParams.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; statsParams.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; statsParams.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; statsParams.push(new Date(creacionDesde)); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; statsParams.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
       }
 
       // Tablas derivadas (LEFT JOIN extra) cuando hay filtro de catorcena. Se
@@ -1920,19 +1950,36 @@ export class PropuestasController {
         return;
       }
 
-      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
-      // Mismo criterio que el guard del atender solicitud.
+      // Bloqueo si existe CUALQUIER circuito rechazado o en correccion por DG/DCM.
+      // Feedback 2026-08-13: mismo criterio que atender solicitud — los circuitos
+      // en 'correccion' derivados del filtro DG/DCM tambien impiden avanzar.
       {
         const rech = await verificarCarasRechazadas(propuestaId.toString());
         if (rech.tieneRechazadas) {
-          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
-          const partes: string[] = [];
-          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
-          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          const totalRech = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const totalCorr = rech.correccionDg.length + rech.correccionDcm.length;
+          const partesEstado: string[] = [];
+          if (totalRech > 0) {
+            const detalle: string[] = [];
+            if (rech.rechazadasDg.length > 0) detalle.push(`${rech.rechazadasDg.length} por DG`);
+            if (rech.rechazadasDcm.length > 0) detalle.push(`${rech.rechazadasDcm.length} por DCM`);
+            partesEstado.push(`${totalRech} rechazado(s) (${detalle.join(', ')})`);
+          }
+          if (totalCorr > 0) {
+            const detalle: string[] = [];
+            if (rech.correccionDg.length > 0) detalle.push(`${rech.correccionDg.length} por DG`);
+            if (rech.correccionDcm.length > 0) detalle.push(`${rech.correccionDcm.length} por DCM`);
+            partesEstado.push(`${totalCorr} en correccion (${detalle.join(', ')})`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede aprobar: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
-            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
+            error: `No se puede aprobar: hay circuitos que impiden el avance — ${partesEstado.join(' y ')}. Corrigelos o quitalos antes de continuar.`,
+            autorizacion: {
+              rechazadasDg: rech.rechazadasDg.length,
+              rechazadasDcm: rech.rechazadasDcm.length,
+              correccionDg: rech.correccionDg.length,
+              correccionDcm: rech.correccionDcm.length,
+            },
           });
           return;
         }

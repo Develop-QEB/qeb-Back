@@ -1788,13 +1788,23 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
-        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo, excludeRechazadas
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1892,6 +1902,26 @@ export class CampanasController {
         if (orClauses.length > 0) {
           conditions.push(`(${orClauses.join(' OR ')})`);
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
+      // el universo sin filtrar y no cuadra con el listado.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        conditions.push(sub);
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(creacionDesde); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        conditions.push(sub);
       }
 
       if (yearInicio && yearFin) {
@@ -11492,6 +11522,22 @@ export class CampanasController {
         select: { id: true, idquote: true, articulo: true, formato: true },
       });
       const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
+
+      // Feedback 2026-08-13: si alguna reserva del circuito tiene APS asignado,
+      // NO se permite eliminar (independiente de lo que muestre el front).
+      // El bote de basura del modal ya oculta este caso, pero blindamos backend.
+      const apsAsignados = await prisma.reservas.findMany({
+        where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null, APS: { not: null } },
+        select: { id: true, APS: true },
+      });
+      if (apsAsignados.length > 0) {
+        const apsList = Array.from(new Set(apsAsignados.map(r => r.APS).filter(Boolean)));
+        res.status(400).json({
+          success: false,
+          error: `No se puede eliminar: el circuito tiene ${apsAsignados.length} reserva(s) con APS asignado (${apsList.join(', ')}). Cancela el APS antes de eliminar.`,
+        });
+        return;
+      }
 
       await prisma.$transaction([
         prisma.reservas.updateMany({

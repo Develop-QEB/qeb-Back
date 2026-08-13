@@ -2060,11 +2060,11 @@ export class NotificacionesController {
             FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
             OR s.usuario_id = ?
           )
-          ${like ? 'AND (c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
+          ${like ? 'AND (CAST(c.id AS CHAR) LIKE ? OR c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
         ORDER BY c.fecha_inicio DESC
         LIMIT 100
       `, ...(like
-        ? [userIdStr, userId, like, like, like]
+        ? [userIdStr, userId, like, like, like, like]
         : [userIdStr, userId]));
 
       res.json({ success: true, data: rows });
@@ -2173,6 +2173,13 @@ export class NotificacionesController {
 
       const refIdNum = ref_id != null ? Number(ref_id) : NaN;
       const hasRef = subtipo && ['Campaña', 'Propuesta'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
+
+      // Lead: subtipo valido sin referencia (no se busca en BD).
+      // Feedback ajuste 2026-08-13: el asesor puede registrar actividad sobre
+      // un prospecto/lead que aun no tiene campaña ni propuesta.
+      if (!hasRef && subtipo === 'Lead') {
+        subtipoOut = 'Lead';
+      }
 
       if (hasRef) {
         subtipoOut = subtipo as string;
