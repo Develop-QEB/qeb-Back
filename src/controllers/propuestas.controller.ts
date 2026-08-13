@@ -2240,7 +2240,7 @@ export class PropuestasController {
             .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
           const codigos = [...new Set(items.map(i => i.codigoUnico).filter(Boolean))];
           for (const ownerId of owners) {
-            await prisma.tareas.create({
+            const tareaDesp = await prisma.tareas.create({
               data: {
                 titulo: 'Reserva desplazada',
                 descripcion: `${items.length} inventario(s) de tu propuesta ${idquote} se vendieron en otra campaña. Edítala para reemplazarlos.`,
@@ -2259,6 +2259,11 @@ export class PropuestasController {
                 id_asignado: '',
               },
             });
+            // Push en vivo (campanita) al dueño de la propuesta perdedora —
+            // mismo patrón que el resto de notificaciones del sistema.
+            try {
+              emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tareaDesp.id, tipo: 'Notificación' });
+            } catch { /* noop */ }
           }
         }
       }
