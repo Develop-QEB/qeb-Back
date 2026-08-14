@@ -8812,13 +8812,16 @@ export class CampanasController {
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
+      // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
       if (filterByTeam && userId) {
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
             usuario_id: userId,
             equipo: {
               deleted_at: null,
+              proposito: 'red_trabajo',
             },
           },
           select: {
@@ -8833,6 +8836,7 @@ export class CampanasController {
               equipo_id: { in: teamIds },
               equipo: {
                 deleted_at: null,
+                proposito: 'red_trabajo',
               },
             },
             select: {
