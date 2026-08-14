@@ -11020,6 +11020,12 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
 
+      // [deferAuth] Durante la edición del borrador (modal), el front manda deferAuth=true
+      // para poder agregar VARIOS circuitos sin que el candado 409 ni la creación de tareas
+      // se disparen por circuitos recién agregados (que quedan 'pendiente'). La autorización
+      // real se resuelve al Guardar (bulkUpdateCaras). Mismo mecanismo que propuestas.
+      const deferAuth = data.deferAuth === true || data.deferAuth === 'true';
+
       // Validar fechas obligatorias.
       if (!data.inicio_periodo || !data.fin_periodo) {
         res.status(400).json({
@@ -11070,7 +11076,11 @@ export class CampanasController {
       // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
       // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
       // está creando ahora (data.grupo_rt_bf).
-      const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+      // [deferAuth] En borrador NO se aplica este candado: el asesor debe poder agregar
+      // varios circuitos aunque los recién agregados queden 'pendiente' (badge informativo).
+      const pendCmCr = deferAuth
+        ? { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] }
+        : await verificarCarasPendientes(cotizacion.id_propuesta.toString());
       if (pendCmCr.tienePendientes) {
         const grupoActualCr = data.grupo_rt_bf ? parseInt(data.grupo_rt_bf) : null;
         const idsPendientesCr = [...new Set([...pendCmCr.pendientesDg, ...pendCmCr.pendientesDcm])];
@@ -11191,8 +11201,10 @@ export class CampanasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
-      // Create authorization tasks if the new cara needs approval
-      if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
+      // Create authorization tasks if the new cara needs approval.
+      // [deferAuth] En borrador NO se crean tareas aquí: se difieren al Guardar
+      // (bulkUpdateCaras las crea una sola vez). El badge Pend. es solo informativo.
+      if (!deferAuth && (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente')) {
         const pendientesDg = estadoResult.autorizacion_dg === 'pendiente' ? [cara.id] : [];
         const pendientesDcm = estadoResult.autorizacion_dcm === 'pendiente' ? [cara.id] : [];
         if (propuesta?.solicitud_id && userId) {
