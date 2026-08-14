@@ -8,6 +8,7 @@ import nodemailer from 'nodemailer';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
+  verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
@@ -1060,16 +1061,31 @@ export class CampanasController {
             select: { id_propuesta: true }
           });
           if (cotizacion?.id_propuesta) {
+            // Feedback 2026-08-15: incluir 'correccion' + 'rechazado' ademas
+            // de 'pendiente' — antes solo se bloqueaba por pendiente, con lo
+            // que activar la campana con circuitos en correccion pasaba sin
+            // alerta. Reusa verificarCarasRechazadas (que incluye ambos).
             const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
-            if (autorizacion.tienePendientes) {
+            const bloqueo = await verificarCarasRechazadas(cotizacion.id_propuesta.toString());
+            if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+              const partes: string[] = [];
               const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+              if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+              const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+              if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+              const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+              if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
               res.status(400).json({
                 success: false,
-                error: `No se puede activar la campaña. ${totalPendientes} circuito(s) están pendientes de autorización.`,
+                error: `No se puede activar la campaña: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
                 autorizacion: {
                   pendientesDg: autorizacion.pendientesDg.length,
-                  pendientesDcm: autorizacion.pendientesDcm.length
-                }
+                  pendientesDcm: autorizacion.pendientesDcm.length,
+                  rechazadasDg: bloqueo.rechazadasDg.length,
+                  rechazadasDcm: bloqueo.rechazadasDcm.length,
+                  correccionDg: bloqueo.correccionDg.length,
+                  correccionDcm: bloqueo.correccionDcm.length,
+                },
               });
               return;
             }
