@@ -1080,6 +1080,29 @@ export class CampanasController {
       // Si tiene APS, no permitir rechazo/cancelación
       const STATUS_LIBERA = ['Rechazada', 'Cancelada'];
       if (STATUS_LIBERA.includes(status) && campanaAnterior.cotizacion_id) {
+        // Feedback 2026-08-14: bloquear rechazo/cancelacion cuando hay
+        // autorizaciones DG/DCM pendientes. Misma politica que solicitud y
+        // propuesta — no cortar el flujo antes de que direccion responda.
+        const cotizacionParaAuth = await prisma.cotizacion.findUnique({
+          where: { id: campanaAnterior.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        if (cotizacionParaAuth?.id_propuesta) {
+          const autorizacion = await verificarCarasPendientes(cotizacionParaAuth.id_propuesta.toString());
+          if (autorizacion.tienePendientes) {
+            const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+            res.status(400).json({
+              success: false,
+              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña. ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+              autorizacion: {
+                pendientesDg: autorizacion.pendientesDg.length,
+                pendientesDcm: autorizacion.pendientesDcm.length,
+              },
+            });
+            return;
+          }
+        }
+
         const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
