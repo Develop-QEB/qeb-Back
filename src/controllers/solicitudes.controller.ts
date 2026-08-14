@@ -923,7 +923,10 @@ export class SolicitudesController {
       // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
       // autorización DG/DCM. Política: la solicitud no avanza a propuesta
       // hasta que dirección apruebe (o rechace) los circuitos pendientes.
-      if (status === 'Aprobada' || status === 'Atendida') {
+      // Feedback 2026-08-14: mismo criterio para Rechazada / Cancelada — no se
+      // puede cortar el flujo mientras direccion aun no responde, para no
+      // dejar tareas de autorizacion huerfanas y perder trazabilidad.
+      if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
         if (auth.tienePendientes) {
           const partes: string[] = [];
@@ -1110,6 +1113,24 @@ export class SolicitudesController {
       if (!solicitud) {
         res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
         return;
+      }
+
+      // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
+      // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
+      // se corta el flujo antes de que direccion responda.
+      {
+        const auth = await verificarCarasPendientes(solicitud.id.toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede eliminar la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
       }
 
       // Cascade: cuando se elimina una solicitud hay que liberar inventario

@@ -880,6 +880,26 @@ export class PropuestasController {
         }
       }
 
+      // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
+      // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
+      // Se evita cortar el flujo antes de que direccion responda (deja tareas
+      // de autorizacion huerfanas y pierde trazabilidad).
+      if (status === 'Rechazada' || status === 'Cancelada') {
+        const autorizacion = await verificarCarasPendientes(propuestaId.toString());
+        if (autorizacion.tienePendientes) {
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+            autorizacion: {
+              pendientesDg: autorizacion.pendientesDg.length,
+              pendientesDcm: autorizacion.pendientesDcm.length,
+            },
+          });
+          return;
+        }
+      }
+
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
