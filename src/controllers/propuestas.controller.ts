@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -4321,19 +4321,23 @@ export class PropuestasController {
       const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
       const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
-      // Cambio de periodo con reservas: liberar el circuito completo (cara +
-      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
+      // (cara + pareja RT/BF) ANTES de reubicarlo/reasignarlo, en la misma
+      // transacción que el update. El inventario reservado pertenece al artículo y
+      // al periodo anteriores, así que no puede arrastrarse al nuevo.
       const periodoCambioUp = (
         (!!inicio_periodo && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
         (!!fin_periodo && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
       );
+      const articuloCambioUp = !!articulo && articulo !== currentCara.articulo;
+      const motivoLiberacionUp = periodoCambioUp ? 'periodo' : 'artículo';
 
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
         updatedCara = await prisma.$transaction(async (tx) => {
-          if (periodoCambioUp) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          if (periodoCambioUp || articuloCambioUp) {
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoLiberacionUp);
             reservasLiberadasUp = liberadas;
           }
           return tx.solicitudCaras.update({
@@ -4372,9 +4376,9 @@ export class PropuestasController {
           data: {
             tipo: 'Propuesta',
             ref_id: parseInt(currentCara.idquote) || 0,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivoLiberacionUp}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: reservasLiberadasUp }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', motivo: motivoLiberacionUp, reservas_liberadas: reservasLiberadasUp }),
           },
         });
       }
@@ -4822,6 +4826,7 @@ export class PropuestasController {
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       let totalReservasLiberadas = 0;
+      const motivosLiberacion = new Set<string>();
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
         // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
@@ -4834,15 +4839,19 @@ export class PropuestasController {
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
-          // Cambio de periodo con reservas: liberar el circuito completo (cara +
-          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo.
+          // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito
+          // completo (cara + pareja RT/BF) y dejarlo en 0. El inventario reservado
+          // pertenece al artículo/periodo anteriores y no puede arrastrarse.
           const periodoCambioP = !!currentCara && (
             (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
             (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
           );
-          if (periodoCambioP) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          const articuloCambioP = !!currentCara && !!data.articulo && data.articulo !== currentCara.articulo;
+          if (periodoCambioP || articuloCambioP) {
+            const motivoP = periodoCambioP ? 'periodo' : 'artículo';
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoP);
             totalReservasLiberadas += liberadas;
+            if (liberadas > 0) motivosLiberacion.add(motivoP);
             if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
           }
 
@@ -4976,15 +4985,16 @@ export class PropuestasController {
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
 
-      // Historial: reservas liberadas por cambio de periodo
+      // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0) {
+        const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
         await prisma.historial.create({
           data: {
             tipo: 'Propuesta',
             ref_id: parseInt(id as string) || 0,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivosTxt}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: totalReservasLiberadas }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', motivo: motivosTxt, reservas_liberadas: totalReservasLiberadas }),
           },
         });
       }
