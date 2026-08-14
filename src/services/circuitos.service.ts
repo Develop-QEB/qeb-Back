@@ -402,20 +402,23 @@ export async function redistribuirReservasCircuito(
 }
 
 /**
- * Libera (soft-delete) las reservas de un circuito cuando se cambia su periodo.
- * Se aplica sobre la cara editada Y su pareja RT/BF (todo el grupo), dejando el
- * circuito con reservas en 0 en el nuevo periodo. Reutiliza el mismo mecanismo
- * de soft-delete (`deleted_at`) que la eliminación de circuito.
+ * Libera (soft-delete) las reservas de un circuito cuando se edita algo que
+ * invalida el inventario ya reservado: cambio de PERIODO (el espacio se reserva
+ * por fecha) o cambio de ARTÍCULO (el espacio reservado pertenece al artículo
+ * anterior). Se aplica sobre la cara editada Y su pareja RT/BF (todo el grupo),
+ * dejando el circuito con reservas en 0. Reutiliza el mismo mecanismo de
+ * soft-delete (`deleted_at`) que la eliminación de circuito.
  *
  * Regla APS: si alguna reserva activa del grupo tiene APS asignado (APS > 0),
- * NO se puede cambiar el periodo — lanza un Error para que el caller lo rechace.
+ * NO se puede editar — lanza un Error para que el caller lo rechace.
  *
  * Devuelve la cantidad de reservas liberadas y los ids de caras afectados.
  * Idempotente: si el grupo no tiene reservas activas, no hace nada (liberadas 0).
  */
-export async function liberarReservasCircuitoPorCambioPeriodo(
+export async function liberarReservasCircuitoPorEdicion(
   tx: Prisma.TransactionClient,
-  caraId: number
+  caraId: number,
+  motivo: string = 'periodo'
 ): Promise<{ liberadas: number; caraIds: number[] }> {
   const cara = await tx.solicitudCaras.findUnique({
     where: { id: caraId },
@@ -433,12 +436,12 @@ export async function liberarReservasCircuitoPorCambioPeriodo(
     if (grupo.length > 0) caraIds = grupo.map((c) => c.id);
   }
 
-  // Candado APS: no se puede reubicar un circuito que ya tiene APS asignado.
+  // Candado APS: no se puede reubicar/reasignar un circuito que ya tiene APS.
   const conAPS = await tx.reservas.count({
     where: { solicitudCaras_id: { in: caraIds }, deleted_at: null, APS: { gt: 0 } },
   });
   if (conAPS > 0) {
-    throw new Error('No se puede cambiar el periodo: el circuito tiene APS asignado.');
+    throw new Error(`No se puede cambiar el ${motivo}: el circuito tiene APS asignado.`);
   }
 
   const liberadas = await tx.reservas.count({

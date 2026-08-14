@@ -12,7 +12,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -1097,6 +1097,29 @@ export class CampanasController {
       // Si tiene APS, no permitir rechazo/cancelación
       const STATUS_LIBERA = ['Rechazada', 'Cancelada'];
       if (STATUS_LIBERA.includes(status) && campanaAnterior.cotizacion_id) {
+        // Feedback 2026-08-14: bloquear rechazo/cancelacion cuando hay
+        // autorizaciones DG/DCM pendientes. Misma politica que solicitud y
+        // propuesta — no cortar el flujo antes de que direccion responda.
+        const cotizacionParaAuth = await prisma.cotizacion.findUnique({
+          where: { id: campanaAnterior.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        if (cotizacionParaAuth?.id_propuesta) {
+          const autorizacion = await verificarCarasPendientes(cotizacionParaAuth.id_propuesta.toString());
+          if (autorizacion.tienePendientes) {
+            const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+            res.status(400).json({
+              success: false,
+              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña. ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+              autorizacion: {
+                pendientesDg: autorizacion.pendientesDg.length,
+                pendientesDcm: autorizacion.pendientesDcm.length,
+              },
+            });
+            return;
+          }
+        }
+
         const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
@@ -10820,21 +10843,25 @@ export class CampanasController {
       if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
       if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
-      // Cambio de periodo con reservas: liberar el circuito completo (cara +
-      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
+      // (cara + pareja RT/BF) ANTES de reubicarlo/reasignarlo, en la misma
+      // transacción que el update. El inventario reservado pertenece al artículo y
+      // al periodo anteriores, así que no puede arrastrarse al nuevo.
       // Respeta candado APS: la helper lanza si el grupo tiene APS y se rechaza
-      // sin mutar el periodo.
+      // sin mutar la cara.
       const periodoCambioUpd = !!currentCaraFull && (
         (!!data.inicio_periodo && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
         (!!data.fin_periodo && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
       );
+      const articuloCambioUpd = !!currentCaraFull && !!data.articulo && data.articulo !== currentCaraFull.articulo;
+      const motivoLiberacionUpd = periodoCambioUpd ? 'periodo' : 'artículo';
 
       let cara;
       let reservasLiberadasUpd = 0;
       try {
         cara = await prisma.$transaction(async (tx) => {
-          if (periodoCambioUpd) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          if (periodoCambioUpd || articuloCambioUpd) {
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoLiberacionUpd);
             reservasLiberadasUpd = liberadas;
           }
           return tx.solicitudCaras.update({
@@ -10852,9 +10879,9 @@ export class CampanasController {
           data: {
             tipo: 'Campaña',
             ref_id: parseInt(currentCara.idquote) || 0,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivoLiberacionUpd}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: reservasLiberadasUpd }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', motivo: motivoLiberacionUpd, reservas_liberadas: reservasLiberadasUpd }),
           },
         });
       }
@@ -11273,9 +11300,10 @@ export class CampanasController {
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       let totalReservasLiberadas = 0;
+      const motivosLiberacion = new Set<string>();
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
-        // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
+        // Grupos cuyas reservas se liberaron (periodo/artículo): se saltan
         // en el post-pass de redistribución (ya no tienen reservas activas).
         const gruposLiberados = new Set<number>();
 
@@ -11285,16 +11313,20 @@ export class CampanasController {
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
-          // Cambio de periodo con reservas: liberar el circuito completo (cara +
-          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo. Respeta candado APS
-          // (la helper lanza si el grupo tiene APS asignado).
+          // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito
+          // completo (cara + pareja RT/BF) y dejarlo en 0. El inventario reservado
+          // pertenece al artículo/periodo anteriores y no puede arrastrarse.
+          // Respeta candado APS (la helper lanza si el grupo tiene APS asignado).
           const periodoCambioBk = !!currentCara && (
             (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
             (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
           );
-          if (periodoCambioBk) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          const articuloCambioBk = !!currentCara && !!data.articulo && data.articulo !== currentCara.articulo;
+          if (periodoCambioBk || articuloCambioBk) {
+            const motivoBk = periodoCambioBk ? 'periodo' : 'artículo';
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoBk);
             totalReservasLiberadas += liberadas;
+            if (liberadas > 0) motivosLiberacion.add(motivoBk);
             if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
           }
 
@@ -11441,15 +11473,16 @@ export class CampanasController {
       const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
       if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
 
-      // Historial: reservas liberadas por cambio de periodo
+      // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0 && refIdHist) {
+        const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
         await prisma.historial.create({
           data: {
             tipo: 'Campaña',
             ref_id: refIdHist,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivosTxt}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', reservas_liberadas: totalReservasLiberadas }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'campaña', motivo: motivosTxt, reservas_liberadas: totalReservasLiberadas }),
           },
         });
       }
