@@ -1705,14 +1705,16 @@ export class SolicitudesController {
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
+      // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
       if (filterByTeam && userId) {
-        // Obtener los equipos del usuario actual
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
             usuario_id: userId,
             equipo: {
               deleted_at: null,
+              proposito: 'red_trabajo',
             },
           },
           select: {
@@ -1720,7 +1722,6 @@ export class SolicitudesController {
           },
         });
 
-        // Si el usuario tiene equipos, obtener todos los miembros de esos equipos
         if (userTeams.length > 0) {
           const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
           const teamMembers = await prisma.usuario_equipo.findMany({
@@ -1728,6 +1729,7 @@ export class SolicitudesController {
               equipo_id: { in: teamIds },
               equipo: {
                 deleted_at: null,
+                proposito: 'red_trabajo',
               },
             },
             select: {
