@@ -979,12 +979,32 @@ export class DashboardController {
   //   - Monto: solicitudCaras.costo (misma fuente que la inversión del listado
   //     de campañas), prorrateado por días de solape cuando hay periodo activo.
   // Respeta el filtro de periodo del dashboard (catorcena_id o fecha_inicio/
-  // fecha_fin) por solape de fechas de campaña y de circuito. Los filtros de
-  // inventario (estado/plaza/formato/nse/tipo) no aplican aquí.
+  // fecha_fin) por solape de fechas de campaña y de circuito, y también los
+  // filtros de inventario (estado/plaza/formato/nse/tipo).
+  //
+  // Filtros de inventario: la plaza vive en `inventarios`, dos saltos abajo del
+  // circuito (sc -> reservas -> inventarios), y un circuito puede tener caras en
+  // varias plazas (~26% de los circuitos; hay uno que toca 9). Por eso el MONTO
+  // se prorratea por caras: un circuito de 10 caras con 6 en GDL aporta 6/10 de
+  // su costo al filtrar por GDL. Así la suma de todas las plazas cuadra con el
+  // total sin filtro. El CONTEO en cambio no se parte — el circuito cuenta
+  // entero en cada plaza que toca — así que los conteos por plaza sí suman más
+  // que el total sin filtro; es intencional, no un error de cuadre.
+  //
+  // Un circuito sin reservas vivas no es atribuible a ninguna plaza, así que
+  // queda fuera en cuanto hay algún filtro de inventario activo (sin filtros
+  // sigue contando completo, como antes).
   async getPosteoStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { catorcena_id, fecha_inicio, fecha_fin } = req.query;
-      const cacheKey = `dashboard:posteo:${JSON.stringify({ catorcena_id, fecha_inicio, fecha_fin })}`;
+      const estados = toMultiValue(req.query.estado);
+      const ciudades = toMultiValue(req.query.ciudad);
+      const formatos = toMultiValue(req.query.formato);
+      const nses = toMultiValue(req.query.nse);
+      const tipos = toMultiValue(req.query.tipo);
+      // Los filtros van dentro de la cacheKey: sin esto el TTL de 10 min
+      // devolvería el mismo resultado para todas las plazas.
+      const cacheKey = `dashboard:posteo:${JSON.stringify({ catorcena_id, fecha_inicio, fecha_fin, estados, ciudades, formatos, nses, tipos })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
         // Resolver rango de fechas (igual que el resto de endpoints).
@@ -1074,6 +1094,58 @@ export class DashboardController {
           ).catch(() => [] as { id: number; posted_aps: string | null }[]),
         ]);
 
+        // Peso de cada circuito bajo los filtros de inventario: fracción de sus
+        // caras vivas que cae dentro del filtro (6 de 10 caras en GDL -> 0.6).
+        // Sin filtros activos no se consulta nada y todos los circuitos pesan 1.
+        const filtroParts: string[] = [];
+        const filtroVals: string[] = [];
+        const addIn = (col: string, values: string[]) => {
+          if (values.length === 0) return;
+          filtroParts.push(
+            values.length === 1 ? `${col} = ?` : `${col} IN (${values.map(() => '?').join(',')})`,
+          );
+          filtroVals.push(...values);
+        };
+        addIn('i.estado', estados);
+        addIn('i.plaza', ciudades);
+        addIn('i.mueble', formatos);
+        addIn('i.nivel_socioeconomico', nses);
+        addIn('i.tradicional_digital', tipos);
+        const filtrosActivos = filtroParts.length > 0;
+
+        const factorByCircuito = new Map<number, number>();
+        if (filtrosActivos) {
+          type PesoRow = { sc_id: number; caras_total: number; caras_match: number };
+          // COUNT(DISTINCT rsv.id): un mismo circuito puede colgar de varias
+          // campañas por el join de idquote y sin DISTINCT se contaría doble.
+          // El denominador NO excluye inventarios 'Inactivo' — la reserva existió
+          // y el costo del circuito la cubre, aunque el mueble se archive después.
+          const pesoRows = await prisma.$queryRawUnsafe<PesoRow[]>(
+            `
+            SELECT sc.id AS sc_id,
+                   COUNT(DISTINCT rsv.id) AS caras_total,
+                   COUNT(DISTINCT CASE WHEN ${filtroParts.join(' AND ')} THEN rsv.id END) AS caras_match
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+            INNER JOIN inventarios i ON i.id = rsv.inventario_id
+            WHERE c.status != 'inactiva'
+              AND rsv.deleted_at IS NULL
+              ${periodoClause}
+            GROUP BY sc.id
+            `,
+            ...filtroVals,
+            ...periodoParams,
+          );
+          for (const r of pesoRows) {
+            const total = Number(r.caras_total) || 0;
+            const match = Number(r.caras_match) || 0;
+            if (total > 0 && match > 0) factorByCircuito.set(Number(r.sc_id), match / total);
+          }
+        }
+
         const apsByCircuito = new Map<number, Set<number>>();
         for (const r of apsRows) {
           const k = Number(r.sc_id);
@@ -1104,7 +1176,11 @@ export class DashboardController {
 
         let pendientesCount = 0, pendientesMonto = 0, posteadasCount = 0, posteadasMonto = 0;
         for (const r of circuitos) {
-          const monto = Number(r.monto) || 0;
+          // factor 0 = el circuito no toca el filtro (o no tiene caras vivas
+          // que atribuir): no cuenta ni aporta monto.
+          const factor = filtrosActivos ? (factorByCircuito.get(Number(r.sc_id)) ?? 0) : 1;
+          if (factor === 0) continue;
+          const monto = (Number(r.monto) || 0) * factor;
           const apsSet = apsByCircuito.get(Number(r.sc_id));
           const postedSet = postedApsByCampana.get(Number(r.campania_id));
           const postedByAps = !!apsSet && apsSet.size > 0 && !!postedSet &&
