@@ -15,9 +15,15 @@ export class EquiposController {
         return;
       }
 
+      // Feedback 2026-08-14: por default solo devolver equipos de "red_trabajo".
+      // Los equipos de proposito='filtro_autorizacion' (40/41 y similares) no
+      // deben aparecer en el tab Red de trabajo de /admin/usuarios. Si en algun
+      // futuro se quiere ver todo, mandar ?proposito=all.
+      const propositoQuery = (req.query.proposito as string) || 'red_trabajo';
       const equipos = await prisma.equipo.findMany({
         where: {
           deleted_at: null,
+          ...(propositoQuery !== 'all' ? { proposito: propositoQuery } : {}),
         },
         include: {
           miembros: {
@@ -46,6 +52,7 @@ export class EquiposController {
         nombre: e.nombre,
         descripcion: e.descripcion,
         color: e.color,
+        proposito: e.proposito,
         created_at: e.created_at,
         miembros: e.miembros.map((m) => ({
           id: m.usuario.id,
@@ -83,7 +90,7 @@ export class EquiposController {
         return;
       }
 
-      const { nombre, descripcion, color } = req.body;
+      const { nombre, descripcion, color, proposito } = req.body;
 
       if (!nombre) {
         res.status(400).json({
@@ -93,11 +100,16 @@ export class EquiposController {
         return;
       }
 
+      // Feedback 2026-08-14: proposito distingue equipos de red_trabajo vs
+      // filtro_autorizacion. Default red_trabajo (creacion desde UI comun).
+      const propositoValor = proposito === 'filtro_autorizacion' ? 'filtro_autorizacion' : 'red_trabajo';
+
       const equipo = await prisma.equipo.create({
         data: {
           nombre,
           descripcion: descripcion || null,
           color: color || '#8B5CF6',
+          proposito: propositoValor,
           created_at: new Date(),
         },
       });
@@ -109,6 +121,7 @@ export class EquiposController {
           nombre: equipo.nombre,
           descripcion: equipo.descripcion,
           color: equipo.color,
+          proposito: equipo.proposito,
           created_at: equipo.created_at,
           miembros: [],
         },
