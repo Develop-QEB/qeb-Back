@@ -11512,6 +11512,22 @@ export class CampanasController {
       });
       const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
 
+      // Feedback 2026-08-13: si alguna reserva del circuito tiene APS asignado,
+      // NO se permite eliminar (independiente de lo que muestre el front).
+      // El bote de basura del modal ya oculta este caso, pero blindamos backend.
+      const apsAsignados = await prisma.reservas.findMany({
+        where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null, APS: { not: null } },
+        select: { id: true, APS: true },
+      });
+      if (apsAsignados.length > 0) {
+        const apsList = Array.from(new Set(apsAsignados.map(r => r.APS).filter(Boolean)));
+        res.status(400).json({
+          success: false,
+          error: `No se puede eliminar: el circuito tiene ${apsAsignados.length} reserva(s) con APS asignado (${apsList.join(', ')}). Cancela el APS antes de eliminar.`,
+        });
+        return;
+      }
+
       await prisma.$transaction([
         prisma.reservas.updateMany({
           where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
