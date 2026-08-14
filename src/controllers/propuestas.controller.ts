@@ -880,6 +880,26 @@ export class PropuestasController {
         }
       }
 
+      // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
+      // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
+      // Se evita cortar el flujo antes de que direccion responda (deja tareas
+      // de autorizacion huerfanas y pierde trazabilidad).
+      if (status === 'Rechazada' || status === 'Cancelada') {
+        const autorizacion = await verificarCarasPendientes(propuestaId.toString());
+        if (autorizacion.tienePendientes) {
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+            autorizacion: {
+              pendientesDg: autorizacion.pendientesDg.length,
+              pendientesDcm: autorizacion.pendientesDcm.length,
+            },
+          });
+          return;
+        }
+      }
+
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
@@ -894,16 +914,33 @@ export class PropuestasController {
           return;
         }
 
+        // Feedback 2026-08-15: verificar tambien caras en 'correccion' — no
+        // solo pendientes. Antes solo se checaban 'pendiente' y Jos reporto
+        // que con una cara en correccion el pase a ventas se ejecutaba sin
+        // alerta. Ahora reusamos verificarCarasRechazadas (que desde el
+        // ajuste de ayer incluye correccion + rechazado) y armamos el
+        // mensaje con el desglose de ambos estados.
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
-        if (autorizacion.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
+        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+          const partes: string[] = [];
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
-              pendientesDcm: autorizacion.pendientesDcm.length
-            }
+              pendientesDcm: autorizacion.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
           });
           return;
         }

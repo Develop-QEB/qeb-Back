@@ -923,16 +923,34 @@ export class SolicitudesController {
       // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
       // autorización DG/DCM. Política: la solicitud no avanza a propuesta
       // hasta que dirección apruebe (o rechace) los circuitos pendientes.
-      if (status === 'Aprobada' || status === 'Atendida') {
+      // Feedback 2026-08-14: mismo criterio para Rechazada / Cancelada — no se
+      // puede cortar el flujo mientras direccion aun no responde, para no
+      // dejar tareas de autorizacion huerfanas y perder trazabilidad.
+      // Feedback 2026-08-15: incluir tambien 'correccion' + 'rechazado' —
+      // no bastaba con 'pendiente' porque los circuitos devueltos a
+      // correccion tampoco cierran la autorizacion.
+      if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
-        if (auth.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(parseInt(id).toString());
+        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
           const partes: string[] = [];
-          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
-          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}" mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
-            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            autorizacion: {
+              pendientesDg: auth.pendientesDg.length,
+              pendientesDcm: auth.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
           });
           return;
         }
@@ -1110,6 +1128,24 @@ export class SolicitudesController {
       if (!solicitud) {
         res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
         return;
+      }
+
+      // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
+      // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
+      // se corta el flujo antes de que direccion responda.
+      {
+        const auth = await verificarCarasPendientes(solicitud.id.toString());
+        if (auth.tienePendientes) {
+          const partes: string[] = [];
+          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
+          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede eliminar la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
+            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+          });
+          return;
+        }
       }
 
       // Cascade: cuando se elimina una solicitud hay que liberar inventario
@@ -1684,14 +1720,16 @@ export class SolicitudesController {
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
+      // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
       if (filterByTeam && userId) {
-        // Obtener los equipos del usuario actual
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
             usuario_id: userId,
             equipo: {
               deleted_at: null,
+              proposito: 'red_trabajo',
             },
           },
           select: {
@@ -1699,7 +1737,6 @@ export class SolicitudesController {
           },
         });
 
-        // Si el usuario tiene equipos, obtener todos los miembros de esos equipos
         if (userTeams.length > 0) {
           const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
           const teamMembers = await prisma.usuario_equipo.findMany({
@@ -1707,6 +1744,7 @@ export class SolicitudesController {
               equipo_id: { in: teamIds },
               equipo: {
                 deleted_at: null,
+                proposito: 'red_trabajo',
               },
             },
             select: {

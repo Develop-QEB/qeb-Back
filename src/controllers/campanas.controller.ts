@@ -8,6 +8,7 @@ import nodemailer from 'nodemailer';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
+  verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
@@ -558,10 +559,10 @@ export class CampanasController {
           COALESCE(s.sap_database, cl.sap_database) as sap_database,
           COALESCE(s.card_code, cl.card_code) as card_code,
           COALESCE(s.salesperson_code, cl.salesperson_code) as salesperson_code,
-          cat_ini.numero_catorcena as catorcena_inicio_num,
-          cat_ini.año as catorcena_inicio_anio,
-          cat_fin.numero_catorcena as catorcena_fin_num,
-          cat_fin.año as catorcena_fin_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
           pr.inversion as propuesta_inversion,
@@ -578,8 +579,6 @@ export class CampanasController {
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
-        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN (
           SELECT
             ct_a.id AS cotizacion_id,
@@ -1079,16 +1078,31 @@ export class CampanasController {
             select: { id_propuesta: true }
           });
           if (cotizacion?.id_propuesta) {
+            // Feedback 2026-08-15: incluir 'correccion' + 'rechazado' ademas
+            // de 'pendiente' — antes solo se bloqueaba por pendiente, con lo
+            // que activar la campana con circuitos en correccion pasaba sin
+            // alerta. Reusa verificarCarasRechazadas (que incluye ambos).
             const autorizacion = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
-            if (autorizacion.tienePendientes) {
+            const bloqueo = await verificarCarasRechazadas(cotizacion.id_propuesta.toString());
+            if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+              const partes: string[] = [];
               const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+              if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+              const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+              if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+              const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+              if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
               res.status(400).json({
                 success: false,
-                error: `No se puede activar la campaña. ${totalPendientes} circuito(s) están pendientes de autorización.`,
+                error: `No se puede activar la campaña: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
                 autorizacion: {
                   pendientesDg: autorizacion.pendientesDg.length,
-                  pendientesDcm: autorizacion.pendientesDcm.length
-                }
+                  pendientesDcm: autorizacion.pendientesDcm.length,
+                  rechazadasDg: bloqueo.rechazadasDg.length,
+                  rechazadasDcm: bloqueo.rechazadasDcm.length,
+                  correccionDg: bloqueo.correccionDg.length,
+                  correccionDcm: bloqueo.correccionDcm.length,
+                },
               });
               return;
             }
@@ -1099,6 +1113,29 @@ export class CampanasController {
       // Si tiene APS, no permitir rechazo/cancelación
       const STATUS_LIBERA = ['Rechazada', 'Cancelada'];
       if (STATUS_LIBERA.includes(status) && campanaAnterior.cotizacion_id) {
+        // Feedback 2026-08-14: bloquear rechazo/cancelacion cuando hay
+        // autorizaciones DG/DCM pendientes. Misma politica que solicitud y
+        // propuesta — no cortar el flujo antes de que direccion responda.
+        const cotizacionParaAuth = await prisma.cotizacion.findUnique({
+          where: { id: campanaAnterior.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        if (cotizacionParaAuth?.id_propuesta) {
+          const autorizacion = await verificarCarasPendientes(cotizacionParaAuth.id_propuesta.toString());
+          if (autorizacion.tienePendientes) {
+            const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+            res.status(400).json({
+              success: false,
+              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña. ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+              autorizacion: {
+                pendientesDg: autorizacion.pendientesDg.length,
+                pendientesDcm: autorizacion.pendientesDcm.length,
+              },
+            });
+            return;
+          }
+        }
+
         const hasAps = await prisma.$queryRawUnsafe<{ has_aps: number }[]>(`
           SELECT MAX(CASE WHEN rsv.APS IS NOT NULL AND rsv.APS > 0 THEN 1 ELSE 0 END) as has_aps
           FROM reservas rsv
@@ -8896,13 +8933,16 @@ export class CampanasController {
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
+      // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
       if (filterByTeam && userId) {
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
             usuario_id: userId,
             equipo: {
               deleted_at: null,
+              proposito: 'red_trabajo',
             },
           },
           select: {
@@ -8917,6 +8957,7 @@ export class CampanasController {
               equipo_id: { in: teamIds },
               equipo: {
                 deleted_at: null,
+                proposito: 'red_trabajo',
               },
             },
             select: {
@@ -11003,6 +11044,12 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
 
+      // [deferAuth] Durante la edición del borrador (modal), el front manda deferAuth=true
+      // para poder agregar VARIOS circuitos sin que el candado 409 ni la creación de tareas
+      // se disparen por circuitos recién agregados (que quedan 'pendiente'). La autorización
+      // real se resuelve al Guardar (bulkUpdateCaras). Mismo mecanismo que propuestas.
+      const deferAuth = data.deferAuth === true || data.deferAuth === 'true';
+
       // Validar fechas obligatorias.
       if (!data.inicio_periodo || !data.fin_periodo) {
         res.status(400).json({
@@ -11053,7 +11100,11 @@ export class CampanasController {
       // la BF primero). La BF queda 'pendiente' y bloquearía a su propia pareja RT
       // con 409. Solo bloqueamos si hay pendientes que NO pertenezcan al par que se
       // está creando ahora (data.grupo_rt_bf).
-      const pendCmCr = await verificarCarasPendientes(cotizacion.id_propuesta.toString());
+      // [deferAuth] En borrador NO se aplica este candado: el asesor debe poder agregar
+      // varios circuitos aunque los recién agregados queden 'pendiente' (badge informativo).
+      const pendCmCr = deferAuth
+        ? { tienePendientes: false, pendientesDg: [] as number[], pendientesDcm: [] as number[] }
+        : await verificarCarasPendientes(cotizacion.id_propuesta.toString());
       if (pendCmCr.tienePendientes) {
         const grupoActualCr = data.grupo_rt_bf ? parseInt(data.grupo_rt_bf) : null;
         const idsPendientesCr = [...new Set([...pendCmCr.pendientesDg, ...pendCmCr.pendientesDcm])];
@@ -11174,8 +11225,10 @@ export class CampanasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
-      // Create authorization tasks if the new cara needs approval
-      if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
+      // Create authorization tasks if the new cara needs approval.
+      // [deferAuth] En borrador NO se crean tareas aquí: se difieren al Guardar
+      // (bulkUpdateCaras las crea una sola vez). El badge Pend. es solo informativo.
+      if (!deferAuth && (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente')) {
         const pendientesDg = estadoResult.autorizacion_dg === 'pendiente' ? [cara.id] : [];
         const pendientesDcm = estadoResult.autorizacion_dcm === 'pendiente' ? [cara.id] : [];
         if (propuesta?.solicitud_id && userId) {

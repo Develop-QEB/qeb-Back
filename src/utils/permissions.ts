@@ -59,13 +59,19 @@ export function hasTeamVisibility(rol: string): boolean {
 /**
  * Obtiene los IDs de todos los miembros de los equipos a los que pertenece el usuario.
  * Incluye al propio usuario.
+ *
+ * Feedback 2026-08-14: excluye equipos con proposito='filtro_autorizacion'
+ * (equipos 40/41 y similares) — esos existen solo para el filtro DG y no
+ * deben expandir la visibilidad "red de trabajo" del asesor.
  */
 export async function getTeamMemberIds(prisma: PrismaClient, userId: number): Promise<number[]> {
   const rows = await prisma.$queryRawUnsafe<{ usuario_id: number }[]>(
     `SELECT DISTINCT ue2.usuario_id
      FROM usuario_equipo ue1
      INNER JOIN usuario_equipo ue2 ON ue2.equipo_id = ue1.equipo_id
-     INNER JOIN equipo e ON e.id = ue1.equipo_id AND e.deleted_at IS NULL
+     INNER JOIN equipo e ON e.id = ue1.equipo_id
+       AND e.deleted_at IS NULL
+       AND e.proposito = 'red_trabajo'
      WHERE ue1.usuario_id = ?`,
     userId
   );

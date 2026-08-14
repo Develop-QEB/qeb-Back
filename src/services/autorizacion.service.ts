@@ -94,9 +94,15 @@ async function getGerenteComercialParaSolicitud(
   }
   if (!asesorId) return null;
 
-  // 2) Equipos del asesor
+  // 2) Equipos del asesor con proposito filtro_autorizacion.
+  // Feedback 2026-08-14: solo estos equipos determinan quien es el GC lider
+  // del asesor. Los equipos "red_trabajo" pueden tener un GC como miembro por
+  // otras razones (mapeo geografico, colaboracion) y no deben confundirse.
   const equiposDelAsesor = await prisma.usuario_equipo.findMany({
-    where: { usuario_id: asesorId, equipo: { deleted_at: null } },
+    where: {
+      usuario_id: asesorId,
+      equipo: { deleted_at: null, proposito: 'filtro_autorizacion' },
+    },
     select: { equipo_id: true },
   });
   if (equiposDelAsesor.length === 0) return null;

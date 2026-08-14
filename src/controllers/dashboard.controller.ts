@@ -30,6 +30,7 @@ export type InventoryDetailParams = {
   formatos: string[];
   nses: string[];
   tipos: string[];
+  micromacro: string; // '' | 'excluir' | 'solo' (circuito Mi Macro Periférico)
   catorcena_id: string | undefined;
   fecha_inicio: string | undefined;
   fecha_fin: string | undefined;
@@ -90,6 +91,7 @@ function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
     formatos: toMultiValue(req.query.formato),
     nses: toMultiValue(req.query.nse),
     tipos: toMultiValue(req.query.tipo),
+    micromacro: (req.query.micromacro as string) || '',
     catorcena_id: catorcena_id as string | undefined,
     fecha_inicio: fecha_inicio as string | undefined,
     fecha_fin: fecha_fin as string | undefined,
@@ -310,10 +312,11 @@ export class DashboardController {
       const formatos = toMultiValue(req.query.formato);
       const nses = toMultiValue(req.query.nse);
       const tipos = toMultiValue(req.query.tipo);
+      const micromacro = (req.query.micromacro as string) || '';
 
       // Cache key based on filters
       const cacheKey = CACHE_KEYS.DASHBOARD_STATS(
-        JSON.stringify({ estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })
+        JSON.stringify({ estados, ciudades, formatos, nses, tipos, micromacro, catorcena_id, fecha_inicio, fecha_fin })
       );
 
       const data = await cache.getOrSet(cacheKey, async () => {
@@ -334,6 +337,9 @@ export class DashboardController {
 
       const tipoClause = multiClause(tipos);
       if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
+
+      if (micromacro === 'excluir') inventarioWhere.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') inventarioWhere.tipo_de_mueble = { contains: 'MI MACRO' };
 
       // Obtener todos los inventarios que cumplen los filtros.
       // Los Inactivos son "fantasmas" — quedan en el catálogo pero NO cuentan
@@ -550,8 +556,9 @@ export class DashboardController {
       const formatos = toMultiValue(req.query.formato);
       const nses = toMultiValue(req.query.nse);
       const tipos = toMultiValue(req.query.tipo);
+      const micromacro = (req.query.micromacro as string) || '';
 
-      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })}`;
+      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, micromacro, catorcena_id, fecha_inicio, fecha_fin })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
@@ -571,6 +578,9 @@ export class DashboardController {
 
       const tipoClause = multiClause(tipos);
       if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
+
+      if (micromacro === 'excluir') inventarioWhere.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') inventarioWhere.tipo_de_mueble = { contains: 'MI MACRO' };
 
       const inventariosBase = await prisma.inventarios.findMany({
         where: inventarioWhere,
@@ -1259,6 +1269,14 @@ export class DashboardController {
     addIn('i.mueble', params.formatos);
     addIn('i.nivel_socioeconomico', params.nses);
     addIn('i.tradicional_digital', params.tipos);
+    // Circuito Mi Macro Periférico: se distingue por tipo_de_mueble (comparte mueble con la calle).
+    if (params.micromacro === 'excluir') {
+      colFilterParts.push('i.tipo_de_mueble NOT LIKE ?');
+      colFilterVals.push('%MI MACRO%');
+    } else if (params.micromacro === 'solo') {
+      colFilterParts.push('i.tipo_de_mueble LIKE ?');
+      colFilterVals.push('%MI MACRO%');
+    }
     const columnFiltersClause = colFilterParts.length > 0 ? 'AND ' + colFilterParts.join(' AND ') : '';
 
     const estatusTargets = expandEstatusFilter(params.estatusFiltro);
