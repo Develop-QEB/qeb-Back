@@ -10,10 +10,14 @@ router.use(authMiddleware);
 // Evaluar autorización - requiere autenticación para identificar al usuario
 router.post('/evaluar-autorizacion', solicitudesController.evaluarAutorizacion.bind(solicitudesController));
 
-// Filtro DG (Director General Adjunto): decisión sobre la tarea de filtro
+// Filtro DG (Gerente Comercial VP/Plazas): decisión sobre la tarea de filtro
 // antes de que la autorización llegue al Director General.
 router.post('/filtro-dg/:tareaId/aprobar', solicitudesController.aprobarFiltroDg.bind(solicitudesController));
 router.post('/filtro-dg/:tareaId/rechazar', solicitudesController.rechazarFiltroDg.bind(solicitudesController));
+// Filtro DCM (Gerente Comercial Aeropuerto): espejo del filtro DG para la
+// dimensión DCM. Feedback 2026-08-15.
+router.post('/filtro-dcm/:tareaId/aprobar', solicitudesController.aprobarFiltroDcm.bind(solicitudesController));
+router.post('/filtro-dcm/:tareaId/rechazar', solicitudesController.rechazarFiltroDcm.bind(solicitudesController));
 
 router.get('/', solicitudesController.getAll.bind(solicitudesController));
 router.get('/stats', solicitudesController.getStats.bind(solicitudesController));
