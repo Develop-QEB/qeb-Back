@@ -11,6 +11,8 @@ import {
   conservarAprobacionSiIncrementa,
   aprobarFiltroDg,
   rechazarFiltroDgComoCorreccion,
+  aprobarFiltroDcm,
+  rechazarFiltroDcmComoCorreccion,
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -4117,6 +4119,7 @@ export class SolicitudesController {
   async aprobarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = (req.body || {}) as { comentario?: string };
       const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
@@ -4136,7 +4139,7 @@ export class SolicitudesController {
         res.status(400).json({ success: false, error: 'tareaId invalido' });
         return;
       }
-      const result = await aprobarFiltroDg(tareaId, userName);
+      const result = await aprobarFiltroDg(tareaId, userName, comentario);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error('Error aprobarFiltroDg:', error);
@@ -4177,6 +4180,68 @@ export class SolicitudesController {
     } catch (error) {
       console.error('Error rechazarFiltroDg:', error);
       const message = error instanceof Error ? error.message : 'Error al rechazar filtro DG';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Feedback 2026-08-15: espejo DCM del filtro DG. Solo Gerente Comercial
+  // Aeropuerto (+ Admin/DEV) puede aprobar/rechazar el filtro DCM.
+  async aprobarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = (req.body || {}) as { comentario?: string };
+      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = [
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DCM' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      const result = await aprobarFiltroDcm(tareaId, userName, comentario);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error aprobarFiltroDcm:', error);
+      const message = error instanceof Error ? error.message : 'Error al aprobar filtro DCM';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async rechazarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { motivo } = req.body as { motivo?: string };
+      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = [
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DCM' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      if (!motivo || !motivo.trim()) {
+        res.status(400).json({ success: false, error: 'Motivo requerido' });
+        return;
+      }
+      const result = await rechazarFiltroDcmComoCorreccion(tareaId, userName, motivo.trim());
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error rechazarFiltroDcm:', error);
+      const message = error instanceof Error ? error.message : 'Error al rechazar filtro DCM';
       res.status(500).json({ success: false, error: message });
     }
   }
