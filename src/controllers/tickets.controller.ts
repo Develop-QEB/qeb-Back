@@ -439,6 +439,66 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// Reasignar ticket entre areas QEB <-> TI.
+// Feedback 2026-08-15: cualquier usuario que ya tiene acceso al ticket puede
+// mandarlo a la otra area (roles globales o del area actual del ticket). La
+// categoria se conserva tal cual (decision de producto).
+export const updateTicketArea = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { area } = req.body as { area?: string };
+    const userName = req.user?.nombre || 'Usuario';
+
+    if (area !== 'QEB' && area !== 'TI') {
+      return res.status(400).json({ message: "area debe ser 'QEB' o 'TI'" });
+    }
+
+    const ticket = await prisma.tickets.findUnique({ where: { id: Number(id) } });
+    if (!ticket) return res.status(404).json({ message: 'Ticket no encontrado' });
+
+    // Permiso: el usuario debe tener acceso al ticket actual — o rol global o
+    // area coincidente con ticket.area. Reusamos getAreaFilterForUser.
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
+    if (areaFilter && areaFilter !== ticket.area) {
+      return res.status(403).json({ message: 'No tienes permiso para reasignar este ticket' });
+    }
+
+    if (ticket.area === area) {
+      return res.json({ message: 'Sin cambios', ticket });
+    }
+
+    const updated = await prisma.tickets.update({
+      where: { id: Number(id) },
+      data: { area },
+    });
+
+    await logHistorial({
+      tipo: 'ticket',
+      refId: ticket.id,
+      accion: `Reasignó ticket #${ticket.id} (${ticket.area} → ${area})`,
+      usuario: userName,
+      usuarioId: req.user?.userId,
+      usuarioRol: req.user?.rol,
+      origen: 'tickets',
+      cambios: [{ campo: 'area', label: 'Área', antes: ticket.area, despues: area }],
+      extras: {
+        ticket: { id: ticket.id, titulo: ticket.titulo },
+        categoria: ticket.categoria,
+      },
+    });
+
+    try {
+      const io = getIO();
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, updated);
+    } catch {}
+
+    return res.json(updated);
+  } catch (error) {
+    console.error('Error al reasignar area del ticket:', error);
+    return res.status(500).json({ message: 'Error al reasignar el ticket' });
+  }
+};
+
 // ============================================================
 // HISTORIAL DE TICKETS - Endpoints para usuarios autorizados
 // ============================================================
