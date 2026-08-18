@@ -2525,6 +2525,17 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtros por historial — mismo contrato que getAll/getStats (modo +
+      // fecha + estatusValor). El desglose los ignoraba, por lo que el chip
+      // de Historial no acotaba nada en esta vista.
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2591,6 +2602,26 @@ export class PropuestasController {
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
         params.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll/getStats: si el desglose no lo aplica, muestra
+      // el universo completo mientras el listado y los KPIs si estan acotados.
+      const endOfDayStr = (d: string): string => `${d} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(new Date(creacionDesde)); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
       }
 
       // Visibility
