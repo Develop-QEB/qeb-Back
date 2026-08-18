@@ -2310,7 +2310,12 @@ export class PropuestasController {
       // tras el commit para no notificar si la aprobación se revierte. Comparte el
       // helper con el alta directa en campaña (createReservas) → aviso idéntico.
       if (desplazadasVenta.length > 0) {
-        await notificarReservasDesplazadas(desplazadasVenta);
+        await notificarReservasDesplazadas(desplazadasVenta, {
+          usuarioNombre: req.user?.nombre,
+          usuarioId: req.user?.userId,
+          campanaId: propuestaId,
+          origen: 'aprobacion',
+        });
       }
 
       // Enviar correos a Analistas asignados (Seguimiento Campaña)

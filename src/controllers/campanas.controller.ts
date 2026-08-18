@@ -10607,7 +10607,12 @@ export class CampanasController {
             prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
           );
           if (desplazadas.length > 0) {
-            await notificarReservasDesplazadas(desplazadas);
+            await notificarReservasDesplazadas(desplazadas, {
+              usuarioNombre: req.user?.nombre,
+              usuarioId: req.user?.userId,
+              campanaId,
+              origen: 'campana',
+            });
             console.log(`[Camp ${campanaId}] desplazadas ${desplazadas.length} reserva(s) tentativa(s) de otras propuestas`);
           }
         } catch (err) {

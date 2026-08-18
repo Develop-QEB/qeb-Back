@@ -29,7 +29,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../utils/prisma';
-import { emitToAll, SOCKET_EVENTS } from '../config/socket';
+import { emitToAll, emitToPropuesta, SOCKET_EVENTS } from '../config/socket';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FUENTE CENTRAL de qué OCUPA un espacio físico tradicional en un período.
@@ -573,12 +573,27 @@ export async function desplazarTentativasEnEspacios(
   return desplazadas;
 }
 
+/** Contexto opcional del desplazamiento, para el historial (quién movió qué a dónde). */
+export interface DesplazamientoContexto {
+  usuarioNombre?: string;
+  usuarioId?: number;
+  campanaId?: number;      // campaña/propuesta GANADORA (a donde se fueron las piezas)
+  campanaNombre?: string;
+  origen?: 'campana' | 'aprobacion';
+}
+
 /**
  * Crea la tarea "Reserva desplazada" (una por dueño) para cada propuesta que perdió
- * piezas y emite el push en vivo (campanita). Compartido por el approve (#4b) y por
- * createReservas de campañas, para que ambos flujos notifiquen idéntico.
+ * piezas y emite el push en vivo (campanita). Además: (1) emite RESERVA_ELIMINADA a la
+ * propuesta perdedora para que, si está abierta, se refresque sola (reservas + historial),
+ * y (2) registra en `historial` quién movió cuántas piezas y a qué campaña, para que
+ * quede rastro visible en el modal de asignar inventario de la propuesta.
+ * Compartido por el approve (#4b) y por createReservas de campañas.
  */
-export async function notificarReservasDesplazadas(desplazadas: DesplazadaInfo[]): Promise<void> {
+export async function notificarReservasDesplazadas(
+  desplazadas: DesplazadaInfo[],
+  ctx: DesplazamientoContexto = {},
+): Promise<void> {
   if (desplazadas.length === 0) return;
   const porPropuesta = new Map<string, DesplazadaInfo[]>();
   for (const d of desplazadas) {
@@ -586,6 +601,19 @@ export async function notificarReservasDesplazadas(desplazadas: DesplazadaInfo[]
     arr.push(d);
     porPropuesta.set(d.idquotePerdedora, arr);
   }
+
+  // Nombre de la campaña ganadora (una sola consulta) para el texto del historial.
+  let campanaTxt = ctx.campanaNombre;
+  if (!campanaTxt && ctx.campanaId) {
+    try {
+      const camp = await defaultPrisma.campania.findUnique({ where: { id: ctx.campanaId }, select: { nombre: true } });
+      campanaTxt = camp?.nombre || undefined;
+    } catch { /* noop */ }
+  }
+  const campanaLabel = campanaTxt
+    ? `${campanaTxt} (#${ctx.campanaId ?? ''})`
+    : (ctx.campanaId ? `campaña #${ctx.campanaId}` : 'otra campaña');
+
   const now = new Date();
   const fin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   for (const [idquote, items] of porPropuesta) {
@@ -618,5 +646,42 @@ export async function notificarReservasDesplazadas(desplazadas: DesplazadaInfo[]
         emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: 'Notificación' });
       } catch { /* noop */ }
     }
+
+    // (1) Refresco en vivo de la propuesta abierta (reservas + historial).
+    try {
+      emitToPropuesta(parseInt(idquote), SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId: parseInt(idquote) });
+    } catch { /* noop */ }
+
+    // (2) Rastro en el historial de la propuesta perdedora (ref_id = propuesta id).
+    //     Aparece en el modal de asignar inventario ("Historial") de esa propuesta.
+    try {
+      const ini = items[0]?.inicioPeriodo;
+      let periodoTxt = ini && items[0]?.finPeriodo ? `${ini} a ${items[0].finPeriodo}` : '';
+      if (ini) {
+        try {
+          const cat = await defaultPrisma.catorcenas.findFirst({
+            where: { fecha_inicio: { lte: new Date(ini) }, fecha_fin: { gte: new Date(ini) } },
+            select: { numero_catorcena: true, a_o: true },
+          });
+          if (cat?.numero_catorcena != null) periodoTxt = `cat ${cat.numero_catorcena}${cat.a_o ? '/' + cat.a_o : ''}`;
+        } catch { /* deja el rango de fechas */ }
+      }
+      const campanaConCat = periodoTxt ? `${campanaLabel} · ${periodoTxt}` : campanaLabel;
+      await defaultPrisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: parseInt(idquote),
+          accion: 'Reservas desplazadas',
+          fecha_hora: now,
+          detalles: JSON.stringify({
+            usuario: ctx.usuarioNombre || 'Sistema',
+            origen: ctx.origen || 'campana',
+            reservas_eliminadas: items.length,
+            campaña: campanaConCat,
+            codigos: codigos.slice(0, 60),
+          }),
+        },
+      });
+    } catch { /* noop */ }
   }
 }
