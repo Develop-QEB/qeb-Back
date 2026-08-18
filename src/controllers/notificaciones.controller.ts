@@ -2142,6 +2142,10 @@ export class NotificacionesController {
         fecha_fin,
         activar_recordatorio,
         recordar_dias_antes,
+        anio,
+        catorcena,
+        estatus_actividad,
+        base,
       } = req.body as {
         subtipo?: string;
         ref_id?: number | string;
@@ -2151,6 +2155,10 @@ export class NotificacionesController {
         fecha_fin?: string;
         activar_recordatorio?: boolean;
         recordar_dias_antes?: number;
+        anio?: number | string;
+        catorcena?: number | string;
+        estatus_actividad?: string;
+        base?: string;
       };
 
       const descripcionTrim = (descripcion || '').trim();
@@ -2239,6 +2247,23 @@ export class NotificacionesController {
       // Default fecha_fin: +7 dias (misma convencion que create() existente).
       const defaultFin = new Date(nowMx); defaultFin.setDate(defaultFin.getDate() + 7);
 
+      // Ajuste feedback 2026-08-15: los 4 campos de clasificacion se guardan
+      // dentro del JSON contenido (no requiere migration). Validaciones
+      // defensivas: anio en un rango razonable, catorcena 1..26, y los
+      // enums solo aceptan los valores exactos definidos.
+      const anioNum = anio != null && anio !== '' ? Number(anio) : null;
+      const anioValido = Number.isFinite(anioNum as number) && (anioNum as number) >= 2020 && (anioNum as number) <= 2035
+        ? (anioNum as number)
+        : null;
+      const catorcenaNum = catorcena != null && catorcena !== '' ? Number(catorcena) : null;
+      const catorcenaValida = Number.isFinite(catorcenaNum as number) && (catorcenaNum as number) >= 1 && (catorcenaNum as number) <= 26
+        ? Math.trunc(catorcenaNum as number)
+        : null;
+      const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
+        estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
+      const baseValida: 'CIMU' | 'TRADE' | null =
+        base === 'CIMU' || base === 'TRADE' ? base : null;
+
       const contenido = JSON.stringify({
         cliente,
         marca,
@@ -2248,6 +2273,10 @@ export class NotificacionesController {
         recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
           ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
           : null,
+        anio: anioValido,
+        catorcena: catorcenaValida,
+        estatus_actividad: estatusActividadValido,
+        base: baseValida,
       });
 
       // Título dinámico según si hay referencia a campaña/propuesta o no.
@@ -2286,7 +2315,11 @@ export class NotificacionesController {
         usuarioId: userId,
         usuarioRol: rol,
         origen: 'notificaciones_actividad_comercial',
-        extras: { cliente, marca, subtipo: subtipoOut, ref_id: refIdOut },
+        extras: {
+          cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
+          anio: anioValido, catorcena: catorcenaValida,
+          estatus_actividad: estatusActividadValido, base: baseValida,
+        },
       });
 
       emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
