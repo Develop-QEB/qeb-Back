@@ -148,14 +148,27 @@ async function main() {
       });
 
       // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
-      // 7am CDMX, antes de que trafico abra: si una campaña se comio caras ya
-      // vendidas, el aviso llega el mismo dia y no dias despues.
-      // Notifica SOLO lo nuevo (estado en `conflictos_ocupacion`) y en un solo
-      // digest por persona, para no enterrar la campanita.
-      programarDiario(7, 'MonitorConflictos 07:00', async () => {
-        const r = await ejecutarMonitorConflictos();
-        console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`);
-      });
+      // Corre CADA HORA: la deteccion es una sola query agregada (~2s sobre el
+      // inventario completo), asi que el costo es despreciable, y el peor caso
+      // de enterarse de un choque baja de 24h a 1h. Correr mas seguido NO
+      // genera mas notificaciones: el estado en `conflictos_ocupacion` hace que
+      // solo se avise lo NUEVO, en un solo digest por persona.
+      // `guardado` evita corridas encimadas si una se alarga o la BD se pone lenta.
+      {
+        let monitorEnCurso = false;
+        const MONITOR_INTERVALO_MS = 60 * 60 * 1000; // 1 hora
+        setInterval(() => {
+          if (monitorEnCurso) {
+            console.warn('[MonitorConflictos] corrida anterior sigue activa; se salta esta.');
+            return;
+          }
+          monitorEnCurso = true;
+          ejecutarMonitorConflictos()
+            .then(r => console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`))
+            .catch((err: unknown) => console.error('[MonitorConflictos] Error en corrida horaria:', err))
+            .finally(() => { monitorEnCurso = false; });
+        }, MONITOR_INTERVALO_MS);
+      }
       // Al arrancar corre SIN notificar: siembra el estado con lo que ya existe
       // para que el primer aviso real sea solo de lo que aparezca despues.
       ejecutarMonitorConflictos({ notificar: false })
