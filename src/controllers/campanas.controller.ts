@@ -1099,20 +1099,34 @@ export class CampanasController {
         // Feedback 2026-08-14: bloquear rechazo/cancelacion cuando hay
         // autorizaciones DG/DCM pendientes. Misma politica que solicitud y
         // propuesta — no cortar el flujo antes de que direccion responda.
+        // Feedback 2026-08-18 (ajuste): tambien incluir 'correccion' y
+        // 'rechazado'. Antes solo se checaba 'pendiente' y podia rechazarse
+        // una campaña con circuitos en correccion sin resolver.
         const cotizacionParaAuth = await prisma.cotizacion.findUnique({
           where: { id: campanaAnterior.cotizacion_id },
           select: { id_propuesta: true },
         });
         if (cotizacionParaAuth?.id_propuesta) {
           const autorizacion = await verificarCarasPendientes(cotizacionParaAuth.id_propuesta.toString());
-          if (autorizacion.tienePendientes) {
+          const bloqueo = await verificarCarasRechazadas(cotizacionParaAuth.id_propuesta.toString());
+          if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+            const partes: string[] = [];
             const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+            if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+            const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+            if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+            const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+            if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
             res.status(400).json({
               success: false,
-              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña. ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
               autorizacion: {
                 pendientesDg: autorizacion.pendientesDg.length,
                 pendientesDcm: autorizacion.pendientesDcm.length,
+                rechazadasDg: bloqueo.rechazadasDg.length,
+                rechazadasDcm: bloqueo.rechazadasDcm.length,
+                correccionDg: bloqueo.correccionDg.length,
+                correccionDcm: bloqueo.correccionDcm.length,
               },
             });
             return;
