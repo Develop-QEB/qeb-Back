@@ -882,18 +882,32 @@ export class PropuestasController {
 
       // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
       // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
-      // Se evita cortar el flujo antes de que direccion responda (deja tareas
-      // de autorizacion huerfanas y pierde trazabilidad).
+      // Feedback 2026-08-18 (ajuste): tambien bloquear cuando hay circuitos
+      // en 'correccion' o 'rechazado'. Antes solo se checaba 'pendiente' y
+      // Jos pudo rechazar una propuesta con 1 circuito en correccion sin
+      // resolver. Ahora se consultan las 3 dimensiones y el mensaje trae el
+      // desglose (mismo patron que Aprobada/Pase a ventas).
       if (status === 'Rechazada' || status === 'Cancelada') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
-        if (autorizacion.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
+        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+          const partes: string[] = [];
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización de dirección.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
             },
           });
           return;

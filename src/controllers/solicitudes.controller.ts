@@ -1135,16 +1135,30 @@ export class SolicitudesController {
       // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
       // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
       // se corta el flujo antes de que direccion responda.
+      // Feedback 2026-08-18 (ajuste): tambien bloquear con 'correccion' o
+      // 'rechazado', no solo 'pendiente'.
       {
         const auth = await verificarCarasPendientes(solicitud.id.toString());
-        if (auth.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(solicitud.id.toString());
+        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
           const partes: string[] = [];
-          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
-          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede eliminar la solicitud mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
-            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            autorizacion: {
+              pendientesDg: auth.pendientesDg.length,
+              pendientesDcm: auth.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
           });
           return;
         }
