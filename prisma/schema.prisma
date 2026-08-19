@@ -802,6 +802,31 @@ model analisis_ocupacion {
   @@map("analisis_ocupacion")
 }
 
+/// Estado del monitor de conflictos de ocupacion. Una fila por celda
+/// (inventario x catorcena) detectada. Sin esto no se puede distinguir un
+/// conflicto NUEVO de uno que ya se avisó ayer, y el cron notificaría lo mismo
+/// en cada corrida — inaceptable con el backlog de notificaciones actual.
+model conflictos_ocupacion {
+  id               Int       @id @default(autoincrement())
+  inventario_id    Int
+  anio             Int
+  numero_catorcena Int
+  /// 'choque' (campañas distintas) | 'duplicado' (una sola campaña)
+  tipo             String    @db.VarChar(20)
+  reservas         Int
+  origenes         Int
+  detectado_at     DateTime  @default(now()) @db.DateTime(0)
+  /// Última corrida del monitor que lo vio vivo.
+  visto_at         DateTime  @default(now()) @db.DateTime(0)
+  notificado_at    DateTime? @db.DateTime(0)
+  /// Se llena cuando una corrida ya no lo encuentra: se resolvió.
+  resuelto_at      DateTime? @db.DateTime(0)
+
+  @@unique([inventario_id, anio, numero_catorcena], map: "uq_celda")
+  @@index([resuelto_at, tipo], map: "idx_estado")
+  @@map("conflictos_ocupacion")
+}
+
 model auditoria_reorganizacion_ocupacion {
   id                    Int      @id @default(autoincrement())
   usuario_id            Int
