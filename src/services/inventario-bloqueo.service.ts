@@ -30,6 +30,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../utils/prisma';
 import { emitToAll, emitToPropuesta, SOCKET_EVENTS } from '../config/socket';
+import { registrarReservaCreada } from './conflictos-live.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FUENTE CENTRAL de qué OCUPA un espacio físico tradicional en un período.
@@ -265,6 +266,10 @@ export async function createReservaConLock(
       // por un P2028 ("unable to start a transaction in the given time"). timeout =
       // tope de EJECUCIÓN de la transacción una vez iniciada.
     }, { timeout: 10000, maxWait: 20000 });
+
+    // Observador de conflictos: anota el sitio para que la verificacion
+    // dirigida (debounced) corra tras la rafaga. Nunca interviene en la reserva.
+    registrarReservaCreada(reserva.invId);
 
     // Emitir evento real-time para que otros buscadores de inventario en
     // vivo quiten este espacio de su listado de disponibles.

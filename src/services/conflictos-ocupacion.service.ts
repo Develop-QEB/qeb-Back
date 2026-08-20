@@ -32,6 +32,10 @@ export interface CeldaConflicto {
   n: number;
   /** Campañas (o propuestas) distintas que la ocupan. */
   origenes: number;
+  /** Campañas que ocupan la celda, para enlazar desde la UI. */
+  campanas: { id: number; nombre: string }[];
+  /** Propuestas (idquote) con reservas sin campaña en la celda. */
+  propuestas: number[];
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
@@ -158,11 +162,20 @@ export async function detectarConflictos(
     anio: number;
     numero_catorcena: number;
     origenes: bigint | number;
+    campanas_raw: string | null;
+    propuestas_raw: string | null;
   }>>(
     `SELECT
        ei.inventario_id, cat.año AS anio, cat.numero_catorcena,
        COUNT(DISTINCT cm.id)
-         + COUNT(DISTINCT CASE WHEN cm.id IS NULL THEN sc.idquote END) AS origenes
+         + COUNT(DISTINCT CASE WHEN cm.id IS NULL THEN sc.idquote END) AS origenes,
+       -- Quien ocupa la celda, para que la UI pueda enlazar a la campaña o
+       -- propuesta sin otra vuelta al servidor. Separador '||' porque los
+       -- nombres de campaña pueden traer comas; el id va antes del primer ':'.
+       GROUP_CONCAT(DISTINCT CASE WHEN cm.id IS NOT NULL
+         THEN CONCAT(cm.id, ':', cm.nombre) END SEPARATOR '||') AS campanas_raw,
+       GROUP_CONCAT(DISTINCT CASE WHEN cm.id IS NULL
+         THEN sc.idquote END SEPARATOR '||') AS propuestas_raw
      FROM espacio_inventario ei
        INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
        INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
@@ -183,14 +196,36 @@ export async function detectarConflictos(
 
   const clave = (r: { inventario_id: number; anio: number; numero_catorcena: number }) =>
     `${r.inventario_id}|${r.anio}|${r.numero_catorcena}`;
-  const porCelda = new Map(origenes.map(o => [clave(o), Number(o.origenes)]));
+  const porCelda = new Map(origenes.map(o => [clave(o), {
+    origenes: Number(o.origenes),
+    // 'id:nombre||id:nombre' → [{id, nombre}]. Solo el primer ':' separa, por
+    // si el nombre de la campaña trae dos puntos.
+    campanas: (o.campanas_raw || '')
+      .split('||')
+      .filter(Boolean)
+      .map(s => {
+        const i = s.indexOf(':');
+        return { id: Number(s.slice(0, i)), nombre: s.slice(i + 1) };
+      })
+      .filter(c => Number.isInteger(c.id)),
+    propuestas: (o.propuestas_raw || '')
+      .split('||')
+      .filter(Boolean) // sin esto, '' -> Number('') = 0 y salia "Propuesta #0"
+      .map(Number)
+      .filter(n2 => Number.isInteger(n2) && n2 > 0),
+  }]));
 
-  return celdas.map(c => ({
-    ...c,
-    n: Number(c.n),
-    // Si la fase 2 no trajo la celda, es una sola campaña: no inventamos choque.
-    origenes: porCelda.get(clave(c)) ?? 1,
-  }));
+  return celdas.map(c => {
+    const extra = porCelda.get(clave(c));
+    return {
+      ...c,
+      n: Number(c.n),
+      // Si la fase 2 no trajo la celda, es una sola campaña: no inventamos choque.
+      origenes: extra?.origenes ?? 1,
+      campanas: extra?.campanas ?? [],
+      propuestas: extra?.propuestas ?? [],
+    };
+  });
 }
 
 export interface ReporteMonitor {
@@ -211,7 +246,7 @@ export interface ReporteMonitor {
  * (el primer barrido puede traer decenas de golpe).
  */
 export async function ejecutarMonitorConflictos(
-  opts: { catorcenas?: CatorcenaRef[]; notificar?: boolean } = {}
+  opts: { catorcenas?: CatorcenaRef[]; notificar?: boolean; ids?: number[] } = {}
 ): Promise<ReporteMonitor> {
   const notificar = opts.notificar !== false;
   const catorcenas = opts.catorcenas ?? (await catorcenasVigentes());
@@ -221,7 +256,7 @@ export async function ejecutarMonitorConflictos(
   };
   if (catorcenas.length === 0) return vacio;
 
-  const detectados = await detectarConflictos(catorcenas);
+  const detectados = await detectarConflictos(catorcenas, opts.ids ?? null);
   const ahora = new Date();
   const claveDe = (c: { inventario_id: number; anio: number; numero_catorcena: number }) =>
     `${c.inventario_id}|${c.anio}|${c.numero_catorcena}`;
@@ -230,7 +265,12 @@ export async function ejecutarMonitorConflictos(
   // Estado previo, acotado a las catorcenas auditadas: lo de otros periodos no
   // se toca porque esta corrida no lo miró y no puede afirmar que se resolvió.
   const previas = await prisma.conflictos_ocupacion.findMany({
-    where: { OR: catorcenas.map(c => ({ anio: c.anio, numero_catorcena: c.numero })) },
+    where: {
+      OR: catorcenas.map(c => ({ anio: c.anio, numero_catorcena: c.numero })),
+      // Corrida acotada por ids (gancho de reservas): solo puede resolver lo
+      // que efectivamente miro. Sin esto marcaria "resuelto" todo lo demas.
+      ...(opts.ids ? { inventario_id: { in: opts.ids } } : {}),
+    },
   });
   const previasPorClave = new Map(previas.map(p => [claveDe(p), p]));
 
