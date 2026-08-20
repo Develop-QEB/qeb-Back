@@ -8179,14 +8179,39 @@ export class CampanasController {
       const rows = await prisma.$queryRawUnsafe<any[]>(
         `SELECT id, campania_id, aps, card_code, cuic, razon_social, marca,
                 cliente_nombre, sap_database, salesperson_code, solicitud_caras_ids,
-                success, doc_entry, doc_num, error_msg, usuario_id, usuario_nombre, posted_at
+                success, doc_entry, doc_num, error_msg, usuario_id, usuario_nombre, accion, posted_at
          FROM campania_post_log
          WHERE campania_id = ?
          ORDER BY posted_at DESC, id DESC`,
         campanaId
       );
+      // Derivar la CATORCENA de cada post desde sus solicitud_caras_ids →
+      // inicio_periodo de la 1ª cara → catorcena que la contiene. Sin tocar el
+      // esquema; sirve para data existente/seed.
+      const allCaraIds = [...new Set(rows.flatMap(r =>
+        String(r.solicitud_caras_ids || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))))];
+      const carasPeriodo = new Map<number, Date>();
+      let catorcenas: { numero: number; anio: number; ini: Date; fin: Date }[] = [];
+      if (allCaraIds.length > 0) {
+        const ph = allCaraIds.map(() => '?').join(',');
+        const caras = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT id, inicio_periodo FROM solicitudCaras WHERE id IN (${ph})`, ...allCaraIds);
+        for (const cc of caras) if (cc.inicio_periodo) carasPeriodo.set(Number(cc.id), new Date(cc.inicio_periodo));
+        const cats = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT numero_catorcena, año AS anio, fecha_inicio, fecha_fin FROM catorcenas`);
+        catorcenas = cats.map(cc => ({ numero: cc.numero_catorcena, anio: cc.anio, ini: new Date(cc.fecha_inicio), fin: new Date(cc.fecha_fin) }));
+      }
+      const catFor = (fecha?: Date): { numero: number | null; anio: number | null } => {
+        if (!fecha) return { numero: null, anio: null };
+        const m = catorcenas.find(cc => fecha >= cc.ini && fecha <= cc.fin);
+        return m ? { numero: m.numero, anio: m.anio } : { numero: null, anio: null };
+      };
       // success viene como 0/1 desde MySQL — normalizar a boolean para el front.
-      const data = rows.map(r => ({ ...r, success: !!r.success }));
+      const data = rows.map(r => {
+        const firstCara = String(r.solicitud_caras_ids || '').split(',').map(s => parseInt(s.trim(), 10)).find(n => !isNaN(n));
+        const cat = catFor(firstCara != null ? carasPeriodo.get(firstCara) : undefined);
+        return { ...r, success: !!r.success, catorcena_numero: cat.numero, catorcena_anio: cat.anio };
+      });
       res.json({ success: true, data });
     } catch (error) {
       console.error('Error en getPostLog:', error);
@@ -8247,6 +8272,27 @@ export class CampanasController {
             }),
           },
         }).catch(err => console.error('Error guardando historial cancel POST APS:', err));
+
+        // Guardar la CANCELACIÓN en la bitácora de posteos (campania_post_log) para que
+        // aparezca en el "Historial de posteos" (con su catorcena), copiando el snapshot
+        // del POST original (cuic/BD/razón social) de cada APS cancelado.
+        for (const apsX of apsQuitados) {
+          try {
+            const orig = await prisma.$queryRawUnsafe<any[]>(
+              `SELECT card_code, cuic, razon_social, marca, cliente_nombre, sap_database, salesperson_code, solicitud_caras_ids
+                 FROM campania_post_log WHERE campania_id=? AND aps=? AND accion='POST' ORDER BY posted_at DESC, id DESC LIMIT 1`,
+              campanaId, apsX);
+            const o = orig[0] || {};
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO campania_post_log
+                (campania_id, aps, card_code, cuic, razon_social, marca, cliente_nombre, sap_database,
+                 salesperson_code, solicitud_caras_ids, success, error_msg, usuario_id, usuario_nombre, accion, posted_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,1,'Cancelación de POST',?,?, 'CANCELACION', NOW())`,
+              campanaId, apsX, o.card_code ?? null, o.cuic ?? null, o.razon_social ?? null, o.marca ?? null,
+              o.cliente_nombre ?? null, o.sap_database ?? null, o.salesperson_code ?? null,
+              o.solicitud_caras_ids ?? null, userId ?? null, userName);
+          } catch (err) { console.error('Error guardando cancelación en post_log:', err); }
+        }
       }
 
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: remaining });
