@@ -1516,6 +1516,10 @@ export class CampanasController {
 
       const campanaId = parseInt(id);
 
+      // Contadores del candado anti-ocupación al recorrer (paso 4c más abajo).
+      let reservasSoltadasPorChoque = 0;
+      let codigosSoltadosPorChoque: string[] = [];
+
       // Obtener la campaña actual para conseguir cotizacion_id
       const campanaActual = await prisma.campania.findUnique({
         where: { id: campanaId },
@@ -1722,6 +1726,64 @@ export class CampanasController {
               AND rs.deleted_at IS NULL
               AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
           `;
+
+          // 4c. CANDADO anti-ocupación al recorrer (fix duplicados AEROPOSTALE/Monster Jam).
+          // Recorrer una campaña a otra catorcena MUEVE sus reservas en su lugar (4a/4b)
+          // sin revisar ocupación → caían sobre caras ya vendidas por OTRA campaña en la
+          // catorcena nueva y generaban duplicados invisibles (el candado normal solo corre
+          // AL RESERVAR, no al recorrer). Aquí, tras mover, soltamos (soft-delete) SOLO las
+          // reservas de ESTA campaña que quedaron encima de una cara ya ocupada por otra
+          // campaña en el periodo solapado (Tradicional; los Digitales comparten pantalla y
+          // no cuentan). Las que cayeron en cara libre se conservan; el asesor re-reserva las
+          // soltadas por el buscador (que sí corre el candado). El mueble físico se resuelve
+          // por COALESCE(espacio_inventario, reserva) para cubrir el inventario_id polimórfico.
+          const colisionesRecorrer = await prisma.$queryRaw<{ id: number; codigo: string | null }[]>`
+            SELECT rs.id AS id, i.codigo_unico AS codigo
+            FROM reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            LEFT JOIN espacio_inventario ei ON ei.id = rs.inventario_id
+            INNER JOIN inventarios i ON i.id = COALESCE(ei.inventario_id, rs.inventario_id)
+            WHERE ct.id = ${cotizacionId}
+              AND rs.deleted_at IS NULL
+              AND rs.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+              AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
+              AND EXISTS (
+                SELECT 1 FROM reservas ro
+                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                LEFT JOIN espacio_inventario eio ON eio.id = ro.inventario_id
+                WHERE ro.deleted_at IS NULL
+                  AND ro.id <> rs.id
+                  AND sco.idquote <> slc.idquote
+                  AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                  AND COALESCE(eio.inventario_id, ro.inventario_id) = COALESCE(ei.inventario_id, rs.inventario_id)
+                  AND sco.inicio_periodo <= slc.fin_periodo
+                  AND sco.fin_periodo >= slc.inicio_periodo
+              )
+          `;
+          if (colisionesRecorrer.length > 0) {
+            const idsSoltar = colisionesRecorrer.map(r => Number(r.id));
+            await prisma.$executeRawUnsafe(
+              `UPDATE reservas SET deleted_at = NOW() WHERE id IN (${idsSoltar.join(',')}) AND deleted_at IS NULL`
+            );
+            reservasSoltadasPorChoque = idsSoltar.length;
+            codigosSoltadosPorChoque = colisionesRecorrer.map(r => r.codigo || '').filter(Boolean);
+            await prisma.historial.create({
+              data: {
+                tipo: 'Campaña',
+                ref_id: campanaId,
+                accion: 'Reservas liberadas por choque al recorrer',
+                fecha_hora: new Date(),
+                detalles: JSON.stringify({
+                  usuario: userName,
+                  origen: 'campaña',
+                  reservas_liberadas: reservasSoltadasPorChoque,
+                  codigos: codigosSoltadosPorChoque.slice(0, 50),
+                }),
+              },
+            });
+          }
         }
       }
 
@@ -1786,6 +1848,7 @@ export class CampanasController {
             if (notas !== undefined) addC('Notas', '', notas || '');
             if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
             if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (reservasSoltadasPorChoque > 0) addC('Reservas liberadas por choque', '', String(reservasSoltadasPorChoque));
             if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
             if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
             if (cuic !== undefined) addC('CUIC', '', String(cuic));
@@ -1810,6 +1873,12 @@ export class CampanasController {
       res.json({
         success: true,
         data: campana,
+        ...(reservasSoltadasPorChoque > 0
+          ? {
+              reservasLiberadas: reservasSoltadasPorChoque,
+              message: `Campaña recorrida. ${reservasSoltadasPorChoque} cara(s) ya estaban ocupadas en la catorcena nueva y se liberaron — vuelve a reservarlas por el buscador.`,
+            }
+          : {}),
       });
 
       // Emitir eventos WebSocket
