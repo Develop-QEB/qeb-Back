@@ -6,6 +6,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { parseCircuitoDigital } from '../lib/circuitos';
+import { registrarReservaCreada } from './conflictos-live.service';
 
 const prisma = new PrismaClient();
 
@@ -219,6 +220,11 @@ export async function autoReservarCircuitoSiAplica(
       },
     });
   }
+
+  // Observador de conflictos: anota los sitios para que la verificacion
+  // dirigida (debounced) corra tras la rafaga. El debounce (20s) da margen de
+  // sobra para que la transaccion de este flujo ya este commiteada.
+  for (const r of aReservar) registrarReservaCreada(r.inventario_id);
 
   // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT)
   //    y SOLO en catorcena. En mensual, todo cuenta como Flujo (regla Gran Formato),
