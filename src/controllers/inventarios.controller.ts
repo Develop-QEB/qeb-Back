@@ -709,6 +709,32 @@ export class InventariosController {
         }
       }
 
+      // (R5) Contador de reservas TENTATIVAS (Reservado/Bonificado) por pieza física en
+      // el período. Es informativo — cuántas propuestas la tienen apartada — NO bloquea.
+      const tentativasPorInventario = new Map<number, number>();
+      if (calendarioIds.length > 0) {
+        const tentativas = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIds },
+            estatus: { in: ['Reservado', 'Bonificado'] },
+          },
+          select: { inventario_id: true },
+        });
+        if (tentativas.length > 0) {
+          const espacioToInv = new Map<number, number>();
+          const espsT = await prisma.espacio_inventario.findMany({
+            where: { id: { in: [...new Set(tentativas.map(t => t.inventario_id))] } },
+            select: { id: true, inventario_id: true },
+          });
+          espsT.forEach(e => espacioToInv.set(e.id, e.inventario_id));
+          for (const t of tentativas) {
+            const invId = espacioToInv.get(t.inventario_id);
+            if (invId != null) tentativasPorInventario.set(invId, (tentativasPorInventario.get(invId) || 0) + 1);
+          }
+        }
+      }
+
       // Get already reserved for this solicitudCara if provided
       let alreadyReservedForCara: Set<number> = new Set();
       let reservedForCaraEspacioIds: Set<number> = new Set();
@@ -763,6 +789,7 @@ export class InventariosController {
         espacios: typeof espacios;
         espacios_count: number;
         ya_reservado_para_cara: boolean;
+        reservas_tentativas_count: number;
       }> = [];
 
       for (const inv of inventarios) {
@@ -792,6 +819,7 @@ export class InventariosController {
             espacios: invEspacios,
             espacios_count: -1, // -1 = sin límite (front lo interpreta)
             ya_reservado_para_cara: yaReservadoParaCara,
+            reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
           });
         } else {
           // Traditional: show once if not all reserved
@@ -807,6 +835,7 @@ export class InventariosController {
               espacios: availableEspacios,
               espacios_count: availableEspacios.length,
               ya_reservado_para_cara: alreadyReservedForCara.has(inv.id),
+              reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
             });
           }
         }
