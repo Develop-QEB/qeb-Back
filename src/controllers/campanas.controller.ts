@@ -19,7 +19,7 @@ import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
@@ -10868,6 +10868,16 @@ export class CampanasController {
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
 
+      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
+      // editar circuitos existentes mientras la campaña esté en "Ajuste CTO Cliente".
+      if (esAsesorComercial(userRol)) {
+        const campAjuste = await prisma.campania.findUnique({ where: { id: campanaId }, select: { status: true } });
+        if (campAjuste?.status === 'Ajuste CTO Cliente') {
+          res.status(403).json({ success: false, error: 'Los asesores comerciales no pueden editar circuitos mientras la campaña está en Ajuste CTO Cliente.' });
+          return;
+        }
+      }
+
       // Validar fechas obligatorias si vienen en el payload.
       if ('inicio_periodo' in data && !data.inicio_periodo) {
         res.status(400).json({ success: false, error: 'inicio_periodo no puede ser vacío' });
@@ -11427,6 +11437,17 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
+
+      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
+      // editar circuitos existentes mientras la campaña esté en "Ajuste CTO Cliente".
+      if (esAsesorComercial(userRol)) {
+        const campAjuste = await prisma.campania.findUnique({ where: { id: campanaId }, select: { status: true } });
+        if (campAjuste?.status === 'Ajuste CTO Cliente') {
+          res.status(403).json({ success: false, error: 'Los asesores comerciales no pueden editar circuitos mientras la campaña está en Ajuste CTO Cliente.' });
+          return;
+        }
+      }
+
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
