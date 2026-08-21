@@ -9,6 +9,7 @@ import {
   CatorcenaRef,
   detectarConflictos,
   esChoque,
+  limpiarCeldasDuplicadas,
 } from '../services/conflictos-ocupacion.service';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -2434,115 +2435,72 @@ export class InventariosController {
         c => !esChoque(c) && pedidas.has(`${c.inventario_id}|${c.anio}|${c.numero_catorcena}`)
       );
 
-      const usuario = req.user?.nombre || 'Sistema';
-      const usuarioId = req.user?.userId;
-      const ahora = new Date();
-
-      const resultado = {
-        celdas_pedidas: pedidas.size,
-        celdas_limpiadas: 0,
-        reservas_liberadas: 0,
-        omitidas: [] as { inventario_id: number; anio: number; numero_catorcena: number; motivo: string }[],
-        detalle: [] as { inventario_id: number; codigo_unico: string | null; anio: number; numero_catorcena: number; conservada: number; liberadas: number[] }[],
-      };
-
-      // Celdas que el cliente pidio pero que ya no son duplicado (se resolvieron,
+      // Celdas que el cliente pidió pero que ya no son duplicado (se resolvieron,
       // o se volvieron choque). Se reportan para que la UI las explique.
+      const preOmitidas: { inventario_id: number; anio: number; numero_catorcena: number; motivo: string }[] = [];
       for (const clave of pedidas) {
         if (!objetivo.some(c => `${c.inventario_id}|${c.anio}|${c.numero_catorcena}` === clave)) {
           const [inv, a, n] = clave.split('|').map(Number);
           const esAhoraChoque = detectados.some(
             c => esChoque(c) && `${c.inventario_id}|${c.anio}|${c.numero_catorcena}` === clave
           );
-          resultado.omitidas.push({
+          preOmitidas.push({
             inventario_id: inv, anio: a, numero_catorcena: n,
             motivo: esAhoraChoque ? 'Ya no es duplicado: ahora hay campañas distintas' : 'Ya no presenta conflicto',
           });
         }
       }
 
-      for (const celda of objetivo) {
-        // Reservas vivas de esa celda, con su APS.
-        const reservas = await prisma.$queryRawUnsafe<Array<{ id: number; APS: number | null }>>(
-          `SELECT rsv.id, rsv.APS
-             FROM espacio_inventario ei
-             INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
-             INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-             INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-            WHERE ei.inventario_id = ?
-              AND rsv.deleted_at IS NULL
-              AND rsv.estatus <> 'eliminada'
-              AND cat.año = ? AND cat.numero_catorcena = ?
-            ORDER BY rsv.id`,
-          celda.inventario_id, celda.anio, celda.numero_catorcena
-        );
+      // Las reglas (APS, conservar la más antigua, soft-delete, historial,
+      // bitácora) viven en el servicio, compartidas con la auto-limpieza.
+      const limpieza = await limpiarCeldasDuplicadas(objetivo, {
+        nombre: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        rol: req.user?.rol,
+        origen: 'Auditoria de conflictos (boton)',
+      });
 
-        if (reservas.length < 2) {
-          resultado.omitidas.push({
-            inventario_id: celda.inventario_id, anio: celda.anio,
-            numero_catorcena: celda.numero_catorcena, motivo: 'Ya no hay reservas duplicadas',
-          });
-          continue;
-        }
-
-        const conAps = reservas.filter(r => r.APS != null && r.APS > 0);
-        if (conAps.length > 1) {
-          resultado.omitidas.push({
-            inventario_id: celda.inventario_id, anio: celda.anio,
-            numero_catorcena: celda.numero_catorcena,
-            motivo: `${conAps.length} reservas con APS: requiere revision manual con SAP`,
-          });
-          continue;
-        }
-
-        // Conservar: la que tiene APS si existe; si no, la mas antigua.
-        const conservada = conAps.length === 1 ? conAps[0] : reservas[0];
-        const aLiberar = reservas.filter(r => r.id !== conservada.id && !(r.APS != null && r.APS > 0));
-        if (aLiberar.length === 0) {
-          resultado.omitidas.push({
-            inventario_id: celda.inventario_id, anio: celda.anio,
-            numero_catorcena: celda.numero_catorcena, motivo: 'Todas las sobrantes tienen APS',
-          });
-          continue;
-        }
-
-        await prisma.reservas.updateMany({
-          where: { id: { in: aLiberar.map(r => r.id) } },
-          data: { deleted_at: ahora },
-        });
-
-        await logHistorial({
-          tipo: 'Inventario',
-          refId: celda.inventario_id,
-          accion: 'Limpieza de reservas duplicadas',
-          usuario,
-          usuarioId,
-          usuarioRol: req.user?.rol,
-          origen: 'Auditoria de conflictos',
-          extras: {
-            catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
-            codigo_unico: celda.codigo_unico,
-            reserva_conservada: conservada.id,
-            reservas_liberadas: aLiberar.map(r => r.id),
-          },
-        });
-
-        resultado.celdas_limpiadas += 1;
-        resultado.reservas_liberadas += aLiberar.length;
-        resultado.detalle.push({
-          inventario_id: celda.inventario_id,
-          codigo_unico: celda.codigo_unico,
-          anio: celda.anio,
-          numero_catorcena: celda.numero_catorcena,
-          conservada: conservada.id,
-          liberadas: aLiberar.map(r => r.id),
-        });
-      }
+      const resultado = {
+        celdas_pedidas: pedidas.size,
+        celdas_limpiadas: limpieza.celdas_limpiadas,
+        reservas_liberadas: limpieza.reservas_liberadas,
+        omitidas: [...preOmitidas, ...limpieza.omitidas],
+        detalle: limpieza.detalle,
+      };
 
       res.json({ success: true, data: resultado });
     } catch (error) {
       console.error('Error en limpiarDuplicadosOcupacion:', error);
       const message = error instanceof Error ? error.message : 'Error al limpiar duplicados';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Registro de limpiezas de duplicados (automáticas y manuales), más
+   * reciente primero. Es la bitácora que alimenta la vista "Limpiezas" de la
+   * Auditoría de conflictos.
+   */
+  async getLimpiezasOcupacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const limitRaw = Number(req.query?.limit);
+      const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 500 ? limitRaw : 200;
+
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT c.inventario_id, i.codigo_unico, i.plaza, i.mueble,
+                c.anio, c.numero_catorcena,
+                c.limpiado_at, c.limpiado_por, c.reserva_conservada, c.reservas_liberadas
+           FROM conflictos_ocupacion c
+           LEFT JOIN inventarios i ON i.id = c.inventario_id
+          WHERE c.limpiado_at IS NOT NULL
+          ORDER BY c.limpiado_at DESC
+          LIMIT ${limit}`
+      );
+
+      res.json({ success: true, data: { limpiezas: serializeBigInt(rows) } });
+    } catch (error) {
+      console.error('Error en getLimpiezasOcupacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener limpiezas';
       res.status(500).json({ success: false, error: message });
     }
   }

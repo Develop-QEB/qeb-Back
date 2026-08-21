@@ -36,6 +36,8 @@ router.post('/conflictos', roleMiddleware('DEV'), inventariosController.getConfl
 // Limpieza de duplicados. Solo DEV y solo duplicados: los choques nunca se
 // resuelven automaticamente (ver limpiarDuplicadosOcupacion).
 router.post('/conflictos/limpiar-duplicados', roleMiddleware('DEV'), inventariosController.limpiarDuplicadosOcupacion.bind(inventariosController));
+// Bitacora de limpiezas de duplicados (automaticas y manuales).
+router.get('/conflictos/limpiezas', roleMiddleware('DEV'), inventariosController.getLimpiezasOcupacion.bind(inventariosController));
 
 // CRUD
 router.post('/bulk-check', inventariosController.bulkCheck.bind(inventariosController));

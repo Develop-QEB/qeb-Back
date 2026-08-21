@@ -821,6 +821,14 @@ model conflictos_ocupacion {
   notificado_at    DateTime? @db.DateTime(0)
   /// Se llena cuando una corrida ya no lo encuentra: se resolvió.
   resuelto_at      DateTime? @db.DateTime(0)
+  /// Registro de limpieza de duplicados (automática o con el botón de la
+  /// auditoría). Sirve como bitácora consultable de qué se limpió y cuándo.
+  limpiado_at        DateTime? @db.DateTime(0)
+  /// 'Automático' o el nombre del usuario que uso el botón.
+  limpiado_por       String?   @db.VarChar(100)
+  reserva_conservada Int?
+  /// Ids de las reservas liberadas, separadas por coma.
+  reservas_liberadas String?   @db.Text
 
   @@unique([inventario_id, anio, numero_catorcena], map: "uq_celda")
   @@index([resuelto_at, tipo], map: "idx_estado")
