@@ -11,6 +11,8 @@ import {
   conservarAprobacionSiIncrementa,
   aprobarFiltroDg,
   rechazarFiltroDgComoCorreccion,
+  aprobarFiltroDcm,
+  rechazarFiltroDcmComoCorreccion,
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -923,16 +925,34 @@ export class SolicitudesController {
       // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
       // autorización DG/DCM. Política: la solicitud no avanza a propuesta
       // hasta que dirección apruebe (o rechace) los circuitos pendientes.
-      if (status === 'Aprobada' || status === 'Atendida') {
+      // Feedback 2026-08-14: mismo criterio para Rechazada / Cancelada — no se
+      // puede cortar el flujo mientras direccion aun no responde, para no
+      // dejar tareas de autorizacion huerfanas y perder trazabilidad.
+      // Feedback 2026-08-15: incluir tambien 'correccion' + 'rechazado' —
+      // no bastaba con 'pendiente' porque los circuitos devueltos a
+      // correccion tampoco cierran la autorizacion.
+      if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
-        if (auth.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(parseInt(id).toString());
+        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
           const partes: string[] = [];
-          if (auth.pendientesDg.length > 0) partes.push(`${auth.pendientesDg.length} pendiente(s) de Dirección General`);
-          if (auth.pendientesDcm.length > 0) partes.push(`${auth.pendientesDcm.length} pendiente(s) de Dirección Comercial`);
+          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}" mientras existan autorizaciones pendientes (${partes.join(' y ')}). Espera a que dirección apruebe o rechace.`,
-            autorizacion: { pendientesDg: auth.pendientesDg.length, pendientesDcm: auth.pendientesDcm.length },
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            autorizacion: {
+              pendientesDg: auth.pendientesDg.length,
+              pendientesDcm: auth.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
           });
           return;
         }
@@ -1110,6 +1130,38 @@ export class SolicitudesController {
       if (!solicitud) {
         res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
         return;
+      }
+
+      // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
+      // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
+      // se corta el flujo antes de que direccion responda.
+      // Feedback 2026-08-18 (ajuste): tambien bloquear con 'correccion' o
+      // 'rechazado', no solo 'pendiente'.
+      {
+        const auth = await verificarCarasPendientes(solicitud.id.toString());
+        const bloqueo = await verificarCarasRechazadas(solicitud.id.toString());
+        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
+          const partes: string[] = [];
+          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            autorizacion: {
+              pendientesDg: auth.pendientesDg.length,
+              pendientesDcm: auth.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
+          });
+          return;
+        }
       }
 
       // Cascade: cuando se elimina una solicitud hay que liberar inventario
@@ -1631,14 +1683,16 @@ export class SolicitudesController {
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual
+      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
+      // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
       if (filterByTeam && userId) {
-        // Obtener los equipos del usuario actual
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
             usuario_id: userId,
             equipo: {
               deleted_at: null,
+              proposito: 'red_trabajo',
             },
           },
           select: {
@@ -1646,7 +1700,6 @@ export class SolicitudesController {
           },
         });
 
-        // Si el usuario tiene equipos, obtener todos los miembros de esos equipos
         if (userTeams.length > 0) {
           const teamIds = userTeams.map((t: { equipo_id: number }) => t.equipo_id);
           const teamMembers = await prisma.usuario_equipo.findMany({
@@ -1654,6 +1707,7 @@ export class SolicitudesController {
               equipo_id: { in: teamIds },
               equipo: {
                 deleted_at: null,
+                proposito: 'red_trabajo',
               },
             },
             select: {
@@ -2692,18 +2746,36 @@ export class SolicitudesController {
         }
       }
 
-      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
+      // Bloqueo si existe CUALQUIER circuito rechazado o en correccion por DG/DCM.
+      // Feedback 2026-08-13: los circuitos enviados a correccion desde el filtro
+      // DG/DCM tambien deben bloquear el avance, no solo los rechazados.
       {
         const rech = await verificarCarasRechazadas(solicitud.id.toString());
         if (rech.tieneRechazadas) {
-          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
-          const partes: string[] = [];
-          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
-          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          const totalRech = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const totalCorr = rech.correccionDg.length + rech.correccionDcm.length;
+          const partesEstado: string[] = [];
+          if (totalRech > 0) {
+            const detalle: string[] = [];
+            if (rech.rechazadasDg.length > 0) detalle.push(`${rech.rechazadasDg.length} por DG`);
+            if (rech.rechazadasDcm.length > 0) detalle.push(`${rech.rechazadasDcm.length} por DCM`);
+            partesEstado.push(`${totalRech} rechazado(s) (${detalle.join(', ')})`);
+          }
+          if (totalCorr > 0) {
+            const detalle: string[] = [];
+            if (rech.correccionDg.length > 0) detalle.push(`${rech.correccionDg.length} por DG`);
+            if (rech.correccionDcm.length > 0) detalle.push(`${rech.correccionDcm.length} por DCM`);
+            partesEstado.push(`${totalCorr} en correccion (${detalle.join(', ')})`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede atender: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
-            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
+            error: `No se puede atender: hay circuitos que impiden el avance — ${partesEstado.join(' y ')}. Corrigelos o quitalos antes de continuar.`,
+            autorizacion: {
+              rechazadasDg: rech.rechazadasDg.length,
+              rechazadasDcm: rech.rechazadasDcm.length,
+              correccionDg: rech.correccionDg.length,
+              correccionDcm: rech.correccionDcm.length,
+            },
           });
           return;
         }
@@ -4063,6 +4135,7 @@ export class SolicitudesController {
   async aprobarFiltroDg(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = (req.body || {}) as { comentario?: string };
       const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
@@ -4082,7 +4155,7 @@ export class SolicitudesController {
         res.status(400).json({ success: false, error: 'tareaId invalido' });
         return;
       }
-      const result = await aprobarFiltroDg(tareaId, userName);
+      const result = await aprobarFiltroDg(tareaId, userName, comentario);
       res.json({ success: true, data: result });
     } catch (error) {
       console.error('Error aprobarFiltroDg:', error);
@@ -4123,6 +4196,68 @@ export class SolicitudesController {
     } catch (error) {
       console.error('Error rechazarFiltroDg:', error);
       const message = error instanceof Error ? error.message : 'Error al rechazar filtro DG';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Feedback 2026-08-15: espejo DCM del filtro DG. Solo Gerente Comercial
+  // Aeropuerto (+ Admin/DEV) puede aprobar/rechazar el filtro DCM.
+  async aprobarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = (req.body || {}) as { comentario?: string };
+      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = [
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DCM' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      const result = await aprobarFiltroDcm(tareaId, userName, comentario);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error aprobarFiltroDcm:', error);
+      const message = error instanceof Error ? error.message : 'Error al aprobar filtro DCM';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  async rechazarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { motivo } = req.body as { motivo?: string };
+      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userRol = req.user?.rol;
+      const rolesPermitidos = [
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ];
+      if (!userRol || !rolesPermitidos.includes(userRol)) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DCM' });
+        return;
+      }
+      if (isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId invalido' });
+        return;
+      }
+      if (!motivo || !motivo.trim()) {
+        res.status(400).json({ success: false, error: 'Motivo requerido' });
+        return;
+      }
+      const result = await rechazarFiltroDcmComoCorreccion(tareaId, userName, motivo.trim());
+      res.json({ success: true, data: result });
+    } catch (error) {
+      console.error('Error rechazarFiltroDcm:', error);
+      const message = error instanceof Error ? error.message : 'Error al rechazar filtro DCM';
       res.status(500).json({ success: false, error: message });
     }
   }

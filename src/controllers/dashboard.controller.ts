@@ -56,6 +56,7 @@ export type InventoryDetailItem = {
   cuic: number | null;
   marca: string | null;
   cliente: string | null;
+  agencia: string | null;
   propuesta_id: number | null;
   nombre_campania: string | null;
   APS: number | null;
@@ -159,6 +160,7 @@ type SolicitudSharedInfo = {
   cuic: number | null;
   marca: string | null;
   cliente: string | null;
+  agencia: string | null;
 };
 type EnrichmentContext = {
   // Info compartida por solicitudCaras_id (marca, cuic, cliente, etc — mismos
@@ -213,7 +215,7 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
     }) : [],
     solicitudIds.length > 0 ? prisma.solicitud.findMany({
       where: { id: { in: solicitudIds } },
-      select: { id: true, razon_social: true, cuic: true },
+      select: { id: true, razon_social: true, cuic: true, agencia: true },
     }) : [],
   ]);
 
@@ -224,12 +226,13 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
   const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
   const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
     where: { CUIC: { in: cuicValues } },
-    select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+    select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true, T0_U_Agencia: true },
   }) : [];
   const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
     nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
     marca: c.T2_U_Marca || '',
     cliente: c.T0_U_Cliente || '',
+    agencia: c.T0_U_Agencia || '',
   }]));
   const solicitudSideInfoMap = new Map(solicitudes.map(s => {
     const cuicNum = parseInt(s.cuic || '');
@@ -239,6 +242,9 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
       cuic: !isNaN(cuicNum) ? cuicNum : null,
       marca: cuicInfo?.marca || null,
       cliente: cuicInfo?.cliente || null,
+      // Misma precedencia que campanas.controller: la agencia capturada en la
+      // solicitud manda sobre la que trae el cliente desde SAP.
+      agencia: s.agencia || cuicInfo?.agencia || null,
     }];
   }));
   const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudSideInfoMap.get(p.solicitud_id) || null]));
@@ -258,6 +264,7 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,
         cliente: solInfo?.cliente || null,
+        agencia: solInfo?.agencia || null,
       }];
     })
   );
@@ -1311,6 +1318,7 @@ export class DashboardController {
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,
         cliente: solInfo?.cliente || null,
+        agencia: solInfo?.agencia || null,
         propuesta_id: solInfo?.propuesta_id || null,
         nombre_campania: solInfo?.nombre_campania || null,
         APS: r.top_APS,
@@ -1474,7 +1482,7 @@ export class DashboardController {
       }) : [],
       solicitudIds.length > 0 ? prisma.solicitud.findMany({
         where: { id: { in: solicitudIds } },
-        select: { id: true, razon_social: true, cuic: true },
+        select: { id: true, razon_social: true, cuic: true, agencia: true },
       }) : [],
     ]);
 
@@ -1485,12 +1493,13 @@ export class DashboardController {
     const cuicValues = [...new Set(solicitudes.map(s => parseInt(s.cuic || '')).filter((id): id is number => !isNaN(id) && id > 0))];
     const cuicClientes = cuicValues.length > 0 ? await prisma.cliente.findMany({
       where: { CUIC: { in: cuicValues } },
-      select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
+      select: { CUIC: true, T2_U_Marca: true, T0_U_Cliente: true, T0_U_RazonSocial: true, T0_U_Agencia: true },
     }) : [];
     const cuicToInfo = new Map(cuicClientes.map(c => [c.CUIC!, {
       nombre: c.T2_U_Marca || c.T0_U_Cliente || c.T0_U_RazonSocial || '',
       marca: c.T2_U_Marca || '',
       cliente: c.T0_U_Cliente || '',
+      agencia: c.T0_U_Agencia || '',
     }]));
     const solicitudInfoMap = new Map(solicitudes.map(s => {
       const cuicNum = parseInt(s.cuic || '');
@@ -1500,7 +1509,8 @@ export class DashboardController {
         cuic: !isNaN(cuicNum) ? cuicNum : null,
         marca: cuicInfo?.marca || null,
         cliente: cuicInfo?.cliente || null,
-      }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+        agencia: s.agencia || cuicInfo?.agencia || null,
+      }] as [number, { cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null; agencia: string | null }];
     }));
     const propuestaToSolicitudInfo = new Map(propuestas.map(p => [p.id, solicitudInfoMap.get(p.solicitud_id) || null]));
 
@@ -1519,7 +1529,8 @@ export class DashboardController {
           cuic: solInfo?.cuic || null,
           marca: solInfo?.marca || null,
           cliente: solInfo?.cliente || null,
-        }] as [number, { campana_id: number | null; propuesta_id: number | null; nombre_campania: string | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null }];
+          agencia: solInfo?.agencia || null,
+        }] as [number, { campana_id: number | null; propuesta_id: number | null; nombre_campania: string | null; cliente_nombre: string | null; cuic: number | null; marca: string | null; cliente: string | null; agencia: string | null }];
       })
     );
 
@@ -1531,7 +1542,8 @@ export class DashboardController {
 
     const inventarioInfo: Record<number, {
       estatus: string; cliente_nombre: string | null; cuic: number | null;
-      marca: string | null; cliente: string | null; propuesta_id: number | null;
+      marca: string | null; cliente: string | null; agencia: string | null;
+      propuesta_id: number | null;
       nombre_campania: string | null; APS: number | null; campana_id: number | null;
       solicitudCaras_id: number;
     }> = {};
@@ -1551,6 +1563,7 @@ export class DashboardController {
         inventarioInfo[invId] = {
           estatus: r.estatus, cliente_nombre: clienteNombre,
           cuic: solInfo?.cuic || null, marca: solInfo?.marca || null, cliente: solInfo?.cliente || null,
+          agencia: solInfo?.agencia || null,
           propuesta_id: solInfo?.propuesta_id ?? null, nombre_campania: solInfo?.nombre_campania || null,
           APS: r.APS, campana_id: solInfo?.campana_id ?? null, solicitudCaras_id: r.solicitudCaras_id,
         };
@@ -1576,6 +1589,7 @@ export class DashboardController {
         cuic: info?.cuic || null,
         marca: info?.marca || null,
         cliente: info?.cliente || null,
+        agencia: info?.agencia || null,
         propuesta_id: info?.propuesta_id || null,
         nombre_campania: info?.nombre_campania || null,
         APS: info?.APS || null,

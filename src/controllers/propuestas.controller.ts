@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorCambioPeriodo, validarFechaEnPeriodoCara } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -880,6 +880,40 @@ export class PropuestasController {
         }
       }
 
+      // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
+      // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
+      // Feedback 2026-08-18 (ajuste): tambien bloquear cuando hay circuitos
+      // en 'correccion' o 'rechazado'. Antes solo se checaba 'pendiente' y
+      // Jos pudo rechazar una propuesta con 1 circuito en correccion sin
+      // resolver. Ahora se consultan las 3 dimensiones y el mensaje trae el
+      // desglose (mismo patron que Aprobada/Pase a ventas).
+      if (status === 'Rechazada' || status === 'Cancelada') {
+        const autorizacion = await verificarCarasPendientes(propuestaId.toString());
+        const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
+        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+          const partes: string[] = [];
+          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          res.status(400).json({
+            success: false,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            autorizacion: {
+              pendientesDg: autorizacion.pendientesDg.length,
+              pendientesDcm: autorizacion.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
+          });
+          return;
+        }
+      }
+
       // Si intenta cambiar a "Aprobada" o "Pase a ventas", verificar cliente con CUIC, autorizaciones y reservas
       if (status === 'Aprobada' || status === 'Pase a ventas') {
         // Verificar que la solicitud tenga un cliente con CUIC
@@ -894,16 +928,33 @@ export class PropuestasController {
           return;
         }
 
+        // Feedback 2026-08-15: verificar tambien caras en 'correccion' — no
+        // solo pendientes. Antes solo se checaban 'pendiente' y Jos reporto
+        // que con una cara en correccion el pase a ventas se ejecutaba sin
+        // alerta. Ahora reusamos verificarCarasRechazadas (que desde el
+        // ajuste de ayer incluye correccion + rechazado) y armamos el
+        // mensaje con el desglose de ambos estados.
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
-        if (autorizacion.tienePendientes) {
+        const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
+        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+          const partes: string[] = [];
           const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}". ${totalPendientes} circuito(s) están pendientes de autorización.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
-              pendientesDcm: autorizacion.pendientesDcm.length
-            }
+              pendientesDcm: autorizacion.pendientesDcm.length,
+              rechazadasDg: bloqueo.rechazadasDg.length,
+              rechazadasDcm: bloqueo.rechazadasDcm.length,
+              correccionDg: bloqueo.correccionDg.length,
+              correccionDcm: bloqueo.correccionDcm.length,
+            },
           });
           return;
         }
@@ -1920,19 +1971,36 @@ export class PropuestasController {
         return;
       }
 
-      // Bloqueo si existe CUALQUIER circuito rechazado por DG o DCM — basta uno.
-      // Mismo criterio que el guard del atender solicitud.
+      // Bloqueo si existe CUALQUIER circuito rechazado o en correccion por DG/DCM.
+      // Feedback 2026-08-13: mismo criterio que atender solicitud — los circuitos
+      // en 'correccion' derivados del filtro DG/DCM tambien impiden avanzar.
       {
         const rech = await verificarCarasRechazadas(propuestaId.toString());
         if (rech.tieneRechazadas) {
-          const total = rech.rechazadasDg.length + rech.rechazadasDcm.length;
-          const partes: string[] = [];
-          if (rech.rechazadasDg.length > 0) partes.push(`${rech.rechazadasDg.length} por DG`);
-          if (rech.rechazadasDcm.length > 0) partes.push(`${rech.rechazadasDcm.length} por DCM`);
+          const totalRech = rech.rechazadasDg.length + rech.rechazadasDcm.length;
+          const totalCorr = rech.correccionDg.length + rech.correccionDcm.length;
+          const partesEstado: string[] = [];
+          if (totalRech > 0) {
+            const detalle: string[] = [];
+            if (rech.rechazadasDg.length > 0) detalle.push(`${rech.rechazadasDg.length} por DG`);
+            if (rech.rechazadasDcm.length > 0) detalle.push(`${rech.rechazadasDcm.length} por DCM`);
+            partesEstado.push(`${totalRech} rechazado(s) (${detalle.join(', ')})`);
+          }
+          if (totalCorr > 0) {
+            const detalle: string[] = [];
+            if (rech.correccionDg.length > 0) detalle.push(`${rech.correccionDg.length} por DG`);
+            if (rech.correccionDcm.length > 0) detalle.push(`${rech.correccionDcm.length} por DCM`);
+            partesEstado.push(`${totalCorr} en correccion (${detalle.join(', ')})`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede aprobar: hay ${total} circuito(s) rechazado(s) por DG/DCM (${partes.join(', ')}). Edita o quita esos circuitos primero.`,
-            autorizacion: { rechazadasDg: rech.rechazadasDg.length, rechazadasDcm: rech.rechazadasDcm.length },
+            error: `No se puede aprobar: hay circuitos que impiden el avance — ${partesEstado.join(' y ')}. Corrigelos o quitalos antes de continuar.`,
+            autorizacion: {
+              rechazadasDg: rech.rechazadasDg.length,
+              rechazadasDcm: rech.rechazadasDcm.length,
+              correccionDg: rech.correccionDg.length,
+              correccionDcm: rech.correccionDcm.length,
+            },
           });
           return;
         }
@@ -4321,19 +4389,23 @@ export class PropuestasController {
       const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
       const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
-      // Cambio de periodo con reservas: liberar el circuito completo (cara +
-      // pareja RT/BF) ANTES de reubicarlo, en la misma transacción que el update.
+      // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
+      // (cara + pareja RT/BF) ANTES de reubicarlo/reasignarlo, en la misma
+      // transacción que el update. El inventario reservado pertenece al artículo y
+      // al periodo anteriores, así que no puede arrastrarse al nuevo.
       const periodoCambioUp = (
         (!!inicio_periodo && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
         (!!fin_periodo && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
       );
+      const articuloCambioUp = !!articulo && articulo !== currentCara.articulo;
+      const motivoLiberacionUp = periodoCambioUp ? 'periodo' : 'artículo';
 
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
         updatedCara = await prisma.$transaction(async (tx) => {
-          if (periodoCambioUp) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          if (periodoCambioUp || articuloCambioUp) {
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoLiberacionUp);
             reservasLiberadasUp = liberadas;
           }
           return tx.solicitudCaras.update({
@@ -4372,9 +4444,9 @@ export class PropuestasController {
           data: {
             tipo: 'Propuesta',
             ref_id: parseInt(currentCara.idquote) || 0,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivoLiberacionUp}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: reservasLiberadasUp }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', motivo: motivoLiberacionUp, reservas_liberadas: reservasLiberadasUp }),
           },
         });
       }
@@ -4822,6 +4894,7 @@ export class PropuestasController {
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
       let totalReservasLiberadas = 0;
+      const motivosLiberacion = new Set<string>();
       const updatedCaras = await prisma.$transaction(async (tx) => {
         const results = [];
         // Grupos cuyas reservas se liberaron por cambio de periodo: se saltan
@@ -4834,15 +4907,19 @@ export class PropuestasController {
           // Get current cara to check if auth-affecting fields changed
           const currentCara = await tx.solicitudCaras.findUnique({ where: { id: parseInt(caraId) } });
 
-          // Cambio de periodo con reservas: liberar el circuito completo (cara +
-          // pareja RT/BF) y dejarlo en 0 en el nuevo periodo.
+          // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito
+          // completo (cara + pareja RT/BF) y dejarlo en 0. El inventario reservado
+          // pertenece al artículo/periodo anteriores y no puede arrastrarse.
           const periodoCambioP = !!currentCara && (
             (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
             (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
           );
-          if (periodoCambioP) {
-            const { liberadas } = await liberarReservasCircuitoPorCambioPeriodo(tx, parseInt(caraId));
+          const articuloCambioP = !!currentCara && !!data.articulo && data.articulo !== currentCara.articulo;
+          if (periodoCambioP || articuloCambioP) {
+            const motivoP = periodoCambioP ? 'periodo' : 'artículo';
+            const { liberadas } = await liberarReservasCircuitoPorEdicion(tx, parseInt(caraId), motivoP);
             totalReservasLiberadas += liberadas;
+            if (liberadas > 0) motivosLiberacion.add(motivoP);
             if (currentCara?.grupo_rt_bf) gruposLiberados.add(currentCara.grupo_rt_bf);
           }
 
@@ -4976,15 +5053,16 @@ export class PropuestasController {
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
 
-      // Historial: reservas liberadas por cambio de periodo
+      // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0) {
+        const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
         await prisma.historial.create({
           data: {
             tipo: 'Propuesta',
             ref_id: parseInt(id as string) || 0,
-            accion: 'Liberación de reservas por cambio de periodo',
+            accion: `Liberación de reservas por cambio de ${motivosTxt}`,
             fecha_hora: new Date(),
-            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', reservas_liberadas: totalReservasLiberadas }),
+            detalles: JSON.stringify({ usuario: userName, origen: 'propuesta', motivo: motivosTxt, reservas_liberadas: totalReservasLiberadas }),
           },
         });
       }

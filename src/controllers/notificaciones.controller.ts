@@ -1616,6 +1616,18 @@ export class NotificacionesController {
 
       const result = await aprobarCaras(idquote, tipo, userId || 0, userName);
 
+      // Idempotencia: si carasAprobadas === 0, este request es un retry (doble-click o
+      // reenvio despues de que el primero ya proceso). No escribir historial ni emitir
+      // socket — evita filas fantasma en historial y notificaciones duplicadas.
+      if (result.carasAprobadas === 0) {
+        res.json({
+          success: true,
+          message: 'No hay caras pendientes de aprobación',
+          data: result,
+        });
+        return;
+      }
+
       // Guardar historial de aprobación (con usuarioRol para auditoria admin)
       const propuestaId = parseInt(idquote);
       if (!isNaN(propuestaId)) {
@@ -1734,7 +1746,17 @@ export class NotificacionesController {
         return;
       }
 
-      await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
+      const result = await rechazarSolicitud(idquote, propuesta.solicitud_id, userId || 0, userName, comentario, tipoAutorizacion);
+
+      // Idempotencia: si carasRechazadas === 0, este request es un retry (doble-click o
+      // reenvio despues de que el primero ya proceso). No escribir historial ni emitir.
+      if (result.carasRechazadas === 0) {
+        res.json({
+          success: true,
+          message: 'No hay caras pendientes de rechazo',
+        });
+        return;
+      }
 
       // Guardar historial de rechazo (con usuarioRol para auditoria admin)
       await logHistorial({

@@ -514,10 +514,18 @@ model equipo {
   nombre      String           @db.VarChar(255)
   descripcion String?          @db.Text
   color       String?          @db.VarChar(255)
+  // proposito distingue equipos de "red de trabajo" (visibilidad expandida,
+  // asignaciones, admin/usuarios) de equipos "filtro_autorizacion" (solo usados
+  // internamente para resolver el GC lider de un asesor en el filtro DG).
+  // Feedback 2026-08-14: los equipos 40/41 son de filtro y no deben aparecer
+  // en red de trabajo.
+  proposito   String           @default("red_trabajo") @db.VarChar(50)
   created_at  DateTime?        @default(now()) @db.Timestamp(0)
   updated_at  DateTime?        @db.Timestamp(0)
   deleted_at  DateTime?        @db.Timestamp(0)
   miembros    usuario_equipo[]
+
+  @@index([proposito])
 }
 
 model usuario_equipo {
