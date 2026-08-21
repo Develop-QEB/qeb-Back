@@ -16,6 +16,50 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+interface CatorcenaRef {
+  numero: number;
+  anio: number;
+}
+
+/**
+ * Valida y normaliza el array de catorcenas que llega en el body de la auditoria
+ * de conflictos. Devuelve null si el formato es invalido, para responder 400 sin
+ * tocar la BD.
+ */
+function parseCatorcenasBody(raw: unknown, max = 30): CatorcenaRef[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > max) return null;
+  const out: CatorcenaRef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return null;
+    const { numero, anio } = item as { numero?: unknown; anio?: unknown };
+    const n = Number(numero);
+    const a = Number(anio);
+    if (!Number.isInteger(n) || !Number.isInteger(a)) return null;
+    out.push({ numero: n, anio: a });
+  }
+  return out;
+}
+
+/**
+ * Ventana de fechas que cubren las catorcenas pedidas. Sirve para acotar
+ * solicitudCaras por `inicio_periodo` y entrar por idx_periodos: sin esto, el
+ * join por rango contra catorcenas obliga a recorrer todas las caras.
+ * Devuelve null si ninguna de las catorcenas existe en la tabla.
+ */
+async function rangoFechasDeCatorcenas(cats: CatorcenaRef[]): Promise<{ inicio: Date; fin: Date } | null> {
+  const ph = cats.map(() => '(?,?)').join(',');
+  const params = cats.flatMap(c => [c.anio, c.numero]);
+  const rows = await prisma.$queryRawUnsafe<Array<{ inicio: Date | null; fin: Date | null }>>(
+    `SELECT MIN(fecha_inicio) AS inicio, MAX(fecha_fin) AS fin
+       FROM catorcenas
+      WHERE (año, numero_catorcena) IN (${ph})`,
+    ...params
+  );
+  const row = rows[0];
+  if (!row?.inicio || !row?.fin) return null;
+  return { inicio: row.inicio, fin: row.fin };
+}
+
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -2236,6 +2280,164 @@ export class InventariosController {
     } catch (error) {
       console.error('Error en checkCodigos:', error);
       const message = error instanceof Error ? error.message : 'Error al verificar códigos';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Auditoria de conflictos de ocupacion (sitio x catorcena).
+   *
+   * Un inventario Tradicional solo admite una campaña por catorcena; dos o mas
+   * reservas vivas en la misma celda es un error de operacion. Detectarlo
+   * recorriendo la matriz obliga a traer el historial de cada sitio, inviable
+   * sobre los ~18,600 inventarios. Aqui se resuelve con agregados en SQL.
+   *
+   * `ids` es opcional: sin el, audita TODO el inventario.
+   *
+   * Ojo con `tradicional_digital`: puede venir NULL y el frontend trata esos
+   * sitios como Tradicional. Un `<> 'Digital'` a secas evalua NULL y los
+   * descartaria, perdiendo conflictos reales.
+   */
+  async getConflictosOcupacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const catorcenas = parseCatorcenasBody(req.body?.catorcenas);
+      if (!catorcenas) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de catorcenas ({ numero, anio }), maximo 30',
+        });
+        return;
+      }
+
+      const idsRaw = req.body?.ids;
+      let ids: number[] | null = null;
+      if (idsRaw !== undefined && idsRaw !== null) {
+        if (!Array.isArray(idsRaw)) {
+          res.status(400).json({ success: false, error: 'ids debe ser un array de enteros' });
+          return;
+        }
+        ids = idsRaw.map(Number).filter(n => Number.isInteger(n));
+        if (ids.length === 0) {
+          res.json({ success: true, data: { conflictos: [] } });
+          return;
+        }
+      }
+
+      const rango = await rangoFechasDeCatorcenas(catorcenas);
+      if (!rango) {
+        // Ninguna de las catorcenas pedidas existe: no hay nada que auditar.
+        res.json({ success: true, data: { conflictos: [] } });
+        return;
+      }
+
+      const phCat = catorcenas.map(() => '(?,?)').join(',');
+      const filtroIds = ids ? `AND ei.inventario_id IN (${ids.map(() => '?').join(',')})` : '';
+      const params: unknown[] = [
+        rango.inicio,
+        rango.fin,
+        ...catorcenas.flatMap(c => [c.anio, c.numero]),
+        ...(ids ?? []),
+      ];
+
+      // FASE 1 - celdas con 2+ reservas. Sin tocar cotizacion/campania: el join
+      // a cotizacion lleva un CAST que impide usar indice, y sobre el inventario
+      // completo la query se cae por costo. Aqui solo se identifican las celdas.
+      const queryCeldas = `
+        SELECT
+          ei.inventario_id,
+          i.codigo_unico,
+          i.plaza,
+          i.mueble,
+          i.ubicacion,
+          i.tradicional_digital,
+          cat.año AS anio,
+          cat.numero_catorcena,
+          COUNT(DISTINCT rsv.id) AS n
+        FROM espacio_inventario ei
+          INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+          INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          INNER JOIN inventarios i     ON i.id = ei.inventario_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus <> 'eliminada'
+          AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
+          AND sc.inicio_periodo BETWEEN ? AND ?
+          AND (cat.año, cat.numero_catorcena) IN (${phCat})
+          ${filtroIds}
+        GROUP BY ei.inventario_id, i.codigo_unico, i.plaza, i.mueble, i.ubicacion,
+                 i.tradicional_digital, cat.año, cat.numero_catorcena
+        HAVING COUNT(DISTINCT rsv.id) >= 2
+        ORDER BY i.codigo_unico, cat.año, cat.numero_catorcena
+      `;
+
+      const celdas = await prisma.$queryRawUnsafe<Array<{
+        inventario_id: number;
+        codigo_unico: string | null;
+        plaza: string | null;
+        mueble: string | null;
+        ubicacion: string | null;
+        tradicional_digital: string | null;
+        anio: number;
+        numero_catorcena: number;
+        n: bigint | number;
+      }>>(queryCeldas, ...params);
+
+      if (celdas.length === 0) {
+        res.json({ success: true, data: { conflictos: [] } });
+        return;
+      }
+
+      // FASE 2 - cuantos origenes distintos ocupan cada celda, ya acotado a los
+      // sitios detectados (decenas o cientos, no 18 mil). Distingue el choque
+      // real entre campañas de las reservas duplicadas dentro de una sola.
+      // Una reserva sin campaña pertenece a una propuesta: se cuenta por idquote.
+      const idsConflicto = [...new Set(celdas.map(c => c.inventario_id))];
+      const phConf = idsConflicto.map(() => '?').join(',');
+      const origenes = await prisma.$queryRawUnsafe<Array<{
+        inventario_id: number;
+        anio: number;
+        numero_catorcena: number;
+        origenes: bigint | number;
+      }>>(
+        `SELECT
+           ei.inventario_id,
+           cat.año AS anio,
+           cat.numero_catorcena,
+           COUNT(DISTINCT cm.id)
+             + COUNT(DISTINCT CASE WHEN cm.id IS NULL THEN sc.idquote END) AS origenes
+         FROM espacio_inventario ei
+           INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+           INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+           LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+         WHERE rsv.deleted_at IS NULL
+           AND rsv.estatus <> 'eliminada'
+           AND ei.inventario_id IN (${phConf})
+           AND sc.inicio_periodo BETWEEN ? AND ?
+           AND (cat.año, cat.numero_catorcena) IN (${phCat})
+         GROUP BY ei.inventario_id, cat.año, cat.numero_catorcena`,
+        ...idsConflicto,
+        rango.inicio,
+        rango.fin,
+        ...catorcenas.flatMap(c => [c.anio, c.numero])
+      );
+
+      const claveCelda = (r: { inventario_id: number; anio: number; numero_catorcena: number }) =>
+        `${r.inventario_id}|${r.anio}|${r.numero_catorcena}`;
+      const origenPorCelda = new Map(origenes.map(o => [claveCelda(o), Number(o.origenes)]));
+
+      const conflictos = celdas.map(c => ({
+        ...c,
+        n: Number(c.n),
+        // Si la fase 2 no trajo la celda, es una sola campaña: no inventamos choque.
+        origenes: origenPorCelda.get(claveCelda(c)) ?? 1,
+      }));
+
+      res.json({ success: true, data: { conflictos: serializeBigInt(conflictos) } });
+    } catch (error) {
+      console.error('Error en getConflictosOcupacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener conflictos';
       res.status(500).json({ success: false, error: message });
     }
   }
