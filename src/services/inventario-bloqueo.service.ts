@@ -588,11 +588,15 @@ export interface DesplazamientoContexto {
 }
 
 /**
- * Crea la tarea "Reserva desplazada" (una por dueño) para cada propuesta que perdió
- * piezas y emite el push en vivo (campanita). Además: (1) emite RESERVA_ELIMINADA a la
- * propuesta perdedora para que, si está abierta, se refresque sola (reservas + historial),
- * y (2) registra en `historial` quién movió cuántas piezas y a qué campaña, para que
- * quede rastro visible en el modal de asignar inventario de la propuesta.
+ * Al desplazar reservas tentativas de otras propuestas (por pase a ventas o por alta
+ * directa en campaña) esta función, por cada propuesta perdedora:
+ *  - (R3) crea la tarea "Reserva desplazada" a sus asesores (id_asignado) Y a Tráfico;
+ *  - (R4) la deja en estatus "Ajuste Inventario" (bloquea edición de circuitos a asesores);
+ *  - emite RESERVA_ELIMINADA para que, si está abierta, se refresque sola;
+ *  - (R1) registra en su historial el desplazamiento SIN el usuario, con el id de la
+ *         ganadora y el motivo "…por el pase a ventas".
+ * Y una vez, (R2) registra en el historial de la GANADORA (campaña o propuesta) que se
+ * quedó con ubicaciones de otras propuestas.
  * Compartido por el approve (#4b) y por createReservas de campañas.
  */
 export async function notificarReservasDesplazadas(
@@ -607,36 +611,90 @@ export async function notificarReservasDesplazadas(
     porPropuesta.set(d.idquotePerdedora, arr);
   }
 
-  // Nombre de la campaña ganadora (una sola consulta) para el texto del historial.
-  let campanaTxt = ctx.campanaNombre;
-  if (!campanaTxt && ctx.campanaId) {
+  // Ganadora: campaña (alta directa) o propuesta (pase a ventas).
+  const ganadorEsCampana = (ctx.origen ?? 'campana') === 'campana';
+  let ganadorNombre = ctx.campanaNombre;
+  if (!ganadorNombre && ctx.campanaId && ganadorEsCampana) {
     try {
       const camp = await defaultPrisma.campania.findUnique({ where: { id: ctx.campanaId }, select: { nombre: true } });
-      campanaTxt = camp?.nombre || undefined;
+      ganadorNombre = camp?.nombre || undefined;
     } catch { /* noop */ }
   }
-  const campanaLabel = campanaTxt
-    ? `${campanaTxt} (#${ctx.campanaId ?? ''})`
-    : (ctx.campanaId ? `campaña #${ctx.campanaId}` : 'otra campaña');
+  const ganadorTipoTxt = ganadorEsCampana ? 'la campaña' : 'la propuesta';
+  const ganadorLabel = ganadorNombre
+    ? `${ganadorNombre} (#${ctx.campanaId ?? ''})`
+    : (ctx.campanaId ? `${ganadorTipoTxt} #${ctx.campanaId}` : (ganadorEsCampana ? 'otra campaña' : 'otra propuesta'));
+  // (R1) Motivo sin usuario, con id, aludiendo al pase a ventas.
+  const motivoTxt = ganadorEsCampana
+    ? `Se desplazaron las reservas porque ${ganadorTipoTxt} #${ctx.campanaId ?? ''} reservó estas ubicaciones.`
+    : `Se desplazaron las reservas por el pase a ventas de ${ganadorTipoTxt} #${ctx.campanaId ?? ''}.`;
+
+  // (R3) Usuarios de Tráfico (una sola consulta) para avisarles además de los asesores.
+  let traficoIds: number[] = [];
+  try {
+    const trafico = await defaultPrisma.usuario.findMany({
+      where: {
+        OR: [
+          { puesto: { contains: 'Tráfico' } }, { puesto: { contains: 'Trafico' } },
+          { area: { contains: 'Tráfico' } }, { area: { contains: 'Trafico' } },
+        ],
+        deleted_at: null,
+        NOT: { user_role: 'Coordinador de Diseño' },
+      },
+      select: { id: true },
+    });
+    traficoIds = trafico.map(u => u.id);
+  } catch { /* noop */ }
 
   const now = new Date();
   const fin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  // Estatus donde NO se toca la propuesta (ya cerrada / no editable por el asesor).
+  const estatusTerminal = ['Aprobada', 'Pase a ventas', 'Cancelada', 'Descartada', 'Rechazada', 'Liberada'];
+  let totalDesplazadas = 0;
+  const perdedorasResumen: string[] = [];
+
   for (const [idquote, items] of porPropuesta) {
     const prop = await defaultPrisma.propuesta.findUnique({ where: { id: parseInt(idquote) } });
     if (!prop || prop.deleted_at) continue;
     const owners = (prop.id_asignado || '')
       .split(',').map(s => parseInt(s.trim())).filter(n => !Number.isNaN(n));
     const codigos = [...new Set(items.map(i => i.codigoUnico).filter(Boolean))];
-    for (const ownerId of owners) {
+    totalDesplazadas += items.length;
+    perdedorasResumen.push(`#${idquote} (${items.length})`);
+
+    // Catorcena/periodo del desplazamiento (para textos).
+    const ini = items[0]?.inicioPeriodo;
+    let periodoTxt = ini && items[0]?.finPeriodo ? `${ini} a ${items[0].finPeriodo}` : '';
+    if (ini) {
+      try {
+        const cat = await defaultPrisma.catorcenas.findFirst({
+          where: { fecha_inicio: { lte: new Date(ini) }, fecha_fin: { gte: new Date(ini) } },
+          select: { numero_catorcena: true, a_o: true },
+        });
+        if (cat?.numero_catorcena != null) periodoTxt = `cat ${cat.numero_catorcena}${cat.a_o ? '/' + cat.a_o : ''}`;
+      } catch { /* deja el rango de fechas */ }
+    }
+
+    // (R4) La propuesta perdedora pasa a "Ajuste Inventario" para que reasignen y se
+    //      bloquee la edición de circuitos a los asesores (guards en el controller).
+    if (!estatusTerminal.includes(prop.status || '')) {
+      try {
+        await defaultPrisma.propuesta.update({ where: { id: parseInt(idquote) }, data: { status: 'Ajuste Inventario' } });
+      } catch { /* noop */ }
+    }
+
+    // (R3) Tarea a asesores (id_asignado) + Tráfico: hay que volver a reservar.
+    const destinatarios = [...new Set([...owners, ...traficoIds])];
+    for (const destId of destinatarios) {
       const tarea = await defaultPrisma.tareas.create({
         data: {
           titulo: 'Reserva desplazada',
-          descripcion: `${items.length} inventario(s) de tu propuesta ${idquote} se vendieron en otra campaña. Edítala para reemplazarlos.`,
+          descripcion: `${items.length} ubicación(es) de la propuesta ${idquote} se desplazaron${periodoTxt ? ' (' + periodoTxt + ')' : ''}. Hay que volver a reservarlas.`,
           contenido: codigos.length ? `Piezas: ${codigos.join(', ')}` : '',
           tipo: 'Notificación',
           categoria: 'general',
           estatus: 'Pendiente',
-          id_responsable: ownerId,
+          id_responsable: destId,
           responsable: '',
           id_solicitud: String(prop.solicitud_id),
           id_propuesta: idquote,
@@ -652,26 +710,14 @@ export async function notificarReservasDesplazadas(
       } catch { /* noop */ }
     }
 
-    // (1) Refresco en vivo de la propuesta abierta (reservas + historial).
+    // Refresco en vivo de la propuesta abierta (reservas + historial).
     try {
       emitToPropuesta(parseInt(idquote), SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId: parseInt(idquote) });
     } catch { /* noop */ }
 
-    // (2) Rastro en el historial de la propuesta perdedora (ref_id = propuesta id).
-    //     Aparece en el modal de asignar inventario ("Historial") de esa propuesta.
+    // (R1) Historial de la propuesta perdedora — SIN usuario, con id, "por el pase a ventas".
     try {
-      const ini = items[0]?.inicioPeriodo;
-      let periodoTxt = ini && items[0]?.finPeriodo ? `${ini} a ${items[0].finPeriodo}` : '';
-      if (ini) {
-        try {
-          const cat = await defaultPrisma.catorcenas.findFirst({
-            where: { fecha_inicio: { lte: new Date(ini) }, fecha_fin: { gte: new Date(ini) } },
-            select: { numero_catorcena: true, a_o: true },
-          });
-          if (cat?.numero_catorcena != null) periodoTxt = `cat ${cat.numero_catorcena}${cat.a_o ? '/' + cat.a_o : ''}`;
-        } catch { /* deja el rango de fechas */ }
-      }
-      const campanaConCat = periodoTxt ? `${campanaLabel} · ${periodoTxt}` : campanaLabel;
+      const campanaConCat = periodoTxt ? `${ganadorLabel} · ${periodoTxt}` : ganadorLabel;
       await defaultPrisma.historial.create({
         data: {
           tipo: 'Propuesta',
@@ -679,11 +725,30 @@ export async function notificarReservasDesplazadas(
           accion: 'Reservas desplazadas',
           fecha_hora: now,
           detalles: JSON.stringify({
-            usuario: ctx.usuarioNombre || 'Sistema',
-            origen: ctx.origen || 'campana',
             reservas_eliminadas: items.length,
             campaña: campanaConCat,
+            motivo: motivoTxt,
             codigos: codigos.slice(0, 60),
+          }),
+        },
+      });
+    } catch { /* noop */ }
+  }
+
+  // (R2) Historial en la GANADORA: registra que se quedó con ubicaciones de otras propuestas.
+  if (ctx.campanaId) {
+    try {
+      await defaultPrisma.historial.create({
+        data: {
+          tipo: ganadorEsCampana ? 'Campaña' : 'Propuesta',
+          ref_id: ctx.campanaId,
+          accion: 'Reservas ganadas',
+          fecha_hora: now,
+          detalles: JSON.stringify({
+            reservas_eliminadas: totalDesplazadas,
+            motivo: ganadorEsCampana
+              ? `Se reservaron ${totalDesplazadas} ubicación(es) que tenían otras propuestas (${perdedorasResumen.join(', ')}), desplazándolas.`
+              : `El pase a ventas tomó ${totalDesplazadas} ubicación(es) que tenían otras propuestas (${perdedorasResumen.join(', ')}), desplazándolas.`,
           }),
         },
       });
