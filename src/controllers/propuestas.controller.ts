@@ -401,6 +401,54 @@ async function enviarCorreoNotificacion(
 }
 
 
+/**
+ * (R6) Error para abortar el pase a ventas cuando un circuito quedó incompleto por un
+ * desplazamiento concurrente (otra venta/campaña le robó piezas durante el proceso).
+ */
+class CircuitoIncompletoError extends Error {
+  constructor() { super('CIRCUITO_INCOMPLETO_TRAS_VENTA'); this.name = 'CircuitoIncompletoError'; }
+}
+
+/**
+ * (R6) Devuelve true si ALGÚN circuito de la propuesta tiene reservas incompletas
+ * (flujo/contraflujo/bonificación no cubiertos). Mismo criterio que el guard de
+ * updateStatus; reutilizable DENTRO de la tx del approve. Cuenta Vendido/Vendido
+ * bonificado igual que Reservado/Bonificado (funciona antes o después del flip a firme).
+ * IM no requiere reservas. Recibe el tx client para ver el estado tras el guardián.
+ */
+async function propuestaTieneCircuitosIncompletos(client: any, propuestaId: number): Promise<boolean> {
+  const caras = await client.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } });
+  const reservas: any[] = await client.$queryRawUnsafe(`
+    SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
+    FROM reservas rsv
+      INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+      INNER JOIN inventarios i ON epIn.inventario_id = i.id
+      INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+    WHERE sc.idquote = ? AND rsv.deleted_at IS NULL
+  `, String(propuestaId));
+  const cot = await client.cotizacion.findFirst({ where: { id_propuesta: propuestaId }, select: { tipo_periodo: true } });
+  const esMensual = cot?.tipo_periodo === 'mensual';
+  return caras.some((cara: any) => {
+    const articulo = (cara.articulo || '').toUpperCase();
+    if (articulo.startsWith('IM')) return false;
+    const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
+    const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
+    const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
+    if (isBonifSplit) return bonificacionReservado !== (Number(cara.bonificacion) || 0);
+    const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
+    const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
+    const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
+    const rawFlujoRequerido = Number(cara.caras_flujo) || 0;
+    const rawContraRequerido = Number(cara.caras_contraflujo) || 0;
+    const bonificacionRequerido = Number(cara.bonificacion) || 0;
+    const flujoReservado = esMensual ? rawFlujoReservado + rawContraReservado : rawFlujoReservado;
+    const contraflujoReservado = esMensual ? 0 : rawContraReservado;
+    const flujoRequerido = esMensual ? rawFlujoRequerido + rawContraRequerido : rawFlujoRequerido;
+    const contraflujoRequerido = esMensual ? 0 : rawContraRequerido;
+    return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
+  });
+}
+
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -2067,6 +2115,13 @@ export class PropuestasController {
         const ventaResult = await venderReservasPropuestaConGuardian(tx, propuestaId);
         desplazadasVenta = ventaResult.desplazadas;
 
+        // (R6) Re-validar completeness DENTRO de la tx tras el guardián: si otra venta/
+        // campaña desplazó piezas de algún circuito durante el pase a ventas, quedó
+        // incompleto → abortar (rollback) para no vender circuitos incompletos.
+        if (await propuestaTieneCircuitosIncompletos(tx, propuestaId)) {
+          throw new CircuitoIncompletoError();
+        }
+
         // 2. Update tareas status
         await tx.tareas.updateMany({
           where: { id_propuesta: String(propuestaId) },
@@ -2446,6 +2501,15 @@ export class PropuestasController {
         message: 'Propuesta aprobada exitosamente',
       });
     } catch (error) {
+      // (R6) Un circuito quedó incompleto por un desplazamiento concurrente durante el pase a ventas.
+      if (error instanceof CircuitoIncompletoError) {
+        res.status(409).json({
+          success: false,
+          error: 'No se pudo completar el pase a ventas: durante el proceso se desplazaron piezas y uno o más circuitos quedaron incompletos (otra venta se procesó primero). Revisa el inventario y reintenta.',
+          circuitoIncompleto: true,
+        });
+        return;
+      }
       // Guardián de venta: alguna pieza tradicional ya se vendió en otra campaña.
       if (error instanceof VentaConflictoError) {
         res.status(409).json({
