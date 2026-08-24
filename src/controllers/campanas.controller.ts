@@ -14,7 +14,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -290,6 +290,169 @@ const markReservasComoInstaladas = async (params: {
     `markReservasComoInstaladas[${mode}]: campana=${campanaId}, reservas=${allAffectedReservaIds.length}, tareaInstalacion=${nuevaInstalacion.id}`
   );
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// ÓRDENES DE MONTAJE — filas de OCUPACIÓN de inventario (disponible/reservado)
+// ────────────────────────────────────────────────────────────────────────────
+// Las órdenes de montaje solo mostraban inventario que YA está en campañas
+// (vendido). Para poder ver "todo" o "disponible" desde aquí, este helper arma
+// filas partiendo del CATÁLOGO de inventario y clasifica cada pieza por su
+// ocupación en el período pedido:
+//   • VENDIDO   (firme)     → se OMITE aquí (ya viene como fila de campaña).
+//   • RESERVADO (tentativo) → hold de propuesta sin vender.
+//   • DISPONIBLE            → sin reserva bloqueante en el período.
+// Mismo criterio de estatus firme/tentativo que getDisponibles / getEspaciosBloqueados.
+// Devuelve el shape 'cat' (columna Estado = negociacion) o 'invian' (= Operacion).
+const ESTATUS_FIRME_SQL_OM = ESTATUS_FIRME.map((e) => `'${e}'`).join(',');
+const ESTATUS_TENTATIVO_SQL_OM = ESTATUS_TENTATIVO.map((e) => `'${e}'`).join(',');
+const ESTATUS_BLOQUEAN_SQL_OM = [...ESTATUS_FIRME, ...ESTATUS_TENTATIVO].map((e) => `'${e}'`).join(',');
+
+async function buildInventarioOcupacionRows(
+  inicioFiltro: Date,
+  finFiltro: Date,
+  shape: 'cat' | 'invian',
+  catNum: number | null,
+  catYear: number | null
+): Promise<any[]> {
+  // 1) Snapshot de ocupación por inventario en el período. Resuelve el
+  //    polimorfismo de reservas.inventario_id (espacio_inventario.id o
+  //    inventarios.id) con COALESCE. Filtra por el período del sc (no calendario)
+  //    e ignora IM (impresión no ocupa). Un digital nunca "bloquea", pero si
+  //    tiene venta firme igual sale como vendido (y se omite abajo).
+  const occ = await prisma.$queryRawUnsafe<{ inventario_id: number; has_firme: number; has_tent: number }[]>(
+    `SELECT t.invId AS inventario_id,
+            MAX(t.firme) AS has_firme,
+            MAX(t.tent)  AS has_tent
+       FROM (
+         SELECT COALESCE(ei.inventario_id, rsv.inventario_id) AS invId,
+                CASE WHEN rsv.estatus IN (${ESTATUS_FIRME_SQL_OM}) THEN 1 ELSE 0 END AS firme,
+                CASE WHEN rsv.estatus IN (${ESTATUS_TENTATIVO_SQL_OM}) THEN 1 ELSE 0 END AS tent
+           FROM reservas rsv
+             INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+             LEFT JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+          WHERE rsv.deleted_at IS NULL
+            AND rsv.estatus IN (${ESTATUS_BLOQUEAN_SQL_OM})
+            AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?
+            AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
+       ) t
+      WHERE t.invId IS NOT NULL
+      GROUP BY t.invId`,
+    finFiltro, inicioFiltro
+  );
+  const occByInv = new Map<number, { firme: boolean; tent: boolean }>();
+  for (const o of occ) {
+    occByInv.set(Number(o.inventario_id), { firme: Number(o.has_firme) === 1, tent: Number(o.has_tent) === 1 });
+  }
+
+  // 2) Catálogo de inventario (excluye Bloqueado/Inactivo, igual que getDisponibles).
+  const inv = await prisma.$queryRawUnsafe<{
+    id: number; codigo_unico: string | null; tipo_de_cara: string | null;
+    tipo_de_mueble: string | null; mueble: string | null; plaza: string | null;
+    municipio: string | null; tradicional_digital: string | null; cto: string | null;
+  }[]>(
+    `SELECT id, codigo_unico, tipo_de_cara, tipo_de_mueble, mueble, plaza, municipio,
+            tradicional_digital, cto
+       FROM inventarios
+      WHERE (estatus IS NULL OR estatus NOT IN ('Bloqueado', 'Inactivo'))`
+  );
+
+  const dateOnly = (d: Date): string => {
+    const yy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  };
+  const fi = dateOnly(inicioFiltro);
+  const ff = dateOnly(finFiltro);
+
+  const rows: any[] = [];
+  for (const p of inv) {
+    const o = occByInv.get(Number(p.id));
+    if (o?.firme) continue; // vendido → ya viene como fila de campaña (modo 'todo')
+    const estado = o?.tent ? 'reservado' : 'disponible';
+    const label = o?.tent ? 'RESERVADO' : 'DISPONIBLE';
+    const plaza = p.plaza || (p.municipio ? String(p.municipio).split(',')[0].trim() : null);
+    const formato = p.tipo_de_mueble || p.mueble || null;
+    const codigo = p.codigo_unico ? String(p.codigo_unico) : null;
+
+    if (shape === 'cat') {
+      rows.push({
+        plaza,
+        tipo: formato,
+        asesor: null,
+        aps_especifico: null,
+        aps_global: null,
+        tipo_periodo: 'catorcena',
+        fecha_inicio_periodo: fi,
+        fecha_fin_periodo: ff,
+        catorcena_numero: catNum,
+        catorcena_year: catYear,
+        cliente: null,
+        marca: null,
+        cuic: null,
+        sap_database: null,
+        bd_sap_post: null,
+        unidad_negocio: null,
+        campania: null,
+        numero_articulo: codigo,
+        negociacion: label, // columna Estado: RESERVADO / DISPONIBLE
+        caras: 1,
+        tarifa: 0,
+        monto_total: 0,
+        delta_caras: 0,
+        campania_id: null,
+        grupo_id: -Number(p.id), // sintético negativo — no choca con sc.id reales
+        tradicional_digital: p.tradicional_digital,
+        posted: false,
+        tipo_fila: 'ocupacion',
+        ocupacion_estado: estado,
+        cara: p.tipo_de_cara || null,
+        cto: p.cto || null,
+      });
+    } else {
+      rows.push({
+        Campania: null,
+        Anunciante: null,
+        Operacion: label, // columna Estado: RESERVADO / DISPONIBLE
+        CodigoContrato: null,
+        idquote: null,
+        campania_id: null,
+        PrecioPorCara: 0,
+        Vendedor: null,
+        Descripcion: null,
+        InicioPeriodo: catYear != null ? `Catorcenas ${catYear}` : null,
+        FinSegmento: catNum != null ? `Catorcena #${String(catNum).padStart(2, '0')}` : null,
+        Arte: null,
+        CodigoArte: null,
+        ArteUrl: null,
+        ArteFileName: null,
+        OrigenArte: null,
+        Unidad: codigo,
+        Cara: p.tipo_de_cara || null,
+        Ciudad: plaza,
+        TipoDistribucion: label,
+        Reproducciones: null,
+        fecha_inicio: fi,
+        fecha_fin: ff,
+        status_campania: null,
+        catorcena_numero: catNum,
+        catorcena_year: catYear,
+        rsv_id: null,
+        tradicional_digital: p.tradicional_digital,
+        cortesia: 0,
+        numero_articulo: codigo,
+        cto: p.cto || null,
+        sap_database: null,
+        bd_sap_post: null,
+        posted: false,
+        formato,
+        tipo_periodo: 'catorcena',
+        ocupacion_estado: estado,
+      });
+    }
+  }
+  return rows;
+}
 
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -9181,8 +9344,12 @@ export class CampanasController {
       // cuando se crean/eliminan reservas, así que el cache solo se queda
       // viejo si nadie toca reservas. Reduce drásticamente el tiempo de
       // re-apertura del modal.
+      // Modo de ocupación: 'vendido' (default = lo de siempre), 'disponible'
+      // (solo inventario libre/reservado, sin campañas) o 'todo' (ambos).
+      const ocupacion = ((req.query.ocupacion as string) || 'vendido').toLowerCase();
+
       const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_CAT(JSON.stringify({
-        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin, ocupacion
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -9201,6 +9368,23 @@ export class CampanasController {
         `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
         inicioFiltro = catRange?.inicio_filtro || null;
         finFiltro = catRange?.fin_filtro || null;
+      }
+
+      // MODO 'disponible': solo inventario libre/reservado (sin filas de campaña).
+      // Cortocircuita antes de tocar campañas/reservas de venta.
+      if (ocupacion === 'disponible') {
+        const dataDisp = (inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respDisp = {
+          success: true,
+          data: serializeBigInt(dataDisp),
+          filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
+          catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
+        };
+        cache.set(cacheKey, respDisp, CACHE_TTL.SHORT);
+        res.json(respDisp);
+        return;
       }
 
       // PASO 2: traer campañas + cotizacion + solicitud + solicitudCaras filtradas
@@ -9275,12 +9459,18 @@ export class CampanasController {
       `, ...scParams);
 
       if (scRows.length === 0) {
-        res.json({
+        // 'todo' sin campañas en el rango → aun así mostramos el inventario libre.
+        const dataEmpty = (ocupacion === 'todo' && inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respEmpty = {
           success: true,
-          data: [],
+          data: serializeBigInt(dataEmpty),
           filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
           catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
-        });
+        };
+        cache.set(cacheKey, respEmpty, CACHE_TTL.SHORT);
+        res.json(respEmpty);
         return;
       }
 
@@ -9556,6 +9746,7 @@ export class CampanasController {
           grupo_id: Number(sc.sc_id),
           tradicional_digital,
           posted,
+          ocupacion_estado: 'vendido', // filas de campaña = venta firme
         };
 
         if (scBonif > 0) {
@@ -9584,10 +9775,22 @@ export class CampanasController {
         }
       }
 
-      // ORDER BY campania_id, grupo_id, tipo_fila (bonificacion < renta alfabéticamente)
+      // MODO 'todo': además de las filas vendidas, agrega el inventario
+      // libre/reservado del período (las piezas vendidas se omiten dentro del
+      // helper para no duplicar).
+      if (ocupacion === 'todo' && inicioFiltro && finFiltro) {
+        const occRows = await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null);
+        for (const r of occRows) result.push(r);
+      }
+
+      // ORDER BY campania_id, grupo_id, tipo_fila (bonificacion < renta). Null-safe:
+      // las filas de ocupación (campania_id null) se ordenan al final.
       result.sort((a, b) => {
-        if (a.campania_id !== b.campania_id) return a.campania_id - b.campania_id;
-        if (a.grupo_id !== b.grupo_id) return a.grupo_id - b.grupo_id;
+        const ca = a.campania_id ?? Number.MAX_SAFE_INTEGER;
+        const cb = b.campania_id ?? Number.MAX_SAFE_INTEGER;
+        if (ca !== cb) return ca - cb;
+        const ga = a.grupo_id ?? 0, gb = b.grupo_id ?? 0;
+        if (ga !== gb) return ga - gb;
         return String(a.tipo_fila).localeCompare(String(b.tipo_fila));
       });
 
@@ -9643,9 +9846,13 @@ export class CampanasController {
         }
       }
 
+      // Modo de ocupación: 'vendido' (default = lo de siempre), 'disponible'
+      // (solo inventario libre/reservado, sin campañas) o 'todo' (ambos).
+      const ocupacion = ((req.query.ocupacion as string) || 'vendido').toLowerCase();
+
       // Caché 2 min (SHORT) — el WebSocket invalida en cambios reales.
       const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_INVIAN(JSON.stringify({
-        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin, ocupacion
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -9664,6 +9871,21 @@ export class CampanasController {
         `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
         inicioFiltro = catRange?.inicio_filtro || null;
         finFiltro = catRange?.fin_filtro || null;
+      }
+
+      // MODO 'disponible': solo inventario libre/reservado (sin filas de campaña).
+      if (ocupacion === 'disponible') {
+        const dataDisp = (inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respDisp = {
+          success: true,
+          data: serializeBigInt(dataDisp),
+          filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
+        };
+        cache.set(cacheKey, respDisp, CACHE_TTL.SHORT);
+        res.json(respDisp);
+        return;
       }
 
       // PASO 2: Pre-filtrar campañas en el rango — tabla pequeña (~758 filas).
@@ -9686,7 +9908,13 @@ export class CampanasController {
       `, ...campParams);
 
       if (campsRows.length === 0) {
-        res.json({ success: true, data: [], filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin } });
+        // 'todo' sin campañas en el rango → aun así mostramos el inventario libre.
+        const dataEmpty = (ocupacion === 'todo' && inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respEmpty = { success: true, data: serializeBigInt(dataEmpty), filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin } };
+        cache.set(cacheKey, respEmpty, CACHE_TTL.SHORT);
+        res.json(respEmpty);
         return;
       }
 
@@ -9930,6 +10158,7 @@ export class CampanasController {
           numero_articulo: r.articulo,
           cto: r.cto || null,
           posted,
+          ocupacion_estado: 'vendido', // filas de campaña = venta firme
         };
       });
 
@@ -10123,6 +10352,13 @@ export class CampanasController {
           urls_artes_do: urlsArtesDo,
         };
       });
+
+      // MODO 'todo': agrega inventario libre/reservado del período (las piezas
+      // vendidas se omiten en el helper para no duplicar).
+      if (ocupacion === 'todo' && inicioFiltro && finFiltro) {
+        const occRows = await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null);
+        for (const r of occRows) enrichedData.push(r);
+      }
 
       const dataSerializable = serializeBigInt(enrichedData);
 
