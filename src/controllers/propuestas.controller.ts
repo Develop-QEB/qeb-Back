@@ -2784,11 +2784,10 @@ export class PropuestasController {
           ct.id_propuesta AS propuesta_id,
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
           MIN(i.id) as id,
-          CASE WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          CASE WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo' ELSE MIN(i.tipo_de_cara) END as tipo_de_cara,
+          -- Des-agrupado: cada cara sale con su codigo_unico real y su Flujo/Contraflujo
+          -- (antes se fusionaban los muebles completos en "BASE_completo_CIUDAD" / 'Completo').
+          MIN(i.codigo_unico) as codigo_unico,
+          MIN(i.tipo_de_cara) as tipo_de_cara,
           MIN(i.mueble) as mueble, MIN(i.plaza) as plaza, MIN(i.estado) as estado,
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.tarifa_publica) as tarifa_publica,
@@ -2810,7 +2809,7 @@ export class PropuestasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
-        GROUP BY ct.id_propuesta, COALESCE(rsv.grupo_completo_id, rsv.id), sc.id, cat.numero_catorcena, cat.año
+        GROUP BY ct.id_propuesta, rsv.id, sc.id, cat.numero_catorcena, cat.año
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 

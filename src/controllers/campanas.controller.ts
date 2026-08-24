@@ -3588,15 +3588,10 @@ export class CampanasController {
           pr.descripcion,
 
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
+          -- Des-agrupado: cada cara sale con su codigo_unico real y su Flujo/Contraflujo
+          -- (antes se fusionaban los muebles completos en "BASE_completo_CIUDAD" / 'Completo').
+          MIN(i.codigo_unico) as codigo_unico,
+          MIN(i.tipo_de_cara) as tipo_de_cara,
           MIN(i.mueble) as mueble,
           MIN(i.plaza) as plaza,
           MIN(i.estado) as estado,
@@ -3633,7 +3628,7 @@ export class CampanasController {
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
                  s.nombre_usuario, ct.tipo_periodo, pr.descripcion,
-                 COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+                 rsv.id, sc.id
         ORDER BY cm.nombre, MIN(rsv.id) DESC
       `;
 
