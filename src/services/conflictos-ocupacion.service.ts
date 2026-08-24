@@ -13,6 +13,7 @@
 // simultáneas son su comportamiento normal, no un conflicto.
 
 import prisma from '../utils/prisma';
+import { logHistorial } from '../utils/historial';
 
 export interface CatorcenaRef {
   numero: number;
@@ -228,6 +229,165 @@ export async function detectarConflictos(
   });
 }
 
+export interface ActorLimpieza {
+  /** 'Automático' para el monitor; nombre del usuario para el botón. */
+  nombre: string;
+  usuarioId?: number;
+  rol?: string;
+  origen: string;
+}
+
+export interface ResultadoLimpieza {
+  celdas_limpiadas: number;
+  reservas_liberadas: number;
+  omitidas: { inventario_id: number; anio: number; numero_catorcena: number; motivo: string }[];
+  detalle: {
+    inventario_id: number;
+    codigo_unico: string | null;
+    anio: number;
+    numero_catorcena: number;
+    conservada: number;
+    liberadas: number[];
+  }[];
+}
+
+/**
+ * Limpia celdas DUPLICADAS: conserva una reserva por celda y soft-deletea las
+ * sobrantes. La usan el botón de la auditoría y el monitor (auto-limpieza), así
+ * que las reglas viven en un solo lugar:
+ *  - re-verifica cada celda contra la BD (nunca confía en la lista recibida);
+ *  - los choques jamás entran (se filtran aquí aunque el caller los mande);
+ *  - nunca borra una reserva con APS; con 2+ APS omite la celda entera;
+ *  - conserva la que tiene APS o, si ninguna tiene, la más antigua;
+ *  - borrado suave + historial + registro en conflictos_ocupacion (bitácora
+ *    consultable de qué se limpió, cuándo y por quién).
+ */
+export async function limpiarCeldasDuplicadas(
+  celdas: CeldaConflicto[],
+  actor: ActorLimpieza
+): Promise<ResultadoLimpieza> {
+  const ahora = new Date();
+  const resultado: ResultadoLimpieza = {
+    celdas_limpiadas: 0,
+    reservas_liberadas: 0,
+    omitidas: [],
+    detalle: [],
+  };
+
+  for (const celda of celdas.filter(c => !esChoque(c))) {
+    const reservas = await prisma.$queryRawUnsafe<Array<{ id: number; APS: number | null }>>(
+      `SELECT rsv.id, rsv.APS
+         FROM espacio_inventario ei
+         INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+         INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+         INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+        WHERE ei.inventario_id = ?
+          AND rsv.deleted_at IS NULL
+          AND rsv.estatus <> 'eliminada'
+          AND cat.año = ? AND cat.numero_catorcena = ?
+        ORDER BY rsv.id`,
+      celda.inventario_id, celda.anio, celda.numero_catorcena
+    );
+
+    if (reservas.length < 2) {
+      resultado.omitidas.push({
+        inventario_id: celda.inventario_id, anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena, motivo: 'Ya no hay reservas duplicadas',
+      });
+      continue;
+    }
+
+    const conAps = reservas.filter(r => r.APS != null && r.APS > 0);
+    if (conAps.length > 1) {
+      resultado.omitidas.push({
+        inventario_id: celda.inventario_id, anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena,
+        motivo: `${conAps.length} reservas con APS: requiere revisión manual con SAP`,
+      });
+      continue;
+    }
+
+    // Conservar: la que tiene APS si existe; si no, la más antigua.
+    const conservada = conAps.length === 1 ? conAps[0] : reservas[0];
+    const aLiberar = reservas.filter(r => r.id !== conservada.id && !(r.APS != null && r.APS > 0));
+    if (aLiberar.length === 0) {
+      resultado.omitidas.push({
+        inventario_id: celda.inventario_id, anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena, motivo: 'Todas las sobrantes tienen APS',
+      });
+      continue;
+    }
+
+    await prisma.reservas.updateMany({
+      where: { id: { in: aLiberar.map(r => r.id) } },
+      data: { deleted_at: ahora },
+    });
+
+    await logHistorial({
+      tipo: 'Inventario',
+      refId: celda.inventario_id,
+      accion: 'Limpieza de reservas duplicadas',
+      usuario: actor.nombre,
+      usuarioId: actor.usuarioId,
+      usuarioRol: actor.rol,
+      origen: actor.origen,
+      extras: {
+        catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
+        codigo_unico: celda.codigo_unico,
+        reserva_conservada: conservada.id,
+        reservas_liberadas: aLiberar.map(r => r.id),
+      },
+    });
+
+    // Bitácora en la tabla de estado. Upsert porque el botón puede limpiar
+    // celdas que el monitor aún no había registrado. Limpiar implica resuelto.
+    await prisma.conflictos_ocupacion.upsert({
+      where: {
+        inventario_id_anio_numero_catorcena: {
+          inventario_id: celda.inventario_id,
+          anio: celda.anio,
+          numero_catorcena: celda.numero_catorcena,
+        },
+      },
+      create: {
+        inventario_id: celda.inventario_id,
+        anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena,
+        tipo: 'duplicado',
+        reservas: celda.n,
+        origenes: celda.origenes,
+        detectado_at: ahora,
+        visto_at: ahora,
+        resuelto_at: ahora,
+        limpiado_at: ahora,
+        limpiado_por: actor.nombre,
+        reserva_conservada: conservada.id,
+        reservas_liberadas: aLiberar.map(r => r.id).join(','),
+      },
+      update: {
+        resuelto_at: ahora,
+        limpiado_at: ahora,
+        limpiado_por: actor.nombre,
+        reserva_conservada: conservada.id,
+        reservas_liberadas: aLiberar.map(r => r.id).join(','),
+      },
+    });
+
+    resultado.celdas_limpiadas += 1;
+    resultado.reservas_liberadas += aLiberar.length;
+    resultado.detalle.push({
+      inventario_id: celda.inventario_id,
+      codigo_unico: celda.codigo_unico,
+      anio: celda.anio,
+      numero_catorcena: celda.numero_catorcena,
+      conservada: conservada.id,
+      liberadas: aLiberar.map(r => r.id),
+    });
+  }
+
+  return resultado;
+}
+
 export interface ReporteMonitor {
   catorcenas: CatorcenaRef[];
   detectados: number;
@@ -236,6 +396,8 @@ export interface ReporteMonitor {
   nuevosDuplicado: number;
   resueltos: number;
   notificados: number;
+  /** Auto-limpieza de duplicados nuevos (null si no corrió). */
+  limpieza: ResultadoLimpieza | null;
 }
 
 /**
@@ -246,13 +408,13 @@ export interface ReporteMonitor {
  * (el primer barrido puede traer decenas de golpe).
  */
 export async function ejecutarMonitorConflictos(
-  opts: { catorcenas?: CatorcenaRef[]; notificar?: boolean; ids?: number[] } = {}
+  opts: { catorcenas?: CatorcenaRef[]; notificar?: boolean; ids?: number[]; autoLimpiar?: boolean } = {}
 ): Promise<ReporteMonitor> {
   const notificar = opts.notificar !== false;
   const catorcenas = opts.catorcenas ?? (await catorcenasVigentes());
   const vacio: ReporteMonitor = {
     catorcenas, detectados: 0, nuevos: 0, nuevosChoque: 0,
-    nuevosDuplicado: 0, resueltos: 0, notificados: 0,
+    nuevosDuplicado: 0, resueltos: 0, notificados: 0, limpieza: null,
   };
   if (catorcenas.length === 0) return vacio;
 
@@ -324,12 +486,26 @@ export async function ejecutarMonitorConflictos(
     });
   }
 
-  const nuevosChoque = nuevos.filter(esChoque).length;
-  const nuevosDuplicado = nuevos.length - nuevosChoque;
+  const choquesNuevos = nuevos.filter(esChoque);
+  const duplicadosNuevos = nuevos.filter(c => !esChoque(c));
+  const nuevosChoque = choquesNuevos.length;
+  const nuevosDuplicado = duplicadosNuevos.length;
   let notificados = 0;
+  let limpieza: ResultadoLimpieza | null = null;
+
+  // Auto-limpieza de duplicados NUEVOS. Solo en corridas que notifican: la
+  // siembra silenciosa del arranque no limpia nada — el primer barrido real
+  // limpia el backlog Y lo avisa, para que siempre quede constancia.
+  const autoLimpiar = (opts.autoLimpiar ?? true) && notificar;
+  if (autoLimpiar && duplicadosNuevos.length > 0) {
+    limpieza = await limpiarCeldasDuplicadas(duplicadosNuevos, {
+      nombre: 'Automático',
+      origen: 'Monitor de conflictos',
+    });
+  }
 
   if (notificar && nuevos.length > 0) {
-    notificados = await notificarConflictos(nuevos, catorcenas);
+    notificados = await notificarConflictos(choquesNuevos, duplicadosNuevos, limpieza, catorcenas);
     await prisma.conflictos_ocupacion.updateMany({
       where: {
         OR: nuevos.map(c => ({
@@ -350,16 +526,22 @@ export async function ejecutarMonitorConflictos(
     nuevosDuplicado,
     resueltos: aResolver.length,
     notificados,
+    limpieza,
   };
 }
 
 /**
- * Una notificación (fila en `tareas` con tipo='Notificación') por destinatario,
- * con el resumen. El middleware de Prisma sobre `tareas.create` se encarga del
- * popup por socket, así que aquí solo se insertan las filas.
+ * Digest de la corrida: una notificación (fila en `tareas`) por destinatario.
+ * El middleware de Prisma sobre `tareas.create` emite el popup por socket.
+ *
+ * El título SIEMPRE contiene "Conflictos de ocupación": el frontend detecta
+ * esta notificación por esa frase (isConflictoOcupacionNotification) para
+ * pintar el botón que abre la auditoría.
  */
 async function notificarConflictos(
-  nuevos: CeldaConflicto[],
+  choques: CeldaConflicto[],
+  duplicados: CeldaConflicto[],
+  limpieza: ResultadoLimpieza | null,
   catorcenas: CatorcenaRef[]
 ): Promise<number> {
   const destinatarios = await prisma.usuario.findMany({
@@ -368,24 +550,7 @@ async function notificarConflictos(
   });
   if (destinatarios.length === 0) return 0;
 
-  const choques = nuevos.filter(esChoque);
-  const duplicados = nuevos.filter(c => !esChoque(c));
-
   const plural = (n: number, singular: string, plural_: string) => (n === 1 ? singular : plural_);
-
-  const partes: string[] = [];
-  if (choques.length > 0) {
-    partes.push(
-      `${choques.length} ${plural(choques.length, 'choque', 'choques')} de campañas — ` +
-      `${plural(choques.length, 'requiere', 'requieren')} liberar una reserva a mano`
-    );
-  }
-  if (duplicados.length > 0) {
-    partes.push(
-      `${duplicados.length} ${plural(duplicados.length, 'duplicado', 'duplicados')} de una misma campaña — ` +
-      `se ${plural(duplicados.length, 'puede', 'pueden')} limpiar con un clic desde la auditoría`
-    );
-  }
 
   const ordenadas = [...catorcenas].sort((a, b) => a.anio - b.anio || a.numero - b.numero);
   const primera = ordenadas[0];
@@ -394,22 +559,60 @@ async function notificarConflictos(
     ? `C${primera.numero}-${primera.anio}`
     : `C${primera.numero}-${primera.anio} a C${ultima.numero}-${ultima.anio}`;
 
-  const muestra = nuevos
-    .slice(0, 5)
-    .map(c => `• ${c.codigo_unico || `#${c.inventario_id}`} · C${c.numero_catorcena}-${c.anio} · ${esChoque(c) ? 'choque' : 'duplicado'}`)
-    .join('\n');
-  const resto = nuevos.length > 5 ? `\n… y ${nuevos.length - 5} más.` : '';
+  const limpiadas = limpieza?.celdas_limpiadas ?? 0;
+  const liberadas = limpieza?.reservas_liberadas ?? 0;
+  const omitidas = limpieza?.omitidas ?? [];
+  // Sin auto-limpieza (p.ej. desactivada): los duplicados quedan pendientes.
+  const dupsPendientes = limpieza ? omitidas.length : duplicados.length;
 
-  // El titulo debe contener "conflicto(s) de ocupación" en texto plano: el
-  // frontend detecta esta notificación por ahí (isConflictoOcupacionNotification)
-  // para pintar el botón que abre la auditoría. Nada de "conflicto(s)" con
-  // paréntesis literales, que rompería el match.
-  const titulo =
-    `${nuevos.length} ${plural(nuevos.length, 'conflicto', 'conflictos')} de ocupación ` +
-    `${plural(nuevos.length, 'nuevo', 'nuevos')} (${periodo})`;
+  const secciones: string[] = [];
+  if (limpiadas > 0) {
+    const lineas = (limpieza?.detalle ?? []).slice(0, 5).map(d =>
+      `• ${d.codigo_unico || `#${d.inventario_id}`} · C${d.numero_catorcena}-${d.anio} — se conservó la reserva #${d.conservada}, ${plural(d.liberadas.length, 'liberada la', 'liberadas las')} #${d.liberadas.join(', #')}`
+    );
+    const resto = (limpieza?.detalle.length ?? 0) > 5 ? `\n… y ${limpieza!.detalle.length - 5} más.` : '';
+    secciones.push(
+      `LIMPIEZA AUTOMÁTICA: se ${plural(limpiadas, 'limpió', 'limpiaron')} ${limpiadas} ${plural(limpiadas, 'duplicado', 'duplicados')} ` +
+      `(${liberadas} ${plural(liberadas, 'reserva liberada', 'reservas liberadas')}). El registro completo está en la auditoría.\n` +
+      lineas.join('\n') + resto
+    );
+  }
+  if (omitidas.length > 0) {
+    const lineas = omitidas.slice(0, 5).map(o =>
+      `• #${o.inventario_id} · C${o.numero_catorcena}-${o.anio} — ${o.motivo}`
+    );
+    const resto = omitidas.length > 5 ? `\n… y ${omitidas.length - 5} más.` : '';
+    secciones.push(
+      `NO SE PUDIERON LIMPIAR ${omitidas.length} ${plural(omitidas.length, 'duplicado', 'duplicados')} — revisar manualmente en la auditoría:\n` +
+      lineas.join('\n') + resto
+    );
+  } else if (!limpieza && duplicados.length > 0) {
+    secciones.push(
+      `${duplicados.length} ${plural(duplicados.length, 'duplicado', 'duplicados')} pendientes de limpieza en la auditoría.`
+    );
+  }
+  if (choques.length > 0) {
+    const lineas = choques.slice(0, 5).map(c =>
+      `• ${c.codigo_unico || `#${c.inventario_id}`} · C${c.numero_catorcena}-${c.anio}` +
+      (c.campanas.length > 0 ? ` — ${c.campanas.map(x => x.nombre).join(' vs ')}` : '')
+    );
+    const resto = choques.length > 5 ? `\n… y ${choques.length - 5} más.` : '';
+    secciones.push(
+      `${choques.length} ${plural(choques.length, 'CHOQUE', 'CHOQUES')} de campañas — ${plural(choques.length, 'requiere', 'requieren')} decisión manual (nunca se limpian solos):\n` +
+      lineas.join('\n') + resto
+    );
+  }
+
+  // Resumen corto para el título, priorizando lo más accionable.
+  const resumen: string[] = [];
+  if (limpiadas > 0) resumen.push(`${limpiadas} ${plural(limpiadas, 'duplicado limpiado', 'duplicados limpiados')} automáticamente`);
+  if (dupsPendientes > 0) resumen.push(`${dupsPendientes} ${plural(dupsPendientes, 'duplicado requiere', 'duplicados requieren')} revisión`);
+  if (choques.length > 0) resumen.push(`${choques.length} ${plural(choques.length, 'choque', 'choques')}`);
+
+  const titulo = `Conflictos de ocupación (${periodo}): ${resumen.join(', ')}`;
   const descripcion =
-    `${partes.join('. ')}.\n\n${muestra}${resto}\n\n` +
-    `Abre "Ver Auditoría de Conflictos" para revisarlos con estos periodos ya cargados.`;
+    `${secciones.join('\n\n')}\n\n` +
+    `Abre "Ver Auditoría de Conflictos" para el detalle y el registro de limpiezas.`;
 
   const ahora = new Date();
   const fechaFin = new Date(ahora.getTime() + 24 * 60 * 60 * 1000);

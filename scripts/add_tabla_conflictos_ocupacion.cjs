@@ -35,6 +35,10 @@ CREATE TABLE ${TABLA} (
   visto_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   notificado_at    DATETIME NULL,
   resuelto_at      DATETIME NULL,
+  limpiado_at        DATETIME NULL,
+  limpiado_por       VARCHAR(100) NULL,
+  reserva_conservada INT NULL,
+  reservas_liberadas TEXT NULL,
   UNIQUE KEY uq_celda (inventario_id, anio, numero_catorcena),
   KEY idx_estado (resuelto_at, tipo)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
