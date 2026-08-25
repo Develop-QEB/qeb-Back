@@ -734,6 +734,8 @@ export class CampanasController {
           COALESCE(rsv_agg.circuitos, 0) AS circuitos,
           0 AS reservas_count_ultima_cat,
           0 AS caras_ultima_cat,
+          COALESCE(inc_agg.caras_esperadas, 0) AS caras_esperadas_total,
+          COALESCE(inc_agg.reservas_validas, 0) AS reservas_validas_total,
           cat_content.catorcenas_con_contenido,
           NULL AS codigos_inventario,
           fmt_agg.formatos
@@ -773,12 +775,30 @@ export class CampanasController {
           WHERE ct_f.id IN (${ctIdPh})
           GROUP BY ct_f.id
         ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
+        LEFT JOIN (
+          -- Totales de completitud para el badge "Incompleta" del listado.
+          -- MISMO criterio que incompleteness_detail de getById: solo circuitos
+          -- que caen en una catorcena (INNER JOIN catorcenas — mensual queda
+          -- fuera, igual que en el detalle) y mismas exclusiones IM/ESP/ES-/-QR.
+          SELECT
+            ct_i.id AS cotizacion_id,
+            COALESCE(SUM(sc_i.caras + sc_i.bonificacion), 0) AS caras_esperadas,
+            COALESCE(SUM((SELECT COUNT(*) FROM reservas r_i
+                          WHERE r_i.solicitudCaras_id = sc_i.id AND r_i.deleted_at IS NULL)), 0) AS reservas_validas
+          FROM solicitudCaras sc_i
+          INNER JOIN catorcenas cat_i ON sc_i.inicio_periodo >= cat_i.fecha_inicio AND sc_i.fin_periodo <= cat_i.fecha_fin
+          INNER JOIN cotizacion ct_i ON sc_i.idquote = CAST(ct_i.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          WHERE ct_i.id IN (${ctIdPh})
+            AND COALESCE(sc_i.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc_i.articulo, '') NOT LIKE '%-QR'
+          GROUP BY ct_i.id
+        ) inc_agg ON inc_agg.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, cotizacionIds para cat_content, cotizacionIds para fmt_agg, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, cat_content, fmt_agg e inc_agg (en ese orden), campaignIds para WHERE
       const dataParams = [
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
