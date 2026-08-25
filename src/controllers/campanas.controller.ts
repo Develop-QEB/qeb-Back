@@ -10710,7 +10710,12 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin } = req.body;
+      // [Muebles completos — separación total] Ya NO se ligan las caras con
+      // grupo_completo_id. Reservar-juntos sigue creando ambas caras (vienen en
+      // `reservas`), pero cada una queda independiente. Se ignora a propósito el
+      // flag `agruparComoCompleto` del body (línea de asignación cae a null).
+      const agruparComoCompleto = false;
 
       if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
