@@ -2041,6 +2041,13 @@ export class PropuestasController {
           where: { cotizacion_id: cotizacion.id },
         }) : null;
 
+        // Ajuste 2026-08-25: circuitos incompletos (de menos o de más) YA NO
+        // bloquean el avance. R6 debe seguir detectando el caso de CARRERA
+        // (otra venta desplaza piezas DURANTE esta aprobación), así que se toma
+        // un snapshot ANTES del flip: solo se aborta si la propuesta estaba
+        // completa y QUEDÓ incompleta por el desplazamiento concurrente.
+        const incompletaAntesDeVender = await propuestaTieneCircuitosIncompletos(tx, propuestaId);
+
         // 1. Flip de reservas tentativas a firmes CON guardián de colisión
         // (reemplaza al stored proc actualizar_reservas). Lanza VentaConflictoError
         // si alguna pieza tradicional ya está vendida por otra campaña en el período
@@ -2052,8 +2059,9 @@ export class PropuestasController {
 
         // (R6) Re-validar completeness DENTRO de la tx tras el guardián: si otra venta/
         // campaña desplazó piezas de algún circuito durante el pase a ventas, quedó
-        // incompleto → abortar (rollback) para no vender circuitos incompletos.
-        if (await propuestaTieneCircuitosIncompletos(tx, propuestaId)) {
+        // incompleto → abortar (rollback). Una propuesta que YA venía incompleta
+        // pasa de largo (política 2026-08-25: incompletas sí se venden).
+        if (!incompletaAntesDeVender && await propuestaTieneCircuitosIncompletos(tx, propuestaId)) {
           throw new CircuitoIncompletoError();
         }
 
