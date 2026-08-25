@@ -1007,76 +1007,11 @@ export class PropuestasController {
           return;
         }
 
-        // Verificar que todas las reservas estén completas
-        const caras = await prisma.solicitudCaras.findMany({
-          where: { idquote: String(propuestaId) },
-        });
-        const reservasQuery = `
-          SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
-          FROM reservas rsv
-            INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
-            INNER JOIN inventarios i ON epIn.inventario_id = i.id
-            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          WHERE sc.idquote = ?
-            AND rsv.deleted_at IS NULL
-        `;
-        const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
-
-        // tipo_periodo de la propuesta. Mensual = Gran Formato / Mi Macro:
-        // solo Flujo, SIN Contraflujo. El front (AssignInventarioModal
-        // getCaraCompletionStatus) ya colapsa caras_flujo+caras_contraflujo → Flujo
-        // cuando es mensual; el backend debe hacer lo mismo o bloquea el pase a
-        // ventas de caras 100% reservadas (caso 80545: MMC VIDRIOS EXTERIOR,
-        // 8/8 reservado pero guardado como cf=4/cc=4 → 8≠4).
-        const cotPeriodo = await prisma.cotizacion.findFirst({
-          where: { id_propuesta: propuestaId },
-          select: { tipo_periodo: true },
-        });
-        const esMensual = cotPeriodo?.tipo_periodo === 'mensual';
-
-        const reservasIncompletas = caras.some(cara => {
-          // Artículos de impresión (IM) no requieren reservas — siempre completos
-          const articulo = (cara.articulo || '').toUpperCase();
-          if (articulo.startsWith('IM')) return false;
-
-          const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
-          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
-
-          // BF/CF/CT: artículos 100% bonificación. El split flujo/contra es INTERNO
-          // a la bonificación (cosmético) — NO es renta. Mismo criterio que el front
-          // (getCaraCompletionStatus): se valida SOLO por el total de reservas
-          // bonificadas, sin exigir flujo/contra de renta (que no existen aquí).
-          // Sin esto, las cortesías con caras_flujo/contra > 0 quedaban bloqueadas
-          // en el pase a ventas aunque su bonificación estuviera 100% reservada.
-          const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
-          if (isBonifSplit) {
-            return bonificacionReservado !== (Number(cara.bonificacion) || 0);
-          }
-
-          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
-          const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
-          const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
-          const rawFlujoRequerido = Number(cara.caras_flujo) || 0;
-          const rawContraRequerido = Number(cara.caras_contraflujo) || 0;
-          const bonificacionRequerido = Number(cara.bonificacion) || 0;
-
-          // Mensual: todo cuenta como Flujo, sin Contraflujo (mismo criterio que el
-          // front). Catorcenal: split exacto Flujo/Contraflujo como siempre.
-          const flujoReservado = esMensual ? rawFlujoReservado + rawContraReservado : rawFlujoReservado;
-          const contraflujoReservado = esMensual ? 0 : rawContraReservado;
-          const flujoRequerido = esMensual ? rawFlujoRequerido + rawContraRequerido : rawFlujoRequerido;
-          const contraflujoRequerido = esMensual ? 0 : rawContraRequerido;
-
-          return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
-        });
-
-        if (reservasIncompletas) {
-          res.status(400).json({
-            success: false,
-            error: `No se puede cambiar a "${status}". No todos los grupos tienen sus reservas completas.`,
-          });
-          return;
-        }
+        // Ajuste 2026-08-25: se ELIMINÓ la validación de reservas completas.
+        // Circuitos con reservas incompletas (de menos o de más) ya NO bloquean
+        // el cambio a "Pase a ventas" / "Aprobada" — el front solo muestra un
+        // aviso informativo. (Antes aquí se comparaba caras_flujo/contraflujo/
+        // bonificación vs reservas reales y se devolvía 400.)
       }
 
       const statusAnterior = propuestaAnterior.status;
