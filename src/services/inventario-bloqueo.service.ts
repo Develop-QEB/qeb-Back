@@ -648,8 +648,10 @@ export async function notificarReservasDesplazadas(
 
   const now = new Date();
   const fin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  // Estatus donde NO se toca la propuesta (ya cerrada / no editable por el asesor).
-  const estatusTerminal = ['Aprobada', 'Pase a ventas', 'Cancelada', 'Descartada', 'Rechazada', 'Liberada'];
+  // Estatus "muertos": la propuesta ya no se trabaja, no tiene sentido mandarla a ajuste.
+  // (Aprobada / Pase a ventas SÍ pasan a "Ajuste Inventario" cuando les roban reservas —
+  //  instrucción del jefe: "cuando a una propuesta le roban reservas, cambia a Ajuste Inventario".)
+  const estatusTerminal = ['Cancelada', 'Descartada', 'Rechazada', 'Liberada'];
   let totalDesplazadas = 0;
   const perdedorasResumen: string[] = [];
 
@@ -677,37 +679,66 @@ export async function notificarReservasDesplazadas(
 
     // (R4) La propuesta perdedora pasa a "Ajuste Inventario" para que reasignen y se
     //      bloquee la edición de circuitos a los asesores (guards en el controller).
-    if (!estatusTerminal.includes(prop.status || '')) {
+    const estatusAnterior = prop.status || '';
+    let estatusCambiado = false;
+    if (!estatusTerminal.includes(estatusAnterior) && estatusAnterior !== 'Ajuste Inventario') {
       try {
         await defaultPrisma.propuesta.update({ where: { id: parseInt(idquote) }, data: { status: 'Ajuste Inventario' } });
-      } catch { /* noop */ }
+        estatusCambiado = true;
+      } catch (e) {
+        // Ya NO en silencio: si esto falla, quedó rastro en logs para diagnosticar.
+        console.error('[desplazamiento] no se pudo poner "Ajuste Inventario" en propuesta', idquote, e);
+      }
     }
 
-    // (R3) Tarea a asesores (id_asignado) + Tráfico: hay que volver a reservar.
-    const destinatarios = [...new Set([...owners, ...traficoIds])];
-    for (const destId of destinatarios) {
+    // (R3) Alertas DIFERENCIADAS (instrucción del jefe):
+    //   - Asesores dueños de la propuesta  -> TAREA accionable (tipo != 'Notificación'):
+    //     aparece en su lista de tareas con fecha, la tienen que marcar Atendida.
+    //   - Tráfico                          -> NOTIFICACIÓN informativa (tipo 'Notificación'):
+    //     solo aviso, no una tarea que deban cerrar.
+    const descBase = `${items.length} ubicación(es) de la propuesta ${idquote} se desplazaron${periodoTxt ? ' (' + periodoTxt + ')' : ''}.`;
+    const piezasTxt = codigos.length ? `Piezas: ${codigos.join(', ')}` : '';
+    const camposComunes = {
+      categoria: 'general',
+      estatus: 'Pendiente',
+      responsable: '',
+      id_solicitud: String(prop.solicitud_id),
+      id_propuesta: idquote,
+      campania_id: parseInt(idquote),
+      fecha_inicio: now,
+      fecha_fin: fin,
+      asignado: '',
+      id_asignado: '',
+    };
+
+    // Asesores -> TAREA
+    for (const destId of [...new Set(owners)]) {
       const tarea = await defaultPrisma.tareas.create({
         data: {
-          titulo: 'Reserva desplazada',
-          descripcion: `${items.length} ubicación(es) de la propuesta ${idquote} se desplazaron${periodoTxt ? ' (' + periodoTxt + ')' : ''}. Hay que volver a reservarlas.`,
-          contenido: codigos.length ? `Piezas: ${codigos.join(', ')}` : '',
-          tipo: 'Notificación',
-          categoria: 'general',
-          estatus: 'Pendiente',
+          titulo: 'Reservar ubicaciones desplazadas',
+          descripcion: `${descBase} Hay que volver a reservarlas.`,
+          contenido: piezasTxt,
+          tipo: 'Propuesta',
           id_responsable: destId,
-          responsable: '',
-          id_solicitud: String(prop.solicitud_id),
-          id_propuesta: idquote,
-          campania_id: parseInt(idquote),
-          fecha_inicio: now,
-          fecha_fin: fin,
-          asignado: '',
-          id_asignado: '',
+          ...camposComunes,
         },
       });
-      try {
-        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: 'Notificación' });
-      } catch { /* noop */ }
+      try { emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: 'Propuesta' }); } catch { /* noop */ }
+    }
+
+    // Tráfico -> NOTIFICACIÓN (excluye a quien ya sea dueño para no duplicarle el aviso)
+    for (const destId of [...new Set(traficoIds)].filter(id => !owners.includes(id))) {
+      const noti = await defaultPrisma.tareas.create({
+        data: {
+          titulo: 'Reservas desplazadas',
+          descripcion: `Aviso: ${descBase} Los asesores de la propuesta ${idquote} tienen que volver a reservarlas.`,
+          contenido: piezasTxt,
+          tipo: 'Notificación',
+          id_responsable: destId,
+          ...camposComunes,
+        },
+      });
+      try { emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: noti.id, tipo: 'Notificación' }); } catch { /* noop */ }
     }
 
     // Refresco en vivo de la propuesta abierta (reservas + historial).
@@ -729,6 +760,7 @@ export async function notificarReservasDesplazadas(
             campaña: campanaConCat,
             motivo: motivoTxt,
             codigos: codigos.slice(0, 60),
+            ...(estatusCambiado ? { estatus_anterior: estatusAnterior, estatus_nuevo: 'Ajuste Inventario' } : {}),
           }),
         },
       });
