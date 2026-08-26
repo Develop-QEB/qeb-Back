@@ -552,6 +552,22 @@ export class InventariosController {
               { plaza: filtro },
             ],
           });
+
+          // [Toluca = plaza aparte] Una búsqueda de Área Metropolitana (CDMX + Edomex,
+          // firma 'Ciudad de México / AM' → estado 'Ciudad de México' + 'Estado de
+          // México') NO debe traer Toluca: para QEB es una plaza DISTINTA aunque
+          // geográficamente Toluca esté en Estado de México. Sin esto, el match por
+          // `estado = 'Estado de México'` colaba las 447 caras de la plaza TOLUCA.
+          // Las búsquedas propias de Toluca (estado 'Estado de México' SIN CDMX) no
+          // se ven afectadas.
+          const estadosNorm = estadoList.map(e => e.toLowerCase());
+          const tieneEstado = (...vals: string[]) => vals.some(v => estadosNorm.includes(v));
+          const esAreaMetropolitana =
+            tieneEstado('ciudad de méxico', 'ciudad de mexico') &&
+            tieneEstado('estado de méxico', 'estado de mexico');
+          if (esAreaMetropolitana) {
+            (where.AND as Record<string, unknown>[]).push({ plaza: { not: 'TOLUCA' } });
+          }
         }
       }
 
