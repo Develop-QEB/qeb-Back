@@ -11,7 +11,8 @@ import {
   verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
-  conservarAprobacionSiIncrementa
+  conservarAprobacionSiIncrementa,
+  crearAutorizacionEliminacionCampana
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
@@ -12013,8 +12014,6 @@ export class CampanasController {
         where: { id: { in: idsToDelete } },
         select: { id: true, idquote: true, articulo: true, formato: true },
       });
-      const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
-
       // Feedback 2026-08-13: si alguna reserva del circuito tiene APS asignado,
       // NO se permite eliminar (independiente de lo que muestre el front).
       // El bote de basura del modal ya oculta este caso, pero blindamos backend.
@@ -12031,36 +12030,42 @@ export class CampanasController {
         return;
       }
 
-      await prisma.$transaction([
-        prisma.reservas.updateMany({
-          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
-          data: { deleted_at: new Date() },
-        }),
-        prisma.solicitudCaras.deleteMany({
-          where: { id: { in: idsToDelete } },
-        }),
-      ]);
-
-      // Historial
+      // [Autorización de Eliminación — SOLO campañas] En vez de borrar al instante,
+      // se crea una tarea de autorización (Filtro Gerente Comercial → DG, como las
+      // autorizaciones normales de DG). La cara y sus reservas quedan INTACTAS
+      // (inventario sigue ocupado) hasta que DG apruebe (se borra) o rechace (no).
+      const campaniaId = parseInt(req.params.id);
       const idquote = carasParaHistorial[0]?.idquote;
-      if (idquote) {
-        await prisma.historial.create({
-          data: {
-            tipo: 'Campaña',
-            ref_id: parseInt(idquote) || 0,
-            accion: 'Eliminación de circuito',
-            fecha_hora: new Date(),
-            detalles: JSON.stringify({
-              usuario: req.user?.nombre || 'Usuario',
-              origen: 'campaña',
-              reservas_eliminadas: reservasCount,
-              circuitos: carasParaHistorial.map(c => ({ articulo: c.articulo, formato: c.formato })),
-            }),
-          },
-        });
+      const propuestaId = idquote ? parseInt(idquote) : NaN;
+      if (!campaniaId || isNaN(propuestaId)) {
+        res.status(400).json({ success: false, error: 'No se pudo resolver la campaña/propuesta del circuito' });
+        return;
       }
+      const propuesta = await prisma.propuesta.findUnique({ where: { id: propuestaId }, select: { solicitud_id: true } });
+      const solicitudId = propuesta?.solicitud_id || 0;
 
-      res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
+      const resumen = carasParaHistorial
+        .map(c => `${c.articulo || ''} ${c.formato || ''}`.trim())
+        .filter(Boolean)
+        .join(', ');
+      const solicitud = await crearAutorizacionEliminacionCampana({
+        campaniaId,
+        propuestaId,
+        solicitudId,
+        caraIds: idsToDelete,
+        solicitanteNombre: req.user?.nombre || 'Usuario',
+        resumen: resumen ? `Circuitos: ${resumen}` : undefined,
+      });
+
+      res.json({
+        success: true,
+        requiereAutorizacion: true,
+        message: solicitud.tipo === 'existente'
+          ? 'Ya existe una solicitud de eliminación pendiente para este circuito.'
+          : `Solicitud de eliminación enviada a autorización (${solicitud.conFiltro ? 'Gerente Comercial → Dirección General' : 'Dirección General'}).`,
+        tareaId: solicitud.tareaId,
+        caras: solicitud.caras,
+      });
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
