@@ -1874,14 +1874,20 @@ export class NotificacionesController {
         },
       });
 
+      // Feedback 2026-08-24: solicitud.cliente_id es cliente.id (PK), NO
+      // cliente.CUIC. La query anterior comparaba CUIC contra id y por eso
+      // nunca encontraba el registro — se caia al fallback razon_social.
+      // Mismo bug que ya se corrigio en inventarios.controller.ts:838.
       let clienteNombre: string | null = solicitud?.razon_social || null;
       if (solicitud?.cliente_id) {
-        const clienteRecord = await prisma.cliente.findFirst({
-          where: { CUIC: solicitud.cliente_id },
-          select: { T0_U_Cliente: true },
+        const clienteRecord = await prisma.cliente.findUnique({
+          where: { id: solicitud.cliente_id },
+          select: { T0_U_Cliente: true, T0_U_RazonSocial: true },
         });
         if (clienteRecord?.T0_U_Cliente) {
           clienteNombre = clienteRecord.T0_U_Cliente;
+        } else if (clienteRecord?.T0_U_RazonSocial) {
+          clienteNombre = clienteRecord.T0_U_RazonSocial;
         }
       }
 
