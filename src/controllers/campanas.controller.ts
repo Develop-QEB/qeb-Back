@@ -12,7 +12,8 @@ import {
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa,
-  crearAutorizacionEliminacionCampana
+  crearAutorizacionEliminacionCampana,
+  ejecutarEliminacionCarasCampana
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
@@ -12009,6 +12010,14 @@ export class CampanasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Cara-ids adicionales (ej. la pareja RT/BF) → una sola solicitud de auth.
+      const caraIdsAdicionales = Array.isArray(req.body?.caraIdsAdicionales)
+        ? req.body.caraIdsAdicionales.map((x: any) => parseInt(x)).filter((n: number) => !isNaN(n))
+        : [];
+      if (caraIdsAdicionales.length > 0) {
+        idsToDelete = Array.from(new Set([...idsToDelete, ...caraIdsAdicionales]));
+      }
+
       // Info para historial antes de eliminar
       const carasParaHistorial = await prisma.solicitudCaras.findMany({
         where: { id: { in: idsToDelete } },
@@ -12027,6 +12036,15 @@ export class CampanasController {
           success: false,
           error: `No se puede eliminar: el circuito tiene ${apsAsignados.length} reserva(s) con APS asignado (${apsList.join(', ')}). Cancela el APS antes de eliminar.`,
         });
+        return;
+      }
+
+      // Bypass de autorización (uso INTERNO: reemplazo de par BF en edición). Borra
+      // al momento — mismo efecto que antes. El borrado normal del usuario NO lo pasa.
+      const sinAutorizacion = req.query.sinAutorizacion === 'true' || req.body?.sinAutorizacion === true;
+      if (sinAutorizacion) {
+        const r = await ejecutarEliminacionCarasCampana(idsToDelete, req.user?.nombre || 'Usuario');
+        res.json({ success: true, message: 'Cara eliminada', eliminadas: r.eliminadas });
         return;
       }
 
