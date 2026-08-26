@@ -7,13 +7,13 @@ import Anthropic from '@anthropic-ai/sdk';
 import { chatbotController } from './chatbot.controller';
 import { logHistorial } from '../utils/historial';
 
-// Categorias hardcoded que enrutan a TI. Cualquier otra (o null) => QEB.
-const CATEGORIAS_TI = ['Desposteo SAP', 'Posteo SAP', 'Ajuste de Usuario'] as const;
+// Default de enrutamiento: todos los tickets nuevos entran a TI.
+// TI puede reasignar a QEB con el dropdown de la fila cuando el ticket
+// requiere ayuda del equipo QEB.
 type AreaTicket = 'TI' | 'QEB';
 
-function deriveAreaFromCategoria(categoria?: string | null): AreaTicket {
-  if (!categoria) return 'QEB';
-  return (CATEGORIAS_TI as readonly string[]).includes(categoria) ? 'TI' : 'QEB';
+function deriveAreaFromCategoria(_categoria?: string | null): AreaTicket {
+  return 'TI';
 }
 
 // Roles TI: solo ven tickets area='TI'. Roles QEB (DEV/Admin): solo area='QEB'.
