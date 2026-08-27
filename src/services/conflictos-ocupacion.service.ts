@@ -61,11 +61,15 @@ export interface CeldaConflicto {
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
- *  notificaciones ya carga un backlog grande y esto no debe engordarlo. */
+ *  notificaciones ya carga un backlog grande y esto no debe engordarlo.
+ *
+ *  TEMPORAL (soft-launch): mientras se prueba el módulo, SOLO DEV recibe
+ *  digest, avisos a dueños y modal. Cuando se libere, descomentar los roles
+ *  de Tráfico. */
 export const ROLES_NOTIFICAR_CONFLICTOS = [
   'DEV',
-  'Gerente de Trafico',
-  'Coordinador de trafico',
+  // 'Gerente de Trafico',
+  // 'Coordinador de trafico',
 ];
 
 export const esChoque = (c: { origenes: number }) => c.origenes >= 2;
@@ -527,6 +531,9 @@ async function avisarDuenosLimpieza(liberadas: LiberadaAviso[], actor: ActorLimp
       select: { id: true, id_asignado: true, solicitud_id: true, deleted_at: true },
     });
     if (!prop || prop.deleted_at) continue;
+    // El aviso al dueño NO se restringe por rol: si su campaña perdió piezas
+    // (choque) tiene que enterarse para reponerlas — si no, va a reintentar a
+    // ciegas. El soft-launch solo aplica al digest y al modal emergente.
     const owners = (prop.id_asignado || '')
       .split(',').map(x => parseInt(x.trim())).filter(n => !Number.isNaN(n));
     if (owners.length === 0) continue;
