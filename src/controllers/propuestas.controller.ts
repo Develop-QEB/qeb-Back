@@ -3433,6 +3433,10 @@ export class PropuestasController {
 
       // Create reservas
       const createdReservas: { id: number }[] = [];
+      // Detalle de lo que NO se pudo reservar, con motivo. Antes cada descarte
+      // era un console.warn y el front solo recibia un numero: el usuario nunca
+      // sabia CUALES piezas se perdieron ni por que (y re-reservaba a ciegas).
+      const omitidosDetalle: { inventario_id: number; motivo: string }[] = [];
       const totalReservas = reservas.length;
       let reservasProcesadas = 0;
 
@@ -3450,27 +3454,30 @@ export class PropuestasController {
       // AQUÍ para que dos items del request no tomen el mismo espacio. La garantía
       // anti-doble-booking real (cross-request) sigue siendo el SELECT FOR UPDATE
       // dentro de createReservaConLock.
-      type WorkItem = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      type WorkItem = { espacioId: number; estatus: string; grupoCompletoId: number | null; invId: number };
       const workList: WorkItem[] = [];
       const planItem = (reserva: typeof reservas[number], grupoCompletoId: number | null): void => {
         const espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
         if (!espacioId) {
           console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Sin espacio disponible en el periodo' });
           reservasProcesadas++;
           return;
         }
         if (espaciosReservadosEnPeriodo.has(espacioId)) {
           console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
           reservasProcesadas++;
           return;
         }
         if (existentesCara.has(espacioId)) {
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Ya está reservado para este circuito' });
           reservasProcesadas++;
           return;
         }
         const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
         espaciosReservadosEnPeriodo.add(espacioId);
-        workList.push({ espacioId, estatus, grupoCompletoId });
+        workList.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       };
 
       // Grupos completos primero (cada invId del grupo), luego las normales.
@@ -3520,18 +3527,24 @@ export class PropuestasController {
               tarea: '',
               grupo_completo_id: w.grupoCompletoId,
             }, fechaIni, fechaFinDate, proposalCaraIds, invPadrePorEspacio.get(w.espacioId) ?? null);
-            return { w, lockResult };
+            return { w, lockResult, inesperado: false };
           } catch (err) {
             console.error(`[Reserva] error inesperado en espacio ${w.espacioId}:`, err);
-            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+            // Antes esto se enmascaraba como OCCUPIED y el usuario leia "ocupado"
+            // ante un timeout de BD. Ahora el motivo distingue la causa real.
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const }, inesperado: true };
           }
         }));
-        for (const { w, lockResult } of resultados) {
+        for (const { w, lockResult, inesperado } of resultados) {
           reservasProcesadas++;
           if (lockResult.ok) {
             createdReservas.push(lockResult.reserva);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+            omitidosDetalle.push({
+              inventario_id: w.invId,
+              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
+            });
           }
         }
         // Progreso por lote
@@ -3586,12 +3599,28 @@ export class PropuestasController {
         }
       }
 
+      // Resolver codigos de lo omitido para que el front pueda listarlos.
+      const codigosOmitidos = new Map<number, string | null>();
+      if (omitidosDetalle.length > 0) {
+        const invsOm = await prisma.inventarios.findMany({
+          where: { id: { in: [...new Set(omitidosDetalle.map(o => o.inventario_id))] } },
+          select: { id: true, codigo_unico: true },
+        });
+        for (const i of invsOm) codigosOmitidos.set(i.id, i.codigo_unico);
+      }
+
       res.json({
         success: true,
         data: {
           calendarioId: calendario.id,
           reservasCreadas: createdReservas.length,
           reservasOmitidas: Math.max(0, totalReservas - createdReservas.length),
+          // Detalle por pieza de lo que no se reservo (codigo + motivo).
+          omitidos: omitidosDetalle.map(o => ({
+            inventario_id: o.inventario_id,
+            codigo_unico: codigosOmitidos.get(o.inventario_id) ?? null,
+            motivo: o.motivo,
+          })),
         },
       });
     } catch (error) {
