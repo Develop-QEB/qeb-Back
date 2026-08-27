@@ -269,7 +269,11 @@ export async function createReservaConLock(
 
     // Observador de conflictos: anota el sitio para que la verificacion
     // dirigida (debounced) corra tras la rafaga. Nunca interviene en la reserva.
-    registrarReservaCreada(reserva.invId);
+    // Solo creaciones FIRMES: las tentativas de propuestas pueden encimarse por
+    // diseño y el detector no las cuenta — registrarlas seria correr en vano.
+    if (esEstatusFirme(String(data.estatus ?? ''))) {
+      registrarReservaCreada(reserva.invId);
+    }
 
     // Emitir evento real-time para que otros buscadores de inventario en
     // vivo quiten este espacio de su listado de disponibles.

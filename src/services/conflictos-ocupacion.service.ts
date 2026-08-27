@@ -4,16 +4,37 @@
 // reservas vivas en la misma celda son un error de operación, de dos clases muy
 // distintas:
 //
-//   CHOQUE     → campañas distintas peleando la misma cara. Decisión comercial:
-//                alguien tiene que liberar. NUNCA se resuelve automáticamente.
-//   DUPLICADO  → una sola campaña con varias reservas sobre la misma cara. Error
-//                de armado; se puede limpiar dejando una.
+//   CHOQUE     → ventas FIRMES de campañas distintas peleando la misma cara.
+//                Regla de limpieza: se conserva la venta MÁS ANTIGUA (la
+//                original) y se libera la más nueva (la que se metió encima).
+//                Si alguna de las nuevas ya tiene APS, la celda se omite y va a
+//                revisión manual: borrar algo que SAP ya conoce descuadra.
+//   DUPLICADO  → una sola campaña con varias reservas FIRMES sobre la misma
+//                cara. Error de armado; se limpia dejando una (la de APS si
+//                existe; si no, la más antigua).
+//
+// Solo cuentan reservas FIRMES (Vendido/Vendido bonificado/Con Arte/Sin Arte).
+// Las tentativas de propuestas (Reservado/Bonificado) se encimen o no, son
+// flujo normal: quedan totalmente fuera de este detector.
 //
 // Los Digitales se excluyen: tienen varios espacios y varias reservas
 // simultáneas son su comportamiento normal, no un conflicto.
 
 import prisma from '../utils/prisma';
+
+// Estatus FIRMES (venta): copia local de ESTATUS_FIRME de
+// inventario-bloqueo.service.ts — importarlo directo crearia un ciclo
+// (inventario-bloqueo → conflictos-live → este archivo). Mantener en sync.
+//
+// El detector SOLO cuenta reservas firmes. Regla de negocio (candado FIRME,
+// commit d8d7259): las tentativas de propuestas (Reservado/Bonificado) pueden
+// encimarse a proposito — el ganador se resuelve al vender y el guardian
+// desplaza/notifica a los perdedores. Contarlas aqui generaba falsos positivos
+// masivos y arriesgaba auto-limpiar reservas legitimas de propuestas.
+const ESTATUS_FIRME_CONF = ['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'];
+const FIRME_SQL = ESTATUS_FIRME_CONF.map(e => `'${e}'`).join(',');
 import { logHistorial } from '../utils/historial';
+import { emitToAll, emitToCampana, emitToPropuesta, SOCKET_EVENTS } from '../config/socket';
 
 export interface CatorcenaRef {
   numero: number;
@@ -40,11 +61,15 @@ export interface CeldaConflicto {
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
- *  notificaciones ya carga un backlog grande y esto no debe engordarlo. */
+ *  notificaciones ya carga un backlog grande y esto no debe engordarlo.
+ *
+ *  TEMPORAL (soft-launch): mientras se prueba el módulo, SOLO DEV recibe
+ *  digest, avisos a dueños y modal. Cuando se libere, descomentar los roles
+ *  de Tráfico. */
 export const ROLES_NOTIFICAR_CONFLICTOS = [
   'DEV',
-  'Gerente de Trafico',
-  'Coordinador de trafico',
+  // 'Gerente de Trafico',
+  // 'Coordinador de trafico',
 ];
 
 export const esChoque = (c: { origenes: number }) => c.origenes >= 2;
@@ -88,7 +113,7 @@ export async function catorcenasVigentes(cantidad = 8): Promise<CatorcenaRef[]> 
 }
 
 /**
- * Celdas con 2+ reservas vivas en las catorcenas pedidas.
+ * Celdas con 2+ reservas FIRMES vivas en las catorcenas pedidas.
  *
  * Va en dos fases a propósito: el join a `cotizacion` lleva un
  * `CAST(id_propuesta AS CHAR)` que impide usar índice, y metido en la consulta
@@ -140,7 +165,7 @@ export async function detectarConflictos(
        INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
        INNER JOIN inventarios i     ON i.id = ei.inventario_id
      WHERE rsv.deleted_at IS NULL
-       AND rsv.estatus <> 'eliminada'
+       AND rsv.estatus IN (${FIRME_SQL})
        AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
        AND sc.inicio_periodo BETWEEN ? AND ?
        AND (cat.año, cat.numero_catorcena) IN (${phCat})
@@ -184,7 +209,7 @@ export async function detectarConflictos(
        LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
      WHERE rsv.deleted_at IS NULL
-       AND rsv.estatus <> 'eliminada'
+       AND rsv.estatus IN (${FIRME_SQL})
        AND ei.inventario_id IN (${phConf})
        AND sc.inicio_periodo BETWEEN ? AND ?
        AND (cat.año, cat.numero_catorcena) IN (${phCat})
@@ -240,25 +265,31 @@ export interface ActorLimpieza {
 export interface ResultadoLimpieza {
   celdas_limpiadas: number;
   reservas_liberadas: number;
-  omitidas: { inventario_id: number; anio: number; numero_catorcena: number; motivo: string }[];
+  omitidas: { inventario_id: number; anio: number; numero_catorcena: number; tipo: 'choque' | 'duplicado'; motivo: string }[];
   detalle: {
     inventario_id: number;
     codigo_unico: string | null;
     anio: number;
     numero_catorcena: number;
+    tipo: 'choque' | 'duplicado';
+    /** Campañas involucradas (útil sobre todo en choques: original vs intrusa). */
+    campanas: { id: number; nombre: string }[];
     conservada: number;
     liberadas: number[];
   }[];
 }
 
 /**
- * Limpia celdas DUPLICADAS: conserva una reserva por celda y soft-deletea las
+ * Limpia celdas en conflicto: conserva una reserva por celda y soft-deletea las
  * sobrantes. La usan el botón de la auditoría y el monitor (auto-limpieza), así
  * que las reglas viven en un solo lugar:
  *  - re-verifica cada celda contra la BD (nunca confía en la lista recibida);
- *  - los choques jamás entran (se filtran aquí aunque el caller los mande);
- *  - nunca borra una reserva con APS; con 2+ APS omite la celda entera;
- *  - conserva la que tiene APS o, si ninguna tiene, la más antigua;
+ *  - DUPLICADO: conserva la de APS si hay exactamente una; si no, la más
+ *    antigua. Con 2+ APS omite la celda entera.
+ *  - CHOQUE: conserva SIEMPRE la más antigua (la venta original) y libera las
+ *    más nuevas (las que se metieron encima). Si alguna de las nuevas tiene
+ *    APS, omite la celda entera: eso se revisa a mano con SAP.
+ *  - nunca borra una reserva con APS, en ningún caso;
  *  - borrado suave + historial + registro en conflictos_ocupacion (bitácora
  *    consultable de qué se limpió, cuándo y por quién).
  */
@@ -273,18 +304,34 @@ export async function limpiarCeldasDuplicadas(
     omitidas: [],
     detalle: [],
   };
+  // Reservas liberadas con su contexto, para avisar a los DUEÑOS (asesores de
+  // la campaña/propuesta afectada). Sin esto, la limpieza era invisible para
+  // quien armó la campaña: sus piezas "desaparecían" sin explicación.
+  const liberadasParaAviso: LiberadaAviso[] = [];
 
-  for (const celda of celdas.filter(c => !esChoque(c))) {
-    const reservas = await prisma.$queryRawUnsafe<Array<{ id: number; APS: number | null }>>(
-      `SELECT rsv.id, rsv.APS
+  for (const celda of celdas) {
+    const tipoCelda: 'choque' | 'duplicado' = esChoque(celda) ? 'choque' : 'duplicado';
+    const reservas = await prisma.$queryRawUnsafe<Array<{
+      id: number;
+      APS: number | null;
+      espacio_id: number;
+      idquote: string | null;
+      campana_id: number | null;
+      campana_nombre: string | null;
+    }>>(
+      `SELECT rsv.id, rsv.APS, rsv.inventario_id AS espacio_id,
+              sc.idquote, cm.id AS campana_id, cm.nombre AS campana_nombre
          FROM espacio_inventario ei
          INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
          INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+         LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+         LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ei.inventario_id = ?
           AND rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
+          AND rsv.estatus IN (${FIRME_SQL})
           AND cat.año = ? AND cat.numero_catorcena = ?
+        GROUP BY rsv.id, rsv.APS, rsv.inventario_id, sc.idquote, cm.id, cm.nombre
         ORDER BY rsv.id`,
       celda.inventario_id, celda.anio, celda.numero_catorcena
     );
@@ -292,28 +339,47 @@ export async function limpiarCeldasDuplicadas(
     if (reservas.length < 2) {
       resultado.omitidas.push({
         inventario_id: celda.inventario_id, anio: celda.anio,
-        numero_catorcena: celda.numero_catorcena, motivo: 'Ya no hay reservas duplicadas',
+        numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
+        motivo: 'Ya no hay reservas en conflicto',
       });
       continue;
     }
 
-    const conAps = reservas.filter(r => r.APS != null && r.APS > 0);
-    if (conAps.length > 1) {
-      resultado.omitidas.push({
-        inventario_id: celda.inventario_id, anio: celda.anio,
-        numero_catorcena: celda.numero_catorcena,
-        motivo: `${conAps.length} reservas con APS: requiere revisión manual con SAP`,
-      });
-      continue;
+    let conservada: { id: number; APS: number | null };
+    if (tipoCelda === 'choque') {
+      // CHOQUE: la venta original (más antigua, id menor) se queda; las que se
+      // metieron encima se liberan. Si alguna intrusa ya tiene APS, no se
+      // decide aquí: SAP ya la conoce y eso se coordina a mano.
+      conservada = reservas[0];
+      const intrusasConAps = reservas.slice(1).filter(r => r.APS != null && r.APS > 0);
+      if (intrusasConAps.length > 0) {
+        resultado.omitidas.push({
+          inventario_id: celda.inventario_id, anio: celda.anio,
+          numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
+          motivo: `La reserva más nueva ya tiene APS (#${intrusasConAps.map(r => r.id).join(', #')}): revisar con SAP`,
+        });
+        continue;
+      }
+    } else {
+      const conAps = reservas.filter(r => r.APS != null && r.APS > 0);
+      if (conAps.length > 1) {
+        resultado.omitidas.push({
+          inventario_id: celda.inventario_id, anio: celda.anio,
+          numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
+          motivo: `${conAps.length} reservas con APS: requiere revisión manual con SAP`,
+        });
+        continue;
+      }
+      // DUPLICADO: conserva la que tiene APS si existe; si no, la más antigua.
+      conservada = conAps.length === 1 ? conAps[0] : reservas[0];
     }
 
-    // Conservar: la que tiene APS si existe; si no, la más antigua.
-    const conservada = conAps.length === 1 ? conAps[0] : reservas[0];
     const aLiberar = reservas.filter(r => r.id !== conservada.id && !(r.APS != null && r.APS > 0));
     if (aLiberar.length === 0) {
       resultado.omitidas.push({
         inventario_id: celda.inventario_id, anio: celda.anio,
-        numero_catorcena: celda.numero_catorcena, motivo: 'Todas las sobrantes tienen APS',
+        numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
+        motivo: 'Todas las sobrantes tienen APS',
       });
       continue;
     }
@@ -326,7 +392,9 @@ export async function limpiarCeldasDuplicadas(
     await logHistorial({
       tipo: 'Inventario',
       refId: celda.inventario_id,
-      accion: 'Limpieza de reservas duplicadas',
+      accion: tipoCelda === 'choque'
+        ? 'Limpieza de choque de reservas (se conservó la venta más antigua)'
+        : 'Limpieza de reservas duplicadas',
       usuario: actor.nombre,
       usuarioId: actor.usuarioId,
       usuarioRol: actor.rol,
@@ -334,6 +402,8 @@ export async function limpiarCeldasDuplicadas(
       extras: {
         catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
         codigo_unico: celda.codigo_unico,
+        tipo_conflicto: tipoCelda,
+        campanas: celda.campanas.map(c => `${c.id}:${c.nombre}`),
         reserva_conservada: conservada.id,
         reservas_liberadas: aLiberar.map(r => r.id),
       },
@@ -353,7 +423,7 @@ export async function limpiarCeldasDuplicadas(
         inventario_id: celda.inventario_id,
         anio: celda.anio,
         numero_catorcena: celda.numero_catorcena,
-        tipo: 'duplicado',
+        tipo: tipoCelda,
         reservas: celda.n,
         origenes: celda.origenes,
         detectado_at: ahora,
@@ -365,6 +435,7 @@ export async function limpiarCeldasDuplicadas(
         reservas_liberadas: aLiberar.map(r => r.id).join(','),
       },
       update: {
+        tipo: tipoCelda,
         resuelto_at: ahora,
         limpiado_at: ahora,
         limpiado_por: actor.nombre,
@@ -373,6 +444,20 @@ export async function limpiarCeldasDuplicadas(
       },
     });
 
+    for (const r of aLiberar) {
+      liberadasParaAviso.push({
+        reservaId: r.id,
+        conservadaId: conservada.id,
+        espacioId: r.espacio_id,
+        idquote: r.idquote,
+        campanaId: r.campana_id,
+        campanaNombre: r.campana_nombre,
+        codigo: celda.codigo_unico || `#${celda.inventario_id}`,
+        catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
+        tipo: tipoCelda,
+      });
+    }
+
     resultado.celdas_limpiadas += 1;
     resultado.reservas_liberadas += aLiberar.length;
     resultado.detalle.push({
@@ -380,12 +465,157 @@ export async function limpiarCeldasDuplicadas(
       codigo_unico: celda.codigo_unico,
       anio: celda.anio,
       numero_catorcena: celda.numero_catorcena,
+      tipo: tipoCelda,
+      campanas: celda.campanas,
       conservada: conservada.id,
       liberadas: aLiberar.map(r => r.id),
     });
   }
 
+  // Aviso a dueños + refresco de vistas abiertas. Falla suave: si el aviso
+  // truena, la limpieza (que es lo critico) ya quedo hecha y auditada.
+  try {
+    await avisarDuenosLimpieza(liberadasParaAviso, actor);
+  } catch (err) {
+    console.error('[Limpieza] Error avisando a los dueños:', err);
+  }
+
   return resultado;
+}
+
+interface LiberadaAviso {
+  reservaId: number;
+  conservadaId: number;
+  espacioId: number;
+  idquote: string | null;
+  campanaId: number | null;
+  campanaNombre: string | null;
+  codigo: string;
+  catorcena: string;
+  tipo: 'choque' | 'duplicado';
+}
+
+/**
+ * Avisa a los DUEÑOS de las reservas liberadas por la limpieza y refresca las
+ * vistas abiertas. Distinto del digest a DEV/Tráfico: esto le llega al asesor
+ * cuya campaña perdió piezas, con el texto correcto según el caso:
+ *  - CHOQUE: su campaña perdió la pieza (la venta original de otra campaña se
+ *    conservó) → tiene que reponerla. Llega con el modal emergente (categoria
+ *    conflicto_ocupacion) porque exige acción.
+ *  - DUPLICADO: solo se quitaron copias repetidas; su pieza sigue reservada por
+ *    la reserva conservada → no tiene que hacer nada. Aviso normal (campanita).
+ *
+ * NO se emite INVENTARIO_LIBERADO a propósito: la pieza SIGUE ocupada por la
+ * reserva conservada; anunciarla como libre engañaría a los buscadores en vivo.
+ */
+async function avisarDuenosLimpieza(liberadas: LiberadaAviso[], actor: ActorLimpieza): Promise<void> {
+  if (liberadas.length === 0) return;
+
+  const ahora = new Date();
+  const fechaFin = new Date(ahora.getTime() + 24 * 60 * 60 * 1000);
+
+  // Agrupar por propuesta dueña (sc.idquote = id de la propuesta).
+  const porPropuesta = new Map<string, LiberadaAviso[]>();
+  for (const l of liberadas) {
+    const key = String(l.idquote ?? '').trim();
+    if (!key || Number.isNaN(parseInt(key))) continue;
+    const arr = porPropuesta.get(key) || [];
+    arr.push(l);
+    porPropuesta.set(key, arr);
+  }
+
+  for (const [idquote, items] of porPropuesta) {
+    const propuestaId = parseInt(idquote);
+    const prop = await prisma.propuesta.findUnique({
+      where: { id: propuestaId },
+      select: { id: true, id_asignado: true, solicitud_id: true, deleted_at: true },
+    });
+    if (!prop || prop.deleted_at) continue;
+    // El aviso al dueño NO se restringe por rol: si su campaña perdió piezas
+    // (choque) tiene que enterarse para reponerlas — si no, va a reintentar a
+    // ciegas. El soft-launch solo aplica al digest y al modal emergente.
+    const owners = (prop.id_asignado || '')
+      .split(',').map(x => parseInt(x.trim())).filter(n => !Number.isNaN(n));
+    if (owners.length === 0) continue;
+
+    const choquesItems = items.filter(i => i.tipo === 'choque');
+    const dupItems = items.filter(i => i.tipo === 'duplicado');
+    const campanaLabel = items[0]?.campanaNombre || `propuesta #${idquote}`;
+
+    const lineas: string[] = [];
+    for (const i of choquesItems) {
+      lineas.push(`• ${i.codigo} · ${i.catorcena} — la pieza estaba vendida dos veces; se conservó la venta más antigua (de otra campaña) y se liberó tu reserva #${i.reservaId}. HAY QUE REPONER esta pieza.`);
+    }
+    for (const i of dupItems) {
+      lineas.push(`• ${i.codigo} · ${i.catorcena} — tenía reservas repetidas; se conservó la #${i.conservadaId} y se quitó la copia #${i.reservaId}. La pieza sigue reservada, no tienes que hacer nada.`);
+    }
+
+    const hayChoque = choquesItems.length > 0;
+    const titulo = hayChoque
+      ? `Conflictos de ocupación: ${choquesItems.length} pieza(s) de "${campanaLabel}" se liberaron — hay que reponerlas`
+      : `Se depuraron ${dupItems.length} reserva(s) duplicada(s) de "${campanaLabel}"`;
+    const descripcion =
+      `${lineas.join('\n')}\n\n` +
+      `Limpieza ${actor.nombre === 'Automático' ? 'automática del monitor de conflictos' : `hecha por ${actor.nombre}`}. ` +
+      `El detalle completo está en el historial de la campaña.`;
+
+    for (const destId of owners) {
+      await prisma.tareas.create({
+        data: {
+          titulo,
+          descripcion,
+          tipo: 'Notificación',
+          // choque → modal emergente (exige acción); duplicado → campanita.
+          categoria: hayChoque ? 'conflicto_ocupacion' : 'general',
+          estatus: 'Pendiente',
+          id_responsable: destId,
+          responsable: '',
+          id_solicitud: String(prop.solicitud_id ?? ''),
+          id_propuesta: idquote,
+          fecha_inicio: ahora,
+          fecha_fin: fechaFin,
+          asignado: 'Sistema',
+          id_asignado: '',
+        },
+      });
+    }
+
+    // Historial de la propuesta/campaña afectada.
+    try {
+      await prisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: propuestaId,
+          accion: 'Reservas liberadas por limpieza de conflictos',
+          fecha_hora: ahora,
+          detalles: JSON.stringify({
+            origen: actor.origen,
+            usuario: actor.nombre,
+            choques: choquesItems.map(i => ({ codigo: i.codigo, catorcena: i.catorcena, reserva: i.reservaId })),
+            duplicados: dupItems.map(i => ({ codigo: i.codigo, catorcena: i.catorcena, reserva: i.reservaId, conservada: i.conservadaId })),
+          }),
+        },
+      });
+    } catch { /* noop */ }
+
+    // Refresco en vivo de la propuesta abierta.
+    try {
+      emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId });
+    } catch { /* noop */ }
+  }
+
+  // Refresco de las campañas abiertas afectadas + broadcast general.
+  const campanasAfectadas = [...new Set(liberadas.map(l => l.campanaId).filter((x): x is number => x != null))];
+  for (const cid of campanasAfectadas) {
+    try {
+      emitToCampana(cid, SOCKET_EVENTS.RESERVA_ELIMINADA, { campanaId: cid });
+    } catch { /* noop */ }
+  }
+  if (liberadas.length > 0) {
+    try {
+      emitToAll(SOCKET_EVENTS.RESERVA_ELIMINADA, {});
+    } catch { /* noop */ }
+  }
 }
 
 export interface ReporteMonitor {
@@ -493,12 +723,12 @@ export async function ejecutarMonitorConflictos(
   let notificados = 0;
   let limpieza: ResultadoLimpieza | null = null;
 
-  // Auto-limpieza de duplicados NUEVOS. Solo en corridas que notifican: la
-  // siembra silenciosa del arranque no limpia nada — el primer barrido real
-  // limpia el backlog Y lo avisa, para que siempre quede constancia.
+  // Auto-limpieza de conflictos NUEVOS (duplicados Y choques). Solo en corridas
+  // que notifican: la siembra silenciosa del arranque no limpia nada — el
+  // primer barrido real limpia el backlog Y lo avisa, con constancia siempre.
   const autoLimpiar = (opts.autoLimpiar ?? true) && notificar;
-  if (autoLimpiar && duplicadosNuevos.length > 0) {
-    limpieza = await limpiarCeldasDuplicadas(duplicadosNuevos, {
+  if (autoLimpiar && nuevos.length > 0) {
+    limpieza = await limpiarCeldasDuplicadas(nuevos, {
       nombre: 'Automático',
       origen: 'Monitor de conflictos',
     });
@@ -562,52 +792,54 @@ async function notificarConflictos(
   const limpiadas = limpieza?.celdas_limpiadas ?? 0;
   const liberadas = limpieza?.reservas_liberadas ?? 0;
   const omitidas = limpieza?.omitidas ?? [];
-  // Sin auto-limpieza (p.ej. desactivada): los duplicados quedan pendientes.
-  const dupsPendientes = limpieza ? omitidas.length : duplicados.length;
+
+  const lineaLimpieza = (d: NonNullable<typeof limpieza>['detalle'][number]) => {
+    const etiqueta = d.tipo === 'choque'
+      ? `CHOQUE${d.campanas.length > 0 ? ` (${d.campanas.map(x => x.nombre).join(' vs ')})` : ''} — se conservó la venta original #${d.conservada}`
+      : `duplicado — se conservó #${d.conservada}`;
+    return `• ${d.codigo_unico || `#${d.inventario_id}`} · C${d.numero_catorcena}-${d.anio} · ${etiqueta}, ${plural(d.liberadas.length, 'liberada la', 'liberadas las')} #${d.liberadas.join(', #')}`;
+  };
 
   const secciones: string[] = [];
-  if (limpiadas > 0) {
-    const lineas = (limpieza?.detalle ?? []).slice(0, 5).map(d =>
-      `• ${d.codigo_unico || `#${d.inventario_id}`} · C${d.numero_catorcena}-${d.anio} — se conservó la reserva #${d.conservada}, ${plural(d.liberadas.length, 'liberada la', 'liberadas las')} #${d.liberadas.join(', #')}`
-    );
-    const resto = (limpieza?.detalle.length ?? 0) > 5 ? `\n… y ${limpieza!.detalle.length - 5} más.` : '';
+  if (limpiadas > 0 && limpieza) {
+    const choquesLimpiados = limpieza.detalle.filter(d => d.tipo === 'choque').length;
+    const dupsLimpiados = limpieza.detalle.length - choquesLimpiados;
+    const partesLimpieza: string[] = [];
+    if (choquesLimpiados > 0) partesLimpieza.push(`${choquesLimpiados} ${plural(choquesLimpiados, 'choque', 'choques')}`);
+    if (dupsLimpiados > 0) partesLimpieza.push(`${dupsLimpiados} ${plural(dupsLimpiados, 'duplicado', 'duplicados')}`);
+    const lineas = limpieza.detalle.slice(0, 5).map(lineaLimpieza);
+    const resto = limpieza.detalle.length > 5 ? `\n… y ${limpieza.detalle.length - 5} más.` : '';
     secciones.push(
-      `LIMPIEZA AUTOMÁTICA: se ${plural(limpiadas, 'limpió', 'limpiaron')} ${limpiadas} ${plural(limpiadas, 'duplicado', 'duplicados')} ` +
-      `(${liberadas} ${plural(liberadas, 'reserva liberada', 'reservas liberadas')}). El registro completo está en la auditoría.\n` +
+      `LIMPIEZA AUTOMÁTICA: ${partesLimpieza.join(' y ')} (${liberadas} ${plural(liberadas, 'reserva liberada', 'reservas liberadas')}). ` +
+      `En choques se conserva la venta más antigua y se libera la que se metió encima. El registro completo está en la auditoría.\n` +
       lineas.join('\n') + resto
     );
   }
   if (omitidas.length > 0) {
     const lineas = omitidas.slice(0, 5).map(o =>
-      `• #${o.inventario_id} · C${o.numero_catorcena}-${o.anio} — ${o.motivo}`
+      `• #${o.inventario_id} · C${o.numero_catorcena}-${o.anio} · ${o.tipo} — ${o.motivo}`
     );
     const resto = omitidas.length > 5 ? `\n… y ${omitidas.length - 5} más.` : '';
     secciones.push(
-      `NO SE PUDIERON LIMPIAR ${omitidas.length} ${plural(omitidas.length, 'duplicado', 'duplicados')} — revisar manualmente en la auditoría:\n` +
+      `NO SE PUDIERON LIMPIAR ${omitidas.length} ${plural(omitidas.length, 'conflicto', 'conflictos')} — revisar manualmente en la auditoría:\n` +
       lineas.join('\n') + resto
-    );
-  } else if (!limpieza && duplicados.length > 0) {
-    secciones.push(
-      `${duplicados.length} ${plural(duplicados.length, 'duplicado', 'duplicados')} pendientes de limpieza en la auditoría.`
     );
   }
-  if (choques.length > 0) {
-    const lineas = choques.slice(0, 5).map(c =>
-      `• ${c.codigo_unico || `#${c.inventario_id}`} · C${c.numero_catorcena}-${c.anio}` +
-      (c.campanas.length > 0 ? ` — ${c.campanas.map(x => x.nombre).join(' vs ')}` : '')
+  if (!limpieza && (choques.length > 0 || duplicados.length > 0)) {
+    // Auto-limpieza desactivada: se reporta lo pendiente como antes.
+    const pendientes = [...choques, ...duplicados];
+    const lineas = pendientes.slice(0, 5).map(c =>
+      `• ${c.codigo_unico || `#${c.inventario_id}`} · C${c.numero_catorcena}-${c.anio} · ${esChoque(c) ? 'choque' : 'duplicado'}`
     );
-    const resto = choques.length > 5 ? `\n… y ${choques.length - 5} más.` : '';
-    secciones.push(
-      `${choques.length} ${plural(choques.length, 'CHOQUE', 'CHOQUES')} de campañas — ${plural(choques.length, 'requiere', 'requieren')} decisión manual (nunca se limpian solos):\n` +
-      lineas.join('\n') + resto
-    );
+    const resto = pendientes.length > 5 ? `\n… y ${pendientes.length - 5} más.` : '';
+    secciones.push(`${pendientes.length} ${plural(pendientes.length, 'conflicto pendiente', 'conflictos pendientes')} en la auditoría:\n` + lineas.join('\n') + resto);
   }
 
-  // Resumen corto para el título, priorizando lo más accionable.
+  // Resumen corto para el título.
   const resumen: string[] = [];
-  if (limpiadas > 0) resumen.push(`${limpiadas} ${plural(limpiadas, 'duplicado limpiado', 'duplicados limpiados')} automáticamente`);
-  if (dupsPendientes > 0) resumen.push(`${dupsPendientes} ${plural(dupsPendientes, 'duplicado requiere', 'duplicados requieren')} revisión`);
-  if (choques.length > 0) resumen.push(`${choques.length} ${plural(choques.length, 'choque', 'choques')}`);
+  if (limpiadas > 0) resumen.push(`${limpiadas} ${plural(limpiadas, 'resuelto', 'resueltos')} automáticamente`);
+  if (omitidas.length > 0) resumen.push(`${omitidas.length} ${plural(omitidas.length, 'requiere', 'requieren')} revisión`);
+  if (!limpieza && (choques.length + duplicados.length) > 0) resumen.push(`${choques.length + duplicados.length} pendientes`);
 
   const titulo = `Conflictos de ocupación (${periodo}): ${resumen.join(', ')}`;
   const descripcion =

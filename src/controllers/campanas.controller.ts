@@ -10878,7 +10878,10 @@ export class CampanasController {
       // PLANIFICACIÓN serial: asigna espacio, descarta los que no aplican y separa
       // reactivaciones (soft-deleted) del trabajo de creación. Marca el Set para
       // que dos items del request no tomen el mismo espacio.
-      type WorkItemCamp = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      type WorkItemCamp = { espacioId: number; estatus: string; grupoCompletoId: number | null; invId: number };
+      // Detalle de lo que NO se pudo reservar, con motivo (ver propuestas: antes
+      // el front solo recibia un numero y el usuario re-reservaba a ciegas).
+      const omitidosDetalleCamp: { inventario_id: number; motivo: string }[] = [];
       const workListCamp: WorkItemCamp[] = [];
       const reactivarList: { reservaId: number; estatus: string }[] = [];
       for (const reserva of reservas) {
@@ -10890,8 +10893,10 @@ export class CampanasController {
           if (enc === null) {
             if (!espaciosCampMap.has(reserva.inventario_id)) {
               console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Inventario sin espacios registrados' });
             } else {
               console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
               reservasOmitidas++;
             }
             continue;
@@ -10902,6 +10907,7 @@ export class CampanasController {
         // Validar que el espacio no esté ya reservado en el período
         if (espaciosReservadosEnPeriodo.has(espacioId)) {
           console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
           reservasOmitidas++;
           continue;
         }
@@ -10918,6 +10924,7 @@ export class CampanasController {
         if (solicitudCaraId) {
           if (activasCaraC.has(espacioId)) {
             console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId}, omitiendo`);
+            omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ya está reservado para este circuito' });
             reservasOmitidas++;
             continue;
           }
@@ -10931,7 +10938,7 @@ export class CampanasController {
 
         const grupoCompletoId = (agruparComoCompleto && reserva.tipo !== 'Bonificacion') ? await getGroupId() : null;
         espaciosReservadosEnPeriodo.add(espacioId);
-        workListCamp.push({ espacioId, estatus, grupoCompletoId });
+        workListCamp.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       }
 
       // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
@@ -10983,18 +10990,22 @@ export class CampanasController {
               tarea: '',
               grupo_completo_id: w.grupoCompletoId,
             }, fechaIni, fechaFinDate, undefined, invPadrePorEspacioCamp.get(w.espacioId) ?? null);
-            return { w, lockResult };
+            return { w, lockResult, inesperado: false };
           } catch (err) {
             console.error(`[Reserva camp] error inesperado en espacio ${w.espacioId}:`, err);
-            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const }, inesperado: true };
           }
         }));
-        for (const { w, lockResult } of resultados) {
+        for (const { w, lockResult, inesperado } of resultados) {
           if (lockResult.ok) {
             reservasCreadas++;
             espaciosFirmados.push(w.espacioId);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+            omitidosDetalleCamp.push({
+              inventario_id: w.invId,
+              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
+            });
             reservasOmitidas++;
           }
         }
@@ -11028,12 +11039,28 @@ export class CampanasController {
         emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { campanaId });
       }
 
+      // Resolver codigos de lo omitido para que el front pueda listarlos.
+      const codigosOmitidosCamp = new Map<number, string | null>();
+      if (omitidosDetalleCamp.length > 0) {
+        const invsOm = await prisma.inventarios.findMany({
+          where: { id: { in: [...new Set(omitidosDetalleCamp.map(o => o.inventario_id))] } },
+          select: { id: true, codigo_unico: true },
+        });
+        for (const i of invsOm) codigosOmitidosCamp.set(i.id, i.codigo_unico);
+      }
+
       res.json({
         success: true,
         data: {
           calendarioId: calendario.id,
           reservasCreadas,
           reservasOmitidas,
+          // Detalle por pieza de lo que no se reservo (codigo + motivo).
+          omitidos: omitidosDetalleCamp.map(o => ({
+            inventario_id: o.inventario_id,
+            codigo_unico: codigosOmitidosCamp.get(o.inventario_id) ?? null,
+            motivo: o.motivo,
+          })),
         },
       });
     } catch (error) {

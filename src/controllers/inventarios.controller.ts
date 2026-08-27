@@ -2533,7 +2533,7 @@ export class InventariosController {
 
       const rows = await prisma.$queryRawUnsafe(
         `SELECT c.inventario_id, i.codigo_unico, i.plaza, i.mueble,
-                c.anio, c.numero_catorcena,
+                c.anio, c.numero_catorcena, c.tipo,
                 c.limpiado_at, c.limpiado_por, c.reserva_conservada, c.reservas_liberadas
            FROM conflictos_ocupacion c
            LEFT JOIN inventarios i ON i.id = c.inventario_id
