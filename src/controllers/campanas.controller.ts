@@ -11,7 +11,9 @@ import {
   verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
-  conservarAprobacionSiIncrementa
+  conservarAprobacionSiIncrementa,
+  crearAutorizacionEliminacionCampana,
+  ejecutarEliminacionCarasCampana
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
@@ -2715,7 +2717,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -3114,7 +3116,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -4272,7 +4274,8 @@ export class CampanasController {
                          'nota', COALESCE(nota, ''),
                          'spot', spot,
                          'nombre_arte', nombre_arte,
-                         'estatus_operaciones', estatus_operaciones
+                         'estatus_operaciones', estatus_operaciones,
+                         'nombre_generico', nombre_generico
                        )
                      ) AS CHAR
                    ) as artes_detalle
@@ -4640,7 +4643,7 @@ export class CampanasController {
                    GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -5173,7 +5176,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5198,23 +5201,25 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: idempotente por (campania, archivo).
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, userId || null);
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -5336,7 +5341,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5361,23 +5366,25 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: idempotente por (campania, archivo).
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, req.user?.userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, req.user?.userId || null);
       }
 
       // Registrar en historial
@@ -5459,10 +5466,12 @@ export class CampanasController {
         imagen_testigo: string;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
       }[]>(`
         SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
                comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo,
-               MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
+               MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones,
+               MAX(nombre_generico) as nombre_generico
         FROM imagenes_digitales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
@@ -5483,6 +5492,7 @@ export class CampanasController {
           tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
           nombre_arte: img.nombre_arte || null,
           estatus_operaciones: img.estatus_operaciones || null,
+          nombre_generico: img.nombre_generico || null,
         })),
       });
     } catch (error) {
@@ -5573,10 +5583,11 @@ export class CampanasController {
         comentario: string | null;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
         spot: number;
       }[]>(`
         SELECT DISTINCT img.id_reserva, img.archivo, img.archivo_data,
-               img.comentario, img.nombre_arte, img.estatus_operaciones, img.spot
+               img.comentario, img.nombre_arte, img.estatus_operaciones, img.nombre_generico, img.spot
         FROM imagenes_digitales img
           INNER JOIN reservas r ON r.id = img.id_reserva
           INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
@@ -5595,6 +5606,7 @@ export class CampanasController {
           comentario: img.comentario || '',
           nombre_arte: img.nombre_arte || null,
           estatus_operaciones: img.estatus_operaciones || null,
+          nombre_generico: img.nombre_generico || null,
           spot: Number(img.spot),
           tipo: img.archivo && img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
         })),
@@ -9078,6 +9090,7 @@ export class CampanasController {
           MAX(nombre_arte) as nombre_arte,
           MAX(nota) as nota,
           MAX(estatus_operaciones) as estatus_operaciones,
+          MAX(nombre_generico) as nombre_generico,
           MAX(estatus) as estatus,
           MAX(tiene_instalado) as tiene_instalado
         FROM (
@@ -9088,6 +9101,7 @@ export class CampanasController {
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_arte,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nota,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r.instalado = 1 THEN 1
@@ -9114,6 +9128,7 @@ export class CampanasController {
             MAX(at2.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(at2.nota) COLLATE utf8mb4_unicode_ci as nota,
             MAX(at2.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(at2.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r2.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r2.instalado = 1 THEN 1
@@ -9138,6 +9153,7 @@ export class CampanasController {
             MAX(imd.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(imd.comentario) COLLATE utf8mb4_unicode_ci as nota,
             MAX(imd.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(imd.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r3.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r3.instalado = 1 THEN 1
@@ -9168,6 +9184,7 @@ export class CampanasController {
             MAX(ba.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(ba.nota) COLLATE utf8mb4_unicode_ci as nota,
             MAX(ba.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(ba.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
             0 as tiene_instalado
           FROM biblioteca_artes ba
@@ -9178,7 +9195,7 @@ export class CampanasController {
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; nombre_generico: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -9188,6 +9205,7 @@ export class CampanasController {
         nombre_arte: arte.nombre_arte || null,
         nota: arte.nota || null,
         estatus_operaciones: arte.estatus_operaciones || null,
+        nombre_generico: arte.nombre_generico || null,
         estatus: arte.estatus || null,
         tiene_instalado: Number(arte.tiene_instalado || 0) === 1,
       }));
@@ -12019,13 +12037,19 @@ export class CampanasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Cara-ids adicionales (ej. la pareja RT/BF) → una sola solicitud de auth.
+      const caraIdsAdicionales = Array.isArray(req.body?.caraIdsAdicionales)
+        ? req.body.caraIdsAdicionales.map((x: any) => parseInt(x)).filter((n: number) => !isNaN(n))
+        : [];
+      if (caraIdsAdicionales.length > 0) {
+        idsToDelete = Array.from(new Set([...idsToDelete, ...caraIdsAdicionales]));
+      }
+
       // Info para historial antes de eliminar
       const carasParaHistorial = await prisma.solicitudCaras.findMany({
         where: { id: { in: idsToDelete } },
         select: { id: true, idquote: true, articulo: true, formato: true },
       });
-      const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
-
       // Feedback 2026-08-13: si alguna reserva del circuito tiene APS asignado,
       // NO se permite eliminar (independiente de lo que muestre el front).
       // El bote de basura del modal ya oculta este caso, pero blindamos backend.
@@ -12042,36 +12066,51 @@ export class CampanasController {
         return;
       }
 
-      await prisma.$transaction([
-        prisma.reservas.updateMany({
-          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
-          data: { deleted_at: new Date() },
-        }),
-        prisma.solicitudCaras.deleteMany({
-          where: { id: { in: idsToDelete } },
-        }),
-      ]);
-
-      // Historial
-      const idquote = carasParaHistorial[0]?.idquote;
-      if (idquote) {
-        await prisma.historial.create({
-          data: {
-            tipo: 'Campaña',
-            ref_id: parseInt(idquote) || 0,
-            accion: 'Eliminación de circuito',
-            fecha_hora: new Date(),
-            detalles: JSON.stringify({
-              usuario: req.user?.nombre || 'Usuario',
-              origen: 'campaña',
-              reservas_eliminadas: reservasCount,
-              circuitos: carasParaHistorial.map(c => ({ articulo: c.articulo, formato: c.formato })),
-            }),
-          },
-        });
+      // Bypass de autorización (uso INTERNO: reemplazo de par BF en edición). Borra
+      // al momento — mismo efecto que antes. El borrado normal del usuario NO lo pasa.
+      const sinAutorizacion = req.query.sinAutorizacion === 'true' || req.body?.sinAutorizacion === true;
+      if (sinAutorizacion) {
+        const r = await ejecutarEliminacionCarasCampana(idsToDelete, req.user?.nombre || 'Usuario');
+        res.json({ success: true, message: 'Cara eliminada', eliminadas: r.eliminadas });
+        return;
       }
 
-      res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
+      // [Autorización de Eliminación — SOLO campañas] En vez de borrar al instante,
+      // se crea una tarea de autorización (Filtro Gerente Comercial → DG, como las
+      // autorizaciones normales de DG). La cara y sus reservas quedan INTACTAS
+      // (inventario sigue ocupado) hasta que DG apruebe (se borra) o rechace (no).
+      const campaniaId = parseInt(req.params.id);
+      const idquote = carasParaHistorial[0]?.idquote;
+      const propuestaId = idquote ? parseInt(idquote) : NaN;
+      if (!campaniaId || isNaN(propuestaId)) {
+        res.status(400).json({ success: false, error: 'No se pudo resolver la campaña/propuesta del circuito' });
+        return;
+      }
+      const propuesta = await prisma.propuesta.findUnique({ where: { id: propuestaId }, select: { solicitud_id: true } });
+      const solicitudId = propuesta?.solicitud_id || 0;
+
+      const resumen = carasParaHistorial
+        .map(c => `${c.articulo || ''} ${c.formato || ''}`.trim())
+        .filter(Boolean)
+        .join(', ');
+      const solicitud = await crearAutorizacionEliminacionCampana({
+        campaniaId,
+        propuestaId,
+        solicitudId,
+        caraIds: idsToDelete,
+        solicitanteNombre: req.user?.nombre || 'Usuario',
+        resumen: resumen ? `Circuitos: ${resumen}` : undefined,
+      });
+
+      res.json({
+        success: true,
+        requiereAutorizacion: true,
+        message: solicitud.tipo === 'existente'
+          ? 'Ya existe una solicitud de eliminación pendiente para este circuito.'
+          : `Solicitud de eliminación enviada a autorización (${solicitud.conFiltro ? 'Gerente Comercial → Dirección General' : 'Dirección General'}).`,
+        tareaId: solicitud.tareaId,
+        caras: solicitud.caras,
+      });
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
@@ -12169,7 +12208,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -12181,27 +12220,29 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         for (const reservaId of allReservaIds) {
           const pairKey = `${reservaId}:${archivoFinal}`;
           if (insertedPairs.has(pairKey)) continue;
           insertedPairs.add(pairKey);
           await prisma.$executeRawUnsafe(`
-            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal);
+            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: guardar el arte aunque luego se desasigne de
         // todos los inventarios. Idempotente por (campania_id, archivo): si ya
         // existe actualiza los metadatos.
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'tradicional', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'tradicional', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, nombreGenericoVal, userId || null);
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)
@@ -12300,9 +12341,11 @@ export class CampanasController {
         created_at: Date;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
       }[]>(`
         SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot,
-               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
+               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones,
+               MAX(nombre_generico) as nombre_generico
         FROM artes_tradicionales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, nota, spot
@@ -12321,6 +12364,7 @@ export class CampanasController {
             createdAt: a.created_at,
             nombre_arte: a.nombre_arte || null,
             estatus_operaciones: a.estatus_operaciones || null,
+            nombre_generico: a.nombre_generico || null,
           })),
         });
         return;

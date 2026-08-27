@@ -182,6 +182,9 @@ model biblioteca_artes {
   nombre_arte         String?   @db.VarChar(255)
   nota                String?   @db.Text
   estatus_operaciones String?   @db.VarChar(500)
+  // Modo Genérico del modal Asignar Arte: valor único compartido por todos
+  // los artes cargados en el mismo batch. Null en modo Versionado.
+  nombre_generico     String?   @db.VarChar(255)
   created_by_id       Int?
   created_at          DateTime  @default(now()) @db.DateTime(0)
   updated_at          DateTime  @default(now()) @db.DateTime(0)
@@ -306,20 +309,27 @@ model imagenes_digitales {
   // Nombre manual del arte capturado por el usuario en el modal de carga.
   // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
   nombre_arte        String?  @db.VarChar(255)
+  // Modo Genérico del modal Asignar Arte: valor único compartido por todos
+  // los artes cargados en el mismo batch. Null cuando el modal se usa en modo
+  // Versionado (comportamiento tradicional por-arte).
+  nombre_generico    String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_id_reserva")
 }
 
 model artes_tradicionales {
-  id          Int      @id @default(autoincrement())
-  id_reserva  Int
-  archivo     String   @db.VarChar(255)
-  nota        String   @db.Text
-  spot        Int      @default(1)
-  created_at  DateTime @default(now()) @db.DateTime(0)
+  id              Int      @id @default(autoincrement())
+  id_reserva      Int
+  archivo         String   @db.VarChar(255)
+  nota            String   @db.Text
+  spot            Int      @default(1)
+  created_at      DateTime @default(now()) @db.DateTime(0)
   // Nombre manual del arte capturado por el usuario en el modal de carga.
   // Reemplaza al nombre del archivo en la columna "Nombre Arte" del Versionario.
-  nombre_arte String?  @db.VarChar(255)
+  nombre_arte     String?  @db.VarChar(255)
+  // Modo Genérico del modal Asignar Arte: valor único compartido por todos
+  // los artes cargados en el mismo batch. Null en modo Versionado.
+  nombre_generico String?  @db.VarChar(255)
 
   @@index([id_reserva], map: "idx_at_id_reserva")
 }
