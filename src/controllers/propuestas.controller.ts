@@ -4981,12 +4981,12 @@ export class PropuestasController {
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
 
-      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
-      // editar circuitos existentes mientras la propuesta esté en "Ajuste Cto-Cliente".
+      // Bloqueo Edición Asesores — un asesor comercial no puede editar circuitos
+      // existentes mientras la propuesta esté en "Ajuste Cto-Cliente" o "Ajuste Inventario".
       if (esAsesorComercial(userRol)) {
         const propAjuste = await prisma.propuesta.findUnique({ where: { id: parseInt(id) }, select: { status: true } });
-        if (propAjuste?.status === 'Ajuste Cto-Cliente') {
-          res.status(403).json({ success: false, error: 'Los asesores comerciales no pueden editar circuitos mientras la propuesta está en Ajuste CTO Cliente.' });
+        if (propAjuste?.status === 'Ajuste Cto-Cliente' || propAjuste?.status === 'Ajuste Inventario') {
+          res.status(403).json({ success: false, error: `Los asesores comerciales no pueden editar circuitos mientras la propuesta está en ${propAjuste.status}.` });
           return;
         }
       }
