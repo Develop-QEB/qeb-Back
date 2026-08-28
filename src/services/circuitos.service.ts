@@ -6,6 +6,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { parseCircuitoDigital } from '../lib/circuitos';
+import { registrarReservaCreada } from './conflictos-live.service';
 
 const prisma = new PrismaClient();
 
@@ -218,6 +219,13 @@ export async function autoReservarCircuitoSiAplica(
         grupo_completo_id: null,
       },
     });
+  }
+
+  // Observador de conflictos: anota los sitios para la verificacion dirigida
+  // (debounced). Solo si la creacion fue FIRME ('Vendido'); 'Bonificado' aqui
+  // es tentativo y el detector no lo cuenta.
+  if (estatus === 'Vendido') {
+    for (const r of aReservar) registrarReservaCreada(r.inventario_id);
   }
 
   // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT)

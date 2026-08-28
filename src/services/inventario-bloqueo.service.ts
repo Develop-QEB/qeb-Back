@@ -29,6 +29,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../utils/prisma';
+import { registrarReservaCreada } from './conflictos-live.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 
 // Estatus que IMPIDEN reusar un espacio físico tradicional en el mismo período.
@@ -201,6 +202,14 @@ export async function createReservaConLock(
       // por un P2028 ("unable to start a transaction in the given time"). timeout =
       // tope de EJECUCIÓN de la transacción una vez iniciada.
     }, { timeout: 10000, maxWait: 20000 });
+
+    // Observador de conflictos: anota el sitio para la verificacion dirigida
+    // (debounced) del monitor. Nunca interviene en la reserva. Solo creaciones
+    // FIRMES (ventas): las tentativas no cuentan para el detector.
+    // NOTA (rama sin candado-FIRME): lista inline en vez de esEstatusFirme().
+    if (['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'].includes(String(data.estatus ?? ''))) {
+      registrarReservaCreada(reserva.invId);
+    }
 
     // Emitir evento real-time para que otros buscadores de inventario en
     // vivo quiten este espacio de su listado de disponibles.
