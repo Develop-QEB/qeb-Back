@@ -310,6 +310,7 @@ export async function limpiarCeldasDuplicadas(
   const liberadasParaAviso: LiberadaAviso[] = [];
 
   for (const celda of celdas) {
+    try {
     const tipoCelda: 'choque' | 'duplicado' = esChoque(celda) ? 'choque' : 'duplicado';
     const reservas = await prisma.$queryRawUnsafe<Array<{
       id: number;
@@ -384,33 +385,14 @@ export async function limpiarCeldasDuplicadas(
       continue;
     }
 
-    await prisma.reservas.updateMany({
-      where: { id: { in: aLiberar.map(r => r.id) } },
-      data: { deleted_at: ahora },
-    });
-
-    await logHistorial({
-      tipo: 'Inventario',
-      refId: celda.inventario_id,
-      accion: tipoCelda === 'choque'
-        ? 'Limpieza de choque de reservas (se conservó la venta más antigua)'
-        : 'Limpieza de reservas duplicadas',
-      usuario: actor.nombre,
-      usuarioId: actor.usuarioId,
-      usuarioRol: actor.rol,
-      origen: actor.origen,
-      extras: {
-        catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
-        codigo_unico: celda.codigo_unico,
-        tipo_conflicto: tipoCelda,
-        campanas: celda.campanas.map(c => `${c.id}:${c.nombre}`),
-        reserva_conservada: conservada.id,
-        reservas_liberadas: aLiberar.map(r => r.id),
-      },
-    });
-
-    // Bitácora en la tabla de estado. Upsert porque el botón puede limpiar
-    // celdas que el monitor aún no había registrado. Limpiar implica resuelto.
+    // Bitácora PRIMERO, liberar DESPUÉS (orden fail-closed): si el registro
+    // falla (p.ej. columnas limpiado_* sin migrar), la celda se omite y NO se
+    // libera nada. Si en cambio fallara el updateMany después del registro, el
+    // detector re-encontraría la celda viva, la marcaría reabierta y la
+    // reintentaría: se auto-corrige. Al revés (liberar y luego registrar) un
+    // fallo dejaba reservas soltadas sin bitácora ni aviso.
+    // Upsert porque el botón puede limpiar celdas que el monitor aún no había
+    // registrado. Limpiar implica resuelto.
     await prisma.conflictos_ocupacion.upsert({
       where: {
         inventario_id_anio_numero_catorcena: {
@@ -444,6 +426,32 @@ export async function limpiarCeldasDuplicadas(
       },
     });
 
+    await prisma.reservas.updateMany({
+      where: { id: { in: aLiberar.map(r => r.id) } },
+      data: { deleted_at: ahora },
+    });
+
+    await logHistorial({
+      tipo: 'Inventario',
+      refId: celda.inventario_id,
+      accion: tipoCelda === 'choque'
+        ? 'Limpieza de choque de reservas (se conservó la venta más antigua)'
+        : 'Limpieza de reservas duplicadas',
+      usuario: actor.nombre,
+      usuarioId: actor.usuarioId,
+      usuarioRol: actor.rol,
+      origen: actor.origen,
+      extras: {
+        catorcena: `C${celda.numero_catorcena}-${celda.anio}`,
+        codigo_unico: celda.codigo_unico,
+        tipo_conflicto: tipoCelda,
+        campanas: celda.campanas.map(c => `${c.id}:${c.nombre}`),
+        reserva_conservada: conservada.id,
+        reservas_liberadas: aLiberar.map(r => r.id),
+      },
+    });
+
+
     for (const r of aLiberar) {
       liberadasParaAviso.push({
         reservaId: r.id,
@@ -470,6 +478,17 @@ export async function limpiarCeldasDuplicadas(
       conservada: conservada.id,
       liberadas: aLiberar.map(r => r.id),
     });
+    } catch (err) {
+      // Una celda con problema (fila rara, error de BD) no debe abortar la
+      // corrida entera: se reporta como omitida y se sigue con las demás.
+      console.error(`[Limpieza] Error en celda ${celda.inventario_id} C${celda.numero_catorcena}-${celda.anio}:`, err);
+      resultado.omitidas.push({
+        inventario_id: celda.inventario_id, anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena,
+        tipo: esChoque(celda) ? 'choque' : 'duplicado',
+        motivo: 'Error inesperado al limpiar — revisar en la auditoría',
+      });
+    }
   }
 
   // Aviso a dueños + refresco de vistas abiertas. Falla suave: si el aviso
