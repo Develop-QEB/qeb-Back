@@ -615,23 +615,10 @@ export async function notificarReservasDesplazadas(
     porPropuesta.set(d.idquotePerdedora, arr);
   }
 
-  // Ganadora: campaña (alta directa) o propuesta (pase a ventas).
+  // Ganadora: campaña (alta directa) o propuesta (pase a ventas). Solo se usa para
+  // el historial de la GANADORA (R2). En el de la PERDEDORA (R1) NO se revela quién
+  // se quedó las reservas — instrucción del jefe: "que no sepan a dónde se fueron".
   const ganadorEsCampana = (ctx.origen ?? 'campana') === 'campana';
-  let ganadorNombre = ctx.campanaNombre;
-  if (!ganadorNombre && ctx.campanaId && ganadorEsCampana) {
-    try {
-      const camp = await defaultPrisma.campania.findUnique({ where: { id: ctx.campanaId }, select: { nombre: true } });
-      ganadorNombre = camp?.nombre || undefined;
-    } catch { /* noop */ }
-  }
-  const ganadorTipoTxt = ganadorEsCampana ? 'la campaña' : 'la propuesta';
-  const ganadorLabel = ganadorNombre
-    ? `${ganadorNombre} (#${ctx.campanaId ?? ''})`
-    : (ctx.campanaId ? `${ganadorTipoTxt} #${ctx.campanaId}` : (ganadorEsCampana ? 'otra campaña' : 'otra propuesta'));
-  // (R1) Motivo sin usuario, con id, aludiendo al pase a ventas.
-  const motivoTxt = ganadorEsCampana
-    ? `Se desplazaron las reservas porque ${ganadorTipoTxt} #${ctx.campanaId ?? ''} reservó estas ubicaciones.`
-    : `Se desplazaron las reservas por el pase a ventas de ${ganadorTipoTxt} #${ctx.campanaId ?? ''}.`;
 
   // (R3) Usuarios de Tráfico (una sola consulta) para avisarles además de los asesores.
   let traficoIds: number[] = [];
@@ -680,6 +667,22 @@ export async function notificarReservasDesplazadas(
         if (cat?.numero_catorcena != null) periodoTxt = `cat ${cat.numero_catorcena}${cat.a_o ? '/' + cat.a_o : ''}`;
       } catch { /* deja el rango de fechas */ }
     }
+
+    // Artículo(s) de las piezas desplazadas (para el historial de la perdedora).
+    let articuloTxt = '';
+    try {
+      const reservaIds = items.map(i => i.reservaId).filter(n => Number.isFinite(n));
+      if (reservaIds.length) {
+        const artRows = await defaultPrisma.$queryRawUnsafe<{ articulo: string | null }[]>(
+          `SELECT DISTINCT sc.articulo AS articulo
+             FROM reservas r
+             INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+            WHERE r.id IN (${reservaIds.map(() => '?').join(',')})`,
+          ...reservaIds,
+        );
+        articuloTxt = [...new Set(artRows.map(a => a.articulo).filter(Boolean))].join(', ');
+      }
+    } catch { /* noop */ }
 
     // (R4) La propuesta perdedora pasa a "Ajuste Inventario" para que reasignen y se
     //      bloquee la edición de circuitos a los asesores (guards en el controller).
@@ -750,9 +753,9 @@ export async function notificarReservasDesplazadas(
       emitToPropuesta(parseInt(idquote), SOCKET_EVENTS.RESERVA_ELIMINADA, { propuestaId: parseInt(idquote) });
     } catch { /* noop */ }
 
-    // (R1) Historial de la propuesta perdedora — SIN usuario, con id, "por el pase a ventas".
+    // (R1) Historial de la propuesta perdedora — SIN usuario y SIN revelar a dónde se
+    //      fueron las reservas: solo cuántas, de qué catorcena y qué artículo.
     try {
-      const campanaConCat = periodoTxt ? `${ganadorLabel} · ${periodoTxt}` : ganadorLabel;
       await defaultPrisma.historial.create({
         data: {
           tipo: 'Propuesta',
@@ -761,8 +764,8 @@ export async function notificarReservasDesplazadas(
           fecha_hora: now,
           detalles: JSON.stringify({
             reservas_eliminadas: items.length,
-            campaña: campanaConCat,
-            motivo: motivoTxt,
+            motivo: `Se desplazaron ${items.length} reserva(s)${periodoTxt ? ' de la ' + periodoTxt : ''}.`,
+            ...(articuloTxt ? { articulo: articuloTxt } : {}),
             codigos: codigos.slice(0, 60),
             ...(estatusCambiado ? { estatus_anterior: estatusAnterior, estatus_nuevo: 'Ajuste Inventario' } : {}),
           }),
