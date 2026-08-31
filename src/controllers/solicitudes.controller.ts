@@ -924,18 +924,20 @@ export class SolicitudesController {
 
       // Guard de autorizacion — se divide por sentido de la transicion.
       //
-      // AVANCE (Aprobada / Atendida): la solicitud no puede avanzar si hay
-      //   circuitos con autorizacion abierta o rechazada. Todo debe estar
-      //   aprobado para pasar a propuesta.
+      // AVANCE (Aprobada / Atendida): bloquea si hay circuitos con
+      //   pendiente / correccion / rechazado. Todo debe estar aprobado.
       //
-      // CIERRE (Rechazada / Cancelada): solo bloquea si hay circuitos
-      //   'pendiente' o 'correccion' — no cortar mientras direccion aun no
-      //   responde. Los circuitos ya 'rechazado' NO deben bloquear el cierre:
-      //   feedback Dulce 2026-08-31, si direccion ya rechazo circuitos es
-      //   esperable que la solicitud completa se rechace.
+      // CIERRE (Rechazada / Cancelada): bloquea si hay pendiente o
+      //   correccion (direccion aun no responde). Los 'rechazado' NO
+      //   bloquean SI todos los circuitos estan rechazados (limpio: se
+      //   puede cerrar). Si hay MEZCLA rechazado + aprobado → tambien
+      //   bloquea, porque cerrar tiraria trabajo aprobado que el asesor
+      //   probablemente quiere salvar (feedback Jos 2026-08-31).
       //
-      // Historia del guard: f71eea3 (2026-08-14) agrego rechazado a las 4
-      // transiciones, lo cual era contradictorio para Rechazada/Cancelada.
+      // Historia: f71eea3 (2026-08-14) agrego rechazado a las 4 transiciones
+      // — contradictorio para el cierre puro. 6df5b99 (2026-08-31) lo saco
+      // pero era muy permisivo (permitia cerrar con mezcla). Este ajuste
+      // agrega la regla de "todos rechazados o ninguno".
       if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
         const bloqueo = await verificarCarasRechazadas(parseInt(id).toString());
@@ -943,16 +945,30 @@ export class SolicitudesController {
         const totalPend = auth.pendientesDg.length + auth.pendientesDcm.length;
         const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
         const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        // Contar aprobadas para detectar mezcla en el cierre
+        const totalAprob = !esAvance ? await prisma.solicitudCaras.count({
+          where: {
+            idquote: parseInt(id).toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        }) : 0;
+
         const bloqueaAvance = totalPend > 0 || totalCorr > 0 || totalRech > 0;
-        const bloqueaCierre = totalPend > 0 || totalCorr > 0;
+        // Cierre: bloquea con pendiente/correccion, o con mezcla rechazado+aprobado.
+        const bloqueaCierre = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+
         if ((esAvance && bloqueaAvance) || (!esAvance && bloqueaCierre)) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           if (esAvance && totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          if (!esAvance && totalRech > 0 && totalAprob > 0) {
+            partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. ${esAvance ? 'Corrigelos y espera la autorizacion antes de continuar.' : 'Resuelve los aprobados/rechazados primero (para cerrar directo, todos los circuitos deben estar rechazados).'}`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -960,6 +976,7 @@ export class SolicitudesController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;
@@ -1140,23 +1157,33 @@ export class SolicitudesController {
         return;
       }
 
-      // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
-      // con autorizaciones DG/DCM pendientes o en correccion — se dejarian
-      // tareas huerfanas y se corta el flujo antes de que direccion responda.
-      // Feedback 2026-08-31 (Dulce): los circuitos ya 'rechazado' NO bloquean
-      // eliminar la solicitud — si direccion ya rechazo, cerrar es esperable.
+      // Guard del bote de basura — mismo criterio que updateStatus cierre.
+      // Bloquea con pendiente / correccion. Los rechazado solo bloquean si
+      // hay mezcla con aprobado (feedback Jos 2026-08-31: si TODOS los
+      // circuitos estan rechazados se puede eliminar limpio; si hay
+      // aprobados mezclados se tiraria trabajo bueno).
       {
         const auth = await verificarCarasPendientes(solicitud.id.toString());
         const bloqueo = await verificarCarasRechazadas(solicitud.id.toString());
-        const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+        const totalPend = auth.pendientesDg.length + auth.pendientesDcm.length;
         const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
-        if (totalPendientes > 0 || totalCorr > 0) {
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        const totalAprob = await prisma.solicitudCaras.count({
+          where: {
+            idquote: solicitud.id.toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        });
+        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        if (bloquea) {
           const partes: string[] = [];
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -1164,6 +1191,7 @@ export class SolicitudesController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;

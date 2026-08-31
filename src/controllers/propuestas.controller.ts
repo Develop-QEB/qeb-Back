@@ -929,22 +929,32 @@ export class PropuestasController {
       }
 
       // Guard de cierre (Rechazada / Cancelada) — feedback 2026-08-14/18/31.
-      // Solo bloquea si hay circuitos 'pendiente' o 'correccion' (direccion aun
-      // no responde). Los circuitos ya 'rechazado' NO bloquean el cierre: si
-      // direccion ya rechazo, cerrar es esperable — antes se bloqueaba y era
-      // contradictorio (Dulce, solicitud 81480 2026-08-31).
+      // Bloquea si hay pendiente/correccion. Los rechazado solo bloquean si
+      // hay MEZCLA con aprobado (feedback Jos 2026-08-31: si TODOS los
+      // circuitos estan rechazados se puede cerrar limpio; con aprobados
+      // mezclados se tiraria trabajo bueno).
       if (status === 'Rechazada' || status === 'Cancelada') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
         const totalPend = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
         const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
-        if (totalPend > 0 || totalCorr > 0) {
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        const totalAprob = await prisma.solicitudCaras.count({
+          where: {
+            idquote: propuestaId.toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        });
+        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        if (bloquea) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Espera la respuesta de direccion antes de continuar.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,
@@ -952,6 +962,7 @@ export class PropuestasController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;
