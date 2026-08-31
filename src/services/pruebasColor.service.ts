@@ -219,6 +219,16 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     extras: { pruebaId, scId: prueba.sc_id },
   });
 
+  // Notificar al creador de la prueba con una tarea "Notificación" — asi
+  // el asesor (o quien haya solicitado) se entera del avance sin depender
+  // de que este mirando el modal. Feedback 2026-08-24.
+  await notificarActualizacionEstatus({
+    prueba,
+    nuevoEstatus,
+    actor: userNombre,
+    actorId: userId,
+  });
+
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
     tareaId: pruebaId,
     tipo: 'Prueba de Color',
@@ -226,6 +236,46 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
   });
 
   return upd;
+}
+
+// Notifica al creador de la prueba (el asesor / diseñador que la solicito)
+// cada vez que su estatus cambia. Si quien esta cambiando el estatus es el
+// mismo creador (raro pero posible), no se auto-notifica.
+async function notificarActualizacionEstatus(input: {
+  prueba: { id: number; propuesta_id: number; sc_id: number; version: number; created_by: number; created_by_nombre: string };
+  nuevoEstatus: EstatusPruebaColor;
+  actor: string;
+  actorId: number;
+}) {
+  const { prueba, nuevoEstatus, actor, actorId } = input;
+  if (prueba.created_by === actorId) return; // el mismo creador no se auto-notifica
+
+  const labelEstatus: Record<EstatusPruebaColor, string> = {
+    solicitada: 'solicitada',
+    enviada_proveedor: 'enviada al proveedor',
+    aprobada: 'aprobada',
+    rechazada: 'rechazada',
+  };
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 7);
+
+  await prisma.tareas.create({
+    data: {
+      tipo: 'Prueba de Color',
+      titulo: `Prueba de color ${labelEstatus[nuevoEstatus]} - Propuesta #${prueba.propuesta_id}`,
+      descripcion: `${actor} marcó la prueba de color v${prueba.version} del circuito #${prueba.sc_id} como ${labelEstatus[nuevoEstatus]}.`,
+      estatus: 'Pendiente',
+      id_responsable: prueba.created_by,
+      responsable: prueba.created_by_nombre,
+      id_solicitud: '',
+      id_propuesta: String(prueba.propuesta_id),
+      id_asignado: String(prueba.created_by),
+      asignado: prueba.created_by_nombre,
+      contenido: JSON.stringify({ pruebaColorId: prueba.id, scId: prueba.sc_id, estatus: nuevoEstatus }),
+      fecha_inicio: now,
+      fecha_fin: fechaFin,
+    },
+  });
 }
 
 export interface ListarFiltro {
