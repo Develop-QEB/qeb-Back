@@ -928,27 +928,23 @@ export class PropuestasController {
         }
       }
 
-      // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
-      // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
-      // Feedback 2026-08-18 (ajuste): tambien bloquear cuando hay circuitos
-      // en 'correccion' o 'rechazado'. Antes solo se checaba 'pendiente' y
-      // Jos pudo rechazar una propuesta con 1 circuito en correccion sin
-      // resolver. Ahora se consultan las 3 dimensiones y el mensaje trae el
-      // desglose (mismo patron que Aprobada/Pase a ventas).
+      // Guard de cierre (Rechazada / Cancelada) — feedback 2026-08-14/18/31.
+      // Solo bloquea si hay circuitos 'pendiente' o 'correccion' (direccion aun
+      // no responde). Los circuitos ya 'rechazado' NO bloquean el cierre: si
+      // direccion ya rechazo, cerrar es esperable — antes se bloqueaba y era
+      // contradictorio (Dulce, solicitud 81480 2026-08-31).
       if (status === 'Rechazada' || status === 'Cancelada') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
-        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+        const totalPend = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        if (totalPend > 0 || totalCorr > 0) {
           const partes: string[] = [];
-          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Espera la respuesta de direccion antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,

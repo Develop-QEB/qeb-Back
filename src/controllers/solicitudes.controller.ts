@@ -922,29 +922,37 @@ export class SolicitudesController {
         return;
       }
 
-      // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
-      // autorización DG/DCM. Política: la solicitud no avanza a propuesta
-      // hasta que dirección apruebe (o rechace) los circuitos pendientes.
-      // Feedback 2026-08-14: mismo criterio para Rechazada / Cancelada — no se
-      // puede cortar el flujo mientras direccion aun no responde, para no
-      // dejar tareas de autorizacion huerfanas y perder trazabilidad.
-      // Feedback 2026-08-15: incluir tambien 'correccion' + 'rechazado' —
-      // no bastaba con 'pendiente' porque los circuitos devueltos a
-      // correccion tampoco cierran la autorizacion.
+      // Guard de autorizacion — se divide por sentido de la transicion.
+      //
+      // AVANCE (Aprobada / Atendida): la solicitud no puede avanzar si hay
+      //   circuitos con autorizacion abierta o rechazada. Todo debe estar
+      //   aprobado para pasar a propuesta.
+      //
+      // CIERRE (Rechazada / Cancelada): solo bloquea si hay circuitos
+      //   'pendiente' o 'correccion' — no cortar mientras direccion aun no
+      //   responde. Los circuitos ya 'rechazado' NO deben bloquear el cierre:
+      //   feedback Dulce 2026-08-31, si direccion ya rechazo circuitos es
+      //   esperable que la solicitud completa se rechace.
+      //
+      // Historia del guard: f71eea3 (2026-08-14) agrego rechazado a las 4
+      // transiciones, lo cual era contradictorio para Rechazada/Cancelada.
       if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
         const bloqueo = await verificarCarasRechazadas(parseInt(id).toString());
-        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
+        const esAvance = status === 'Aprobada' || status === 'Atendida';
+        const totalPend = auth.pendientesDg.length + auth.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        const bloqueaAvance = totalPend > 0 || totalCorr > 0 || totalRech > 0;
+        const bloqueaCierre = totalPend > 0 || totalCorr > 0;
+        if ((esAvance && bloqueaAvance) || (!esAvance && bloqueaCierre)) {
           const partes: string[] = [];
-          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (esAvance && totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -1133,24 +1141,22 @@ export class SolicitudesController {
       }
 
       // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
-      // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
-      // se corta el flujo antes de que direccion responda.
-      // Feedback 2026-08-18 (ajuste): tambien bloquear con 'correccion' o
-      // 'rechazado', no solo 'pendiente'.
+      // con autorizaciones DG/DCM pendientes o en correccion — se dejarian
+      // tareas huerfanas y se corta el flujo antes de que direccion responda.
+      // Feedback 2026-08-31 (Dulce): los circuitos ya 'rechazado' NO bloquean
+      // eliminar la solicitud — si direccion ya rechazo, cerrar es esperable.
       {
         const auth = await verificarCarasPendientes(solicitud.id.toString());
         const bloqueo = await verificarCarasRechazadas(solicitud.id.toString());
-        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
+        const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        if (totalPendientes > 0 || totalCorr > 0) {
           const partes: string[] = [];
-          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
           if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           res.status(400).json({
             success: false,
-            error: `No se puede eliminar la solicitud: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
