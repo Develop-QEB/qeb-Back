@@ -334,6 +334,40 @@ model artes_tradicionales {
   @@index([id_reserva], map: "idx_at_id_reserva")
 }
 
+// Pruebas de color — feedback 2026-08-15 (Gestor artes Propuestas - prueba de color).
+// Permite subir un arte "prueba" antes del pedido de impresión real. Puede
+// existir desde el nivel de propuesta (sin APS ni reserva aún) y se vincula
+// automáticamente a la campaña + reserva cuando el flujo avanza:
+//   - vincularConCampania: al aprobar propuesta se llena campania_id.
+//   - vincularConReserva: al asignar APS se llena reserva_id (match por sc_id).
+// Versionado: version = 1..N por (propuesta_id, sc_id). Nueva versión al
+// rechazar la anterior. Ver services/pruebasColor.service.ts.
+model pruebas_color {
+  id                 Int       @id @default(autoincrement())
+  propuesta_id       Int
+  sc_id              Int                                          // solicitudCaras.id (circuito)
+  campania_id        Int?
+  reserva_id         Int?
+  archivo            String    @db.VarChar(500)
+  archivo_data       String?   @db.LongText                       // base64 opcional (Spaces si aplica)
+  nombre_arte        String?   @db.VarChar(255)
+  notas              String?   @db.Text
+  // estatus: 'solicitada' | 'enviada_proveedor' | 'aprobada' | 'rechazada'
+  estatus            String    @default("solicitada") @db.VarChar(50)
+  version            Int       @default(1)
+  created_by         Int
+  created_by_nombre  String    @db.VarChar(255)
+  created_at         DateTime  @default(now()) @db.DateTime(0)
+  updated_at         DateTime  @default(now()) @updatedAt @db.DateTime(0)
+  deleted_at         DateTime? @db.DateTime(0)
+
+  @@index([propuesta_id])
+  @@index([campania_id])
+  @@index([sc_id])
+  @@index([reserva_id])
+  @@index([estatus])
+}
+
 model propuesta {
   id                       Int       @id @default(autoincrement())
   cliente_id               Int
