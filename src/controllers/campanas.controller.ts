@@ -12122,6 +12122,9 @@ export class CampanasController {
         .map(c => `${c.articulo || ''} ${c.formato || ''}`.trim())
         .filter(Boolean)
         .join(', ');
+      // Nota de ELIMINACIÓN (por qué se borra) — la escribe el solicitante y viaja
+      // en la tarea para que la vea el Gerente (filtro) y DG.
+      const motivoEliminacion = typeof req.body?.motivoEliminacion === 'string' ? req.body.motivoEliminacion : undefined;
       const solicitud = await crearAutorizacionEliminacionCampana({
         campaniaId,
         propuestaId,
@@ -12129,6 +12132,7 @@ export class CampanasController {
         caraIds: idsToDelete,
         solicitanteNombre: req.user?.nombre || 'Usuario',
         resumen: resumen ? `Circuitos: ${resumen}` : undefined,
+        motivo: motivoEliminacion,
       });
 
       res.json({

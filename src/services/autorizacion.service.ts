@@ -2425,8 +2425,9 @@ export async function crearAutorizacionEliminacionCampana(params: {
   caraIds: number[];
   solicitanteNombre: string;
   resumen?: string;
+  motivo?: string; // Nota de ELIMINACIÓN (por qué se borra) — viaja en la tarea → la ve el gerente y DG.
 }): Promise<{ tareaId: number; tipo: string; conFiltro: boolean; caras: number }> {
-  const { campaniaId, propuestaId, solicitudId, caraIds, solicitanteNombre, resumen } = params;
+  const { campaniaId, propuestaId, solicitudId, caraIds, solicitanteNombre, resumen, motivo } = params;
 
   // Dedup vs tareas de eliminación abiertas de esta campaña.
   const abiertas = await prisma.tareas.findMany({
@@ -2452,7 +2453,10 @@ export async function crearAutorizacionEliminacionCampana(params: {
   fechaFin.setDate(fechaFin.getDate() + 7);
 
   const tituloBase = `Eliminación de ${caraIdsNuevas.length} circuito(s) — Campaña #${campaniaId}`;
-  const desc = `${solicitanteNombre} solicita eliminar ${caraIdsNuevas.length} circuito(s) de la Campaña #${campaniaId}.${resumen ? '\n' + resumen : ''}`;
+  const motivoTxt = (motivo || '').trim();
+  const desc = `${solicitanteNombre} solicita eliminar ${caraIdsNuevas.length} circuito(s) de la Campaña #${campaniaId}.`
+    + (motivoTxt ? `\n\nMotivo de eliminación: ${motivoTxt}` : '')
+    + (resumen ? `\n${resumen}` : '');
 
   let responsables: { id: number; nombre: string }[];
   let tipoTarea: string;
