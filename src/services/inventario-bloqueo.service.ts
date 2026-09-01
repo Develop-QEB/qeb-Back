@@ -28,9 +28,53 @@
 // de estatus.
 
 import { Prisma, PrismaClient } from '@prisma/client';
+import nodemailer from 'nodemailer';
 import { prisma as defaultPrisma } from '../utils/prisma';
 import { emitToAll, emitToPropuesta, SOCKET_EVENTS } from '../config/socket';
 import { registrarReservaCreada } from './conflictos-live.service';
+
+// Transporter para avisar por correo a los asesores cuando les desplazan reservas.
+// Misma config que el resto del sistema (env SMTP_*). Fail-soft: si no hay SMTP o
+// falla el envío, NO rompe el desplazamiento.
+const mailTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  tls: { rejectUnauthorized: false },
+});
+
+/** Correo a los asesores dueños de una propuesta a la que le desplazaron reservas. */
+async function enviarCorreoDesplazamiento(
+  asesorIds: number[],
+  idquote: string,
+  cuantas: number,
+  periodoTxt: string,
+  articuloTxt: string,
+  codigos: (string | null)[],
+): Promise<void> {
+  try {
+    if (!process.env.SMTP_USER) return; // sin config SMTP → no-op silencioso
+    const users = await defaultPrisma.usuario.findMany({
+      where: { id: { in: asesorIds }, deleted_at: null },
+      select: { correo_electronico: true },
+    });
+    const to = users.map(u => u.correo_electronico).filter(Boolean);
+    if (to.length === 0) return;
+    const cods = codigos.filter((c): c is string => !!c);
+    const cat = periodoTxt ? ` de la ${periodoTxt}` : '';
+    const art = articuloTxt ? ` — artículo(s): ${articuloTxt}` : '';
+    const piezas = cods.length ? `\n\nPiezas: ${cods.slice(0, 60).join(', ')}` : '';
+    await mailTransporter.sendMail({
+      from: process.env.SMTP_FROM || '"QEB Sistema" <no-reply@qeb.mx>',
+      to,
+      subject: `Reservas desplazadas — propuesta ${idquote}`,
+      text: `Se desplazaron ${cuantas} reserva(s)${cat}${art} de la propuesta ${idquote}. Hay que volver a reservarlas.${piezas}`,
+    });
+  } catch (e) {
+    console.error('[desplazamiento] no se pudo enviar correo a asesores', e);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FUENTE CENTRAL de qué OCUPA un espacio físico tradicional en un período.
@@ -718,9 +762,12 @@ export async function notificarReservasDesplazadas(
       id_asignado: '',
     };
 
+    const asesorIds = [...new Set(owners)];
+    const traficoDestIds = [...new Set(traficoIds)].filter(id => !owners.includes(id));
+
     // Asesores -> TAREA
-    for (const destId of [...new Set(owners)]) {
-      const tarea = await defaultPrisma.tareas.create({
+    for (const destId of asesorIds) {
+      await defaultPrisma.tareas.create({
         data: {
           titulo: 'Reservar ubicaciones desplazadas',
           descripcion: `${descBase} Hay que volver a reservarlas.`,
@@ -730,12 +777,11 @@ export async function notificarReservasDesplazadas(
           ...camposComunes,
         },
       });
-      try { emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: 'Propuesta' }); } catch { /* noop */ }
     }
 
     // Tráfico -> NOTIFICACIÓN (excluye a quien ya sea dueño para no duplicarle el aviso)
-    for (const destId of [...new Set(traficoIds)].filter(id => !owners.includes(id))) {
-      const noti = await defaultPrisma.tareas.create({
+    for (const destId of traficoDestIds) {
+      await defaultPrisma.tareas.create({
         data: {
           titulo: 'Reservas desplazadas',
           descripcion: `Aviso: ${descBase} Los asesores de la propuesta ${idquote} tienen que volver a reservarlas.`,
@@ -745,7 +791,30 @@ export async function notificarReservasDesplazadas(
           ...camposComunes,
         },
       });
-      try { emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: noti.id, tipo: 'Notificación' }); } catch { /* noop */ }
+    }
+
+    // POPUP EN VIVO: un solo emit DIRIGIDO (con `destinatarios`) para que el front
+    // dispare el toast SOLO a asesores + Tráfico. Categoría 'reserva_desplazada'
+    // salta las preferencias opt-in (igual que 'conflicto_ocupacion') → el aviso
+    // NO se pierde en silencio. (El bug anterior: emit sin `destinatarios` +
+    // `tareaId` en vez de `tarea_id` → `paraMi=false` → nunca había popup.)
+    const destinatariosPopup = [...asesorIds, ...traficoDestIds];
+    if (destinatariosPopup.length) {
+      try {
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+          tipo: 'Notificación',
+          clase: 'notificacion',
+          categoria: 'reserva_desplazada',
+          titulo: 'Reservas desplazadas',
+          descripcion: `${descBase} Hay que volver a reservarlas.`,
+          destinatarios: destinatariosPopup,
+        });
+      } catch { /* noop */ }
+    }
+
+    // CORREO a los asesores dueños de la propuesta (fail-soft, no bloquea).
+    if (asesorIds.length) {
+      void enviarCorreoDesplazamiento(asesorIds, idquote, items.length, periodoTxt, articuloTxt, codigos);
     }
 
     // Refresco en vivo de la propuesta abierta (reservas + historial).
