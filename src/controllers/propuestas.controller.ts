@@ -430,7 +430,8 @@ async function propuestaTieneCircuitosIncompletos(client: any, propuestaId: numb
   const esMensual = cot?.tipo_periodo === 'mensual';
   return caras.some((cara: any) => {
     const articulo = (cara.articulo || '').toUpperCase();
-    if (articulo.startsWith('IM')) return false;
+    // IM (impresión) y ES/ESP (ejec. especial) no requieren inventario → nunca incompletos.
+    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
     const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
     const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
     const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');

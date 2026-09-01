@@ -2558,7 +2558,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           sc.idquote = ?
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.id IS NULL
       `;
 
@@ -2826,7 +2826,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           sc.idquote = ?
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY sc.id
@@ -3215,7 +3215,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id IN (${placeholders})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.id IS NULL
       `;
 
@@ -3269,7 +3269,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           cm.id IN (${placeholders})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY cm.id, sc.id
@@ -3733,7 +3733,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE cm.id IN (${cmIdPh})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL AND rsv.APS > 0
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
@@ -9745,9 +9745,9 @@ export class CampanasController {
 
         const articuloUp = String(sc.articulo || '').toUpperCase();
 
-        // Para IM (Impresiones): no aplican reservas de inventario físico,
-        // siempre se considera completo (delta=0 → ✓ en UI).
-        const delta_caras = articuloUp.startsWith('IM')
+        // Para IM (Impresiones) y ES/ESP (Ejec. Especiales): no aplican reservas de
+        // inventario físico, siempre se consideran completos (delta=0 → ✓ en UI).
+        const delta_caras = (articuloUp.startsWith('IM') || articuloUp.startsWith('ESP') || articuloUp.startsWith('ES-'))
           ? 0
           : rsvCount - (scCaras + scBonif);
 
