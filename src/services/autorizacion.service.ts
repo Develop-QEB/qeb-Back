@@ -2472,7 +2472,7 @@ export async function crearAutorizacionEliminacionCampana(params: {
   const tarea = await prisma.tareas.create({
     data: {
       tipo: tipoTarea,
-      titulo: gc ? `Filtro ${tituloBase}` : tituloBase,
+      titulo: tituloBase, // el gerente DECIDE (ya no es "filtro"), sin prefijo confuso
       descripcion: desc,
       estatus: 'Pendiente',
       id_responsable: responsables[0].id,
@@ -2503,79 +2503,36 @@ export async function crearAutorizacionEliminacionCampana(params: {
   return { tareaId: tarea.id, tipo: tipoTarea, conFiltro: !!gc, caras: caraIdsNuevas.length };
 }
 
-/** Aprueba una tarea de eliminación. Si es Filtro → crea la tarea DG. Si es la
- *  tarea DG → ejecuta el borrado real. Devuelve qué pasó. */
+/** Aprueba una tarea de eliminación → EJECUTA el borrado directo. El GERENTE decide
+ *  (aprueba y se borra, ya NO escala a DG). El caso 'Autorización Eliminación' es el
+ *  fallback cuando el asesor no tiene gerente: lo aprueba DG y también borra. */
 export async function aprobarEliminacionCampana(
   tareaId: number,
   aprobadorNombre: string,
   comentario?: string
-): Promise<{ accion: 'filtro_a_dg' | 'eliminado'; tareaDgId?: number; eliminadas?: number }> {
+): Promise<{ accion: 'eliminado'; eliminadas: number }> {
   const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
   if (!tarea) throw new Error('Tarea no encontrada');
   if (['Atendido', 'Cancelado', 'Rechazado'].includes(tarea.estatus || '')) {
     throw new Error('La tarea ya fue procesada');
   }
+  if (!esTareaEliminacion(tarea.tipo)) throw new Error('La tarea no es de autorización de eliminación');
+
   const caraIds = (tarea.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
+  const esGerente = tarea.tipo === TIPO_FILTRO_ELIMINACION;
 
-  if (tarea.tipo === TIPO_FILTRO_ELIMINACION) {
-    const usuariosDg = await prisma.usuario.findMany({ where: usuariosDgQuery, select: { id: true, nombre: true } });
-    if (usuariosDg.length === 0) throw new Error('No hay usuarios Director General configurados');
-    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-    const fechaFin = new Date(now.getTime());
-    fechaFin.setDate(fechaFin.getDate() + 7);
-    const comentarioLimpio = (comentario || '').trim();
-
-    const tareaDg = await prisma.$transaction(async (tx) => {
-      await tx.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
-      const dg = await tx.tareas.create({
-        data: {
-          tipo: TIPO_AUTORIZACION_ELIMINACION,
-          titulo: (tarea.titulo || 'Autorización de eliminación').replace(/^Filtro /, ''),
-          descripcion: tarea.descripcion || 'Se requiere autorización de eliminación de Dirección General',
-          estatus: 'Pendiente',
-          id_responsable: usuariosDg[0].id,
-          responsable: usuariosDg[0].nombre,
-          id_solicitud: tarea.id_solicitud,
-          id_propuesta: tarea.id_propuesta,
-          campania_id: tarea.campania_id,
-          contenido: 'campana',
-          ids_reservas: tarea.ids_reservas,
-          id_asignado: usuariosDg.map((u) => u.id).join(','),
-          asignado: usuariosDg.map((u) => u.nombre).join(', '),
-          fecha_fin: fechaFin,
-        },
-      });
-      await tx.historial.create({
-        data: {
-          tipo: 'autorizacion_solicitud_campana',
-          ref_id: tarea.campania_id || 0,
-          accion: `${aprobadorNombre} (Gerente Comercial) aprobó filtro de eliminación y envió a Dirección General${comentarioLimpio ? ' (con comentario)' : ''}`,
-          detalles: JSON.stringify({ tareaFiltroId: tareaId, tareaDgId: dg.id, comentario: comentarioLimpio || null }),
-        },
-      });
-      return dg;
-    });
-    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tareaDg.id, tipo: TIPO_AUTORIZACION_ELIMINACION });
-    emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tareaDg.id, tipo: TIPO_AUTORIZACION_ELIMINACION });
-    return { accion: 'filtro_a_dg', tareaDgId: tareaDg.id };
-  }
-
-  if (tarea.tipo === TIPO_AUTORIZACION_ELIMINACION) {
-    const res = await ejecutarEliminacionCarasCampana(caraIds, aprobadorNombre);
-    await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
-    await prisma.historial.create({
-      data: {
-        tipo: 'autorizacion_solicitud_campana',
-        ref_id: tarea.campania_id || 0,
-        accion: `${aprobadorNombre} (Dirección General) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
-        detalles: JSON.stringify({ tareaId, eliminadas: res.eliminadas, reservas: res.reservas }),
-      },
-    });
-    emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: TIPO_AUTORIZACION_ELIMINACION });
-    return { accion: 'eliminado', eliminadas: res.eliminadas };
-  }
-
-  throw new Error('La tarea no es de autorización de eliminación');
+  const res = await ejecutarEliminacionCarasCampana(caraIds, aprobadorNombre);
+  await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
+  await prisma.historial.create({
+    data: {
+      tipo: 'autorizacion_solicitud_campana',
+      ref_id: tarea.campania_id || 0,
+      accion: `${aprobadorNombre} (${esGerente ? 'Gerente Comercial' : 'Dirección General'}) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
+      detalles: JSON.stringify({ tareaId, eliminadas: res.eliminadas, reservas: res.reservas, comentario: (comentario || '').trim() || null }),
+    },
+  });
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: tarea.tipo || TIPO_AUTORIZACION_ELIMINACION });
+  return { accion: 'eliminado', eliminadas: res.eliminadas };
 }
 
 /** Rechaza una tarea de eliminación: NO borra, marca Rechazado y guarda el

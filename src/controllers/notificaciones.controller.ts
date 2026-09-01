@@ -1746,9 +1746,7 @@ export class NotificacionesController {
       const result = await aprobarEliminacionCampana(tareaId, userName, comentario);
       res.json({
         success: true,
-        message: result.accion === 'eliminado'
-          ? `Eliminación aprobada: ${result.eliminadas} circuito(s) borrado(s).`
-          : 'Filtro aprobado, enviado a Dirección General.',
+        message: `Eliminación aprobada: ${result.eliminadas} circuito(s) borrado(s).`,
         data: result,
       });
     } catch (error) {
