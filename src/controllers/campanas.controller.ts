@@ -13,7 +13,9 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa,
   crearAutorizacionEliminacionCampana,
-  ejecutarEliminacionCarasCampana
+  ejecutarEliminacionCarasCampana,
+  TIPO_FILTRO_ELIMINACION,
+  TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
@@ -2390,6 +2392,25 @@ export class CampanasController {
         );
         const map = new Map(masivoRows.map(r => [Number(r.id), r.grupo_masivo_id]));
         carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
+      }
+
+      // pendiente_eliminacion: caras con una tarea de eliminación abierta (Filtro GC
+      // o DG). Mismo criterio de dedup que crearAutorizacionEliminacionCampana. Sirve
+      // para pintar el badge "Pend. DG (elim.)" en la cara del modal de campaña.
+      if (carasEnriched.length > 0) {
+        const tareasElim = await prisma.tareas.findMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { in: [TIPO_FILTRO_ELIMINACION, TIPO_AUTORIZACION_ELIMINACION] },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          select: { ids_reservas: true },
+        });
+        const pendSet = new Set<number>();
+        for (const t of tareasElim) {
+          (t.ids_reservas || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)).forEach(n => pendSet.add(n));
+        }
+        carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
       }
 
       const carasSerializable = serializeBigInt(carasEnriched);
