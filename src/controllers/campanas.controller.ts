@@ -28,6 +28,13 @@ import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
+import {
+  verificarAutorizacionEjecucion,
+  cerrarPorEjecucion,
+  registrarBypass,
+  esRolTI,
+  puedeBypassearDesposteo,
+} from '../services/desposteo.service';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -8510,19 +8517,53 @@ export class CampanasController {
   async unmarkPostedAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
       const campanaId = parseInt(req.params.id);
-      const { aps } = req.body as { aps?: number[] };
+      const { aps, bypass_motivo } = req.body as { aps?: number[]; bypass_motivo?: string };
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+      const rol = req.user?.rol;
+
+      // Guard Filtro Autorizacion Desposteo:
+      //   - TI solo puede cancelar POST si hay solicitud de desposteo aprobada
+      //     para cada (campaña, aps). Se cierra auto al ejecutar.
+      //   - DEV/Administrador pueden hacer bypass con motivo (queda registrado
+      //     en desposteo_solicitudes con sin_autorizacion=true).
+      //   - Cualquier otro rol se bloquea (aunque canCancelPostSAP=true en
+      //     front, el back es la verdad).
+      const esTI = esRolTI(rol);
+      const puedeBypass = puedeBypassearDesposteo(rol);
+      if (!esTI && !puedeBypass) {
+        res.status(403).json({ success: false, error: 'Tu rol no puede cancelar posteos a SAP' });
+        return;
+      }
+      if (!aps || aps.length === 0) {
+        res.status(400).json({ success: false, error: 'Debes especificar los APS a cancelar' });
+        return;
+      }
+
+      // Validar autorizacion por APS. Recopilar solicitudes aprobadas y APS
+      // sin autorizacion — TI se bloquea si alguno no tiene; bypass sigue.
+      const solicitudesAprobadas = new Map<number, number>();
+      const noAutorizados: Array<{ aps: number; motivo: string }> = [];
+      for (const apsX of aps) {
+        const r = await verificarAutorizacionEjecucion(campanaId, apsX);
+        if (r.ok) solicitudesAprobadas.set(apsX, r.solicitudId);
+        else noAutorizados.push({ aps: apsX, motivo: r.motivo });
+      }
+      if (noAutorizados.length > 0 && !puedeBypass) {
+        res.status(403).json({
+          success: false,
+          error: 'Falta solicitud de desposteo aprobada para uno o mas APS',
+          detalles: noAutorizados,
+        });
+        return;
+      }
 
       const current = await prisma.$queryRawUnsafe<any[]>(
         'SELECT posted_aps FROM campania WHERE id = ?', campanaId
       );
       const existing: number[] = JSON.parse(current[0]?.posted_aps || '[]');
 
-      // Si se pasan APS específicos, solo quitar esos; si no, limpiar todos
-      const remaining = aps && aps.length > 0
-        ? existing.filter(id => !aps.includes(id))
-        : [];
+      const remaining = existing.filter(id => !aps.includes(id));
       const apsQuitados = existing.filter(a => !remaining.includes(a));
 
       await prisma.$queryRawUnsafe(
@@ -8580,6 +8621,24 @@ export class CampanasController {
               o.cliente_nombre ?? null, o.sap_database ?? null, o.salesperson_code ?? null,
               o.solicitud_caras_ids ?? null, userId ?? null, userName);
           } catch (err) { console.error('Error guardando cancelación en post_log:', err); }
+        }
+      }
+
+      // Cerrar solicitudes de desposteo asociadas / registrar bypass. Cada
+      // APS efectivamente quitado dispara una de las dos acciones. Se hace
+      // best-effort — si falla no revierte el unmark (ya se ejecuto en SAP
+      // conceptualmente y forzar rollback dejaria estado peor).
+      const actor = { id: userId ?? 0, nombre: userName };
+      for (const apsX of apsQuitados) {
+        const solicitudId = solicitudesAprobadas.get(apsX);
+        try {
+          if (solicitudId) {
+            await cerrarPorEjecucion(solicitudId, actor, bypass_motivo || null);
+          } else if (puedeBypass) {
+            await registrarBypass(campanaId, apsX, actor, bypass_motivo || 'Bypass sin motivo');
+          }
+        } catch (err) {
+          console.error(`[unmarkPostedAPS] cierre solicitud APS ${apsX} fallo:`, err);
         }
       }
 
