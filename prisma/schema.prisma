@@ -155,10 +155,10 @@ model campania_post_log {
   solicitud_caras_ids String? @db.Text
 
   // --- Resultado del envío a SAP ---
-  success   Boolean @default(false)
-  doc_entry Int?
-  doc_num   Int?
-  error_msg String? @db.Text
+  success      Boolean @default(false)
+  doc_entry    Int?
+  doc_num      Int?
+  error_msg    String? @db.Text
   // Payload completo del Delivery Note enviado (auditoría).
   payload_json String? @db.LongText
 
@@ -175,19 +175,19 @@ model campania_post_log {
 // en artes_tradicionales/imagenes_digitales/reservas.archivo, así un arte
 // desasignado de inventarios sigue visible en la "Biblioteca de artes".
 model biblioteca_artes {
-  id                  Int       @id @default(autoincrement())
+  id                  Int      @id @default(autoincrement())
   campania_id         Int
-  archivo             String    @db.VarChar(1000)
-  tipo                String    @default("tradicional") @db.VarChar(20)
-  nombre_arte         String?   @db.VarChar(255)
-  nota                String?   @db.Text
-  estatus_operaciones String?   @db.VarChar(500)
+  archivo             String   @db.VarChar(1000)
+  tipo                String   @default("tradicional") @db.VarChar(20)
+  nombre_arte         String?  @db.VarChar(255)
+  nota                String?  @db.Text
+  estatus_operaciones String?  @db.VarChar(500)
   // Modo Genérico del modal Asignar Arte: valor único compartido por todos
   // los artes cargados en el mismo batch. Null en modo Versionado.
-  nombre_generico     String?   @db.VarChar(255)
+  nombre_generico     String?  @db.VarChar(255)
   created_by_id       Int?
-  created_at          DateTime  @default(now()) @db.DateTime(0)
-  updated_at          DateTime  @default(now()) @db.DateTime(0)
+  created_at          DateTime @default(now()) @db.DateTime(0)
+  updated_at          DateTime @default(now()) @db.DateTime(0)
 
   @@unique([campania_id, archivo], map: "uniq_biblioteca_campania_archivo")
   @@index([campania_id], map: "idx_biblioteca_campania")
@@ -268,19 +268,19 @@ model espacio_inventario {
 }
 
 model historial {
-  id                       BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
-  tipo                     String    @db.VarChar(255)
-  ref_id                   Int
-  accion                   String    @db.VarChar(255)
-  fecha_hora               DateTime  @default(now()) @db.Timestamp(0)
+  id                      BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  tipo                    String    @db.VarChar(255)
+  ref_id                  Int
+  accion                  String    @db.VarChar(255)
+  fecha_hora              DateTime  @default(now()) @db.Timestamp(0)
   // MediumText (16MB) en vez de Text (64KB) — fotografías de caras de
   // campañas grandes (300+ circuitos) excedían el límite y la tx revertía.
-  detalles                 String?   @db.MediumText
-  usuario_id               Int?
-  fecha_entrega            DateTime? @db.DateTime(0)
-  recordar_dias_antes      Int?
-  recordatorio_enviado_at  DateTime? @db.DateTime(0)
-  tarea_recordatorio_id    Int?
+  detalles                String?   @db.MediumText
+  usuario_id              Int?
+  fecha_entrega           DateTime? @db.DateTime(0)
+  recordar_dias_antes     Int?
+  recordatorio_enviado_at DateTime? @db.DateTime(0)
+  tarea_recordatorio_id   Int?
 
   @@index([fecha_entrega, recordatorio_enviado_at], map: "idx_recordatorios_pendientes")
   @@index([usuario_id], map: "idx_historial_usuario")
@@ -343,23 +343,23 @@ model artes_tradicionales {
 // Versionado: version = 1..N por (propuesta_id, sc_id). Nueva versión al
 // rechazar la anterior. Ver services/pruebasColor.service.ts.
 model pruebas_color {
-  id                 Int       @id @default(autoincrement())
-  propuesta_id       Int
-  sc_id              Int                                          // solicitudCaras.id (circuito)
-  campania_id        Int?
-  reserva_id         Int?
-  archivo            String    @db.VarChar(500)
-  archivo_data       String?   @db.LongText                       // base64 opcional (Spaces si aplica)
-  nombre_arte        String?   @db.VarChar(255)
-  notas              String?   @db.Text
+  id                Int       @id @default(autoincrement())
+  propuesta_id      Int
+  sc_id             Int // solicitudCaras.id (circuito)
+  campania_id       Int?
+  reserva_id        Int?
+  archivo           String    @db.VarChar(500)
+  archivo_data      String?   @db.LongText // base64 opcional (Spaces si aplica)
+  nombre_arte       String?   @db.VarChar(255)
+  notas             String?   @db.Text
   // estatus: 'solicitada' | 'enviada_proveedor' | 'aprobada' | 'rechazada'
-  estatus            String    @default("solicitada") @db.VarChar(50)
-  version            Int       @default(1)
-  created_by         Int
-  created_by_nombre  String    @db.VarChar(255)
-  created_at         DateTime  @default(now()) @db.DateTime(0)
-  updated_at         DateTime  @default(now()) @updatedAt @db.DateTime(0)
-  deleted_at         DateTime? @db.DateTime(0)
+  estatus           String    @default("solicitada") @db.VarChar(50)
+  version           Int       @default(1)
+  created_by        Int
+  created_by_nombre String    @db.VarChar(255)
+  created_at        DateTime  @default(now()) @db.DateTime(0)
+  updated_at        DateTime  @default(now()) @updatedAt @db.DateTime(0)
+  deleted_at        DateTime? @db.DateTime(0)
 
   @@index([propuesta_id])
   @@index([campania_id])
@@ -368,24 +368,97 @@ model pruebas_color {
   @@index([estatus])
 }
 
+// Filtro Autorizacion "Quitar Posteo" — comercial pide desposteo de un APS
+// ya posteado a SAP, gerente comercial da check, facturacion aprueba/rechaza
+// y TI ejecuta la cancelacion via unmarkPostedAPS. Cada intento crea una
+// fila nueva (auditoria por intento); el hilo de notas de todos los intentos
+// para el mismo (campania_id, aps) se agrupa en desposteo_notas y se muestra
+// como conversacion persistente.
+model desposteo_solicitudes {
+  id                    Int       @id @default(autoincrement())
+  campania_id           Int
+  aps                   Int
+  post_log_id           Int? // campania_post_log.id del posteo original
+  snapshot_aps          String?   @db.LongText // JSON congelado al solicitar (monto, circuitos, razon social)
+  // estatus: 'solicitado' | 'filtro_aprobado' | 'aprobado' | 'rechazado' | 'ejecutado'
+  estatus               String    @default("solicitado") @db.VarChar(30)
+  solicitado_por_id     Int
+  solicitado_por_nombre String    @db.VarChar(255)
+  filtro_gc_id          Int?
+  filtro_gc_nombre      String?   @db.VarChar(255)
+  filtro_gc_at          DateTime? @db.DateTime(0)
+  facturacion_id        Int?
+  facturacion_nombre    String?   @db.VarChar(255)
+  facturacion_at        DateTime? @db.DateTime(0)
+  ti_ejecutor_id        Int?
+  ti_ejecutor_nombre    String?   @db.VarChar(255)
+  ti_ejecutor_at        DateTime? @db.DateTime(0)
+  // Bandera para bypass DEV/Administrador: unmarkPostedAPS ejecutado sin
+  // solicitud aprobada (emergencia). Se registra en historial como sin_autorizacion.
+  sin_autorizacion      Boolean   @default(false)
+  created_at            DateTime  @default(now()) @db.DateTime(0)
+  updated_at            DateTime  @default(now()) @updatedAt @db.DateTime(0)
+  deleted_at            DateTime? @db.DateTime(0)
+
+  @@index([campania_id, aps])
+  @@index([estatus])
+  @@index([solicitado_por_id])
+  @@index([filtro_gc_id])
+  @@index([facturacion_id])
+}
+
+// Historial de notas por solicitud de desposteo. El modal en UI agrupa por
+// (campania_id, aps) sumando notas de TODAS las solicitudes previas, para
+// que el hilo persista entre intentos rechazados y aprobados.
+model desposteo_notas {
+  id             Int      @id @default(autoincrement())
+  desposteo_id   Int
+  usuario_id     Int
+  usuario_nombre String   @db.VarChar(255)
+  // tipo: 'inicio' | 'ajuste' | 'aprobacion_gerente' | 'rechazo_gerente'
+  //     | 'aprobacion_facturacion' | 'rechazo_facturacion' | 'ejecucion'
+  tipo           String   @db.VarChar(40)
+  nota           String   @db.Text
+  created_at     DateTime @default(now()) @db.DateTime(0)
+
+  @@index([desposteo_id])
+}
+
+// Reglas de escalado por monto para el flujo de desposteo. Fase 1 vacia:
+// Jos define los rangos despues. Semantica: si el monto del APS a desposteo
+// cae en [monto_min, monto_max), aplica nivel_escalado. NULL en monto_max
+// significa "infinito hacia arriba".
+model desposteo_tabuladores {
+  id             Int      @id @default(autoincrement())
+  monto_min      Decimal  @db.Decimal(12, 2)
+  monto_max      Decimal? @db.Decimal(12, 2)
+  // nivel_escalado: 'sin_escalado' | 'gerente_comercial' | 'director_general'
+  nivel_escalado String   @db.VarChar(40)
+  activo         Boolean  @default(true)
+  created_at     DateTime @default(now()) @db.DateTime(0)
+  updated_at     DateTime @default(now()) @updatedAt @db.DateTime(0)
+
+  @@index([activo])
+}
+
 model propuesta {
-  id                       Int       @id @default(autoincrement())
-  cliente_id               Int
-  fecha                    DateTime  @default(dbgenerated("(curdate())")) @db.Date
-  status                   String    @default("Abierto") @db.VarChar(255)
-  descripcion              String?   @db.Text
-  precio                   Decimal?  @db.Decimal(10, 2)
-  notas                    String?   @db.Text
-  deleted_at               DateTime? @db.DateTime(0)
-  solicitud_id             Int
-  precio_simulado          Int?
-  asignado                 String    @db.Text
-  id_asignado              String?   @db.Text
-  inversion                Decimal  @default(0) @db.Decimal(12, 2)
-  comentario_cambio_status String    @db.Text
-  articulo                 String    @db.VarChar(255)
-  updated_at               DateTime? @default(now()) @db.Timestamp(0)
-  archivo                  String?   @db.VarChar(255)
+  id                        Int       @id @default(autoincrement())
+  cliente_id                Int
+  fecha                     DateTime  @default(dbgenerated("(curdate())")) @db.Date
+  status                    String    @default("Abierto") @db.VarChar(255)
+  descripcion               String?   @db.Text
+  precio                    Decimal?  @db.Decimal(10, 2)
+  notas                     String?   @db.Text
+  deleted_at                DateTime? @db.DateTime(0)
+  solicitud_id              Int
+  precio_simulado           Int?
+  asignado                  String    @db.Text
+  id_asignado               String?   @db.Text
+  inversion                 Decimal   @default(0) @db.Decimal(12, 2)
+  comentario_cambio_status  String    @db.Text
+  articulo                  String    @db.VarChar(255)
+  updated_at                DateTime? @default(now()) @db.Timestamp(0)
+  archivo                   String?   @db.VarChar(255)
   // Ancla del contador de liberación automática de reservas (Criterio 30 días).
   // NULL = usar `fecha` (creación) → primera liberación. Se setea a NOW() SOLO
   // cuando el status pasa de 'Liberada' a otro (retoman la propuesta): reinicia
@@ -574,28 +647,28 @@ model usuario_preferencias_notif {
 }
 
 model usuario {
-  id                 Int              @id @default(autoincrement())
-  nombre             String           @db.VarChar(255)
-  correo_electronico String           @db.VarChar(255)
-  user_password      String?          @db.VarChar(255)
-  area               String           @db.VarChar(255)
-  puesto             String           @db.VarChar(255)
-  updated_at         DateTime?        @db.Timestamp(0)
-  created_at         DateTime?        @default(now()) @db.Timestamp(0)
-  deleted_at         DateTime?        @db.Timestamp(0)
-  user_role          String           @default("Normal") @db.VarChar(255)
-  foto_perfil        String?          @db.VarChar(500)
-  reset_token        String?          @db.VarChar(6)
-  reset_token_expiry DateTime?        @db.DateTime(0)
-  sap_asesor_id      Int?
-  light_theme_notified Boolean @default(false)
-  version_notified     String?  @db.VarChar(20)
-  equipos            usuario_equipo[]
+  id                   Int              @id @default(autoincrement())
+  nombre               String           @db.VarChar(255)
+  correo_electronico   String           @db.VarChar(255)
+  user_password        String?          @db.VarChar(255)
+  area                 String           @db.VarChar(255)
+  puesto               String           @db.VarChar(255)
+  updated_at           DateTime?        @db.Timestamp(0)
+  created_at           DateTime?        @default(now()) @db.Timestamp(0)
+  deleted_at           DateTime?        @db.Timestamp(0)
+  user_role            String           @default("Normal") @db.VarChar(255)
+  foto_perfil          String?          @db.VarChar(500)
+  reset_token          String?          @db.VarChar(6)
+  reset_token_expiry   DateTime?        @db.DateTime(0)
+  sap_asesor_id        Int?
+  light_theme_notified Boolean          @default(false)
+  version_notified     String?          @db.VarChar(20)
+  equipos              usuario_equipo[]
 }
 
 model version {
-  id     Int    @id @default(autoincrement())
-  numero String @db.VarChar(20)
+  id     Int      @id @default(autoincrement())
+  numero String   @db.VarChar(20)
   fecha  DateTime @db.Date
 }
 
@@ -732,27 +805,27 @@ model vista_conteo_por_muebles {
 }
 
 model tickets {
-  id                  Int               @id @default(autoincrement())
-  titulo              String            @db.VarChar(255)
-  descripcion         String            @db.Text
-  imagen              String?           @db.LongText
-  status              String            @default("Nuevo") @db.VarChar(255)
-  prioridad           String            @default("Normal") @db.VarChar(255)
+  id                  Int                  @id @default(autoincrement())
+  titulo              String               @db.VarChar(255)
+  descripcion         String               @db.Text
+  imagen              String?              @db.LongText
+  status              String               @default("Nuevo") @db.VarChar(255)
+  prioridad           String               @default("Normal") @db.VarChar(255)
   // Categoría (opcional) — clasifica el ticket para enrutamiento TI/QEB.
   // Categorías TI (Desposteo SAP, Posteo SAP, Ajuste de Usuario) → area='TI'.
   // Cualquier otra o null → area='QEB'.
-  categoria           String?           @db.VarChar(255)
+  categoria           String?              @db.VarChar(255)
   // Área derivada de la categoría — controla quién ve/administra el ticket.
-  area                String            @default("QEB") @db.VarChar(50)
+  area                String               @default("QEB") @db.VarChar(50)
   usuario_id          Int
-  usuario_nombre      String            @db.VarChar(255)
-  usuario_email       String            @db.VarChar(255)
-  respuesta           String?           @db.Text
-  respondido_por      String?           @db.VarChar(255)
-  respondido_at       DateTime?         @db.DateTime(0)
-  created_at          DateTime          @default(now()) @db.DateTime(0)
-  updated_at          DateTime          @updatedAt @db.DateTime(0)
-  status_cambiado_por String?           @db.VarChar(255)
+  usuario_nombre      String               @db.VarChar(255)
+  usuario_email       String               @db.VarChar(255)
+  respuesta           String?              @db.Text
+  respondido_por      String?              @db.VarChar(255)
+  respondido_at       DateTime?            @db.DateTime(0)
+  created_at          DateTime             @default(now()) @db.DateTime(0)
+  updated_at          DateTime             @updatedAt @db.DateTime(0)
+  status_cambiado_por String?              @db.VarChar(255)
   mensajes            ticket_mensajes[]
   vistas              ticket_vistas[]
   chat                ticket_chat[]
@@ -807,11 +880,11 @@ model ticket_chat {
 }
 
 model ticket_chat_vistas {
-  id                      Int      @id @default(autoincrement())
+  id                      Int     @id @default(autoincrement())
   ticket_id               Int
   usuario_id              Int
   ultimo_mensaje_leido_id Int?
-  ticket                  tickets  @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  ticket                  tickets @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
 
   @@unique([ticket_id, usuario_id])
   @@map("ticket_chat_vistas")
@@ -851,20 +924,20 @@ model analisis_ocupacion {
 /// conflicto NUEVO de uno que ya se avisó ayer, y el cron notificaría lo mismo
 /// en cada corrida — inaceptable con el backlog de notificaciones actual.
 model conflictos_ocupacion {
-  id               Int       @id @default(autoincrement())
-  inventario_id    Int
-  anio             Int
-  numero_catorcena Int
+  id                 Int       @id @default(autoincrement())
+  inventario_id      Int
+  anio               Int
+  numero_catorcena   Int
   /// 'choque' (campañas distintas) | 'duplicado' (una sola campaña)
-  tipo             String    @db.VarChar(20)
-  reservas         Int
-  origenes         Int
-  detectado_at     DateTime  @default(now()) @db.DateTime(0)
+  tipo               String    @db.VarChar(20)
+  reservas           Int
+  origenes           Int
+  detectado_at       DateTime  @default(now()) @db.DateTime(0)
   /// Última corrida del monitor que lo vio vivo.
-  visto_at         DateTime  @default(now()) @db.DateTime(0)
-  notificado_at    DateTime? @db.DateTime(0)
+  visto_at           DateTime  @default(now()) @db.DateTime(0)
+  notificado_at      DateTime? @db.DateTime(0)
   /// Se llena cuando una corrida ya no lo encuentra: se resolvió.
-  resuelto_at      DateTime? @db.DateTime(0)
+  resuelto_at        DateTime? @db.DateTime(0)
   /// Registro de limpieza de duplicados (automática o con el botón de la
   /// auditoría). Sirve como bitácora consultable de qué se limpió y cuándo.
   limpiado_at        DateTime? @db.DateTime(0)
@@ -880,18 +953,18 @@ model conflictos_ocupacion {
 }
 
 model auditoria_reorganizacion_ocupacion {
-  id                    Int      @id @default(autoincrement())
-  usuario_id            Int
-  usuario_nombre        String   @db.VarChar(255)
-  campana_id            Int
-  solicitud_caras_id    Int
-  catorcena_numero      Int
-  catorcena_anio        Int
-  reservas_creadas      Int      @default(0)
-  reservas_sustituidas  Int      @default(0)
-  reservas_liberadas    Int      @default(0)
-  payload_json          String   @db.LongText
-  fecha_hora            DateTime @default(now()) @db.DateTime(0)
+  id                   Int      @id @default(autoincrement())
+  usuario_id           Int
+  usuario_nombre       String   @db.VarChar(255)
+  campana_id           Int
+  solicitud_caras_id   Int
+  catorcena_numero     Int
+  catorcena_anio       Int
+  reservas_creadas     Int      @default(0)
+  reservas_sustituidas Int      @default(0)
+  reservas_liberadas   Int      @default(0)
+  payload_json         String   @db.LongText
+  fecha_hora           DateTime @default(now()) @db.DateTime(0)
 
   @@index([campana_id], map: "idx_aro_campana")
   @@index([solicitud_caras_id], map: "idx_aro_solicitud_caras")
