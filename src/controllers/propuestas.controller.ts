@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -3341,13 +3341,18 @@ export class PropuestasController {
         }
       }
 
-      // Create calendario entry
-      const calendario = await prisma.calendario.create({
-        data: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-        },
+      // Create calendario entry. Anti-calendario-inflado (bug 81543): CATORCENA se
+      // ancla a la catorcena real de la fecha; MENSUAL respeta el rango.
+      const cotizPeriodoCr = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+        select: { tipo_periodo: true },
       });
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodoCr?.tipo_periodo === 'mensual',
+      );
 
       // Espacios ya bloqueados en el período (excluyendo los de esta propuesta).
       // Helper centralizado: ver inventario-bloqueo.service.ts. Usa rango de
@@ -3967,22 +3972,19 @@ export class PropuestasController {
         }
       }
 
-      let calendario = await prisma.calendario.findFirst({
-        where: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-          deleted_at: null
-        }
+      // Anti-calendario-inflado (bug 81543): para CATORCENA ancla el calendario a la
+      // catorcena real de la fecha, para que un `fin` inflado no cree un calendario de
+      // varias catorcenas que "sangre" el hold. MENSUAL respeta el rango.
+      const cotizPeriodo = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: Number(propuestaId) },
+        select: { tipo_periodo: true },
       });
-
-      if (!calendario) {
-        calendario = await prisma.calendario.create({
-          data: {
-            fecha_inicio: new Date(fechaInicio),
-            fecha_fin: new Date(fechaFin),
-          },
-        });
-      }
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodo?.tipo_periodo === 'mensual',
+      );
 
       const espacio = await prisma.espacio_inventario.findFirst({
         where: { inventario_id: parseInt(inventarioId) }

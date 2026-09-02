@@ -502,3 +502,51 @@ export async function validarFechaEnPeriodoCara(
   }
   return null;
 }
+
+/**
+ * Resuelve (find-or-create) el `calendario` correcto para una reserva, evitando
+ * calendarios "inflados" que abarcan VARIAS catorcenas — la causa raíz de que un
+ * hold de una catorcena "sangre" a las siguientes y salga "ocupado" al reservar
+ * aunque el análisis lo vea libre (bug 81543 HISTIACIL, sep-2026).
+ *
+ * Antes cada sitio hacía `calendario.create({ fecha_inicio, fecha_fin })` con las
+ * fechas que le mandaban; si a una cara de CATORCENA le llegaba un `fin` inflado
+ * (fin de campaña en vez de fin de su catorcena), nacía un calendario de 4
+ * catorcenas y el check por `calendario_id`-overlap lo veía tomado en todas.
+ *
+ * - CATORCENA: se ancla a la catorcena que contiene `fechaInicio` (usa sus
+ *   fecha_inicio/fecha_fin reales), sin importar el `fin` inflado que venga.
+ * - MENSUAL: el periodo abarca varias catorcenas POR DISEÑO (regla Gran Formato),
+ *   así que se respeta el rango [fechaInicio, fechaFin] tal cual.
+ *
+ * Si no hay catorcena que contenga la fecha (dato raro), cae al rango original —
+ * nunca peor que antes.
+ */
+export async function resolverCalendarioReserva(
+  client: Prisma.TransactionClient | PrismaClient,
+  fechaInicio: Date | string,
+  fechaFin: Date | string,
+  esMensual: boolean,
+): Promise<{ id: number }> {
+  let ini = new Date(fechaInicio);
+  let fin = new Date(fechaFin);
+
+  if (!esMensual) {
+    const cat = await client.catorcenas.findFirst({
+      where: { fecha_inicio: { lte: ini }, fecha_fin: { gte: ini } },
+      select: { fecha_inicio: true, fecha_fin: true },
+      orderBy: { fecha_inicio: 'desc' },
+    });
+    if (cat?.fecha_inicio && cat?.fecha_fin) {
+      ini = new Date(cat.fecha_inicio);
+      fin = new Date(cat.fecha_fin);
+    }
+  }
+
+  const existing = await client.calendario.findFirst({
+    where: { fecha_inicio: ini, fecha_fin: fin, deleted_at: null },
+    orderBy: { id: 'asc' },
+  });
+  if (existing) return { id: existing.id };
+  return client.calendario.create({ data: { fecha_inicio: ini, fecha_fin: fin } });
+}

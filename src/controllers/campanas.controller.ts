@@ -17,7 +17,7 @@ import {
   TIPO_FILTRO_ELIMINACION,
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -10823,13 +10823,20 @@ export class CampanasController {
         }
       }
 
-      // Crear calendario entry
-      const calendario = await prisma.calendario.create({
-        data: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-        },
-      });
+      // Crear calendario entry. Anti-calendario-inflado (bug 81543): para CATORCENA
+      // se ancla a la catorcena real de la fecha; MENSUAL respeta el rango.
+      const cotizPeriodoCal = campana.cotizacion_id
+        ? await prisma.cotizacion.findUnique({
+            where: { id: campana.cotizacion_id },
+            select: { tipo_periodo: true },
+          })
+        : null;
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodoCal?.tipo_periodo === 'mensual',
+      );
 
       // Espacios ya bloqueados en el período. Helper centralizado: filtra por
       // el rango de fechas contra solicitudCaras (no por calendario_id, que
