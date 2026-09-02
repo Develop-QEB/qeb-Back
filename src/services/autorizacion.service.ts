@@ -2346,17 +2346,6 @@ export async function depurarTareasAutorizacionResueltas(): Promise<number> {
 export const TIPO_FILTRO_ELIMINACION = 'Filtro Autorización Eliminación';
 export const TIPO_AUTORIZACION_ELIMINACION = 'Autorización Eliminación';
 
-const usuariosDgQuery = {
-  deleted_at: null,
-  OR: [
-    { puesto: 'DG' },
-    { puesto: 'Director General' },
-    { puesto: 'Dirección General' },
-    { puesto: 'Direccion General' },
-    { user_role: 'Director General' },
-  ],
-};
-
 /** Ejecuta el borrado REAL de caras de campaña (mismo efecto que el deleteCara
  *  original): soft-delete de reservas + hard-delete de caras + historial. Re-chequea
  *  el candado de APS por si se asignó entre la solicitud y la aprobación. */
@@ -2458,16 +2447,14 @@ export async function crearAutorizacionEliminacionCampana(params: {
     + (motivoTxt ? `\n\nMotivo de eliminación: ${motivoTxt}` : '')
     + (resumen ? `\n${resumen}` : '');
 
-  let responsables: { id: number; nombre: string }[];
-  let tipoTarea: string;
-  if (gc) {
-    responsables = [{ id: gc.id, nombre: gc.nombre }];
-    tipoTarea = TIPO_FILTRO_ELIMINACION;
-  } else {
-    responsables = await prisma.usuario.findMany({ where: usuariosDgQuery, select: { id: true, nombre: true } });
-    if (responsables.length === 0) throw new Error('No hay usuarios Director General configurados');
-    tipoTarea = TIPO_AUTORIZACION_ELIMINACION;
+  // [Solo Gerencia] La eliminación NUNCA va a DG: debe llegar al GERENTE de
+  // autorización del asesor (miembro del equipo con proposito 'filtro_autorizacion').
+  // Si el asesor no tiene gerente configurado, se BLOQUEA (no se escala a Dirección).
+  if (!gc) {
+    throw new Error('No se encontró Gerente de autorización para el asesor de esta campaña. Revisa su equipo de filtro de autorización.');
   }
+  const responsables: { id: number; nombre: string }[] = [{ id: gc.id, nombre: gc.nombre }];
+  const tipoTarea: string = TIPO_FILTRO_ELIMINACION;
 
   const tarea = await prisma.tareas.create({
     data: {
