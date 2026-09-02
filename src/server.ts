@@ -8,6 +8,7 @@ import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
 import { finalizarCampanasPorIniciarVencidas } from './services/campania-status.service';
 import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
+import { ejecutarMonitorConflictos } from './services/conflictos-ocupacion.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -145,6 +146,36 @@ async function main() {
       liberarReservasPropuestasVencidas().catch((err: unknown) => {
         console.error('[LiberacionReservas] Error en ejecucion inicial:', err);
       });
+
+      // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
+      // Corre CADA HORA: la deteccion es una sola query agregada (~2s sobre el
+      // inventario completo), asi que el costo es despreciable, y el peor caso
+      // de enterarse de un choque baja de 24h a 1h. Correr mas seguido NO
+      // genera mas notificaciones: el estado en `conflictos_ocupacion` hace que
+      // solo se avise lo NUEVO, en un solo digest por persona.
+      // `guardado` evita corridas encimadas si una se alarga o la BD se pone lenta.
+      {
+        let monitorEnCurso = false;
+        const MONITOR_INTERVALO_MS = 60 * 60 * 1000; // 1 hora
+        setInterval(() => {
+          if (monitorEnCurso) {
+            console.warn('[MonitorConflictos] corrida anterior sigue activa; se salta esta.');
+            return;
+          }
+          monitorEnCurso = true;
+          ejecutarMonitorConflictos()
+            .then(r => console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`))
+            .catch((err: unknown) => console.error('[MonitorConflictos] Error en corrida horaria:', err))
+            .finally(() => { monitorEnCurso = false; });
+        }, MONITOR_INTERVALO_MS);
+      }
+      // Al arrancar corre SIN notificar: siembra el estado con lo que ya existe
+      // para que el primer aviso real sea solo de lo que aparezca despues.
+      ejecutarMonitorConflictos({ notificar: false })
+        .then(r => console.log(`[MonitorConflictos] siembra inicial: ${r.detectados} conflictos registrados sin notificar`))
+        .catch((err: unknown) => {
+          console.error('[MonitorConflictos] Error en ejecucion inicial:', err);
+        });
     }
   } catch (error) {
     console.error('[DB] Could not connect to database after all retries:', error);

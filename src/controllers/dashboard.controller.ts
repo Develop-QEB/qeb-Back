@@ -30,6 +30,7 @@ export type InventoryDetailParams = {
   formatos: string[];
   nses: string[];
   tipos: string[];
+  micromacro: string; // '' | 'excluir' | 'solo' (circuito Mi Macro Periférico)
   catorcena_id: string | undefined;
   fecha_inicio: string | undefined;
   fecha_fin: string | undefined;
@@ -90,6 +91,7 @@ function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
     formatos: toMultiValue(req.query.formato),
     nses: toMultiValue(req.query.nse),
     tipos: toMultiValue(req.query.tipo),
+    micromacro: (req.query.micromacro as string) || '',
     catorcena_id: catorcena_id as string | undefined,
     fecha_inicio: fecha_inicio as string | undefined,
     fecha_fin: fecha_fin as string | undefined,
@@ -125,18 +127,25 @@ async function resolveCalendarioClauseSql(params: InventoryDetailParams): Promis
 
   if (!fechaInicio || !fechaFin) return '';
 
+  // Solo lo CONTENIDO en el periodo filtrado: calendarios/catorcenas cuyo
+  // inicio y fin caen completos dentro del rango. Con una catorcena
+  // seleccionada equivale a coincidencia exacta (nada mas cabe completo);
+  // una ocupacion que solo solapa (p.ej. mensual sobre una catorcena) NO
+  // se muestra.
   const [calendarios, catorcenasMatch] = await Promise.all([
     prisma.calendario.findMany({
-      where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      where: { deleted_at: null, fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
       select: { id: true },
     }),
     prisma.catorcenas.findMany({
-      where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+      where: { fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
       select: { id: true },
     }),
   ]);
   const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
-  if (allIds.length === 0) return '';
+  // Con periodo activo y sin calendarios que coincidan, NO mostrar ninguna
+  // reserva (antes se devolvia '' y eso dejaba pasar todo el historico).
+  if (allIds.length === 0) return 'AND rsv.calendario_id IN (-1)';
   return `AND rsv.calendario_id IN (${allIds.join(',')})`;
 }
 
@@ -303,10 +312,11 @@ export class DashboardController {
       const formatos = toMultiValue(req.query.formato);
       const nses = toMultiValue(req.query.nse);
       const tipos = toMultiValue(req.query.tipo);
+      const micromacro = (req.query.micromacro as string) || '';
 
       // Cache key based on filters
       const cacheKey = CACHE_KEYS.DASHBOARD_STATS(
-        JSON.stringify({ estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })
+        JSON.stringify({ estados, ciudades, formatos, nses, tipos, micromacro, catorcena_id, fecha_inicio, fecha_fin })
       );
 
       const data = await cache.getOrSet(cacheKey, async () => {
@@ -327,6 +337,9 @@ export class DashboardController {
 
       const tipoClause = multiClause(tipos);
       if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
+
+      if (micromacro === 'excluir') inventarioWhere.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') inventarioWhere.tipo_de_mueble = { contains: 'MI MACRO' };
 
       // Obtener todos los inventarios que cumplen los filtros.
       // Los Inactivos son "fantasmas" — quedan en el catálogo pero NO cuentan
@@ -380,13 +393,15 @@ export class DashboardController {
         inventario_id: { in: espacioIds },
       };
 
-      // Si hay filtro de fecha, buscar reservas en calendarios que coincidan
+      // Si hay filtro de fecha, buscar reservas en calendarios contenidos
+      // completos en el periodo (no por solape). Con una catorcena equivale
+      // a coincidencia exacta.
       if (fechaInicio && fechaFin) {
         const calendarios = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            fecha_inicio: { lte: fechaFin },
-            fecha_fin: { gte: fechaInicio },
+            fecha_inicio: { gte: fechaInicio },
+            fecha_fin: { lte: fechaFin },
           },
           select: { id: true },
         });
@@ -409,7 +424,9 @@ export class DashboardController {
         'Vendido': 5,
         'Vendido bonificado': 4,
         'Con Arte': 3,
+        'Sin Arte': 3,      // firme (vendido con arte quitado) — antes se perdía
         'Reservado': 2,
+        'Bonificado': 2,    // tentativa (bonificación) — antes se contaba como Disponible
         'Bloqueado': 1,
       };
       reservas.forEach((r) => {
@@ -440,9 +457,9 @@ export class DashboardController {
 
       inventariosBase.forEach((inv) => {
         const estatus = getEstatusEfectivo(inv);
-        if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte') {
+        if (estatus === 'Vendido' || estatus === 'Vendido bonificado' || estatus === 'Con Arte' || estatus === 'Sin Arte') {
           vendidos++;
-        } else if (estatus === 'Reservado') {
+        } else if (estatus === 'Reservado' || estatus === 'Bonificado') {
           reservados++;
         } else if (estatus === 'Bloqueado') {
           bloqueados++;
@@ -541,8 +558,9 @@ export class DashboardController {
       const formatos = toMultiValue(req.query.formato);
       const nses = toMultiValue(req.query.nse);
       const tipos = toMultiValue(req.query.tipo);
+      const micromacro = (req.query.micromacro as string) || '';
 
-      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, catorcena_id, fecha_inicio, fecha_fin })}`;
+      const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, micromacro, catorcena_id, fecha_inicio, fecha_fin })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
       // Construir filtro base para inventarios
@@ -562,6 +580,9 @@ export class DashboardController {
 
       const tipoClause = multiClause(tipos);
       if (tipoClause !== undefined) inventarioWhere.tradicional_digital = tipoClause;
+
+      if (micromacro === 'excluir') inventarioWhere.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') inventarioWhere.tipo_de_mueble = { contains: 'MI MACRO' };
 
       const inventariosBase = await prisma.inventarios.findMany({
         where: inventarioWhere,
@@ -609,12 +630,14 @@ export class DashboardController {
         inventario_id: { in: espacioIds },
       };
 
+      // Solo calendarios contenidos completos en el periodo (no solape) —
+      // mismo criterio que getStats.
       if (fechaInicio && fechaFin) {
         const calendarios = await prisma.calendario.findMany({
           where: {
             deleted_at: null,
-            fecha_inicio: { lte: fechaFin },
-            fecha_fin: { gte: fechaInicio },
+            fecha_inicio: { gte: fechaInicio },
+            fecha_fin: { lte: fechaFin },
           },
           select: { id: true },
         });
@@ -635,7 +658,9 @@ export class DashboardController {
         'Vendido': 5,
         'Vendido bonificado': 4,
         'Con Arte': 3,
+        'Sin Arte': 3,
         'Reservado': 2,
+        'Bonificado': 2,
         'Bloqueado': 1,
       };
       reservas.forEach((r) => {
@@ -660,7 +685,7 @@ export class DashboardController {
         if (estatus_filtro === 'Reservado') {
           return est === 'Reservado' || est === 'Bonificado';
         } else if (estatus_filtro === 'Vendido') {
-          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte';
+          return est === 'Vendido' || est === 'Vendido bonificado' || est === 'Con Arte' || est === 'Sin Arte';
         }
         return est === estatus_filtro;
       });
@@ -968,12 +993,32 @@ export class DashboardController {
   //   - Monto: solicitudCaras.costo (misma fuente que la inversión del listado
   //     de campañas), prorrateado por días de solape cuando hay periodo activo.
   // Respeta el filtro de periodo del dashboard (catorcena_id o fecha_inicio/
-  // fecha_fin) por solape de fechas de campaña y de circuito. Los filtros de
-  // inventario (estado/plaza/formato/nse/tipo) no aplican aquí.
+  // fecha_fin) por solape de fechas de campaña y de circuito, y también los
+  // filtros de inventario (estado/plaza/formato/nse/tipo).
+  //
+  // Filtros de inventario: la plaza vive en `inventarios`, dos saltos abajo del
+  // circuito (sc -> reservas -> inventarios), y un circuito puede tener caras en
+  // varias plazas (~26% de los circuitos; hay uno que toca 9). Por eso el MONTO
+  // se prorratea por caras: un circuito de 10 caras con 6 en GDL aporta 6/10 de
+  // su costo al filtrar por GDL. Así la suma de todas las plazas cuadra con el
+  // total sin filtro. El CONTEO en cambio no se parte — el circuito cuenta
+  // entero en cada plaza que toca — así que los conteos por plaza sí suman más
+  // que el total sin filtro; es intencional, no un error de cuadre.
+  //
+  // Un circuito sin reservas vivas no es atribuible a ninguna plaza, así que
+  // queda fuera en cuanto hay algún filtro de inventario activo (sin filtros
+  // sigue contando completo, como antes).
   async getPosteoStats(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { catorcena_id, fecha_inicio, fecha_fin } = req.query;
-      const cacheKey = `dashboard:posteo:${JSON.stringify({ catorcena_id, fecha_inicio, fecha_fin })}`;
+      const estados = toMultiValue(req.query.estado);
+      const ciudades = toMultiValue(req.query.ciudad);
+      const formatos = toMultiValue(req.query.formato);
+      const nses = toMultiValue(req.query.nse);
+      const tipos = toMultiValue(req.query.tipo);
+      // Los filtros van dentro de la cacheKey: sin esto el TTL de 10 min
+      // devolvería el mismo resultado para todas las plazas.
+      const cacheKey = `dashboard:posteo:${JSON.stringify({ catorcena_id, fecha_inicio, fecha_fin, estados, ciudades, formatos, nses, tipos })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
         // Resolver rango de fechas (igual que el resto de endpoints).
@@ -1063,6 +1108,58 @@ export class DashboardController {
           ).catch(() => [] as { id: number; posted_aps: string | null }[]),
         ]);
 
+        // Peso de cada circuito bajo los filtros de inventario: fracción de sus
+        // caras vivas que cae dentro del filtro (6 de 10 caras en GDL -> 0.6).
+        // Sin filtros activos no se consulta nada y todos los circuitos pesan 1.
+        const filtroParts: string[] = [];
+        const filtroVals: string[] = [];
+        const addIn = (col: string, values: string[]) => {
+          if (values.length === 0) return;
+          filtroParts.push(
+            values.length === 1 ? `${col} = ?` : `${col} IN (${values.map(() => '?').join(',')})`,
+          );
+          filtroVals.push(...values);
+        };
+        addIn('i.estado', estados);
+        addIn('i.plaza', ciudades);
+        addIn('i.mueble', formatos);
+        addIn('i.nivel_socioeconomico', nses);
+        addIn('i.tradicional_digital', tipos);
+        const filtrosActivos = filtroParts.length > 0;
+
+        const factorByCircuito = new Map<number, number>();
+        if (filtrosActivos) {
+          type PesoRow = { sc_id: number; caras_total: number; caras_match: number };
+          // COUNT(DISTINCT rsv.id): un mismo circuito puede colgar de varias
+          // campañas por el join de idquote y sin DISTINCT se contaría doble.
+          // El denominador NO excluye inventarios 'Inactivo' — la reserva existió
+          // y el costo del circuito la cubre, aunque el mueble se archive después.
+          const pesoRows = await prisma.$queryRawUnsafe<PesoRow[]>(
+            `
+            SELECT sc.id AS sc_id,
+                   COUNT(DISTINCT rsv.id) AS caras_total,
+                   COUNT(DISTINCT CASE WHEN ${filtroParts.join(' AND ')} THEN rsv.id END) AS caras_match
+            FROM campania c
+            INNER JOIN cotizacion cot ON cot.id = c.cotizacion_id
+            INNER JOIN solicitudCaras sc
+              ON sc.idquote = CAST(cot.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+            INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id
+            INNER JOIN inventarios i ON i.id = rsv.inventario_id
+            WHERE c.status != 'inactiva'
+              AND rsv.deleted_at IS NULL
+              ${periodoClause}
+            GROUP BY sc.id
+            `,
+            ...filtroVals,
+            ...periodoParams,
+          );
+          for (const r of pesoRows) {
+            const total = Number(r.caras_total) || 0;
+            const match = Number(r.caras_match) || 0;
+            if (total > 0 && match > 0) factorByCircuito.set(Number(r.sc_id), match / total);
+          }
+        }
+
         const apsByCircuito = new Map<number, Set<number>>();
         for (const r of apsRows) {
           const k = Number(r.sc_id);
@@ -1093,7 +1190,11 @@ export class DashboardController {
 
         let pendientesCount = 0, pendientesMonto = 0, posteadasCount = 0, posteadasMonto = 0;
         for (const r of circuitos) {
-          const monto = Number(r.monto) || 0;
+          // factor 0 = el circuito no toca el filtro (o no tiene caras vivas
+          // que atribuir): no cuenta ni aporta monto.
+          const factor = filtrosActivos ? (factorByCircuito.get(Number(r.sc_id)) ?? 0) : 1;
+          if (factor === 0) continue;
+          const monto = (Number(r.monto) || 0) * factor;
           const apsSet = apsByCircuito.get(Number(r.sc_id));
           const postedSet = postedApsByCampana.get(Number(r.campania_id));
           const postedByAps = !!apsSet && apsSet.size > 0 && !!postedSet &&
@@ -1172,6 +1273,14 @@ export class DashboardController {
     addIn('i.mueble', params.formatos);
     addIn('i.nivel_socioeconomico', params.nses);
     addIn('i.tradicional_digital', params.tipos);
+    // Circuito Mi Macro Periférico: se distingue por tipo_de_mueble (comparte mueble con la calle).
+    if (params.micromacro === 'excluir') {
+      colFilterParts.push('i.tipo_de_mueble NOT LIKE ?');
+      colFilterVals.push('%MI MACRO%');
+    } else if (params.micromacro === 'solo') {
+      colFilterParts.push('i.tipo_de_mueble LIKE ?');
+      colFilterVals.push('%MI MACRO%');
+    }
     const columnFiltersClause = colFilterParts.length > 0 ? 'AND ' + colFilterParts.join(' AND ') : '';
 
     const estatusTargets = expandEstatusFilter(params.estatusFiltro);
@@ -1180,10 +1289,16 @@ export class DashboardController {
       : '';
     const estatusFilterVals = estatusTargets ?? [];
 
+    // MULTIRESERVAS: en el filtro 'Reservado' el detalle muestra UNA FILA POR
+    // (pieza, cliente) — una pieza reservada por 2 clientes = 2 filas (el KPI de
+    // getStats sigue contando piezas DISTINTAS). En los demás filtros, una fila
+    // por pieza (reserva ganadora vía ROW_NUMBER).
+    const perPairMode = params.estatusFiltro === 'Reservado';
+
     // Subquery derivada compartida por items y scan. Calcula estatus_efectivo
     // y la reserva ganadora (top_*) via ROW_NUMBER partitioned by inventario_id.
     // Tie-break por rsv.id ASC para determinismo.
-    const filteredSubquery = `
+    const perPieceSubquery = `
       SELECT
         i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
         i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
@@ -1208,7 +1323,9 @@ export class DashboardController {
                        WHEN 'Vendido' THEN 5
                        WHEN 'Vendido bonificado' THEN 4
                        WHEN 'Con Arte' THEN 3
+                       WHEN 'Sin Arte' THEN 3
                        WHEN 'Reservado' THEN 2
+                       WHEN 'Bonificado' THEN 2
                        WHEN 'Bloqueado' THEN 1
                        ELSE 0
                      END DESC,
@@ -1217,12 +1334,10 @@ export class DashboardController {
           FROM reservas rsv
           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
           WHERE rsv.deleted_at IS NULL
-            -- Whitelist EXACTA de los 5 estatus mapeados en el CASE de prioridad.
-            -- Reservas fuera de esta lista (ej. Bonificado a secas, o cualquier
-            -- estatus futuro no clasificado) NO participan del ranking — igual
-            -- que en el legacy, donde prioridad[X] || 0 daba 0 y el mayor-que
-            -- estricto nunca las dejaba ganar, colapsando el efectivo a Disponible.
-            AND rsv.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Reservado', 'Bloqueado')
+            -- Whitelist de estatus que participan del ranking de estatus_efectivo.
+            -- Incluye 'Bonificado' y 'Sin Arte' (antes se omitían y una pieza con
+            -- solo esos colapsaba a Disponible por error).
+            AND rsv.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte', 'Reservado', 'Bonificado', 'Bloqueado')
             ${calendarioClause}
         ) ranked
         WHERE rn = 1
@@ -1231,11 +1346,47 @@ export class DashboardController {
         ${columnFiltersClause}
     `;
 
-    // Q_items: 50 filas con todos los campos de display + reserva ganadora
+    // Subquery ALTERNATIVA (perPairMode): una fila por (pieza, cliente) sobre las
+    // reservas tentativas. Representante por par: MIN(solicitudCaras_id) para el
+    // enriquecimiento, MAX(APS), y estatus = Reservado si hay renta, si no Bonificado.
+    const pairSubquery = `
+      SELECT
+        i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
+        i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
+        pc.pair_estatus AS estatus_efectivo,
+        pc.top_solicitudCaras_id, pc.top_cliente_id, pc.top_APS
+      FROM inventarios i
+      INNER JOIN (
+        SELECT ei.inventario_id, rsv.cliente_id AS top_cliente_id,
+               MIN(rsv.solicitudCaras_id) AS top_solicitudCaras_id,
+               MAX(rsv.APS) AS top_APS,
+               CASE WHEN SUM(CASE WHEN rsv.estatus = 'Reservado' THEN 1 ELSE 0 END) > 0
+                    THEN 'Reservado' ELSE 'Bonificado' END AS pair_estatus
+        FROM reservas rsv
+        INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+        WHERE rsv.deleted_at IS NULL
+          AND rsv.estatus IN ('Reservado', 'Bonificado')
+          ${calendarioClause}
+        GROUP BY ei.inventario_id, rsv.cliente_id
+      ) pc ON pc.inventario_id = i.id
+      WHERE i.estatus <> 'Bloqueado'
+        ${columnFiltersClause}
+    `;
+
+    const filteredSubquery = perPairMode ? pairSubquery : perPieceSubquery;
+
+    // En perPairMode el pairSubquery ya restringe a Reservado/Bonificado, así que
+    // el filtro de estatus del outer sobra — y además evita el choque de collation
+    // entre el CASE pair_estatus (COERCIBLE) y los parámetros del IN.
+    const effEstatusFilterClause = perPairMode ? '' : estatusFilterClause;
+    const effEstatusFilterVals = perPairMode ? [] : estatusFilterVals;
+
+    // Q_items: filas de la página con todos los campos de display. En perPairMode
+    // hay varias filas por pieza (una por cliente) → desempate por top_cliente_id.
     const itemsSql = `
       SELECT * FROM (${filteredSubquery}) t
-      WHERE 1=1 ${estatusFilterClause}
-      ORDER BY t.id
+      WHERE 1=1 ${effEstatusFilterClause}
+      ORDER BY t.id, t.top_cliente_id
       LIMIT ? OFFSET ?
     `;
     // Q_scan: id/plaza/lat/lng/estatus del set completo filtrado (5 cols)
@@ -1243,7 +1394,7 @@ export class DashboardController {
     const scanSql = `
       SELECT t.id, t.plaza, t.latitud, t.longitud, t.estatus_efectivo
       FROM (${filteredSubquery}) t
-      WHERE 1=1 ${estatusFilterClause}
+      WHERE 1=1 ${effEstatusFilterClause}
       ORDER BY t.id
     `;
 
@@ -1275,14 +1426,14 @@ export class DashboardController {
       prisma.$queryRawUnsafe<ItemRow[]>(
         itemsSql,
         ...colFilterVals,
-        ...estatusFilterVals,
+        ...effEstatusFilterVals,
         params.limitNum,
         params.skip,
       ),
       prisma.$queryRawUnsafe<ScanRow[]>(
         scanSql,
         ...colFilterVals,
-        ...estatusFilterVals,
+        ...effEstatusFilterVals,
       ),
     ]);
 
@@ -1295,13 +1446,45 @@ export class DashboardController {
     }));
     const { solicitudInfoMap, clienteNombreMap } = await buildEnrichmentContext(enrichmentSources);
 
+    // MULTIRESERVAS: una pieza puede tener varias reservas de varios clientes.
+    // Concatenamos TODOS los clientes distintos por pieza (en el período) para que
+    // la tabla y el CSV muestren "APPLE, AEROMEXICO" y no solo la reserva ganadora.
+    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC).
+    const pieceIds = itemRows.map(r => r.id);
+    const clientesPorPieza = new Map<number, string>();
+    // En perPairMode cada fila ya es (pieza, cliente) → no se concatena.
+    if (!perPairMode && pieceIds.length > 0) {
+      const ph = pieceIds.map(() => '?').join(',');
+      const clienteRows = await prisma.$queryRawUnsafe<{ inv_id: number; clientes: string | null }[]>(
+        `SELECT ei.inventario_id AS inv_id,
+                GROUP_CONCAT(DISTINCT COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente)
+                             ORDER BY COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente) SEPARATOR ', ') AS clientes
+         FROM reservas rsv
+         INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+         LEFT JOIN cliente clById ON clById.id = rsv.cliente_id
+         LEFT JOIN cliente clByCuic ON clByCuic.CUIC = rsv.cliente_id
+         WHERE rsv.deleted_at IS NULL
+           AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
+           AND ei.inventario_id IN (${ph})
+           ${calendarioClause}
+         GROUP BY ei.inventario_id`,
+        ...pieceIds,
+      );
+      for (const cr of clienteRows) {
+        if (cr.clientes) clientesPorPieza.set(Number(cr.inv_id), cr.clientes);
+      }
+    }
+
     // Resolucion per-item: APS y cliente_nombre son atributos de la RESERVA
     // ganadora (vienen crudos en r.top_APS y r.top_cliente_id). El resto
     // (marca, cuic, cliente, propuesta_id, nombre_campania, campana_id) es
     // compartido por solicitudCaras_id y sale del solicitudInfoMap.
     const items: InventoryDetailItem[] = itemRows.map(r => {
       const solInfo = r.top_solicitudCaras_id != null ? solicitudInfoMap.get(r.top_solicitudCaras_id) : undefined;
-      const clienteNombre = (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
+      // En perPairMode la fila ya trae su cliente (top_cliente_id/solInfo); en
+      // per-pieza, se usa el concat de todos los clientes de la pieza.
+      const clientesMulti = perPairMode ? null : (clientesPorPieza.get(r.id) || null);
+      const clienteNombre = clientesMulti || (r.top_cliente_id ? clienteNombreMap.get(r.top_cliente_id) || null : null) || solInfo?.cliente_nombre_fallback || null;
       return {
         id: r.id,
         codigo_unico: r.codigo_unico,
@@ -1317,7 +1500,7 @@ export class DashboardController {
         cliente_nombre: clienteNombre,
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,
-        cliente: solInfo?.cliente || null,
+        cliente: clientesMulti || solInfo?.cliente || null,
         agencia: solInfo?.agencia || null,
         propuesta_id: solInfo?.propuesta_id || null,
         nombre_campania: solInfo?.nombre_campania || null,
@@ -1415,19 +1598,23 @@ export class DashboardController {
     }
 
     let calendarioClause = '';
+    // Solo calendarios contenidos completos en el periodo (no solape) —
+    // mismo criterio que resolveCalendarioClauseSql.
     if (fechaInicio && fechaFin) {
       const [calendarios, catorcenasMatch] = await Promise.all([
         prisma.calendario.findMany({
-          where: { deleted_at: null, fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          where: { deleted_at: null, fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
           select: { id: true },
         }),
         prisma.catorcenas.findMany({
-          where: { fecha_inicio: { lte: fechaFin }, fecha_fin: { gte: fechaInicio } },
+          where: { fecha_inicio: { gte: fechaInicio }, fecha_fin: { lte: fechaFin } },
           select: { id: true },
         }),
       ]);
       const allIds = [...calendarios.map(c => c.id), ...catorcenasMatch.map(c => c.id)];
-      if (allIds.length > 0) calendarioClause = `AND rsv.calendario_id IN (${allIds.join(',')})`;
+      calendarioClause = allIds.length > 0
+        ? `AND rsv.calendario_id IN (${allIds.join(',')})`
+        : 'AND rsv.calendario_id IN (-1)';
     }
 
     type ReservaRaw = { inventario_id: number; estatus: string; cliente_id: number; APS: number | null; solicitudCaras_id: number };

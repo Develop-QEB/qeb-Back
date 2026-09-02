@@ -55,6 +55,11 @@ router.post('/:id/mark-posted-sap', campanasController.markPostedToSAP.bind(camp
 router.post('/:id/mark-posted-aps', campanasController.markPostedAPS.bind(campanasController));
 router.post('/:id/unmark-posted-aps', campanasController.unmarkPostedAPS.bind(campanasController));
 
+// Bitácora de POSTs a SAP: guarda/consulta a QUIÉN se mandó cada APS (snapshot
+// del cliente al momento del envío) — sobrevive a cambios de cliente en la campaña.
+router.post('/:id/post-log', campanasController.registrarPostLog.bind(campanasController));
+router.get('/:id/post-log', campanasController.getPostLog.bind(campanasController));
+
 // APS
 router.post('/:id/assign-aps', campanasController.assignAPS.bind(campanasController));
 router.post('/:id/remove-aps', campanasController.removeAPS.bind(campanasController));

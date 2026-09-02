@@ -11,15 +11,19 @@ import {
   verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
-  conservarAprobacionSiIncrementa
+  conservarAprobacionSiIncrementa,
+  crearAutorizacionEliminacionCampana,
+  ejecutarEliminacionCarasCampana,
+  TIPO_FILTRO_ELIMINACION,
+  TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
@@ -40,6 +44,25 @@ const CAMPANIA_SAFE_SELECT = {
   fecha_aprobacion: true,
   posted_to_sap: true,
 } as const;
+
+// Una entrada de la bitácora de POST a SAP (ver campania_post_log en schema.prisma).
+// El front manda una por cada APS enviado, con el snapshot del destino.
+interface PostLogEntry {
+  aps: number | string;
+  card_code?: string | null;
+  cuic?: number | string | null;
+  razon_social?: string | null;
+  marca?: string | null;
+  cliente_nombre?: string | null;
+  sap_database?: string | null;
+  salesperson_code?: number | string | null;
+  solicitud_caras_ids?: string | number[] | null;
+  success?: boolean;
+  doc_entry?: number | string | null;
+  doc_num?: number | string | null;
+  error_msg?: string | null;
+  payload_json?: string | unknown | null;
+}
 
 // Configurar transporter de nodemailer para envío de correos
 const transporter = nodemailer.createTransport({
@@ -271,6 +294,169 @@ const markReservasComoInstaladas = async (params: {
     `markReservasComoInstaladas[${mode}]: campana=${campanaId}, reservas=${allAffectedReservaIds.length}, tareaInstalacion=${nuevaInstalacion.id}`
   );
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// ÓRDENES DE MONTAJE — filas de OCUPACIÓN de inventario (disponible/reservado)
+// ────────────────────────────────────────────────────────────────────────────
+// Las órdenes de montaje solo mostraban inventario que YA está en campañas
+// (vendido). Para poder ver "todo" o "disponible" desde aquí, este helper arma
+// filas partiendo del CATÁLOGO de inventario y clasifica cada pieza por su
+// ocupación en el período pedido:
+//   • VENDIDO   (firme)     → se OMITE aquí (ya viene como fila de campaña).
+//   • RESERVADO (tentativo) → hold de propuesta sin vender.
+//   • DISPONIBLE            → sin reserva bloqueante en el período.
+// Mismo criterio de estatus firme/tentativo que getDisponibles / getEspaciosBloqueados.
+// Devuelve el shape 'cat' (columna Estado = negociacion) o 'invian' (= Operacion).
+const ESTATUS_FIRME_SQL_OM = ESTATUS_FIRME.map((e) => `'${e}'`).join(',');
+const ESTATUS_TENTATIVO_SQL_OM = ESTATUS_TENTATIVO.map((e) => `'${e}'`).join(',');
+const ESTATUS_BLOQUEAN_SQL_OM = [...ESTATUS_FIRME, ...ESTATUS_TENTATIVO].map((e) => `'${e}'`).join(',');
+
+async function buildInventarioOcupacionRows(
+  inicioFiltro: Date,
+  finFiltro: Date,
+  shape: 'cat' | 'invian',
+  catNum: number | null,
+  catYear: number | null
+): Promise<any[]> {
+  // 1) Snapshot de ocupación por inventario en el período. Resuelve el
+  //    polimorfismo de reservas.inventario_id (espacio_inventario.id o
+  //    inventarios.id) con COALESCE. Filtra por el período del sc (no calendario)
+  //    e ignora IM (impresión no ocupa). Un digital nunca "bloquea", pero si
+  //    tiene venta firme igual sale como vendido (y se omite abajo).
+  const occ = await prisma.$queryRawUnsafe<{ inventario_id: number; has_firme: number; has_tent: number }[]>(
+    `SELECT t.invId AS inventario_id,
+            MAX(t.firme) AS has_firme,
+            MAX(t.tent)  AS has_tent
+       FROM (
+         SELECT COALESCE(ei.inventario_id, rsv.inventario_id) AS invId,
+                CASE WHEN rsv.estatus IN (${ESTATUS_FIRME_SQL_OM}) THEN 1 ELSE 0 END AS firme,
+                CASE WHEN rsv.estatus IN (${ESTATUS_TENTATIVO_SQL_OM}) THEN 1 ELSE 0 END AS tent
+           FROM reservas rsv
+             INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+             LEFT JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+          WHERE rsv.deleted_at IS NULL
+            AND rsv.estatus IN (${ESTATUS_BLOQUEAN_SQL_OM})
+            AND sc.inicio_periodo <= ? AND sc.fin_periodo >= ?
+            AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
+       ) t
+      WHERE t.invId IS NOT NULL
+      GROUP BY t.invId`,
+    finFiltro, inicioFiltro
+  );
+  const occByInv = new Map<number, { firme: boolean; tent: boolean }>();
+  for (const o of occ) {
+    occByInv.set(Number(o.inventario_id), { firme: Number(o.has_firme) === 1, tent: Number(o.has_tent) === 1 });
+  }
+
+  // 2) Catálogo de inventario (excluye Bloqueado/Inactivo, igual que getDisponibles).
+  const inv = await prisma.$queryRawUnsafe<{
+    id: number; codigo_unico: string | null; tipo_de_cara: string | null;
+    tipo_de_mueble: string | null; mueble: string | null; plaza: string | null;
+    municipio: string | null; tradicional_digital: string | null; cto: string | null;
+  }[]>(
+    `SELECT id, codigo_unico, tipo_de_cara, tipo_de_mueble, mueble, plaza, municipio,
+            tradicional_digital, cto
+       FROM inventarios
+      WHERE (estatus IS NULL OR estatus NOT IN ('Bloqueado', 'Inactivo'))`
+  );
+
+  const dateOnly = (d: Date): string => {
+    const yy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  };
+  const fi = dateOnly(inicioFiltro);
+  const ff = dateOnly(finFiltro);
+
+  const rows: any[] = [];
+  for (const p of inv) {
+    const o = occByInv.get(Number(p.id));
+    if (o?.firme) continue; // vendido → ya viene como fila de campaña (modo 'todo')
+    const estado = o?.tent ? 'reservado' : 'disponible';
+    const label = o?.tent ? 'RESERVADO' : 'DISPONIBLE';
+    const plaza = p.plaza || (p.municipio ? String(p.municipio).split(',')[0].trim() : null);
+    const formato = p.tipo_de_mueble || p.mueble || null;
+    const codigo = p.codigo_unico ? String(p.codigo_unico) : null;
+
+    if (shape === 'cat') {
+      rows.push({
+        plaza,
+        tipo: formato,
+        asesor: null,
+        aps_especifico: null,
+        aps_global: null,
+        tipo_periodo: 'catorcena',
+        fecha_inicio_periodo: fi,
+        fecha_fin_periodo: ff,
+        catorcena_numero: catNum,
+        catorcena_year: catYear,
+        cliente: null,
+        marca: null,
+        cuic: null,
+        sap_database: null,
+        bd_sap_post: null,
+        unidad_negocio: null,
+        campania: null,
+        numero_articulo: codigo,
+        negociacion: label, // columna Estado: RESERVADO / DISPONIBLE
+        caras: 1,
+        tarifa: 0,
+        monto_total: 0,
+        delta_caras: 0,
+        campania_id: null,
+        grupo_id: -Number(p.id), // sintético negativo — no choca con sc.id reales
+        tradicional_digital: p.tradicional_digital,
+        posted: false,
+        tipo_fila: 'ocupacion',
+        ocupacion_estado: estado,
+        cara: p.tipo_de_cara || null,
+        cto: p.cto || null,
+      });
+    } else {
+      rows.push({
+        Campania: null,
+        Anunciante: null,
+        Operacion: label, // columna Estado: RESERVADO / DISPONIBLE
+        CodigoContrato: null,
+        idquote: null,
+        campania_id: null,
+        PrecioPorCara: 0,
+        Vendedor: null,
+        Descripcion: null,
+        InicioPeriodo: catYear != null ? `Catorcenas ${catYear}` : null,
+        FinSegmento: catNum != null ? `Catorcena #${String(catNum).padStart(2, '0')}` : null,
+        Arte: null,
+        CodigoArte: null,
+        ArteUrl: null,
+        ArteFileName: null,
+        OrigenArte: null,
+        Unidad: codigo,
+        Cara: p.tipo_de_cara || null,
+        Ciudad: plaza,
+        TipoDistribucion: label,
+        Reproducciones: null,
+        fecha_inicio: fi,
+        fecha_fin: ff,
+        status_campania: null,
+        catorcena_numero: catNum,
+        catorcena_year: catYear,
+        rsv_id: null,
+        tradicional_digital: p.tradicional_digital,
+        cortesia: 0,
+        numero_articulo: codigo,
+        cto: p.cto || null,
+        sap_database: null,
+        bd_sap_post: null,
+        posted: false,
+        formato,
+        tipo_periodo: 'catorcena',
+        ocupacion_estado: estado,
+      });
+    }
+  }
+  return rows;
+}
 
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -540,10 +726,10 @@ export class CampanasController {
           COALESCE(s.sap_database, cl.sap_database) as sap_database,
           COALESCE(s.card_code, cl.card_code) as card_code,
           COALESCE(s.salesperson_code, cl.salesperson_code) as salesperson_code,
-          cat_ini.numero_catorcena as catorcena_inicio_num,
-          cat_ini.año as catorcena_inicio_anio,
-          cat_fin.numero_catorcena as catorcena_fin_num,
-          cat_fin.año as catorcena_fin_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_inicio BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_inicio_anio,
+          (SELECT ca.numero_catorcena FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_num,
+          (SELECT ca.año FROM catorcenas ca WHERE cm.fecha_fin BETWEEN ca.fecha_inicio AND ca.fecha_fin ORDER BY ca.id LIMIT 1) as catorcena_fin_anio,
           ct.id_propuesta as propuesta_id,
           ct.tipo_periodo as tipo_periodo,
           pr.inversion as propuesta_inversion,
@@ -552,6 +738,8 @@ export class CampanasController {
           COALESCE(rsv_agg.circuitos, 0) AS circuitos,
           0 AS reservas_count_ultima_cat,
           0 AS caras_ultima_cat,
+          COALESCE(inc_agg.caras_esperadas, 0) AS caras_esperadas_total,
+          COALESCE(inc_agg.reservas_validas, 0) AS reservas_validas_total,
           cat_content.catorcenas_con_contenido,
           NULL AS codigos_inventario,
           fmt_agg.formatos
@@ -560,8 +748,6 @@ export class CampanasController {
         LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
         LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = pr.solicitud_id
-        LEFT JOIN catorcenas cat_ini ON cm.fecha_inicio BETWEEN cat_ini.fecha_inicio AND cat_ini.fecha_fin
-        LEFT JOIN catorcenas cat_fin ON cm.fecha_fin BETWEEN cat_fin.fecha_inicio AND cat_fin.fecha_fin
         LEFT JOIN (
           SELECT
             ct_a.id AS cotizacion_id,
@@ -593,12 +779,30 @@ export class CampanasController {
           WHERE ct_f.id IN (${ctIdPh})
           GROUP BY ct_f.id
         ) fmt_agg ON fmt_agg.cotizacion_id = ct.id
+        LEFT JOIN (
+          -- Totales de completitud para el badge "Incompleta" del listado.
+          -- MISMO criterio que incompleteness_detail de getById: solo circuitos
+          -- que caen en una catorcena (INNER JOIN catorcenas — mensual queda
+          -- fuera, igual que en el detalle) y mismas exclusiones IM/ESP/ES-/-QR.
+          SELECT
+            ct_i.id AS cotizacion_id,
+            COALESCE(SUM(sc_i.caras + sc_i.bonificacion), 0) AS caras_esperadas,
+            COALESCE(SUM((SELECT COUNT(*) FROM reservas r_i
+                          WHERE r_i.solicitudCaras_id = sc_i.id AND r_i.deleted_at IS NULL)), 0) AS reservas_validas
+          FROM solicitudCaras sc_i
+          INNER JOIN catorcenas cat_i ON sc_i.inicio_periodo >= cat_i.fecha_inicio AND sc_i.fin_periodo <= cat_i.fecha_fin
+          INNER JOIN cotizacion ct_i ON sc_i.idquote = CAST(ct_i.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+          WHERE ct_i.id IN (${ctIdPh})
+            AND COALESCE(sc_i.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc_i.articulo, '') NOT LIKE '%-QR'
+          GROUP BY ct_i.id
+        ) inc_agg ON inc_agg.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
         ORDER BY COALESCE(cm.fecha_aprobacion, cm.fecha_inicio) DESC, cm.id DESC
       `;
 
-      // Parámetros: cotizacionIds para rsv_agg, cotizacionIds para cat_content, cotizacionIds para fmt_agg, campaignIds para WHERE
+      // Parámetros: cotizacionIds para rsv_agg, cat_content, fmt_agg e inc_agg (en ese orden), campaignIds para WHERE
       const dataParams = [
+        ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
         ...(cotizacionIds.length > 0 ? cotizacionIds : []),
@@ -1096,30 +1300,37 @@ export class CampanasController {
       // Si tiene APS, no permitir rechazo/cancelación
       const STATUS_LIBERA = ['Rechazada', 'Cancelada'];
       if (STATUS_LIBERA.includes(status) && campanaAnterior.cotizacion_id) {
-        // Feedback 2026-08-14: bloquear rechazo/cancelacion cuando hay
-        // autorizaciones DG/DCM pendientes. Misma politica que solicitud y
-        // propuesta — no cortar el flujo antes de que direccion responda.
-        // Feedback 2026-08-18 (ajuste): tambien incluir 'correccion' y
-        // 'rechazado'. Antes solo se checaba 'pendiente' y podia rechazarse
-        // una campaña con circuitos en correccion sin resolver.
+        // Guard de cierre — feedback 2026-08-14/18/31. Bloquea con
+        // pendiente/correccion. Los rechazado solo bloquean si hay MEZCLA
+        // con aprobado (Jos 2026-08-31: si TODOS estan rechazados se puede
+        // cerrar limpio; con aprobados mezclados se tiraria trabajo bueno).
         const cotizacionParaAuth = await prisma.cotizacion.findUnique({
           where: { id: campanaAnterior.cotizacion_id },
           select: { id_propuesta: true },
         });
         if (cotizacionParaAuth?.id_propuesta) {
-          const autorizacion = await verificarCarasPendientes(cotizacionParaAuth.id_propuesta.toString());
-          const bloqueo = await verificarCarasRechazadas(cotizacionParaAuth.id_propuesta.toString());
-          if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+          const propuestaIdStr = cotizacionParaAuth.id_propuesta.toString();
+          const autorizacion = await verificarCarasPendientes(propuestaIdStr);
+          const bloqueo = await verificarCarasRechazadas(propuestaIdStr);
+          const totalPend = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+          const totalAprob = await prisma.solicitudCaras.count({
+            where: {
+              idquote: propuestaIdStr,
+              autorizacion_dg: 'aprobado',
+              autorizacion_dcm: 'aprobado',
+            },
+          });
+          const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+          if (bloquea) {
             const partes: string[] = [];
-            const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-            if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-            const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-            if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-            const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+            if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
             if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+            if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
             res.status(400).json({
               success: false,
-              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+              error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña: hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
               autorizacion: {
                 pendientesDg: autorizacion.pendientesDg.length,
                 pendientesDcm: autorizacion.pendientesDcm.length,
@@ -1127,6 +1338,7 @@ export class CampanasController {
                 rechazadasDcm: bloqueo.rechazadasDcm.length,
                 correccionDg: bloqueo.correccionDg.length,
                 correccionDcm: bloqueo.correccionDcm.length,
+                aprobadas: totalAprob,
               },
             });
             return;
@@ -1499,6 +1711,10 @@ export class CampanasController {
 
       const campanaId = parseInt(id);
 
+      // Contadores del candado anti-ocupación al recorrer (paso 4c más abajo).
+      let reservasSoltadasPorChoque = 0;
+      let codigosSoltadosPorChoque: string[] = [];
+
       // Obtener la campaña actual para conseguir cotizacion_id
       const campanaActual = await prisma.campania.findUnique({
         where: { id: campanaId },
@@ -1705,6 +1921,64 @@ export class CampanasController {
               AND rs.deleted_at IS NULL
               AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
           `;
+
+          // 4c. CANDADO anti-ocupación al recorrer (fix duplicados AEROPOSTALE/Monster Jam).
+          // Recorrer una campaña a otra catorcena MUEVE sus reservas en su lugar (4a/4b)
+          // sin revisar ocupación → caían sobre caras ya vendidas por OTRA campaña en la
+          // catorcena nueva y generaban duplicados invisibles (el candado normal solo corre
+          // AL RESERVAR, no al recorrer). Aquí, tras mover, soltamos (soft-delete) SOLO las
+          // reservas de ESTA campaña que quedaron encima de una cara ya ocupada por otra
+          // campaña en el periodo solapado (Tradicional; los Digitales comparten pantalla y
+          // no cuentan). Las que cayeron en cara libre se conservan; el asesor re-reserva las
+          // soltadas por el buscador (que sí corre el candado). El mueble físico se resuelve
+          // por COALESCE(espacio_inventario, reserva) para cubrir el inventario_id polimórfico.
+          const colisionesRecorrer = await prisma.$queryRaw<{ id: number; codigo: string | null }[]>`
+            SELECT rs.id AS id, i.codigo_unico AS codigo
+            FROM reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            LEFT JOIN espacio_inventario ei ON ei.id = rs.inventario_id
+            INNER JOIN inventarios i ON i.id = COALESCE(ei.inventario_id, rs.inventario_id)
+            WHERE ct.id = ${cotizacionId}
+              AND rs.deleted_at IS NULL
+              AND rs.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+              AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
+              AND EXISTS (
+                SELECT 1 FROM reservas ro
+                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                LEFT JOIN espacio_inventario eio ON eio.id = ro.inventario_id
+                WHERE ro.deleted_at IS NULL
+                  AND ro.id <> rs.id
+                  AND sco.idquote <> slc.idquote
+                  AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                  AND COALESCE(eio.inventario_id, ro.inventario_id) = COALESCE(ei.inventario_id, rs.inventario_id)
+                  AND sco.inicio_periodo <= slc.fin_periodo
+                  AND sco.fin_periodo >= slc.inicio_periodo
+              )
+          `;
+          if (colisionesRecorrer.length > 0) {
+            const idsSoltar = colisionesRecorrer.map(r => Number(r.id));
+            await prisma.$executeRawUnsafe(
+              `UPDATE reservas SET deleted_at = NOW() WHERE id IN (${idsSoltar.join(',')}) AND deleted_at IS NULL`
+            );
+            reservasSoltadasPorChoque = idsSoltar.length;
+            codigosSoltadosPorChoque = colisionesRecorrer.map(r => r.codigo || '').filter(Boolean);
+            await prisma.historial.create({
+              data: {
+                tipo: 'Campaña',
+                ref_id: campanaId,
+                accion: 'Reservas liberadas por choque al recorrer',
+                fecha_hora: new Date(),
+                detalles: JSON.stringify({
+                  usuario: userName,
+                  origen: 'campaña',
+                  reservas_liberadas: reservasSoltadasPorChoque,
+                  codigos: codigosSoltadosPorChoque.slice(0, 50),
+                }),
+              },
+            });
+          }
         }
       }
 
@@ -1769,6 +2043,7 @@ export class CampanasController {
             if (notas !== undefined) addC('Notas', '', notas || '');
             if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
             if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (reservasSoltadasPorChoque > 0) addC('Reservas liberadas por choque', '', String(reservasSoltadasPorChoque));
             if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
             if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
             if (cuic !== undefined) addC('CUIC', '', String(cuic));
@@ -1793,6 +2068,12 @@ export class CampanasController {
       res.json({
         success: true,
         data: campana,
+        ...(reservasSoltadasPorChoque > 0
+          ? {
+              reservasLiberadas: reservasSoltadasPorChoque,
+              message: `Campaña recorrida. ${reservasSoltadasPorChoque} cara(s) ya estaban ocupadas en la catorcena nueva y se liberaron — vuelve a reservarlas por el buscador.`,
+            }
+          : {}),
       });
 
       // Emitir eventos WebSocket
@@ -1824,13 +2105,23 @@ export class CampanasController {
       const catorcenaInicio = req.query.catorcenaInicio ? parseInt(req.query.catorcenaInicio as string) : undefined;
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
-        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo, excludeRechazadas
+        u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1928,6 +2219,26 @@ export class CampanasController {
         if (orClauses.length > 0) {
           conditions.push(`(${orClauses.join(' OR ')})`);
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
+      // el universo sin filtrar y no cuadra con el listado.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        conditions.push(sub);
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(creacionDesde); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        conditions.push(sub);
       }
 
       if (yearInicio && yearFin) {
@@ -2083,6 +2394,25 @@ export class CampanasController {
         carasEnriched = caras.map(c => ({ ...c, grupo_masivo_id: map.get(c.id) ?? null }));
       }
 
+      // pendiente_eliminacion: caras con una tarea de eliminación abierta (Filtro GC
+      // o DG). Mismo criterio de dedup que crearAutorizacionEliminacionCampana. Sirve
+      // para pintar el badge "Pend. DG (elim.)" en la cara del modal de campaña.
+      if (carasEnriched.length > 0) {
+        const tareasElim = await prisma.tareas.findMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { in: [TIPO_FILTRO_ELIMINACION, TIPO_AUTORIZACION_ELIMINACION] },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          select: { ids_reservas: true },
+        });
+        const pendSet = new Set<number>();
+        for (const t of tareasElim) {
+          (t.ids_reservas || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)).forEach(n => pendSet.add(n));
+        }
+        carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
+      }
+
       const carasSerializable = serializeBigInt(carasEnriched);
 
       res.json({
@@ -2228,7 +2558,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           sc.idquote = ?
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.id IS NULL
       `;
 
@@ -2416,7 +2746,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -2496,7 +2826,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           sc.idquote = ?
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY sc.id
@@ -2815,7 +3145,7 @@ export class CampanasController {
             SELECT id_reserva,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -2885,7 +3215,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id IN (${placeholders})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.id IS NULL
       `;
 
@@ -2939,7 +3269,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           cm.id IN (${placeholders})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY cm.id, sc.id
@@ -3309,15 +3639,10 @@ export class CampanasController {
           pr.descripcion,
 
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
+          -- Des-agrupado: cada cara sale con su codigo_unico real y su Flujo/Contraflujo
+          -- (antes se fusionaban los muebles completos en "BASE_completo_CIUDAD" / 'Completo').
+          MIN(i.codigo_unico) as codigo_unico,
+          MIN(i.tipo_de_cara) as tipo_de_cara,
           MIN(i.mueble) as mueble,
           MIN(i.plaza) as plaza,
           MIN(i.estado) as estado,
@@ -3354,7 +3679,7 @@ export class CampanasController {
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
                  s.nombre_usuario, ct.tipo_periodo, pr.descripcion,
-                 COALESCE(rsv.grupo_completo_id, rsv.id), sc.id
+                 rsv.id, sc.id
         ORDER BY cm.nombre, MIN(rsv.id) DESC
       `;
 
@@ -3408,7 +3733,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE cm.id IN (${cmIdPh})
-          AND UPPER(sc.articulo) LIKE 'IM%'
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
           AND rsv.APS IS NOT NULL AND rsv.APS > 0
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
@@ -3978,7 +4303,8 @@ export class CampanasController {
                          'nota', COALESCE(nota, ''),
                          'spot', spot,
                          'nombre_arte', nombre_arte,
-                         'estatus_operaciones', estatus_operaciones
+                         'estatus_operaciones', estatus_operaciones,
+                         'nombre_generico', nombre_generico
                        )
                      ) AS CHAR
                    ) as artes_detalle
@@ -4346,7 +4672,7 @@ export class CampanasController {
                    GROUP_CONCAT(DISTINCT archivo ORDER BY spot SEPARATOR '||') as artes_all,
                    CAST(
                      JSON_ARRAYAGG(
-                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones)
+                       JSON_OBJECT('archivo', archivo, 'nota', COALESCE(nota, ''), 'spot', spot, 'nombre_arte', nombre_arte, 'estatus_operaciones', estatus_operaciones, 'nombre_generico', nombre_generico)
                      ) AS CHAR
                    ) as artes_detalle
             FROM artes_tradicionales
@@ -4879,7 +5205,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -4904,23 +5230,25 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: idempotente por (campania, archivo).
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, userId || null);
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -5042,7 +5370,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5067,23 +5395,25 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         // Insertar registro en imagenes_digitales para cada reserva
         for (const reservaId of allReservaIds) {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?)
-          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal);
+            INSERT INTO imagenes_digitales (id_reserva, archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, '', 'Pendiente', '', ?, CURDATE(), '', ?, ?, ?)
+          `, reservaId, uniqueFilename, archivoData, spot, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: idempotente por (campania, archivo).
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'digital', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'digital', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, req.user?.userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, req.user?.userId || null);
       }
 
       // Registrar en historial
@@ -5165,10 +5495,12 @@ export class CampanasController {
         imagen_testigo: string;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
       }[]>(`
         SELECT DISTINCT archivo, archivo_data, MIN(id) as id, MIN(id_reserva) as id_reserva,
                comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo,
-               MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
+               MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones,
+               MAX(nombre_generico) as nombre_generico
         FROM imagenes_digitales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, archivo_data, comentario, aprobado_rechazado, respuesta, spot, fecha_testigo, imagen_testigo
@@ -5189,6 +5521,7 @@ export class CampanasController {
           tipo: img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
           nombre_arte: img.nombre_arte || null,
           estatus_operaciones: img.estatus_operaciones || null,
+          nombre_generico: img.nombre_generico || null,
         })),
       });
     } catch (error) {
@@ -5279,10 +5612,11 @@ export class CampanasController {
         comentario: string | null;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
         spot: number;
       }[]>(`
         SELECT DISTINCT img.id_reserva, img.archivo, img.archivo_data,
-               img.comentario, img.nombre_arte, img.estatus_operaciones, img.spot
+               img.comentario, img.nombre_arte, img.estatus_operaciones, img.nombre_generico, img.spot
         FROM imagenes_digitales img
           INNER JOIN reservas r ON r.id = img.id_reserva
           INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
@@ -5301,6 +5635,7 @@ export class CampanasController {
           comentario: img.comentario || '',
           nombre_arte: img.nombre_arte || null,
           estatus_operaciones: img.estatus_operaciones || null,
+          nombre_generico: img.nombre_generico || null,
           spot: Number(img.spot),
           tipo: img.archivo && img.archivo.match(/\.(mp4|mov|webm|avi)$/i) ? 'video' : 'image',
         })),
@@ -8059,6 +8394,119 @@ export class CampanasController {
     }
   }
 
+  // Bitácora de POSTs a SAP: registra una fila por APS enviado con el SNAPSHOT
+  // del destino (card_code/cuic/razón social/marca) al momento del envío.
+  // Se llama desde el front justo después de postear, con el resultado de SAP.
+  // Append-only a propósito: si luego le cambian el cliente a la campaña, el
+  // histórico de a quién se mandó cada APS se conserva.
+  async registrarPostLog(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const { entries } = req.body as { entries?: PostLogEntry[] };
+      const userId = req.user?.userId ?? null;
+      const userName = req.user?.nombre || 'Usuario';
+
+      if (!Array.isArray(entries) || entries.length === 0) {
+        res.status(400).json({ success: false, error: 'No hay entradas para registrar' });
+        return;
+      }
+
+      const num = (v: unknown): number | null => {
+        if (v === undefined || v === null || v === '') return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const str = (v: unknown, max: number): string | null => {
+        if (v === undefined || v === null) return null;
+        const s = String(v).trim();
+        return s === '' ? null : s.slice(0, max);
+      };
+
+      let creadas = 0;
+      for (const e of entries) {
+        const aps = num(e.aps);
+        if (aps === null) continue; // sin APS no hay nada que registrar
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO campania_post_log
+            (campania_id, aps, card_code, cuic, razon_social, marca, cliente_nombre,
+             sap_database, salesperson_code, solicitud_caras_ids, success, doc_entry,
+             doc_num, error_msg, payload_json, usuario_id, usuario_nombre, posted_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())`,
+          campanaId,
+          aps,
+          str(e.card_code, 50),
+          num(e.cuic),
+          str(e.razon_social, 255),
+          str(e.marca, 255),
+          str(e.cliente_nombre, 255),
+          str(e.sap_database, 20),
+          num(e.salesperson_code),
+          str(Array.isArray(e.solicitud_caras_ids) ? e.solicitud_caras_ids.join(',') : e.solicitud_caras_ids, 65000),
+          e.success ? 1 : 0,
+          num(e.doc_entry),
+          num(e.doc_num),
+          str(e.error_msg, 65000),
+          typeof e.payload_json === 'string' ? e.payload_json : (e.payload_json ? JSON.stringify(e.payload_json) : null),
+          userId,
+          userName,
+        );
+        creadas++;
+      }
+
+      res.json({ success: true, registradas: creadas });
+    } catch (error) {
+      console.error('Error en registrarPostLog:', error);
+      res.status(500).json({ success: false, error: 'Error al registrar la bitácora de POST' });
+    }
+  }
+
+  // Devuelve la bitácora de POSTs de una campaña (más reciente primero).
+  async getPostLog(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const campanaId = parseInt(req.params.id);
+      const rows = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, campania_id, aps, card_code, cuic, razon_social, marca,
+                cliente_nombre, sap_database, salesperson_code, solicitud_caras_ids,
+                success, doc_entry, doc_num, error_msg, usuario_id, usuario_nombre, accion, posted_at
+         FROM campania_post_log
+         WHERE campania_id = ?
+         ORDER BY posted_at DESC, id DESC`,
+        campanaId
+      );
+      // Derivar la CATORCENA de cada post desde sus solicitud_caras_ids →
+      // inicio_periodo de la 1ª cara → catorcena que la contiene. Sin tocar el
+      // esquema; sirve para data existente/seed.
+      const allCaraIds = [...new Set(rows.flatMap(r =>
+        String(r.solicitud_caras_ids || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))))];
+      const carasPeriodo = new Map<number, Date>();
+      let catorcenas: { numero: number; anio: number; ini: Date; fin: Date }[] = [];
+      if (allCaraIds.length > 0) {
+        const ph = allCaraIds.map(() => '?').join(',');
+        const caras = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT id, inicio_periodo FROM solicitudCaras WHERE id IN (${ph})`, ...allCaraIds);
+        for (const cc of caras) if (cc.inicio_periodo) carasPeriodo.set(Number(cc.id), new Date(cc.inicio_periodo));
+        const cats = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT numero_catorcena, año AS anio, fecha_inicio, fecha_fin FROM catorcenas`);
+        catorcenas = cats.map(cc => ({ numero: cc.numero_catorcena, anio: cc.anio, ini: new Date(cc.fecha_inicio), fin: new Date(cc.fecha_fin) }));
+      }
+      const catFor = (fecha?: Date): { numero: number | null; anio: number | null } => {
+        if (!fecha) return { numero: null, anio: null };
+        const m = catorcenas.find(cc => fecha >= cc.ini && fecha <= cc.fin);
+        return m ? { numero: m.numero, anio: m.anio } : { numero: null, anio: null };
+      };
+      // success viene como 0/1 desde MySQL — normalizar a boolean para el front.
+      const data = rows.map(r => {
+        const firstCara = String(r.solicitud_caras_ids || '').split(',').map(s => parseInt(s.trim(), 10)).find(n => !isNaN(n));
+        const cat = catFor(firstCara != null ? carasPeriodo.get(firstCara) : undefined);
+        return { ...r, success: !!r.success, catorcena_numero: cat.numero, catorcena_anio: cat.anio };
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getPostLog:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener la bitácora de POST' });
+    }
+  }
+
   async unmarkPostedAPS(req: AuthRequest, res: Response): Promise<void> {
     try {
       const campanaId = parseInt(req.params.id);
@@ -8112,6 +8560,27 @@ export class CampanasController {
             }),
           },
         }).catch(err => console.error('Error guardando historial cancel POST APS:', err));
+
+        // Guardar la CANCELACIÓN en la bitácora de posteos (campania_post_log) para que
+        // aparezca en el "Historial de posteos" (con su catorcena), copiando el snapshot
+        // del POST original (cuic/BD/razón social) de cada APS cancelado.
+        for (const apsX of apsQuitados) {
+          try {
+            const orig = await prisma.$queryRawUnsafe<any[]>(
+              `SELECT card_code, cuic, razon_social, marca, cliente_nombre, sap_database, salesperson_code, solicitud_caras_ids
+                 FROM campania_post_log WHERE campania_id=? AND aps=? AND accion='POST' ORDER BY posted_at DESC, id DESC LIMIT 1`,
+              campanaId, apsX);
+            const o = orig[0] || {};
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO campania_post_log
+                (campania_id, aps, card_code, cuic, razon_social, marca, cliente_nombre, sap_database,
+                 salesperson_code, solicitud_caras_ids, success, error_msg, usuario_id, usuario_nombre, accion, posted_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,1,'Cancelación de POST',?,?, 'CANCELACION', NOW())`,
+              campanaId, apsX, o.card_code ?? null, o.cuic ?? null, o.razon_social ?? null, o.marca ?? null,
+              o.cliente_nombre ?? null, o.sap_database ?? null, o.salesperson_code ?? null,
+              o.solicitud_caras_ids ?? null, userId ?? null, userName);
+          } catch (err) { console.error('Error guardando cancelación en post_log:', err); }
+        }
       }
 
       emitToCampana(campanaId, SOCKET_EVENTS.CAMPANA_APS_POSTED, { campanaId, posted_aps: remaining });
@@ -8650,6 +9119,7 @@ export class CampanasController {
           MAX(nombre_arte) as nombre_arte,
           MAX(nota) as nota,
           MAX(estatus_operaciones) as estatus_operaciones,
+          MAX(nombre_generico) as nombre_generico,
           MAX(estatus) as estatus,
           MAX(tiene_instalado) as tiene_instalado
         FROM (
@@ -8660,6 +9130,7 @@ export class CampanasController {
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_arte,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nota,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r.instalado = 1 THEN 1
@@ -8686,6 +9157,7 @@ export class CampanasController {
             MAX(at2.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(at2.nota) COLLATE utf8mb4_unicode_ci as nota,
             MAX(at2.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(at2.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r2.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r2.instalado = 1 THEN 1
@@ -8710,6 +9182,7 @@ export class CampanasController {
             MAX(imd.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(imd.comentario) COLLATE utf8mb4_unicode_ci as nota,
             MAX(imd.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(imd.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             MAX(r3.arte_aprobado) COLLATE utf8mb4_unicode_ci as estatus,
             MAX(CASE
               WHEN r3.instalado = 1 THEN 1
@@ -8740,6 +9213,7 @@ export class CampanasController {
             MAX(ba.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
             MAX(ba.nota) COLLATE utf8mb4_unicode_ci as nota,
             MAX(ba.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            MAX(ba.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
             0 as tiene_instalado
           FROM biblioteca_artes ba
@@ -8750,7 +9224,7 @@ export class CampanasController {
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; nombre_generico: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -8760,6 +9234,7 @@ export class CampanasController {
         nombre_arte: arte.nombre_arte || null,
         nota: arte.nota || null,
         estatus_operaciones: arte.estatus_operaciones || null,
+        nombre_generico: arte.nombre_generico || null,
         estatus: arte.estatus || null,
         tiene_instalado: Number(arte.tiene_instalado || 0) === 1,
       }));
@@ -8931,8 +9406,12 @@ export class CampanasController {
       // cuando se crean/eliminan reservas, así que el cache solo se queda
       // viejo si nadie toca reservas. Reduce drásticamente el tiempo de
       // re-apertura del modal.
+      // Modo de ocupación: 'vendido' (default = lo de siempre), 'disponible'
+      // (solo inventario libre/reservado, sin campañas) o 'todo' (ambos).
+      const ocupacion = ((req.query.ocupacion as string) || 'vendido').toLowerCase();
+
       const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_CAT(JSON.stringify({
-        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin, ocupacion
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -8951,6 +9430,23 @@ export class CampanasController {
         `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
         inicioFiltro = catRange?.inicio_filtro || null;
         finFiltro = catRange?.fin_filtro || null;
+      }
+
+      // MODO 'disponible': solo inventario libre/reservado (sin filas de campaña).
+      // Cortocircuita antes de tocar campañas/reservas de venta.
+      if (ocupacion === 'disponible') {
+        const dataDisp = (inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respDisp = {
+          success: true,
+          data: serializeBigInt(dataDisp),
+          filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
+          catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
+        };
+        cache.set(cacheKey, respDisp, CACHE_TTL.SHORT);
+        res.json(respDisp);
+        return;
       }
 
       // PASO 2: traer campañas + cotizacion + solicitud + solicitudCaras filtradas
@@ -9025,12 +9521,18 @@ export class CampanasController {
       `, ...scParams);
 
       if (scRows.length === 0) {
-        res.json({
+        // 'todo' sin campañas en el rango → aun así mostramos el inventario libre.
+        const dataEmpty = (ocupacion === 'todo' && inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respEmpty = {
           success: true,
-          data: [],
+          data: serializeBigInt(dataEmpty),
           filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
           catorcenaActual: catorcenaInicio && yearInicio ? `${catorcenaInicio}-${yearInicio}` : null,
-        });
+        };
+        cache.set(cacheKey, respEmpty, CACHE_TTL.SHORT);
+        res.json(respEmpty);
         return;
       }
 
@@ -9071,7 +9573,7 @@ export class CampanasController {
       const campaniaIdsCat = [...new Set(scRows.map(s => Number(s.campania_id)).filter(Boolean))];
       const phCamp = campaniaIdsCat.map(() => '?').join(',');
 
-      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr, postedRows] = await Promise.all([
+      const [reservasArr, clientesArr, catorcenasArr, plazaMunicipioArr, postedRows, postLogRows] = await Promise.all([
         prisma.$queryRawUnsafe<ResRow[]>(
           `SELECT
              rsv.id AS rsv_id,
@@ -9107,6 +9609,16 @@ export class CampanasController {
               ...campaniaIdsCat
             ).catch(() => [] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[])
           : Promise.resolve([] as { id: number; posted_aps: string | null; posted_to_sap: number | null }[]),
+        // campania_post_log: BD SAP congelada por (campania, aps) al postear.
+        // La tabla puede no existir en algún ambiente → catch a [].
+        campaniaIdsCat.length > 0
+          ? prisma.$queryRawUnsafe<{ campania_id: number; aps: number; sap_database: string | null }[]>(
+              `SELECT campania_id, aps, sap_database FROM campania_post_log
+               WHERE success = 1 AND sap_database IS NOT NULL AND campania_id IN (${phCamp})
+               ORDER BY posted_at DESC`,
+              ...campaniaIdsCat
+            ).catch(() => [] as { campania_id: number; aps: number; sap_database: string | null }[])
+          : Promise.resolve([] as { campania_id: number; aps: number; sap_database: string | null }[]),
       ]);
 
       // municipio → plaza canónica (toma la primera por orden alfabético, igual
@@ -9127,6 +9639,16 @@ export class CampanasController {
           }
         } catch { /* JSON inválido — ignorar */ }
         postedByCampana.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
+
+      // (campania_id, aps) → BD SAP del POST (snapshot). Primero = más reciente
+      // (ORDER BY posted_at DESC). El circuito hereda la BD de su APS posteado,
+      // independiente del cliente/BD actual de la campaña (por eso "congelado").
+      const postLogSapByCampAps = new Map<string, string>();
+      for (const p of postLogRows) {
+        if (!p.sap_database) continue;
+        const key = `${Number(p.campania_id)}::${Number(p.aps)}`;
+        if (!postLogSapByCampAps.has(key)) postLogSapByCampAps.set(key, p.sap_database);
       }
 
       // Index reservas por solicitudCaras_id
@@ -9223,9 +9745,9 @@ export class CampanasController {
 
         const articuloUp = String(sc.articulo || '').toUpperCase();
 
-        // Para IM (Impresiones): no aplican reservas de inventario físico,
-        // siempre se considera completo (delta=0 → ✓ en UI).
-        const delta_caras = articuloUp.startsWith('IM')
+        // Para IM (Impresiones) y ES/ESP (Ejec. Especiales): no aplican reservas de
+        // inventario físico, siempre se consideran completos (delta=0 → ✓ en UI).
+        const delta_caras = (articuloUp.startsWith('IM') || articuloUp.startsWith('ESP') || articuloUp.startsWith('ES-'))
           ? 0
           : rsvCount - (scCaras + scBonif);
 
@@ -9253,6 +9775,15 @@ export class CampanasController {
           (apsList.length > 0 && apsList.every(a => postedInfo.apsSet.has(Number(a))))
         );
 
+        // BD SAP CONGELADA a la que se posteó el circuito (por su APS). Vacío si el
+        // circuito aún no tiene POST. Una misma campaña puede tener 2 bases → se unen.
+        const bdSapPostSet = new Set<string>();
+        for (const a of apsList) {
+          const v = postLogSapByCampAps.get(`${Number(sc.campania_id)}::${Number(a)}`);
+          if (v) bdSapPostSet.add(v);
+        }
+        const bd_sap_post = bdSapPostSet.size === 0 ? null : [...bdSapPostSet].sort().join('/');
+
         const base = {
           plaza,
           tipo: sc.formato,
@@ -9268,6 +9799,7 @@ export class CampanasController {
           marca: cliente?.T2_U_Marca ?? null,
           cuic: cliente?.CUIC != null ? Number(cliente.CUIC) : null,
           sap_database,
+          bd_sap_post, // BD SAP congelada del POST (por circuito); null si sin post
           unidad_negocio: sc.unidad_negocio,
           campania: sc.campania_nombre,
           numero_articulo: sc.articulo,
@@ -9276,6 +9808,7 @@ export class CampanasController {
           grupo_id: Number(sc.sc_id),
           tradicional_digital,
           posted,
+          ocupacion_estado: 'vendido', // filas de campaña = venta firme
         };
 
         if (scBonif > 0) {
@@ -9304,10 +9837,22 @@ export class CampanasController {
         }
       }
 
-      // ORDER BY campania_id, grupo_id, tipo_fila (bonificacion < renta alfabéticamente)
+      // MODO 'todo': además de las filas vendidas, agrega el inventario
+      // libre/reservado del período (las piezas vendidas se omiten dentro del
+      // helper para no duplicar).
+      if (ocupacion === 'todo' && inicioFiltro && finFiltro) {
+        const occRows = await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'cat', catorcenaInicio ?? null, yearInicio ?? null);
+        for (const r of occRows) result.push(r);
+      }
+
+      // ORDER BY campania_id, grupo_id, tipo_fila (bonificacion < renta). Null-safe:
+      // las filas de ocupación (campania_id null) se ordenan al final.
       result.sort((a, b) => {
-        if (a.campania_id !== b.campania_id) return a.campania_id - b.campania_id;
-        if (a.grupo_id !== b.grupo_id) return a.grupo_id - b.grupo_id;
+        const ca = a.campania_id ?? Number.MAX_SAFE_INTEGER;
+        const cb = b.campania_id ?? Number.MAX_SAFE_INTEGER;
+        if (ca !== cb) return ca - cb;
+        const ga = a.grupo_id ?? 0, gb = b.grupo_id ?? 0;
+        if (ga !== gb) return ga - gb;
         return String(a.tipo_fila).localeCompare(String(b.tipo_fila));
       });
 
@@ -9363,9 +9908,13 @@ export class CampanasController {
         }
       }
 
+      // Modo de ocupación: 'vendido' (default = lo de siempre), 'disponible'
+      // (solo inventario libre/reservado, sin campañas) o 'todo' (ambos).
+      const ocupacion = ((req.query.ocupacion as string) || 'vendido').toLowerCase();
+
       // Caché 2 min (SHORT) — el WebSocket invalida en cambios reales.
       const cacheKey = CACHE_KEYS.ORDEN_MONTAJE_INVIAN(JSON.stringify({
-        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin
+        u: req.user?.userId, status, catorcenaInicio, catorcenaFin, yearInicio, yearFin, ocupacion
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -9384,6 +9933,21 @@ export class CampanasController {
         `, yearInicio, catorcenaInicio, yearFin, catorcenaFin);
         inicioFiltro = catRange?.inicio_filtro || null;
         finFiltro = catRange?.fin_filtro || null;
+      }
+
+      // MODO 'disponible': solo inventario libre/reservado (sin filas de campaña).
+      if (ocupacion === 'disponible') {
+        const dataDisp = (inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respDisp = {
+          success: true,
+          data: serializeBigInt(dataDisp),
+          filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin },
+        };
+        cache.set(cacheKey, respDisp, CACHE_TTL.SHORT);
+        res.json(respDisp);
+        return;
       }
 
       // PASO 2: Pre-filtrar campañas en el rango — tabla pequeña (~758 filas).
@@ -9406,7 +9970,13 @@ export class CampanasController {
       `, ...campParams);
 
       if (campsRows.length === 0) {
-        res.json({ success: true, data: [], filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin } });
+        // 'todo' sin campañas en el rango → aun así mostramos el inventario libre.
+        const dataEmpty = (ocupacion === 'todo' && inicioFiltro && finFiltro)
+          ? await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null)
+          : [];
+        const respEmpty = { success: true, data: serializeBigInt(dataEmpty), filtroAplicado: { catorcenaInicio, catorcenaFin, yearInicio, yearFin } };
+        cache.set(cacheKey, respEmpty, CACHE_TTL.SHORT);
+        res.json(respEmpty);
         return;
       }
 
@@ -9432,6 +10002,22 @@ export class CampanasController {
           }
         } catch { /* JSON inválido — ignorar */ }
         postedByCampanaInvian.set(Number(r.id), { all: r.posted_to_sap === 1, apsSet });
+      }
+
+      // BD SAP congelada por (campania, aps) del POST — igual criterio que CAT.
+      const postLogRowsInvian = campIdsInvian.length > 0
+        ? await prisma.$queryRawUnsafe<{ campania_id: number; aps: number; sap_database: string | null }[]>(
+            `SELECT campania_id, aps, sap_database FROM campania_post_log
+             WHERE success = 1 AND sap_database IS NOT NULL AND campania_id IN (${phCampInvian})
+             ORDER BY posted_at DESC`,
+            ...campIdsInvian
+          ).catch(() => [] as { campania_id: number; aps: number; sap_database: string | null }[])
+        : [];
+      const postLogSapByCampApsInvian = new Map<string, string>();
+      for (const p of postLogRowsInvian) {
+        if (!p.sap_database) continue;
+        const key = `${Number(p.campania_id)}::${Number(p.aps)}`;
+        if (!postLogSapByCampApsInvian.has(key)) postLogSapByCampApsInvian.set(key, p.sap_database);
       }
 
       // PASO 3: Pre-fetch clientes (sólo los relevantes), catorcenas y
@@ -9587,6 +10173,11 @@ export class CampanasController {
         const apsRowNum = r.rsv_aps != null ? Number(r.rsv_aps) : null;
         const posted = !!postedInfoI && (postedInfoI.all || (apsRowNum != null && postedInfoI.apsSet.has(apsRowNum)));
 
+        // BD SAP congelada del POST de este circuito (por su APS). Vacío si sin post.
+        const bd_sap_post = (camp?.id != null && apsRowNum != null)
+          ? (postLogSapByCampApsInvian.get(`${Number(camp.id)}::${apsRowNum}`) ?? null)
+          : null;
+
         return {
           Campania: camp?.nombre || null,
           Anunciante: cliente?.T1_U_Cliente || null,
@@ -9617,6 +10208,7 @@ export class CampanasController {
           formato: r.sc_formato ? String(r.sc_formato) : null,
           tipo_periodo: camp?.tipo_periodo || 'catorcena',
           sap_database: cliente?.sap_database || null,
+          bd_sap_post, // BD SAP congelada del POST (por circuito); null si sin post
           TipoDistribucion: tipoDist,
           Reproducciones: null,
           fecha_inicio: r.inicio_periodo,
@@ -9628,6 +10220,7 @@ export class CampanasController {
           numero_articulo: r.articulo,
           cto: r.cto || null,
           posted,
+          ocupacion_estado: 'vendido', // filas de campaña = venta firme
         };
       });
 
@@ -9821,6 +10414,13 @@ export class CampanasController {
           urls_artes_do: urlsArtesDo,
         };
       });
+
+      // MODO 'todo': agrega inventario libre/reservado del período (las piezas
+      // vendidas se omiten en el helper para no duplicar).
+      if (ocupacion === 'todo' && inicioFiltro && finFiltro) {
+        const occRows = await buildInventarioOcupacionRows(inicioFiltro, finFiltro, 'invian', catorcenaInicio ?? null, yearInicio ?? null);
+        for (const r of occRows) enrichedData.push(r);
+      }
 
       const dataSerializable = serializeBigInt(enrichedData);
 
@@ -10177,7 +10777,12 @@ export class CampanasController {
     try {
       const { id } = req.params;
       const campanaId = parseInt(id);
-      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin } = req.body;
+      // [Muebles completos — separación total] Ya NO se ligan las caras con
+      // grupo_completo_id. Reservar-juntos sigue creando ambas caras (vienen en
+      // `reservas`), pero cada una queda independiente. Se ignora a propósito el
+      // flag `agruparComoCompleto` del body (línea de asignación cae a null).
+      const agruparComoCompleto = false;
 
       if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
@@ -10302,7 +10907,10 @@ export class CampanasController {
       // PLANIFICACIÓN serial: asigna espacio, descarta los que no aplican y separa
       // reactivaciones (soft-deleted) del trabajo de creación. Marca el Set para
       // que dos items del request no tomen el mismo espacio.
-      type WorkItemCamp = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      type WorkItemCamp = { espacioId: number; estatus: string; grupoCompletoId: number | null; invId: number };
+      // Detalle de lo que NO se pudo reservar, con motivo (ver propuestas: antes
+      // el front solo recibia un numero y el usuario re-reservaba a ciegas).
+      const omitidosDetalleCamp: { inventario_id: number; motivo: string }[] = [];
       const workListCamp: WorkItemCamp[] = [];
       const reactivarList: { reservaId: number; estatus: string }[] = [];
       for (const reserva of reservas) {
@@ -10314,8 +10922,10 @@ export class CampanasController {
           if (enc === null) {
             if (!espaciosCampMap.has(reserva.inventario_id)) {
               console.warn(`No se encontró espacio_inventario para inventario_id: ${reserva.inventario_id}`);
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Inventario sin espacios registrados' });
             } else {
               console.warn(`Todos los espacios del inventario ${reserva.inventario_id} están ocupados en el período`);
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
               reservasOmitidas++;
             }
             continue;
@@ -10326,11 +10936,15 @@ export class CampanasController {
         // Validar que el espacio no esté ya reservado en el período
         if (espaciosReservadosEnPeriodo.has(espacioId)) {
           console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
           reservasOmitidas++;
           continue;
         }
 
-        const estatus = (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Bonificado' : 'Vendido';
+        // Reservas de CAMPAÑA = vendidas (firmes). La bonificación de una campaña
+        // es 'Vendido bonificado' (ocupa/bloquea), NO 'Bonificado' (que es el hold
+        // tentativo de una PROPUESTA). Ver ESTATUS_FIRME en inventario-bloqueo.service.
+        const estatus = (reserva.tipo === 'Bonificacion' || isBfCara) ? 'Vendido bonificado' : 'Vendido';
 
         // Fix dups PATSA-style: si ya existe reserva activa para este espacio + sc,
         // NO crear otra. Si hay una soft-deleted previa, reactivarla en vez de
@@ -10339,6 +10953,7 @@ export class CampanasController {
         if (solicitudCaraId) {
           if (activasCaraC.has(espacioId)) {
             console.warn(`Reserva ya existe para inv=${espacioId} sc=${solicitudCaraId}, omitiendo`);
+            omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Ya está reservado para este circuito' });
             reservasOmitidas++;
             continue;
           }
@@ -10352,7 +10967,7 @@ export class CampanasController {
 
         const grupoCompletoId = (agruparComoCompleto && reserva.tipo !== 'Bonificacion') ? await getGroupId() : null;
         espaciosReservadosEnPeriodo.add(espacioId);
-        workListCamp.push({ espacioId, estatus, grupoCompletoId });
+        workListCamp.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       }
 
       // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
@@ -10384,6 +10999,7 @@ export class CampanasController {
       // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
       // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
       const BATCH_SIZE_CAMP = 5;
+      const espaciosFirmados: number[] = [];
       for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
         const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
         const resultados = await Promise.all(lote.map(async (w) => {
@@ -10403,19 +11019,47 @@ export class CampanasController {
               tarea: '',
               grupo_completo_id: w.grupoCompletoId,
             }, fechaIni, fechaFinDate, undefined, invPadrePorEspacioCamp.get(w.espacioId) ?? null);
-            return { w, lockResult };
+            return { w, lockResult, inesperado: false };
           } catch (err) {
             console.error(`[Reserva camp] error inesperado en espacio ${w.espacioId}:`, err);
-            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const }, inesperado: true };
           }
         }));
-        for (const { w, lockResult } of resultados) {
+        for (const { w, lockResult, inesperado } of resultados) {
           if (lockResult.ok) {
             reservasCreadas++;
+            espaciosFirmados.push(w.espacioId);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+            omitidosDetalleCamp.push({
+              inventario_id: w.invId,
+              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
+            });
             reservasOmitidas++;
           }
+        }
+      }
+
+      // Desplazamiento: al FIRMAR inventario en campaña, robarle la pieza a las
+      // propuestas que solo la tenían tentativa (mismo desalojo que el approve #4b)
+      // y avisar a sus dueños. Falla suave: si algo truena aquí las reservas ya
+      // quedaron creadas; solo se pierde el aviso, no la venta.
+      if (espaciosFirmados.length > 0) {
+        try {
+          const desplazadas = await desplazarTentativasEnEspacios(
+            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
+          );
+          if (desplazadas.length > 0) {
+            await notificarReservasDesplazadas(desplazadas, {
+              usuarioNombre: req.user?.nombre,
+              usuarioId: req.user?.userId,
+              campanaId,
+              origen: 'campana',
+            });
+            console.log(`[Camp ${campanaId}] desplazadas ${desplazadas.length} reserva(s) tentativa(s) de otras propuestas`);
+          }
+        } catch (err) {
+          console.error(`[Camp ${campanaId}] error en desplazamiento/notificación de tentativas:`, err);
         }
       }
 
@@ -10424,12 +11068,28 @@ export class CampanasController {
         emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { campanaId });
       }
 
+      // Resolver codigos de lo omitido para que el front pueda listarlos.
+      const codigosOmitidosCamp = new Map<number, string | null>();
+      if (omitidosDetalleCamp.length > 0) {
+        const invsOm = await prisma.inventarios.findMany({
+          where: { id: { in: [...new Set(omitidosDetalleCamp.map(o => o.inventario_id))] } },
+          select: { id: true, codigo_unico: true },
+        });
+        for (const i of invsOm) codigosOmitidosCamp.set(i.id, i.codigo_unico);
+      }
+
       res.json({
         success: true,
         data: {
           calendarioId: calendario.id,
           reservasCreadas,
           reservasOmitidas,
+          // Detalle por pieza de lo que no se reservo (codigo + motivo).
+          omitidos: omitidosDetalleCamp.map(o => ({
+            inventario_id: o.inventario_id,
+            codigo_unico: codigosOmitidosCamp.get(o.inventario_id) ?? null,
+            motivo: o.motivo,
+          })),
         },
       });
     } catch (error) {
@@ -10537,6 +11197,16 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
+
+      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
+      // editar circuitos existentes mientras la campaña esté en "Ajuste CTO Cliente".
+      if (esAsesorComercial(userRol)) {
+        const campAjuste = await prisma.campania.findUnique({ where: { id: campanaId }, select: { status: true } });
+        if (campAjuste?.status === 'Ajuste CTO Cliente') {
+          res.status(403).json({ success: false, error: 'Los asesores comerciales no pueden editar circuitos mientras la campaña está en Ajuste CTO Cliente.' });
+          return;
+        }
+      }
 
       // Validar fechas obligatorias si vienen en el payload.
       if ('inicio_periodo' in data && !data.inicio_periodo) {
@@ -11097,6 +11767,17 @@ export class CampanasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
+
+      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
+      // editar circuitos existentes mientras la campaña esté en "Ajuste CTO Cliente".
+      if (esAsesorComercial(userRol)) {
+        const campAjuste = await prisma.campania.findUnique({ where: { id: campanaId }, select: { status: true } });
+        if (campAjuste?.status === 'Ajuste CTO Cliente') {
+          res.status(403).json({ success: false, error: 'Los asesores comerciales no pueden editar circuitos mientras la campaña está en Ajuste CTO Cliente.' });
+          return;
+        }
+      }
+
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {
@@ -11385,43 +12066,84 @@ export class CampanasController {
         if (rows.length > 0) idsToDelete = rows.map(r => Number(r.id));
       }
 
+      // Cara-ids adicionales (ej. la pareja RT/BF) → una sola solicitud de auth.
+      const caraIdsAdicionales = Array.isArray(req.body?.caraIdsAdicionales)
+        ? req.body.caraIdsAdicionales.map((x: any) => parseInt(x)).filter((n: number) => !isNaN(n))
+        : [];
+      if (caraIdsAdicionales.length > 0) {
+        idsToDelete = Array.from(new Set([...idsToDelete, ...caraIdsAdicionales]));
+      }
+
       // Info para historial antes de eliminar
       const carasParaHistorial = await prisma.solicitudCaras.findMany({
         where: { id: { in: idsToDelete } },
         select: { id: true, idquote: true, articulo: true, formato: true },
       });
-      const reservasCount = await prisma.reservas.count({ where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null } });
-
-      await prisma.$transaction([
-        prisma.reservas.updateMany({
-          where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null },
-          data: { deleted_at: new Date() },
-        }),
-        prisma.solicitudCaras.deleteMany({
-          where: { id: { in: idsToDelete } },
-        }),
-      ]);
-
-      // Historial
-      const idquote = carasParaHistorial[0]?.idquote;
-      if (idquote) {
-        await prisma.historial.create({
-          data: {
-            tipo: 'Campaña',
-            ref_id: parseInt(idquote) || 0,
-            accion: 'Eliminación de circuito',
-            fecha_hora: new Date(),
-            detalles: JSON.stringify({
-              usuario: req.user?.nombre || 'Usuario',
-              origen: 'campaña',
-              reservas_eliminadas: reservasCount,
-              circuitos: carasParaHistorial.map(c => ({ articulo: c.articulo, formato: c.formato })),
-            }),
-          },
+      // Feedback 2026-08-13: si alguna reserva del circuito tiene APS asignado,
+      // NO se permite eliminar (independiente de lo que muestre el front).
+      // El bote de basura del modal ya oculta este caso, pero blindamos backend.
+      const apsAsignados = await prisma.reservas.findMany({
+        where: { solicitudCaras_id: { in: idsToDelete }, deleted_at: null, APS: { not: null } },
+        select: { id: true, APS: true },
+      });
+      if (apsAsignados.length > 0) {
+        const apsList = Array.from(new Set(apsAsignados.map(r => r.APS).filter(Boolean)));
+        res.status(400).json({
+          success: false,
+          error: `No se puede eliminar: el circuito tiene ${apsAsignados.length} reserva(s) con APS asignado (${apsList.join(', ')}). Cancela el APS antes de eliminar.`,
         });
+        return;
       }
 
-      res.json({ success: true, message: 'Cara eliminada', eliminadas: idsToDelete.length });
+      // Bypass de autorización (uso INTERNO: reemplazo de par BF en edición). Borra
+      // al momento — mismo efecto que antes. El borrado normal del usuario NO lo pasa.
+      const sinAutorizacion = req.query.sinAutorizacion === 'true' || req.body?.sinAutorizacion === true;
+      if (sinAutorizacion) {
+        const r = await ejecutarEliminacionCarasCampana(idsToDelete, req.user?.nombre || 'Usuario');
+        res.json({ success: true, message: 'Cara eliminada', eliminadas: r.eliminadas });
+        return;
+      }
+
+      // [Autorización de Eliminación — SOLO campañas] En vez de borrar al instante,
+      // se crea una tarea de autorización (Filtro Gerente Comercial → DG, como las
+      // autorizaciones normales de DG). La cara y sus reservas quedan INTACTAS
+      // (inventario sigue ocupado) hasta que DG apruebe (se borra) o rechace (no).
+      const campaniaId = parseInt(req.params.id);
+      const idquote = carasParaHistorial[0]?.idquote;
+      const propuestaId = idquote ? parseInt(idquote) : NaN;
+      if (!campaniaId || isNaN(propuestaId)) {
+        res.status(400).json({ success: false, error: 'No se pudo resolver la campaña/propuesta del circuito' });
+        return;
+      }
+      const propuesta = await prisma.propuesta.findUnique({ where: { id: propuestaId }, select: { solicitud_id: true } });
+      const solicitudId = propuesta?.solicitud_id || 0;
+
+      const resumen = carasParaHistorial
+        .map(c => `${c.articulo || ''} ${c.formato || ''}`.trim())
+        .filter(Boolean)
+        .join(', ');
+      // Nota de ELIMINACIÓN (por qué se borra) — la escribe el solicitante y viaja
+      // en la tarea para que la vea el Gerente (filtro) y DG.
+      const motivoEliminacion = typeof req.body?.motivoEliminacion === 'string' ? req.body.motivoEliminacion : undefined;
+      const solicitud = await crearAutorizacionEliminacionCampana({
+        campaniaId,
+        propuestaId,
+        solicitudId,
+        caraIds: idsToDelete,
+        solicitanteNombre: req.user?.nombre || 'Usuario',
+        resumen: resumen ? `Circuitos: ${resumen}` : undefined,
+        motivo: motivoEliminacion,
+      });
+
+      res.json({
+        success: true,
+        requiereAutorizacion: true,
+        message: solicitud.tipo === 'existente'
+          ? 'Ya existe una solicitud de eliminación pendiente para este circuito.'
+          : `Solicitud de eliminación enviada a autorización (${solicitud.conFiltro ? 'Gerente Comercial → Dirección General' : 'Dirección General'}).`,
+        tareaId: solicitud.tareaId,
+        caras: solicitud.caras,
+      });
     } catch (error) {
       console.error('Error en deleteCara:', error);
       const message = error instanceof Error ? error.message : 'Error al eliminar cara';
@@ -11519,7 +12241,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -11531,27 +12253,29 @@ export class CampanasController {
 
         const nombreArteVal = (nombre_arte && String(nombre_arte).trim()) || null;
         const estatusOpVal = (estatus_operaciones && String(estatus_operaciones).trim()) || null;
+        const nombreGenericoVal = (nombre_generico && String(nombre_generico).trim()) || null;
         for (const reservaId of allReservaIds) {
           const pairKey = `${reservaId}:${archivoFinal}`;
           if (insertedPairs.has(pairKey)) continue;
           insertedPairs.add(pairKey);
           await prisma.$executeRawUnsafe(`
-            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte, estatus_operaciones)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal);
+            INSERT INTO artes_tradicionales (id_reserva, archivo, nota, spot, nombre_arte, estatus_operaciones, nombre_generico)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, reservaId, archivoFinal, nota.trim(), spot || 1, nombreArteVal, estatusOpVal, nombreGenericoVal);
         }
 
         // Biblioteca persistente: guardar el arte aunque luego se desasigne de
         // todos los inventarios. Idempotente por (campania_id, archivo): si ya
         // existe actualiza los metadatos.
         await prisma.$executeRawUnsafe(`
-          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, created_by_id)
-          VALUES (?, ?, 'tradicional', ?, ?, ?, ?)
+          INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+          VALUES (?, ?, 'tradicional', ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
             nota = COALESCE(VALUES(nota), nota),
-            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones)
-        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, userId || null);
+            estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+            nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, nombreGenericoVal, userId || null);
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)
@@ -11650,9 +12374,11 @@ export class CampanasController {
         created_at: Date;
         nombre_arte: string | null;
         estatus_operaciones: string | null;
+        nombre_generico: string | null;
       }[]>(`
         SELECT DISTINCT archivo, nota, MIN(id) as id, MIN(id_reserva) as id_reserva, spot,
-               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones
+               MIN(created_at) as created_at, MAX(nombre_arte) as nombre_arte, MAX(estatus_operaciones) as estatus_operaciones,
+               MAX(nombre_generico) as nombre_generico
         FROM artes_tradicionales
         WHERE id_reserva IN (${placeholders})
         GROUP BY archivo, nota, spot
@@ -11671,6 +12397,7 @@ export class CampanasController {
             createdAt: a.created_at,
             nombre_arte: a.nombre_arte || null,
             estatus_operaciones: a.estatus_operaciones || null,
+            nombre_generico: a.nombre_generico || null,
           })),
         });
         return;

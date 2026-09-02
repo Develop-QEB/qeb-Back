@@ -8,11 +8,19 @@ import {
   rechazarSolicitud,
   obtenerResumenAutorizacion,
   depurarTareasAutorizacionResueltas,
+  aprobarEliminacionCampana,
+  rechazarEliminacionCampana,
+  esTareaEliminacion,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { logHistorial } from '../utils/historial';
+
+// Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
+// al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
+// para que el conteo del header y el de la página no se descuadren.
+const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
 
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
@@ -62,16 +70,26 @@ export class NotificacionesController {
       const orderDir = req.query.orderDir as string || 'desc';
       const userId = req.user?.userId;
       const quick = req.query.quick as string;
+      const vista = req.query.vista as string;
 
       const where: Record<string, unknown> = {};
       const userRole = req.user?.rol;
 
+      // `vista` alinea esta lista con el criterio EXACTO del badge (getStats).
+      // Antes el front bajaba 200 filas "de todo" y filtraba por destinatario en
+      // el cliente: las filas que caían fuera de esas 200 se volvían invisibles
+      // aunque el badge sí las contara (ej. Autorización DG #97479, posición 276
+      // de 912 para el Director General). Con `vista` el filtro vive en la BD:
+      //  - 'notificaciones': tipo = 'Notificación' y el destinatario es
+      //    id_responsable (en estas filas id_asignado es el AUTOR, no el destino).
+      //  - 'tareas': tipo != 'Notificación', destinatario = responsable o asignado.
+      // Sin `vista` se conserva el comportamiento anterior (retrocompatibilidad).
+      const vistaNotificaciones = vista === 'notificaciones';
+      const vistaTareas = vista === 'tareas';
+
       // Filtrar por usuario responsable o asignado
       if (userId) {
-        const orConditions: Record<string, unknown>[] = [
-          { id_responsable: userId },
-          ...idAsignadoMatch(userId),
-        ];
+        const ids: number[] = [userId];
 
         // Coordinador de Diseño también ve tareas de todos los Diseñadores
         if (userRole === 'Coordinador de Diseño') {
@@ -79,10 +97,7 @@ export class NotificacionesController {
             where: { user_role: 'Diseñadores', deleted_at: null },
             select: { id: true },
           });
-          for (const d of disenadores) {
-            orConditions.push({ id_responsable: d.id });
-            orConditions.push(...idAsignadoMatch(d.id));
-          }
+          ids.push(...disenadores.map(d => d.id));
         }
 
         // Gerente Digital (Operaciones) también ve tareas de todos los Jefe de Operaciones Digital
@@ -91,13 +106,20 @@ export class NotificacionesController {
             where: { user_role: 'Jefe de Operaciones Digital', deleted_at: null },
             select: { id: true },
           });
-          for (const j of jefesDigital) {
-            orConditions.push({ id_responsable: j.id });
-            orConditions.push(...idAsignadoMatch(j.id));
-          }
+          ids.push(...jefesDigital.map(j => j.id));
         }
 
-        where.OR = orConditions;
+        const porResponsable = ids.map(id => ({ id_responsable: id }));
+        where.OR = vistaNotificaciones
+          ? porResponsable
+          : [...porResponsable, ...ids.flatMap(id => idAsignadoMatch(id))];
+      }
+
+      if (vistaNotificaciones || vistaTareas) {
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
+          vistaNotificaciones ? { tipo: 'Notificación' } : { tipo: { not: 'Notificación' } },
+        ];
       }
 
       // Diseñadores y Coordinador de Diseño solo deben ver tareas/notificaciones
@@ -232,12 +254,18 @@ export class NotificacionesController {
       // filtros rapidos
       if (quick) {
         switch (quick) {
+          // Mismo criterio que badge_count del header: "sin finalizar" / "no
+          // leídas" = estatus NO resuelto. Antes 'no_leidas' era `!= Atendido`
+          // (incluía Rechazado/Cancelado, que el badge no cuenta) y 'leidas' era
+          // solo `= Atendido`, así que ninguno de los dos cuadraba con la campanita.
           case 'no_leidas':
-            where.estatus = { not: 'Atendido' };
+          case 'pendientes':
+            where.estatus = { notIn: ESTATUS_RESUELTOS };
             break;
 
           case 'leidas':
-            where.estatus = 'Atendido';
+          case 'finalizadas':
+            where.estatus = { in: ESTATUS_RESUELTOS };
             break;
 
           case 'hoy': {
@@ -1048,7 +1076,9 @@ export class NotificacionesController {
 
       emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { ids: idsLimpios, estatus });
 
-      res.json({ success: true, affected: result.count });
+      // `data` es obligatorio: el cliente valida `response.data.data` y lanzaba
+      // "Error en bulk update" aunque el UPDATE sí se hubiera aplicado.
+      res.json({ success: true, data: { affected: result.count }, affected: result.count });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al actualizar bulk';
       res.status(500).json({ success: false, error: message });
@@ -1063,14 +1093,22 @@ export class NotificacionesController {
       // no de "marcar como leída". Si se incluyen aquí, las caras quedan en pendiente y
       // el director pierde la tarea de su bandeja.
       const where: Record<string, unknown> = {
-        estatus: { not: 'Atendido' },
+        // notIn resueltos, no `!= Atendido`: con `!= Atendido` esto reescribía a
+        // 'Atendido' filas ya Rechazado/Cancelado, perdiendo ese estatus (y sin
+        // efecto en el badge, que ya las consideraba resueltas).
+        estatus: { notIn: ESTATUS_RESUELTOS },
         NOT: { tipo: { contains: 'Autorización' } },
       };
 
       if (userId) {
+        // Mismo criterio de destinatario que el badge (getStats): en las filas
+        // 'Notificación' id_asignado es el AUTOR, no el destinatario. Incluirlo
+        // sin restricción de tipo hacía que "marcar todas leídas" cerrara
+        // notificaciones DE OTROS USUARIOS — las que yo generé — bajando la
+        // campanita de esa gente sin que las hubiera visto.
         where.OR = [
           { id_responsable: userId },
-          ...idAsignadoMatch(userId),
+          { AND: [{ tipo: { not: 'Notificación' } }, { OR: idAsignadoMatch(userId) }] },
         ];
       }
 
@@ -1203,7 +1241,7 @@ export class NotificacionesController {
         ];
       }
 
-      const [total, activas, badgeCount, porTipo, porEstatus] = await Promise.all([
+      const [total, activas, badgeCount, badgeNotif, porTipo, porEstatus] = await Promise.all([
         prisma.tareas.count({ where }),
         prisma.tareas.count({ where: { ...where, estatus: { not: 'Atendido' } } }),
         // badge_count: lo que se muestra en la burbuja roja del header.
@@ -1214,7 +1252,16 @@ export class NotificacionesController {
         // (ej. Rodrigo Margain con 405 registros: el limit se llenaba con
         // Atendidos viejos y el conteo cliente no veia el conjunto completo).
         prisma.tareas.count({
-          where: { ...where, estatus: { notIn: ['Atendido', 'Rechazado', 'Cancelado'] } },
+          where: { ...where, estatus: { notIn: ESTATUS_RESUELTOS } },
+        }),
+        // Parte del badge que corresponde a la pestaña "Notificaciones". Al
+        // combinarse con tipo='Notificación', la rama de id_asignado de `where`
+        // se vuelve imposible, así que esto cuenta exactamente lo mismo que la
+        // vista 'notificaciones' de getAll (destinatario = id_responsable).
+        // El resto (badge_tareas) se deriva por resta, para no pagar un COUNT
+        // extra sobre `tareas` en un endpoint que ya hace varios agregados.
+        prisma.tareas.count({
+          where: { ...where, tipo: 'Notificación', estatus: { notIn: ESTATUS_RESUELTOS } },
         }),
         prisma.tareas.groupBy({
           by: ['tipo'],
@@ -1247,6 +1294,12 @@ export class NotificacionesController {
         atendidas: total - activas,
         // Para la burbuja roja del header (Notif. sin leer + Tareas activas)
         badge_count: badgeCount,
+        // Desglose del badge por pestaña de /notificaciones. Invariante:
+        // badge_count === badge_notificaciones + badge_tareas (son disjuntos por
+        // tipo). Permite que cada pestaña muestre su propio conteo exacto y que
+        // el usuario vea de dónde sale el número de la campanita.
+        badge_notificaciones: badgeNotif,
+        badge_tareas: badgeCount - badgeNotif,
         por_tipo,
         por_estatus,
       };
@@ -1664,6 +1717,79 @@ export class NotificacionesController {
   }
 
   /**
+   * Aprueba una tarea de AUTORIZACIÓN DE ELIMINACIÓN (por tareaId). Si es Filtro
+   * → crea la tarea DG; si es la tarea DG → ejecuta el borrado real. Permiso:
+   * usuario asignado a la tarea, o Admin/DEV.
+   */
+  async aprobarEliminacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = req.body || {};
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      if (!tareaId || isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId inválido' });
+        return;
+      }
+      const tarea = await prisma.tareas.findUnique({ where: { id: tareaId }, select: { id_asignado: true, tipo: true } });
+      if (!tarea) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
+      if (!esTareaEliminacion(tarea.tipo)) { res.status(400).json({ success: false, error: 'La tarea no es de autorización de eliminación' }); return; }
+
+      const asignados = (tarea.id_asignado || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      const rol = (req.user?.rol || '').toUpperCase();
+      const esAdmin = rol === 'ADMINISTRADOR' || rol === 'DEV';
+      if (!esAdmin && !(userId && asignados.includes(userId))) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar esta eliminación' });
+        return;
+      }
+
+      const result = await aprobarEliminacionCampana(tareaId, userName, comentario);
+      res.json({
+        success: true,
+        message: `Eliminación aprobada: ${result.eliminadas} circuito(s) borrado(s).`,
+        data: result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al aprobar eliminación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Rechaza una tarea de AUTORIZACIÓN DE ELIMINACIÓN (por tareaId): NO borra,
+   * marca Rechazado y guarda el motivo. Permiso: asignado a la tarea o Admin/DEV.
+   */
+  async rechazarEliminacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario, motivo } = req.body || {};
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const motivoFinal = String(motivo || comentario || '').trim();
+      if (!tareaId || isNaN(tareaId)) { res.status(400).json({ success: false, error: 'tareaId inválido' }); return; }
+      if (!motivoFinal) { res.status(400).json({ success: false, error: 'Se requiere un motivo de rechazo' }); return; }
+
+      const tarea = await prisma.tareas.findUnique({ where: { id: tareaId }, select: { id_asignado: true, tipo: true } });
+      if (!tarea) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
+      if (!esTareaEliminacion(tarea.tipo)) { res.status(400).json({ success: false, error: 'La tarea no es de autorización de eliminación' }); return; }
+
+      const asignados = (tarea.id_asignado || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      const rol = (req.user?.rol || '').toUpperCase();
+      const esAdmin = rol === 'ADMINISTRADOR' || rol === 'DEV';
+      if (!esAdmin && !(userId && asignados.includes(userId))) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar esta eliminación' });
+        return;
+      }
+
+      await rechazarEliminacionCampana(tareaId, userName, motivoFinal);
+      res.json({ success: true, message: 'Eliminación rechazada.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al rechazar eliminación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
    * Rechaza toda la solicitud
    */
   async rechazarAutorizacion(req: AuthRequest, res: Response): Promise<void> {
@@ -1824,14 +1950,20 @@ export class NotificacionesController {
         },
       });
 
+      // Feedback 2026-08-24: solicitud.cliente_id es cliente.id (PK), NO
+      // cliente.CUIC. La query anterior comparaba CUIC contra id y por eso
+      // nunca encontraba el registro — se caia al fallback razon_social.
+      // Mismo bug que ya se corrigio en inventarios.controller.ts:838.
       let clienteNombre: string | null = solicitud?.razon_social || null;
       if (solicitud?.cliente_id) {
-        const clienteRecord = await prisma.cliente.findFirst({
-          where: { CUIC: solicitud.cliente_id },
-          select: { T0_U_Cliente: true },
+        const clienteRecord = await prisma.cliente.findUnique({
+          where: { id: solicitud.cliente_id },
+          select: { T0_U_Cliente: true, T0_U_RazonSocial: true },
         });
         if (clienteRecord?.T0_U_Cliente) {
           clienteNombre = clienteRecord.T0_U_Cliente;
+        } else if (clienteRecord?.T0_U_RazonSocial) {
+          clienteNombre = clienteRecord.T0_U_RazonSocial;
         }
       }
 
@@ -2010,11 +2142,11 @@ export class NotificacionesController {
             FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
             OR s.usuario_id = ?
           )
-          ${like ? 'AND (c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
+          ${like ? 'AND (CAST(c.id AS CHAR) LIKE ? OR c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
         ORDER BY c.fecha_inicio DESC
         LIMIT 100
       `, ...(like
-        ? [userIdStr, userId, like, like, like]
+        ? [userIdStr, userId, like, like, like, like]
         : [userIdStr, userId]));
 
       res.json({ success: true, data: rows });
@@ -2092,6 +2224,10 @@ export class NotificacionesController {
         fecha_fin,
         activar_recordatorio,
         recordar_dias_antes,
+        anio,
+        catorcena,
+        estatus_actividad,
+        base,
       } = req.body as {
         subtipo?: string;
         ref_id?: number | string;
@@ -2101,6 +2237,10 @@ export class NotificacionesController {
         fecha_fin?: string;
         activar_recordatorio?: boolean;
         recordar_dias_antes?: number;
+        anio?: number | string;
+        catorcena?: number | string;
+        estatus_actividad?: string;
+        base?: string;
       };
 
       const descripcionTrim = (descripcion || '').trim();
@@ -2123,6 +2263,13 @@ export class NotificacionesController {
 
       const refIdNum = ref_id != null ? Number(ref_id) : NaN;
       const hasRef = subtipo && ['Campaña', 'Propuesta'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
+
+      // Lead: subtipo valido sin referencia (no se busca en BD).
+      // Feedback ajuste 2026-08-13: el asesor puede registrar actividad sobre
+      // un prospecto/lead que aun no tiene campaña ni propuesta.
+      if (!hasRef && subtipo === 'Lead') {
+        subtipoOut = 'Lead';
+      }
 
       if (hasRef) {
         subtipoOut = subtipo as string;
@@ -2182,6 +2329,23 @@ export class NotificacionesController {
       // Default fecha_fin: +7 dias (misma convencion que create() existente).
       const defaultFin = new Date(nowMx); defaultFin.setDate(defaultFin.getDate() + 7);
 
+      // Ajuste feedback 2026-08-15: los 4 campos de clasificacion se guardan
+      // dentro del JSON contenido (no requiere migration). Validaciones
+      // defensivas: anio en un rango razonable, catorcena 1..26, y los
+      // enums solo aceptan los valores exactos definidos.
+      const anioNum = anio != null && anio !== '' ? Number(anio) : null;
+      const anioValido = Number.isFinite(anioNum as number) && (anioNum as number) >= 2020 && (anioNum as number) <= 2035
+        ? (anioNum as number)
+        : null;
+      const catorcenaNum = catorcena != null && catorcena !== '' ? Number(catorcena) : null;
+      const catorcenaValida = Number.isFinite(catorcenaNum as number) && (catorcenaNum as number) >= 1 && (catorcenaNum as number) <= 26
+        ? Math.trunc(catorcenaNum as number)
+        : null;
+      const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
+        estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
+      const baseValida: 'CIMU' | 'TRADE' | null =
+        base === 'CIMU' || base === 'TRADE' ? base : null;
+
       const contenido = JSON.stringify({
         cliente,
         marca,
@@ -2191,6 +2355,10 @@ export class NotificacionesController {
         recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
           ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
           : null,
+        anio: anioValido,
+        catorcena: catorcenaValida,
+        estatus_actividad: estatusActividadValido,
+        base: baseValida,
       });
 
       // Título dinámico según si hay referencia a campaña/propuesta o no.
@@ -2229,7 +2397,11 @@ export class NotificacionesController {
         usuarioId: userId,
         usuarioRol: rol,
         origen: 'notificaciones_actividad_comercial',
-        extras: { cliente, marca, subtipo: subtipoOut, ref_id: refIdOut },
+        extras: {
+          cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
+          anio: anioValido, catorcena: catorcenaValida,
+          estatus_actividad: estatusActividadValido, base: baseValida,
+        },
       });
 
       emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {

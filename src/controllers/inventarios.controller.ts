@@ -3,8 +3,14 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
-import { ESTATUS_QUE_BLOQUEAN } from '../services/inventario-bloqueo.service';
+import { ESTATUS_QUE_BLOQUEAN, ESTATUS_FIRME } from '../services/inventario-bloqueo.service';
 import { logHistorial } from '../utils/historial';
+import {
+  CatorcenaRef,
+  detectarConflictos,
+  esChoque,
+  limpiarCeldasDuplicadas,
+} from '../services/conflictos-ocupacion.service';
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371; // km
@@ -14,11 +20,6 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-interface CatorcenaRef {
-  numero: number;
-  anio: number;
 }
 
 /**
@@ -40,26 +41,6 @@ function parseCatorcenasBody(raw: unknown, max = 30): CatorcenaRef[] | null {
   return out;
 }
 
-/**
- * Ventana de fechas que cubren las catorcenas pedidas. Sirve para acotar
- * solicitudCaras por `inicio_periodo` y entrar por idx_periodos: sin esto, el
- * join por rango contra catorcenas obliga a recorrer todas las caras.
- * Devuelve null si ninguna de las catorcenas existe en la tabla.
- */
-async function rangoFechasDeCatorcenas(cats: CatorcenaRef[]): Promise<{ inicio: Date; fin: Date } | null> {
-  const ph = cats.map(() => '(?,?)').join(',');
-  const params = cats.flatMap(c => [c.anio, c.numero]);
-  const rows = await prisma.$queryRawUnsafe<Array<{ inicio: Date | null; fin: Date | null }>>(
-    `SELECT MIN(fecha_inicio) AS inicio, MAX(fecha_fin) AS fin
-       FROM catorcenas
-      WHERE (año, numero_catorcena) IN (${ph})`,
-    ...params
-  );
-  const row = rows[0];
-  if (!row?.inicio || !row?.fin) return null;
-  return { inicio: row.inicio, fin: row.fin };
-}
-
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -70,6 +51,8 @@ export class InventariosController {
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
       const cto = req.query.cto as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
@@ -110,6 +93,18 @@ export class InventariosController {
 
       if (cto) {
         where.cto = cto;
+      }
+
+      if (tradicional) {
+        where.tradicional_digital = tradicional;
+      }
+
+      // Circuito Mi Macro Periférico: comparte mueble (PARABUS, VIDRIO, MUPIS…)
+      // con el mobiliario de calle pero se distingue por tipo_de_mueble.
+      if (micromacro === 'excluir') {
+        where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      } else if (micromacro === 'solo') {
+        where.tipo_de_mueble = { contains: 'MI MACRO' };
       }
 
       // Filter by campaign: get inventario IDs linked to this campaign
@@ -329,6 +324,8 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       // Build Prisma where filter — same logic as getAll
@@ -354,6 +351,9 @@ export class InventariosController {
       if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
+      if (tradicional) where.tradicional_digital = tradicional;
+      if (micromacro === 'excluir') where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') where.tipo_de_mueble = { contains: 'MI MACRO' };
 
       // Filter by campaign: get inventario IDs linked to this campaign
       if (campanaId) {
@@ -552,6 +552,22 @@ export class InventariosController {
               { plaza: filtro },
             ],
           });
+
+          // [Toluca = plaza aparte] Una búsqueda de Área Metropolitana (CDMX + Edomex,
+          // firma 'Ciudad de México / AM' → estado 'Ciudad de México' + 'Estado de
+          // México') NO debe traer Toluca: para QEB es una plaza DISTINTA aunque
+          // geográficamente Toluca esté en Estado de México. Sin esto, el match por
+          // `estado = 'Estado de México'` colaba las 447 caras de la plaza TOLUCA.
+          // Las búsquedas propias de Toluca (estado 'Estado de México' SIN CDMX) no
+          // se ven afectadas.
+          const estadosNorm = estadoList.map(e => e.toLowerCase());
+          const tieneEstado = (...vals: string[]) => vals.some(v => estadosNorm.includes(v));
+          const esAreaMetropolitana =
+            tieneEstado('ciudad de méxico', 'ciudad de mexico') &&
+            tieneEstado('estado de méxico', 'estado de mexico');
+          if (esAreaMetropolitana) {
+            (where.AND as Record<string, unknown>[]).push({ plaza: { not: 'TOLUCA' } });
+          }
         }
       }
 
@@ -654,6 +670,26 @@ export class InventariosController {
         calendarioIds = calendarios.map(c => c.id);
       }
 
+      // Pareja RT/BF: las caras del MISMO grupo_rt_bf no pueden compartir la pieza
+      // física en el período (un parabús no es RT y BF a la vez). Se excluyen las
+      // reservas de las caras HERMANAS del grupo con CUALQUIER estatus (Reservado/
+      // Bonificado/Vendido/...), aparte de la ocupación FIRME cross-propuesta. Esto
+      // NO aplica entre propuestas distintas (ahí los tentativos siguen sin bloquear).
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId as string) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: parseInt(solicitudCaraId as string) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       // Get ALL reservations once (both espacio-level and inventario-level info)
       let reservedInventarioIds: Set<number> = new Set();
       let reservedEspacioIds: Set<number> = new Set();
@@ -663,7 +699,16 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] },
+            // Ocupa la pieza si: (a) es FIRME de CUALQUIER propuesta —
+            // Reservado/Bonificado NO bloquean cross-propuesta (duplicados OK); o
+            // (b) es de una cara HERMANA del mismo grupo_rt_bf, con cualquier
+            // estatus (la RT y su BF pareja no comparten pieza en el período).
+            OR: [
+              { estatus: { in: [...ESTATUS_FIRME] } },
+              ...(grupoHermanasCaraIds.length > 0
+                ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                : []),
+            ],
           },
           select: { inventario_id: true },
         });
@@ -678,6 +723,32 @@ export class InventariosController {
             select: { inventario_id: true },
           });
           reservedInventarioIds = new Set(espaciosReservados.map(e => e.inventario_id));
+        }
+      }
+
+      // (R5) Contador de reservas TENTATIVAS (Reservado/Bonificado) por pieza física en
+      // el período. Es informativo — cuántas propuestas la tienen apartada — NO bloquea.
+      const tentativasPorInventario = new Map<number, number>();
+      if (calendarioIds.length > 0) {
+        const tentativas = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIds },
+            estatus: { in: ['Reservado', 'Bonificado'] },
+          },
+          select: { inventario_id: true },
+        });
+        if (tentativas.length > 0) {
+          const espacioToInv = new Map<number, number>();
+          const espsT = await prisma.espacio_inventario.findMany({
+            where: { id: { in: [...new Set(tentativas.map(t => t.inventario_id))] } },
+            select: { id: true, inventario_id: true },
+          });
+          espsT.forEach(e => espacioToInv.set(e.id, e.inventario_id));
+          for (const t of tentativas) {
+            const invId = espacioToInv.get(t.inventario_id);
+            if (invId != null) tentativasPorInventario.set(invId, (tentativasPorInventario.get(invId) || 0) + 1);
+          }
         }
       }
 
@@ -735,6 +806,7 @@ export class InventariosController {
         espacios: typeof espacios;
         espacios_count: number;
         ya_reservado_para_cara: boolean;
+        reservas_tentativas_count: number;
       }> = [];
 
       for (const inv of inventarios) {
@@ -764,6 +836,7 @@ export class InventariosController {
             espacios: invEspacios,
             espacios_count: -1, // -1 = sin límite (front lo interpreta)
             ya_reservado_para_cara: yaReservadoParaCara,
+            reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
           });
         } else {
           // Traditional: show once if not all reserved
@@ -779,6 +852,7 @@ export class InventariosController {
               espacios: availableEspacios,
               espacios_count: availableEspacios.length,
               ya_reservado_para_cara: alreadyReservedForCara.has(inv.id),
+              reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
             });
           }
         }
@@ -1366,7 +1440,8 @@ export class InventariosController {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
               inventario_id: { in: espacios.map(e => e.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] }
+              // Solo FIRMES ocupan (ver getDisponibles).
+              estatus: { in: [...ESTATUS_FIRME] }
             },
             select: { inventario_id: true }
           });
@@ -2172,14 +2247,42 @@ export class InventariosController {
       });
       const calendarioIds = calendariosOverlap.map(c => c.id);
 
+      // Misma regla que getDisponibles: una pieza SOLO cuenta ocupada si está FIRME
+      // (cualquier propuesta) o la tiene una cara HERMANA del mismo grupo_rt_bf
+      // (cualquier estatus). Las reservas tentativas de OTRAS propuestas NO ocupan
+      // (duplicados permitidos). Se incluye también la cara ACTUAL para poder marcar
+      // 'ya_reservado_para_cara'.
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: Number(solicitudCaraId) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: Number(solicitudCaraId) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       const espacioIds = espacios.map(e => e.id);
       const reservasActivas = (espacioIds.length > 0 && calendarioIds.length > 0)
         ? await prisma.reservas.findMany({
             where: {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
-              estatus: { in: [...ESTATUS_QUE_BLOQUEAN] },
               inventario_id: { in: espacioIds },
+              OR: [
+                { estatus: { in: [...ESTATUS_FIRME] } },
+                ...(grupoHermanasCaraIds.length > 0
+                  ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                  : []),
+                ...(solicitudCaraId
+                  ? [{ solicitudCaras_id: Number(solicitudCaraId) }]
+                  : []),
+              ],
             },
             select: { inventario_id: true, solicitudCaras_id: true },
           })
@@ -2286,17 +2389,10 @@ export class InventariosController {
 
   /**
    * Auditoria de conflictos de ocupacion (sitio x catorcena).
-   *
-   * Un inventario Tradicional solo admite una campaña por catorcena; dos o mas
-   * reservas vivas en la misma celda es un error de operacion. Detectarlo
-   * recorriendo la matriz obliga a traer el historial de cada sitio, inviable
-   * sobre los ~18,600 inventarios. Aqui se resuelve con agregados en SQL.
+   * La deteccion vive en conflictos-ocupacion.service para que el endpoint y el
+   * cron del monitor compartan exactamente el mismo criterio.
    *
    * `ids` es opcional: sin el, audita TODO el inventario.
-   *
-   * Ojo con `tradicional_digital`: puede venir NULL y el frontend trata esos
-   * sitios como Tradicional. Un `<> 'Digital'` a secas evalua NULL y los
-   * descartaria, perdiendo conflictos reales.
    */
   async getConflictosOcupacion(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -2317,127 +2413,139 @@ export class InventariosController {
           return;
         }
         ids = idsRaw.map(Number).filter(n => Number.isInteger(n));
-        if (ids.length === 0) {
-          res.json({ success: true, data: { conflictos: [] } });
-          return;
-        }
       }
 
-      const rango = await rangoFechasDeCatorcenas(catorcenas);
-      if (!rango) {
-        // Ninguna de las catorcenas pedidas existe: no hay nada que auditar.
-        res.json({ success: true, data: { conflictos: [] } });
-        return;
-      }
-
-      const phCat = catorcenas.map(() => '(?,?)').join(',');
-      const filtroIds = ids ? `AND ei.inventario_id IN (${ids.map(() => '?').join(',')})` : '';
-      const params: unknown[] = [
-        rango.inicio,
-        rango.fin,
-        ...catorcenas.flatMap(c => [c.anio, c.numero]),
-        ...(ids ?? []),
-      ];
-
-      // FASE 1 - celdas con 2+ reservas. Sin tocar cotizacion/campania: el join
-      // a cotizacion lleva un CAST que impide usar indice, y sobre el inventario
-      // completo la query se cae por costo. Aqui solo se identifican las celdas.
-      const queryCeldas = `
-        SELECT
-          ei.inventario_id,
-          i.codigo_unico,
-          i.plaza,
-          i.mueble,
-          i.ubicacion,
-          i.tradicional_digital,
-          cat.año AS anio,
-          cat.numero_catorcena,
-          COUNT(DISTINCT rsv.id) AS n
-        FROM espacio_inventario ei
-          INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-          INNER JOIN inventarios i     ON i.id = ei.inventario_id
-        WHERE rsv.deleted_at IS NULL
-          AND rsv.estatus <> 'eliminada'
-          AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
-          AND sc.inicio_periodo BETWEEN ? AND ?
-          AND (cat.año, cat.numero_catorcena) IN (${phCat})
-          ${filtroIds}
-        GROUP BY ei.inventario_id, i.codigo_unico, i.plaza, i.mueble, i.ubicacion,
-                 i.tradicional_digital, cat.año, cat.numero_catorcena
-        HAVING COUNT(DISTINCT rsv.id) >= 2
-        ORDER BY i.codigo_unico, cat.año, cat.numero_catorcena
-      `;
-
-      const celdas = await prisma.$queryRawUnsafe<Array<{
-        inventario_id: number;
-        codigo_unico: string | null;
-        plaza: string | null;
-        mueble: string | null;
-        ubicacion: string | null;
-        tradicional_digital: string | null;
-        anio: number;
-        numero_catorcena: number;
-        n: bigint | number;
-      }>>(queryCeldas, ...params);
-
-      if (celdas.length === 0) {
-        res.json({ success: true, data: { conflictos: [] } });
-        return;
-      }
-
-      // FASE 2 - cuantos origenes distintos ocupan cada celda, ya acotado a los
-      // sitios detectados (decenas o cientos, no 18 mil). Distingue el choque
-      // real entre campañas de las reservas duplicadas dentro de una sola.
-      // Una reserva sin campaña pertenece a una propuesta: se cuenta por idquote.
-      const idsConflicto = [...new Set(celdas.map(c => c.inventario_id))];
-      const phConf = idsConflicto.map(() => '?').join(',');
-      const origenes = await prisma.$queryRawUnsafe<Array<{
-        inventario_id: number;
-        anio: number;
-        numero_catorcena: number;
-        origenes: bigint | number;
-      }>>(
-        `SELECT
-           ei.inventario_id,
-           cat.año AS anio,
-           cat.numero_catorcena,
-           COUNT(DISTINCT cm.id)
-             + COUNT(DISTINCT CASE WHEN cm.id IS NULL THEN sc.idquote END) AS origenes
-         FROM espacio_inventario ei
-           INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
-           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-           INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-           LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
-         WHERE rsv.deleted_at IS NULL
-           AND rsv.estatus <> 'eliminada'
-           AND ei.inventario_id IN (${phConf})
-           AND sc.inicio_periodo BETWEEN ? AND ?
-           AND (cat.año, cat.numero_catorcena) IN (${phCat})
-         GROUP BY ei.inventario_id, cat.año, cat.numero_catorcena`,
-        ...idsConflicto,
-        rango.inicio,
-        rango.fin,
-        ...catorcenas.flatMap(c => [c.anio, c.numero])
-      );
-
-      const claveCelda = (r: { inventario_id: number; anio: number; numero_catorcena: number }) =>
-        `${r.inventario_id}|${r.anio}|${r.numero_catorcena}`;
-      const origenPorCelda = new Map(origenes.map(o => [claveCelda(o), Number(o.origenes)]));
-
-      const conflictos = celdas.map(c => ({
-        ...c,
-        n: Number(c.n),
-        // Si la fase 2 no trajo la celda, es una sola campaña: no inventamos choque.
-        origenes: origenPorCelda.get(claveCelda(c)) ?? 1,
-      }));
-
+      const conflictos = await detectarConflictos(catorcenas, ids);
       res.json({ success: true, data: { conflictos: serializeBigInt(conflictos) } });
     } catch (error) {
       console.error('Error en getConflictosOcupacion:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener conflictos';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Limpieza de DUPLICADOS: celdas donde una sola campaña metio varias reservas
+   * sobre la misma cara. Conserva una y soft-deletea el resto.
+   *
+   * Deliberadamente NO toca los CHOQUES: ahi hay campañas distintas y decidir
+   * cual vale es una decision comercial, no algo que pueda resolver el sistema.
+   *
+   * Reglas de seguridad, en orden:
+   *  - Se re-verifica en el servidor que la celda sea duplicado. Nunca se confia
+   *    en lo que mande el cliente: entre que se pinto la tabla y llego el clic,
+   *    la celda pudo cambiar.
+   *  - Si 2+ reservas tienen APS se omite la celda entera: no se puede decidir
+   *    cual conservar sin coordinar con SAP.
+   *  - Si solo una tiene APS, esa se conserva (SAP ya la conoce) y se sueltan
+   *    las demas. Si ninguna tiene, se conserva la mas antigua.
+   *  - Nunca se borra una reserva con APS.
+   *  - Borrado SUAVE (deleted_at) y con historial: todo es reversible.
+   */
+  async limpiarDuplicadosOcupacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const catorcenas = parseCatorcenasBody(req.body?.catorcenas);
+      if (!catorcenas) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de catorcenas ({ numero, anio }), maximo 30',
+        });
+        return;
+      }
+
+      const celdasRaw = req.body?.celdas;
+      if (!Array.isArray(celdasRaw) || celdasRaw.length === 0) {
+        res.status(400).json({ success: false, error: 'Se requiere un array de celdas a limpiar' });
+        return;
+      }
+      const pedidas = new Set<string>();
+      for (const c of celdasRaw) {
+        if (!c || typeof c !== 'object') continue;
+        const { inventario_id, anio, numero_catorcena } = c as Record<string, unknown>;
+        const inv = Number(inventario_id);
+        const a = Number(anio);
+        const n = Number(numero_catorcena);
+        if (!Number.isInteger(inv) || !Number.isInteger(a) || !Number.isInteger(n)) continue;
+        pedidas.add(`${inv}|${a}|${n}`);
+      }
+      if (pedidas.size === 0) {
+        res.status(400).json({ success: false, error: 'Ninguna celda valida' });
+        return;
+      }
+
+      // Re-detectar en el servidor y quedarnos solo con las que HOY son duplicado.
+      const ids = [...new Set([...pedidas].map(k => Number(k.split('|')[0])))];
+      const detectados = await detectarConflictos(catorcenas, ids);
+      const objetivo = detectados.filter(
+        c => !esChoque(c) && pedidas.has(`${c.inventario_id}|${c.anio}|${c.numero_catorcena}`)
+      );
+
+      // Celdas que el cliente pidió pero que ya no son duplicado (se resolvieron,
+      // o se volvieron choque). Se reportan para que la UI las explique.
+      const preOmitidas: { inventario_id: number; anio: number; numero_catorcena: number; motivo: string }[] = [];
+      for (const clave of pedidas) {
+        if (!objetivo.some(c => `${c.inventario_id}|${c.anio}|${c.numero_catorcena}` === clave)) {
+          const [inv, a, n] = clave.split('|').map(Number);
+          const esAhoraChoque = detectados.some(
+            c => esChoque(c) && `${c.inventario_id}|${c.anio}|${c.numero_catorcena}` === clave
+          );
+          preOmitidas.push({
+            inventario_id: inv, anio: a, numero_catorcena: n,
+            motivo: esAhoraChoque ? 'Ya no es duplicado: ahora hay campañas distintas' : 'Ya no presenta conflicto',
+          });
+        }
+      }
+
+      // Las reglas (APS, conservar la más antigua, soft-delete, historial,
+      // bitácora) viven en el servicio, compartidas con la auto-limpieza.
+      const limpieza = await limpiarCeldasDuplicadas(objetivo, {
+        nombre: req.user?.nombre || 'Sistema',
+        usuarioId: req.user?.userId,
+        rol: req.user?.rol,
+        origen: 'Auditoria de conflictos (boton)',
+      });
+
+      const resultado = {
+        celdas_pedidas: pedidas.size,
+        celdas_limpiadas: limpieza.celdas_limpiadas,
+        reservas_liberadas: limpieza.reservas_liberadas,
+        omitidas: [...preOmitidas, ...limpieza.omitidas],
+        detalle: limpieza.detalle,
+      };
+
+      res.json({ success: true, data: resultado });
+    } catch (error) {
+      console.error('Error en limpiarDuplicadosOcupacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al limpiar duplicados';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Registro de limpiezas de duplicados (automáticas y manuales), más
+   * reciente primero. Es la bitácora que alimenta la vista "Limpiezas" de la
+   * Auditoría de conflictos.
+   */
+  async getLimpiezasOcupacion(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const limitRaw = Number(req.query?.limit);
+      const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 500 ? limitRaw : 200;
+
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT c.inventario_id, i.codigo_unico, i.plaza, i.mueble,
+                c.anio, c.numero_catorcena, c.tipo,
+                c.limpiado_at, c.limpiado_por, c.reserva_conservada, c.reservas_liberadas
+           FROM conflictos_ocupacion c
+           LEFT JOIN inventarios i ON i.id = c.inventario_id
+          WHERE c.limpiado_at IS NOT NULL
+          ORDER BY c.limpiado_at DESC
+          LIMIT ${limit}`
+      );
+
+      res.json({ success: true, data: { limpiezas: serializeBigInt(rows) } });
+    } catch (error) {
+      console.error('Error en getLimpiezasOcupacion:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener limpiezas';
       res.status(500).json({ success: false, error: message });
     }
   }

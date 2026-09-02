@@ -922,29 +922,53 @@ export class SolicitudesController {
         return;
       }
 
-      // No permitir aprobar (ni pasar a Atendida) si hay caras pendientes de
-      // autorización DG/DCM. Política: la solicitud no avanza a propuesta
-      // hasta que dirección apruebe (o rechace) los circuitos pendientes.
-      // Feedback 2026-08-14: mismo criterio para Rechazada / Cancelada — no se
-      // puede cortar el flujo mientras direccion aun no responde, para no
-      // dejar tareas de autorizacion huerfanas y perder trazabilidad.
-      // Feedback 2026-08-15: incluir tambien 'correccion' + 'rechazado' —
-      // no bastaba con 'pendiente' porque los circuitos devueltos a
-      // correccion tampoco cierran la autorizacion.
+      // Guard de autorizacion — se divide por sentido de la transicion.
+      //
+      // AVANCE (Aprobada / Atendida): bloquea si hay circuitos con
+      //   pendiente / correccion / rechazado. Todo debe estar aprobado.
+      //
+      // CIERRE (Rechazada / Cancelada): bloquea si hay pendiente o
+      //   correccion (direccion aun no responde). Los 'rechazado' NO
+      //   bloquean SI todos los circuitos estan rechazados (limpio: se
+      //   puede cerrar). Si hay MEZCLA rechazado + aprobado → tambien
+      //   bloquea, porque cerrar tiraria trabajo aprobado que el asesor
+      //   probablemente quiere salvar (feedback Jos 2026-08-31).
+      //
+      // Historia: f71eea3 (2026-08-14) agrego rechazado a las 4 transiciones
+      // — contradictorio para el cierre puro. 6df5b99 (2026-08-31) lo saco
+      // pero era muy permisivo (permitia cerrar con mezcla). Este ajuste
+      // agrega la regla de "todos rechazados o ninguno".
       if (status === 'Aprobada' || status === 'Atendida' || status === 'Rechazada' || status === 'Cancelada') {
         const auth = await verificarCarasPendientes(parseInt(id).toString());
         const bloqueo = await verificarCarasRechazadas(parseInt(id).toString());
-        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
+        const esAvance = status === 'Aprobada' || status === 'Atendida';
+        const totalPend = auth.pendientesDg.length + auth.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        // Contar aprobadas para detectar mezcla en el cierre
+        const totalAprob = !esAvance ? await prisma.solicitudCaras.count({
+          where: {
+            idquote: parseInt(id).toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        }) : 0;
+
+        const bloqueaAvance = totalPend > 0 || totalCorr > 0 || totalRech > 0;
+        // Cierre: bloquea con pendiente/correccion, o con mezcla rechazado+aprobado.
+        const bloqueaCierre = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+
+        if ((esAvance && bloqueaAvance) || (!esAvance && bloqueaCierre)) {
           const partes: string[] = [];
-          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (esAvance && totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
+          if (!esAvance && totalRech > 0 && totalAprob > 0) {
+            partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
+          }
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. ${esAvance ? 'Corrigelos y espera la autorizacion antes de continuar.' : 'Resuelve los aprobados/rechazados primero (para cerrar directo, todos los circuitos deben estar rechazados).'}`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -952,6 +976,7 @@ export class SolicitudesController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;
@@ -1132,25 +1157,33 @@ export class SolicitudesController {
         return;
       }
 
-      // Feedback 2026-08-14: no se puede eliminar (bote de basura) una solicitud
-      // con autorizaciones DG/DCM pendientes — se dejarian tareas huerfanas y
-      // se corta el flujo antes de que direccion responda.
-      // Feedback 2026-08-18 (ajuste): tambien bloquear con 'correccion' o
-      // 'rechazado', no solo 'pendiente'.
+      // Guard del bote de basura — mismo criterio que updateStatus cierre.
+      // Bloquea con pendiente / correccion. Los rechazado solo bloquean si
+      // hay mezcla con aprobado (feedback Jos 2026-08-31: si TODOS los
+      // circuitos estan rechazados se puede eliminar limpio; si hay
+      // aprobados mezclados se tiraria trabajo bueno).
       {
         const auth = await verificarCarasPendientes(solicitud.id.toString());
         const bloqueo = await verificarCarasRechazadas(solicitud.id.toString());
-        if (auth.tienePendientes || bloqueo.tieneRechazadas) {
+        const totalPend = auth.pendientesDg.length + auth.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        const totalAprob = await prisma.solicitudCaras.count({
+          where: {
+            idquote: solicitud.id.toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        });
+        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        if (bloquea) {
           const partes: string[] = [];
-          const totalPendientes = auth.pendientesDg.length + auth.pendientesDcm.length;
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede eliminar la solicitud: hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -1158,6 +1191,7 @@ export class SolicitudesController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;
@@ -1321,6 +1355,16 @@ export class SolicitudesController {
       const catorcenaFin = req.query.catorcenaFin as string;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const tipoPeriodo = req.query.tipoPeriodo as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const where: Record<string, unknown> = { deleted_at: null };
@@ -1373,6 +1417,49 @@ export class SolicitudesController {
         if (orConditions.length > 0) {
           where.OR = orConditions;
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo pre-query de `ref_id` que usa getAll, intersectado como AND para
+      // no pisar el `where.id` que ponen visibilidad y periodo. Sin esto los
+      // KPIs se quedan en el universo sin filtrar y no cuadran con el listado.
+      const addIdFilter = (ids: number[]) => {
+        if (!Array.isArray(where.AND)) where.AND = where.AND ? [where.AND] : [];
+        (where.AND as any[]).push({ id: { in: ids } });
+      };
+      const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+        const qp: any[] = [];
+        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+        if (estatusValor) { conds.push('detalles LIKE ?'); qp.push(`%"despues":"${estatusValor}"%`); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+      if (creacionDesde || creacionHasta) {
+        const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
+        const qp: any[] = [];
+        if (creacionDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(creacionDesde)); }
+        if (creacionHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(creacionHasta)); }
+        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+        addIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+
+      // tipoPeriodo (catorcena / mensual). getAll lo aplica en JS sobre el
+      // enrichment; aquí no hay filas que enriquecer, así que se resuelve como
+      // pre-query con el mismo COALESCE: sin cotizacion cuenta como catorcena.
+      if (tipoPeriodo && tipoPeriodo !== 'todas') {
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id
+           FROM solicitud s
+           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           LEFT JOIN cotizacion ct ON ct.id_propuesta = pr.id
+           WHERE s.deleted_at IS NULL AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`,
+          tipoPeriodo);
+        addIdFilter(rows.map(r => Number(r.id)));
       }
 
       // Visibility filter

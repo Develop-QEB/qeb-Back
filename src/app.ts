@@ -6,6 +6,7 @@ import path from 'path';
 import routes from './routes';
 import { errorMiddleware, notFoundMiddleware } from './middleware/error.middleware';
 import { maintenanceGuard } from './middleware/maintenance.middleware';
+import { requestTimeout } from './middleware/timeout.middleware';
 
 const app = express();
 
@@ -21,7 +22,9 @@ const getAllowedOrigins = () => {
     'http://localhost:5177',
     'https://front-qeb.vercel.app',
     'https://app.qeb.mx',
-    'https://develop-qeb.vercel.app'
+    'https://develop-qeb.vercel.app',
+    'https://jos.qeb.mx',
+    'https://pruebas.qeb.mx'
   ];
 
   const envUrl = process.env.FRONTEND_URL;
@@ -93,6 +96,9 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Pragma', 'no-cache');
   next();
 });
+// Timeout por ruta: 503 recuperable en vez de requests colgadas acumulándose
+// cuando la BD se satura (ver timeout.middleware.ts).
+app.use('/api', requestTimeout);
 // Guard de mantenimiento programado. Salta /auth/* (login/refresh/logout/etc)
 // y /public/* (vista de propuesta para clientes). Bloquea el resto si el rol
 // del JWT no es DEV o de Trafico.

@@ -6,6 +6,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { parseCircuitoDigital } from '../lib/circuitos';
+import { registrarReservaCreada } from './conflictos-live.service';
 
 const prisma = new PrismaClient();
 
@@ -218,6 +219,15 @@ export async function autoReservarCircuitoSiAplica(
         grupo_completo_id: null,
       },
     });
+  }
+
+  // Observador de conflictos: anota los sitios para que la verificacion
+  // dirigida (debounced) corra tras la rafaga. El debounce (20s) da margen de
+  // sobra para que la transaccion de este flujo ya este commiteada.
+  // Solo si la creacion fue FIRME ('Vendido'); 'Bonificado' es tentativo y el
+  // detector no lo cuenta.
+  if (estatus === 'Vendido') {
+    for (const r of aReservar) registrarReservaCreada(r.inventario_id);
   }
 
   // 9. Actualizar caras_flujo / caras_contraflujo SOLO para RT (no para BF/CF/CT)

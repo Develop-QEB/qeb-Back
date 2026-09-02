@@ -11,11 +11,11 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
@@ -400,6 +400,55 @@ async function enviarCorreoNotificacion(
   }
 }
 
+
+/**
+ * (R6) Error para abortar el pase a ventas cuando un circuito quedó incompleto por un
+ * desplazamiento concurrente (otra venta/campaña le robó piezas durante el proceso).
+ */
+class CircuitoIncompletoError extends Error {
+  constructor() { super('CIRCUITO_INCOMPLETO_TRAS_VENTA'); this.name = 'CircuitoIncompletoError'; }
+}
+
+/**
+ * (R6) Devuelve true si ALGÚN circuito de la propuesta tiene reservas incompletas
+ * (flujo/contraflujo/bonificación no cubiertos). Mismo criterio que el guard de
+ * updateStatus; reutilizable DENTRO de la tx del approve. Cuenta Vendido/Vendido
+ * bonificado igual que Reservado/Bonificado (funciona antes o después del flip a firme).
+ * IM no requiere reservas. Recibe el tx client para ver el estado tras el guardián.
+ */
+async function propuestaTieneCircuitosIncompletos(client: any, propuestaId: number): Promise<boolean> {
+  const caras = await client.solicitudCaras.findMany({ where: { idquote: String(propuestaId) } });
+  const reservas: any[] = await client.$queryRawUnsafe(`
+    SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
+    FROM reservas rsv
+      INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+      INNER JOIN inventarios i ON epIn.inventario_id = i.id
+      INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+    WHERE sc.idquote = ? AND rsv.deleted_at IS NULL
+  `, String(propuestaId));
+  const cot = await client.cotizacion.findFirst({ where: { id_propuesta: propuestaId }, select: { tipo_periodo: true } });
+  const esMensual = cot?.tipo_periodo === 'mensual';
+  return caras.some((cara: any) => {
+    const articulo = (cara.articulo || '').toUpperCase();
+    // IM (impresión) y ES/ESP (ejec. especial) no requieren inventario → nunca incompletos.
+    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
+    const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
+    const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
+    const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
+    if (isBonifSplit) return bonificacionReservado !== (Number(cara.bonificacion) || 0);
+    const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
+    const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
+    const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
+    const rawFlujoRequerido = Number(cara.caras_flujo) || 0;
+    const rawContraRequerido = Number(cara.caras_contraflujo) || 0;
+    const bonificacionRequerido = Number(cara.bonificacion) || 0;
+    const flujoReservado = esMensual ? rawFlujoReservado + rawContraReservado : rawFlujoReservado;
+    const contraflujoReservado = esMensual ? 0 : rawContraReservado;
+    const flujoRequerido = esMensual ? rawFlujoRequerido + rawContraRequerido : rawFlujoRequerido;
+    const contraflujoRequerido = esMensual ? 0 : rawContraRequerido;
+    return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
+  });
+}
 
 export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -880,27 +929,33 @@ export class PropuestasController {
         }
       }
 
-      // Feedback 2026-08-14: no permitir Rechazada/Cancelada mientras existan
-      // autorizaciones DG/DCM pendientes — misma politica que solicitud/campana.
-      // Feedback 2026-08-18 (ajuste): tambien bloquear cuando hay circuitos
-      // en 'correccion' o 'rechazado'. Antes solo se checaba 'pendiente' y
-      // Jos pudo rechazar una propuesta con 1 circuito en correccion sin
-      // resolver. Ahora se consultan las 3 dimensiones y el mensaje trae el
-      // desglose (mismo patron que Aprobada/Pase a ventas).
+      // Guard de cierre (Rechazada / Cancelada) — feedback 2026-08-14/18/31.
+      // Bloquea si hay pendiente/correccion. Los rechazado solo bloquean si
+      // hay MEZCLA con aprobado (feedback Jos 2026-08-31: si TODOS los
+      // circuitos estan rechazados se puede cerrar limpio; con aprobados
+      // mezclados se tiraria trabajo bueno).
       if (status === 'Rechazada' || status === 'Cancelada') {
         const autorizacion = await verificarCarasPendientes(propuestaId.toString());
         const bloqueo = await verificarCarasRechazadas(propuestaId.toString());
-        if (autorizacion.tienePendientes || bloqueo.tieneRechazadas) {
+        const totalPend = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
+        const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+        const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
+        const totalAprob = await prisma.solicitudCaras.count({
+          where: {
+            idquote: propuestaId.toString(),
+            autorizacion_dg: 'aprobado',
+            autorizacion_dcm: 'aprobado',
+          },
+        });
+        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        if (bloquea) {
           const partes: string[] = [];
-          const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
-          if (totalPendientes > 0) partes.push(`${totalPendientes} pendiente(s)`);
-          const totalRech = bloqueo.rechazadasDg.length + bloqueo.rechazadasDcm.length;
-          if (totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          const totalCorr = bloqueo.correccionDg.length + bloqueo.correccionDcm.length;
+          if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
           if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}": hay circuitos que impiden el avance — ${partes.join(', ')}. Corrigelos y espera la autorizacion antes de continuar.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,
@@ -908,6 +963,7 @@ export class PropuestasController {
               rechazadasDcm: bloqueo.rechazadasDcm.length,
               correccionDg: bloqueo.correccionDg.length,
               correccionDcm: bloqueo.correccionDcm.length,
+              aprobadas: totalAprob,
             },
           });
           return;
@@ -959,76 +1015,11 @@ export class PropuestasController {
           return;
         }
 
-        // Verificar que todas las reservas estén completas
-        const caras = await prisma.solicitudCaras.findMany({
-          where: { idquote: String(propuestaId) },
-        });
-        const reservasQuery = `
-          SELECT rsv.id, rsv.estatus, i.tipo_de_cara, sc.id as solicitud_cara_id
-          FROM reservas rsv
-            INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
-            INNER JOIN inventarios i ON epIn.inventario_id = i.id
-            INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          WHERE sc.idquote = ?
-            AND rsv.deleted_at IS NULL
-        `;
-        const reservas: any[] = await prisma.$queryRawUnsafe(reservasQuery, String(propuestaId));
-
-        // tipo_periodo de la propuesta. Mensual = Gran Formato / Mi Macro:
-        // solo Flujo, SIN Contraflujo. El front (AssignInventarioModal
-        // getCaraCompletionStatus) ya colapsa caras_flujo+caras_contraflujo → Flujo
-        // cuando es mensual; el backend debe hacer lo mismo o bloquea el pase a
-        // ventas de caras 100% reservadas (caso 80545: MMC VIDRIOS EXTERIOR,
-        // 8/8 reservado pero guardado como cf=4/cc=4 → 8≠4).
-        const cotPeriodo = await prisma.cotizacion.findFirst({
-          where: { id_propuesta: propuestaId },
-          select: { tipo_periodo: true },
-        });
-        const esMensual = cotPeriodo?.tipo_periodo === 'mensual';
-
-        const reservasIncompletas = caras.some(cara => {
-          // Artículos de impresión (IM) no requieren reservas — siempre completos
-          const articulo = (cara.articulo || '').toUpperCase();
-          if (articulo.startsWith('IM')) return false;
-
-          const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
-          const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
-
-          // BF/CF/CT: artículos 100% bonificación. El split flujo/contra es INTERNO
-          // a la bonificación (cosmético) — NO es renta. Mismo criterio que el front
-          // (getCaraCompletionStatus): se valida SOLO por el total de reservas
-          // bonificadas, sin exigir flujo/contra de renta (que no existen aquí).
-          // Sin esto, las cortesías con caras_flujo/contra > 0 quedaban bloqueadas
-          // en el pase a ventas aunque su bonificación estuviera 100% reservada.
-          const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
-          if (isBonifSplit) {
-            return bonificacionReservado !== (Number(cara.bonificacion) || 0);
-          }
-
-          const nonBonificacion = caraReservas.filter(r => r.estatus !== 'Bonificado' && r.estatus !== 'Vendido bonificado');
-          const rawFlujoReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Flujo')).length;
-          const rawContraReservado = nonBonificacion.filter(r => String(r.tipo_de_cara).startsWith('Contraflujo')).length;
-          const rawFlujoRequerido = Number(cara.caras_flujo) || 0;
-          const rawContraRequerido = Number(cara.caras_contraflujo) || 0;
-          const bonificacionRequerido = Number(cara.bonificacion) || 0;
-
-          // Mensual: todo cuenta como Flujo, sin Contraflujo (mismo criterio que el
-          // front). Catorcenal: split exacto Flujo/Contraflujo como siempre.
-          const flujoReservado = esMensual ? rawFlujoReservado + rawContraReservado : rawFlujoReservado;
-          const contraflujoReservado = esMensual ? 0 : rawContraReservado;
-          const flujoRequerido = esMensual ? rawFlujoRequerido + rawContraRequerido : rawFlujoRequerido;
-          const contraflujoRequerido = esMensual ? 0 : rawContraRequerido;
-
-          return flujoReservado !== flujoRequerido || contraflujoReservado !== contraflujoRequerido || bonificacionReservado !== bonificacionRequerido;
-        });
-
-        if (reservasIncompletas) {
-          res.status(400).json({
-            success: false,
-            error: `No se puede cambiar a "${status}". No todos los grupos tienen sus reservas completas.`,
-          });
-          return;
-        }
+        // Ajuste 2026-08-25: se ELIMINÓ la validación de reservas completas.
+        // Circuitos con reservas incompletas (de menos o de más) ya NO bloquean
+        // el cambio a "Pase a ventas" / "Aprobada" — el front solo muestra un
+        // aviso informativo. (Antes aquí se comparaba caras_flujo/contraflujo/
+        // bonificación vs reservas reales y se devolvía 400.)
       }
 
       const statusAnterior = propuestaAnterior.status;
@@ -1578,13 +1569,23 @@ export class PropuestasController {
       const yearFin = req.query.yearFin as string;
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
+      // Filtros por historial — mismo contrato que getAll (modo + fecha + estatusValor).
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
-        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin, excludeRechazadas
+        u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1642,6 +1643,26 @@ export class PropuestasController {
         if (orClauses.length > 0) {
           whereConditions += ` AND (${orClauses.join(' OR ')})`;
         }
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
+      // el universo sin filtrar y no cuadra con el listado.
+      const endOfDayStr = (s: string): string => `${s} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; statsParams.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; statsParams.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; statsParams.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; statsParams.push(new Date(creacionDesde)); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; statsParams.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
       }
 
       // Tablas derivadas (LEFT JOIN extra) cuando hay filtro de catorcena. Se
@@ -2014,6 +2035,8 @@ export class PropuestasController {
       // Declare outside transaction so post-tx code can use them
       let cotizacion: any = null;
       let campania: any = null;
+      // Reservas de OTRAS propuestas desplazadas por esta venta (para notificar).
+      let desplazadasVenta: DesplazadaInfo[] = [];
 
       // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
@@ -2026,8 +2049,29 @@ export class PropuestasController {
           where: { cotizacion_id: cotizacion.id },
         }) : null;
 
-        // 1. Call stored procedure for reservas
-        await tx.$executeRaw`CALL actualizar_reservas(${propuestaId})`;
+        // Ajuste 2026-08-25: circuitos incompletos (de menos o de más) YA NO
+        // bloquean el avance. R6 debe seguir detectando el caso de CARRERA
+        // (otra venta desplaza piezas DURANTE esta aprobación), así que se toma
+        // un snapshot ANTES del flip: solo se aborta si la propuesta estaba
+        // completa y QUEDÓ incompleta por el desplazamiento concurrente.
+        const incompletaAntesDeVender = await propuestaTieneCircuitosIncompletos(tx, propuestaId);
+
+        // 1. Flip de reservas tentativas a firmes CON guardián de colisión
+        // (reemplaza al stored proc actualizar_reservas). Lanza VentaConflictoError
+        // si alguna pieza tradicional ya está vendida por otra campaña en el período
+        // → la tx se revierte y el catch responde 409 (fail-closed, sin sold-dupes).
+        // También desplaza (soft-delete) las tentativas de otras propuestas sobre
+        // las piezas ganadas y las devuelve para notificar tras el commit.
+        const ventaResult = await venderReservasPropuestaConGuardian(tx, propuestaId);
+        desplazadasVenta = ventaResult.desplazadas;
+
+        // (R6) Re-validar completeness DENTRO de la tx tras el guardián: si otra venta/
+        // campaña desplazó piezas de algún circuito durante el pase a ventas, quedó
+        // incompleto → abortar (rollback). Una propuesta que YA venía incompleta
+        // pasa de largo (política 2026-08-25: incompletas sí se venden).
+        if (!incompletaAntesDeVender && await propuestaTieneCircuitosIncompletos(tx, propuestaId)) {
+          throw new CircuitoIncompletoError();
+        }
 
         // 2. Update tareas status
         await tx.tareas.updateMany({
@@ -2281,6 +2325,19 @@ export class PropuestasController {
         }
       }, { timeout: 30000 });
 
+      // #4b: notificar a los dueños de las propuestas cuyas reservas se
+      // desplazaron (perdieron la pieza porque esta propuesta la vendió). Se hace
+      // tras el commit para no notificar si la aprobación se revierte. Comparte el
+      // helper con el alta directa en campaña (createReservas) → aviso idéntico.
+      if (desplazadasVenta.length > 0) {
+        await notificarReservasDesplazadas(desplazadasVenta, {
+          usuarioNombre: req.user?.nombre,
+          usuarioId: req.user?.userId,
+          campanaId: propuestaId,
+          origen: 'aprobacion',
+        });
+      }
+
       // Enviar correos a Analistas asignados (Seguimiento Campaña)
       if (campania) {
         const idsAsignadosCorreo = (id_asignados || propuesta.id_asignado || '')
@@ -2395,6 +2452,24 @@ export class PropuestasController {
         message: 'Propuesta aprobada exitosamente',
       });
     } catch (error) {
+      // (R6) Un circuito quedó incompleto por un desplazamiento concurrente durante el pase a ventas.
+      if (error instanceof CircuitoIncompletoError) {
+        res.status(409).json({
+          success: false,
+          error: 'No se pudo completar el pase a ventas: durante el proceso se desplazaron piezas y uno o más circuitos quedaron incompletos (otra venta se procesó primero). Revisa el inventario y reintenta.',
+          circuitoIncompleto: true,
+        });
+        return;
+      }
+      // Guardián de venta: alguna pieza tradicional ya se vendió en otra campaña.
+      if (error instanceof VentaConflictoError) {
+        res.status(409).json({
+          success: false,
+          error: `No se puede aprobar: ${error.conflictos.length} pieza(s) ya se vendieron en otra campaña en el período. Edita esas caras y reintenta.`,
+          conflictos: error.conflictos,
+        });
+        return;
+      }
       console.error('Error approving propuesta:', error);
       const message = error instanceof Error ? error.message : 'Error al aprobar propuesta';
       res.status(500).json({
@@ -2484,6 +2559,17 @@ export class PropuestasController {
       const catorcenaInicio = req.query.catorcenaInicio as string;
       const catorcenaFin = req.query.catorcenaFin as string;
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtros por historial — mismo contrato que getAll/getStats (modo +
+      // fecha + estatusValor). El desglose los ignoraba, por lo que el chip
+      // de Historial no acotaba nada en esta vista.
+      const modoHistorial = req.query.modo as string;
+      const fechaDesde = req.query.fechaDesde as string;
+      const fechaHasta = req.query.fechaHasta as string;
+      const estatusValor = req.query.estatusValor as string;
+      const cambioEstatusDesde = (modoHistorial === 'cambio_estatus' ? fechaDesde : '') || (req.query.cambioEstatusDesde as string);
+      const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
+      const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
+      const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2550,6 +2636,26 @@ export class PropuestasController {
       } else if (yearInicio && yearFin) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
         params.push(new Date(`${yearFin}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
+      // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
+      // Mismo EXISTS que getAll/getStats: si el desglose no lo aplica, muestra
+      // el universo completo mientras el listado y los KPIs si estan acotados.
+      const endOfDayStr = (d: string): string => `${d} 23:59:59`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
+        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
+      }
+      if (creacionDesde || creacionHasta) {
+        let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
+        if (creacionDesde) { sub += ` AND h_cr.fecha_hora >= ?`; params.push(new Date(creacionDesde)); }
+        if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
+        sub += `)`;
+        whereConditions += ` AND ${sub}`;
       }
 
       // Visibility
@@ -2629,11 +2735,10 @@ export class PropuestasController {
           ct.id_propuesta AS propuesta_id,
           GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
           MIN(i.id) as id,
-          CASE WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          CASE WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo' ELSE MIN(i.tipo_de_cara) END as tipo_de_cara,
+          -- Des-agrupado: cada cara sale con su codigo_unico real y su Flujo/Contraflujo
+          -- (antes se fusionaban los muebles completos en "BASE_completo_CIUDAD" / 'Completo').
+          MIN(i.codigo_unico) as codigo_unico,
+          MIN(i.tipo_de_cara) as tipo_de_cara,
           MIN(i.mueble) as mueble, MIN(i.plaza) as plaza, MIN(i.estado) as estado,
           MIN(i.tradicional_digital) as tradicional_digital,
           MIN(i.tarifa_publica) as tarifa_publica,
@@ -2655,7 +2760,7 @@ export class PropuestasController {
           INNER JOIN inventarios i ON i.id = epIn.inventario_id
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE ct.id_propuesta IN (${phIds})
-        GROUP BY ct.id_propuesta, COALESCE(rsv.grupo_completo_id, rsv.id), sc.id, cat.numero_catorcena, cat.año
+        GROUP BY ct.id_propuesta, rsv.id, sc.id, cat.numero_catorcena, cat.año
         ORDER BY ct.id_propuesta, cat.año, cat.numero_catorcena
       `;
 
@@ -3171,7 +3276,12 @@ export class PropuestasController {
     try {
       const { id } = req.params;
       const propuestaId = parseInt(id);
-      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin, agruparComoCompleto = true } = req.body;
+      const { reservas, solicitudCaraId, clienteId, fechaInicio, fechaFin } = req.body;
+      // [Muebles completos — separación total] Ya NO se ligan las caras con
+      // grupo_completo_id. Reservar-juntos sigue creando ambas caras (vienen en
+      // `reservas`), pero cada una queda independiente. Se ignora a propósito el
+      // flag `agruparComoCompleto` del body.
+      const agruparComoCompleto = false;
 
       if (!reservas || !Array.isArray(reservas) || reservas.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para guardar' });
@@ -3331,6 +3441,10 @@ export class PropuestasController {
 
       // Create reservas
       const createdReservas: { id: number }[] = [];
+      // Detalle de lo que NO se pudo reservar, con motivo. Antes cada descarte
+      // era un console.warn y el front solo recibia un numero: el usuario nunca
+      // sabia CUALES piezas se perdieron ni por que (y re-reservaba a ciegas).
+      const omitidosDetalle: { inventario_id: number; motivo: string }[] = [];
       const totalReservas = reservas.length;
       let reservasProcesadas = 0;
 
@@ -3348,27 +3462,30 @@ export class PropuestasController {
       // AQUÍ para que dos items del request no tomen el mismo espacio. La garantía
       // anti-doble-booking real (cross-request) sigue siendo el SELECT FOR UPDATE
       // dentro de createReservaConLock.
-      type WorkItem = { espacioId: number; estatus: string; grupoCompletoId: number | null };
+      type WorkItem = { espacioId: number; estatus: string; grupoCompletoId: number | null; invId: number };
       const workList: WorkItem[] = [];
       const planItem = (reserva: typeof reservas[number], grupoCompletoId: number | null): void => {
         const espacioId = reserva.espacio_id || encontrarEspacioDisponible(reserva.inventario_id);
         if (!espacioId) {
           console.warn(`No hay espacios disponibles para inventario_id ${reserva.inventario_id}`);
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Sin espacio disponible en el periodo' });
           reservasProcesadas++;
           return;
         }
         if (espaciosReservadosEnPeriodo.has(espacioId)) {
           console.warn(`El espacio ${espacioId} ya está reservado en el período`);
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Ocupado en el periodo' });
           reservasProcesadas++;
           return;
         }
         if (existentesCara.has(espacioId)) {
+          omitidosDetalle.push({ inventario_id: reserva.inventario_id, motivo: 'Ya está reservado para este circuito' });
           reservasProcesadas++;
           return;
         }
         const estatus = (reserva.tipo === 'Bonificacion' || esCortesia) ? 'Bonificado' : 'Reservado';
         espaciosReservadosEnPeriodo.add(espacioId);
-        workList.push({ espacioId, estatus, grupoCompletoId });
+        workList.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       };
 
       // Grupos completos primero (cada invId del grupo), luego las normales.
@@ -3418,18 +3535,24 @@ export class PropuestasController {
               tarea: '',
               grupo_completo_id: w.grupoCompletoId,
             }, fechaIni, fechaFinDate, proposalCaraIds, invPadrePorEspacio.get(w.espacioId) ?? null);
-            return { w, lockResult };
+            return { w, lockResult, inesperado: false };
           } catch (err) {
             console.error(`[Reserva] error inesperado en espacio ${w.espacioId}:`, err);
-            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const } };
+            // Antes esto se enmascaraba como OCCUPIED y el usuario leia "ocupado"
+            // ante un timeout de BD. Ahora el motivo distingue la causa real.
+            return { w, lockResult: { ok: false as const, reason: 'OCCUPIED' as const }, inesperado: true };
           }
         }));
-        for (const { w, lockResult } of resultados) {
+        for (const { w, lockResult, inesperado } of resultados) {
           reservasProcesadas++;
           if (lockResult.ok) {
             createdReservas.push(lockResult.reserva);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
+            omitidosDetalle.push({
+              inventario_id: w.invId,
+              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
+            });
           }
         }
         // Progreso por lote
@@ -3484,12 +3607,28 @@ export class PropuestasController {
         }
       }
 
+      // Resolver codigos de lo omitido para que el front pueda listarlos.
+      const codigosOmitidos = new Map<number, string | null>();
+      if (omitidosDetalle.length > 0) {
+        const invsOm = await prisma.inventarios.findMany({
+          where: { id: { in: [...new Set(omitidosDetalle.map(o => o.inventario_id))] } },
+          select: { id: true, codigo_unico: true },
+        });
+        for (const i of invsOm) codigosOmitidos.set(i.id, i.codigo_unico);
+      }
+
       res.json({
         success: true,
         data: {
           calendarioId: calendario.id,
           reservasCreadas: createdReservas.length,
           reservasOmitidas: Math.max(0, totalReservas - createdReservas.length),
+          // Detalle por pieza de lo que no se reservo (codigo + motivo).
+          omitidos: omitidosDetalle.map(o => ({
+            inventario_id: o.inventario_id,
+            codigo_unico: codigosOmitidos.get(o.inventario_id) ?? null,
+            motivo: o.motivo,
+          })),
         },
       });
     } catch (error) {
@@ -4274,6 +4413,17 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
+
+      // Bloqueo Edición Asesores — Estatus Ajuste CTO: un asesor comercial no puede
+      // editar circuitos existentes mientras la propuesta esté en "Ajuste Cto-Cliente".
+      if (esAsesorComercial(userRol)) {
+        const propAjuste = await prisma.propuesta.findUnique({ where: { id: parseInt(req.params.id) }, select: { status: true } });
+        if (propAjuste?.status === 'Ajuste Cto-Cliente' || propAjuste?.status === 'Ajuste Inventario') {
+          res.status(403).json({ success: false, error: `Los asesores comerciales no pueden editar circuitos mientras la propuesta está en ${propAjuste.status}.` });
+          return;
+        }
+      }
+
       const {
         ciudad,
         estados,
@@ -4867,6 +5017,17 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
       const userRol = req.user?.rol || '';
+
+      // Bloqueo Edición Asesores — un asesor comercial no puede editar circuitos
+      // existentes mientras la propuesta esté en "Ajuste Cto-Cliente" o "Ajuste Inventario".
+      if (esAsesorComercial(userRol)) {
+        const propAjuste = await prisma.propuesta.findUnique({ where: { id: parseInt(id) }, select: { status: true } });
+        if (propAjuste?.status === 'Ajuste Cto-Cliente' || propAjuste?.status === 'Ajuste Inventario') {
+          res.status(403).json({ success: false, error: `Los asesores comerciales no pueden editar circuitos mientras la propuesta está en ${propAjuste.status}.` });
+          return;
+        }
+      }
+
       const { caras: carasToUpdate } = req.body;
 
       if (!Array.isArray(carasToUpdate) || carasToUpdate.length === 0) {

@@ -6,6 +6,9 @@ import {
   getTicketById,
   createTicket,
   updateTicketStatus,
+  updateTicketArea,
+  bulkUpdateTicketStatus,
+  bulkUpdateTicketArea,
   getTicketStats,
   getTicketsHistorial,
   getTicketsUnreadCount,
@@ -63,5 +66,10 @@ router.get('/:id', getTicketById);
 // Rutas para programadores/admin (obtener todos, actualizar status)
 router.get('/', getAllTickets);
 router.patch('/:id/status', updateTicketStatus);
+// Reasignar entre QEB <-> TI. Feedback 2026-08-15.
+router.patch('/:id/area', updateTicketArea);
+// Acciones masivas. Feedback 2026-08-15.
+router.patch('/bulk/status', bulkUpdateTicketStatus);
+router.patch('/bulk/area', bulkUpdateTicketArea);
 
 export default router;
