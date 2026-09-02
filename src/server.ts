@@ -163,7 +163,10 @@ async function main() {
             return;
           }
           monitorEnCurso = true;
-          ejecutarMonitorConflictos()
+          // autoLimpiar:false — decisión 2026-09-02: el monitor solo detecta y
+          // notifica; la limpieza de duplicados se hace únicamente con el botón
+          // de la auditoría (con revisión humana de qué se libera).
+          ejecutarMonitorConflictos({ autoLimpiar: false })
             .then(r => console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`))
             .catch((err: unknown) => console.error('[MonitorConflictos] Error en corrida horaria:', err))
             .finally(() => { monitorEnCurso = false; });
