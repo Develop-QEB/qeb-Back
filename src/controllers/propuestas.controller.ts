@@ -3737,8 +3737,23 @@ export class PropuestasController {
       // Obtener info de reservas antes de eliminar para historial + emit liberación
       const reservasInfo = await prisma.reservas.findMany({
         where: { id: { in: reservaIds } },
-        select: { id: true, solicitudCaras_id: true, inventario_id: true },
+        select: { id: true, solicitudCaras_id: true, inventario_id: true, APS: true },
       });
+
+      // Guard servidor: una reserva con APS asignado NUNCA se elimina por esta vía
+      // (mismo criterio que la limpieza de duplicados: el APS ya vive en SAP y
+      // quitarla aquí genera desfase). El candado del front solo cubre la cara
+      // seleccionada; el modo Eliminar Masivo arrastraba equivalentes posteados
+      // de otras catorcenas sin revisarlos. Todo-o-nada: no se borra ninguna.
+      const bloqueadasAps = reservasInfo.filter(r => r.APS != null && r.APS > 0);
+      if (bloqueadasAps.length > 0) {
+        res.status(409).json({
+          success: false,
+          error: `${bloqueadasAps.length} reserva(s) tienen APS asignado y no se pueden eliminar (revisar con SAP)`,
+          bloqueadas: bloqueadasAps.map(r => ({ id: r.id, APS: r.APS })),
+        });
+        return;
+      }
       const caraIds = [...new Set(reservasInfo.map(r => r.solicitudCaras_id).filter(Boolean))];
       const carasInfo = caraIds.length > 0 ? await prisma.solicitudCaras.findMany({
         where: { id: { in: caraIds as number[] } },
