@@ -12206,7 +12206,7 @@ export class CampanasController {
         requiereAutorizacion: true,
         message: solicitud.tipo === 'existente'
           ? 'Ya existe una solicitud de eliminación pendiente para este circuito.'
-          : `Solicitud de eliminación enviada a autorización (${solicitud.conFiltro ? 'Gerente Comercial → Dirección General' : 'Dirección General'}).`,
+          : 'Solicitud de eliminación enviada a autorización de Gerencia.',
         tareaId: solicitud.tareaId,
         caras: solicitud.caras,
       });

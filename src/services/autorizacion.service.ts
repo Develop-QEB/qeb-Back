@@ -2506,7 +2506,6 @@ export async function aprobarEliminacionCampana(
   if (!esTareaEliminacion(tarea.tipo)) throw new Error('La tarea no es de autorización de eliminación');
 
   const caraIds = (tarea.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
-  const esGerente = tarea.tipo === TIPO_FILTRO_ELIMINACION;
 
   const res = await ejecutarEliminacionCarasCampana(caraIds, aprobadorNombre);
   await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
@@ -2514,7 +2513,7 @@ export async function aprobarEliminacionCampana(
     data: {
       tipo: 'autorizacion_solicitud_campana',
       ref_id: tarea.campania_id || 0,
-      accion: `${aprobadorNombre} (${esGerente ? 'Gerente Comercial' : 'Dirección General'}) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
+      accion: `${aprobadorNombre} (Gerencia) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
       detalles: JSON.stringify({ tareaId, eliminadas: res.eliminadas, reservas: res.reservas, comentario: (comentario || '').trim() || null }),
     },
   });
