@@ -2343,8 +2343,8 @@ export class NotificacionesController {
         : null;
       const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
         estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
-      const baseValida: 'CIMU' | 'TRADE' | null =
-        base === 'CIMU' || base === 'TRADE' ? base : null;
+      const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
+        base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
       const contenido = JSON.stringify({
         cliente,
