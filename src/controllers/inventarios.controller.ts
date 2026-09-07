@@ -3,9 +3,10 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
-import { ESTATUS_QUE_BLOQUEAN } from '../services/inventario-bloqueo.service';
+import { ESTATUS_QUE_BLOQUEAN, ESTATUS_FIRME } from '../services/inventario-bloqueo.service';
 import { logHistorial } from '../utils/historial';
 import {
+  CatorcenaRef,
   detectarConflictos,
   esChoque,
   limpiarCeldasDuplicadas,
@@ -19,11 +20,6 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-interface CatorcenaRef {
-  numero: number;
-  anio: number;
 }
 
 /**
@@ -45,7 +41,6 @@ function parseCatorcenasBody(raw: unknown, max = 30): CatorcenaRef[] | null {
   return out;
 }
 
-
 export class InventariosController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -56,6 +51,8 @@ export class InventariosController {
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
       const cto = req.query.cto as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       const where: Record<string, unknown> = {};
@@ -96,6 +93,18 @@ export class InventariosController {
 
       if (cto) {
         where.cto = cto;
+      }
+
+      if (tradicional) {
+        where.tradicional_digital = tradicional;
+      }
+
+      // Circuito Mi Macro Periférico: comparte mueble (PARABUS, VIDRIO, MUPIS…)
+      // con el mobiliario de calle pero se distingue por tipo_de_mueble.
+      if (micromacro === 'excluir') {
+        where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      } else if (micromacro === 'solo') {
+        where.tipo_de_mueble = { contains: 'MI MACRO' };
       }
 
       // Filter by campaign: get inventario IDs linked to this campaign
@@ -315,6 +324,8 @@ export class InventariosController {
       const tipo = req.query.tipo as string;
       const estatus = req.query.estatus as string;
       const plaza = req.query.plaza as string;
+      const tradicional = req.query.tradicional as string;
+      const micromacro = req.query.micromacro as string; // 'excluir' | 'solo'
       const campanaId = req.query.campanaId ? parseInt(req.query.campanaId as string) : null;
 
       // Build Prisma where filter — same logic as getAll
@@ -340,6 +351,9 @@ export class InventariosController {
       if (tipo) where.mueble = tipo;
       if (estatus) where.estatus = estatus;
       if (plaza) where.plaza = plaza;
+      if (tradicional) where.tradicional_digital = tradicional;
+      if (micromacro === 'excluir') where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
+      else if (micromacro === 'solo') where.tipo_de_mueble = { contains: 'MI MACRO' };
 
       // Filter by campaign: get inventario IDs linked to this campaign
       if (campanaId) {
@@ -538,6 +552,22 @@ export class InventariosController {
               { plaza: filtro },
             ],
           });
+
+          // [Toluca = plaza aparte] Una búsqueda de Área Metropolitana (CDMX + Edomex,
+          // firma 'Ciudad de México / AM' → estado 'Ciudad de México' + 'Estado de
+          // México') NO debe traer Toluca: para QEB es una plaza DISTINTA aunque
+          // geográficamente Toluca esté en Estado de México. Sin esto, el match por
+          // `estado = 'Estado de México'` colaba las 447 caras de la plaza TOLUCA.
+          // Las búsquedas propias de Toluca (estado 'Estado de México' SIN CDMX) no
+          // se ven afectadas.
+          const estadosNorm = estadoList.map(e => e.toLowerCase());
+          const tieneEstado = (...vals: string[]) => vals.some(v => estadosNorm.includes(v));
+          const esAreaMetropolitana =
+            tieneEstado('ciudad de méxico', 'ciudad de mexico') &&
+            tieneEstado('estado de méxico', 'estado de mexico');
+          if (esAreaMetropolitana) {
+            (where.AND as Record<string, unknown>[]).push({ plaza: { not: 'TOLUCA' } });
+          }
         }
       }
 
@@ -640,6 +670,26 @@ export class InventariosController {
         calendarioIds = calendarios.map(c => c.id);
       }
 
+      // Pareja RT/BF: las caras del MISMO grupo_rt_bf no pueden compartir la pieza
+      // física en el período (un parabús no es RT y BF a la vez). Se excluyen las
+      // reservas de las caras HERMANAS del grupo con CUALQUIER estatus (Reservado/
+      // Bonificado/Vendido/...), aparte de la ocupación FIRME cross-propuesta. Esto
+      // NO aplica entre propuestas distintas (ahí los tentativos siguen sin bloquear).
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId as string) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: parseInt(solicitudCaraId as string) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       // Get ALL reservations once (both espacio-level and inventario-level info)
       let reservedInventarioIds: Set<number> = new Set();
       let reservedEspacioIds: Set<number> = new Set();
@@ -649,7 +699,16 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] },
+            // Ocupa la pieza si: (a) es FIRME de CUALQUIER propuesta —
+            // Reservado/Bonificado NO bloquean cross-propuesta (duplicados OK); o
+            // (b) es de una cara HERMANA del mismo grupo_rt_bf, con cualquier
+            // estatus (la RT y su BF pareja no comparten pieza en el período).
+            OR: [
+              { estatus: { in: [...ESTATUS_FIRME] } },
+              ...(grupoHermanasCaraIds.length > 0
+                ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                : []),
+            ],
           },
           select: { inventario_id: true },
         });
@@ -664,6 +723,32 @@ export class InventariosController {
             select: { inventario_id: true },
           });
           reservedInventarioIds = new Set(espaciosReservados.map(e => e.inventario_id));
+        }
+      }
+
+      // (R5) Contador de reservas TENTATIVAS (Reservado/Bonificado) por pieza física en
+      // el período. Es informativo — cuántas propuestas la tienen apartada — NO bloquea.
+      const tentativasPorInventario = new Map<number, number>();
+      if (calendarioIds.length > 0) {
+        const tentativas = await prisma.reservas.findMany({
+          where: {
+            deleted_at: null,
+            calendario_id: { in: calendarioIds },
+            estatus: { in: ['Reservado', 'Bonificado'] },
+          },
+          select: { inventario_id: true },
+        });
+        if (tentativas.length > 0) {
+          const espacioToInv = new Map<number, number>();
+          const espsT = await prisma.espacio_inventario.findMany({
+            where: { id: { in: [...new Set(tentativas.map(t => t.inventario_id))] } },
+            select: { id: true, inventario_id: true },
+          });
+          espsT.forEach(e => espacioToInv.set(e.id, e.inventario_id));
+          for (const t of tentativas) {
+            const invId = espacioToInv.get(t.inventario_id);
+            if (invId != null) tentativasPorInventario.set(invId, (tentativasPorInventario.get(invId) || 0) + 1);
+          }
         }
       }
 
@@ -721,6 +806,7 @@ export class InventariosController {
         espacios: typeof espacios;
         espacios_count: number;
         ya_reservado_para_cara: boolean;
+        reservas_tentativas_count: number;
       }> = [];
 
       for (const inv of inventarios) {
@@ -750,6 +836,7 @@ export class InventariosController {
             espacios: invEspacios,
             espacios_count: -1, // -1 = sin límite (front lo interpreta)
             ya_reservado_para_cara: yaReservadoParaCara,
+            reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
           });
         } else {
           // Traditional: show once if not all reserved
@@ -765,6 +852,7 @@ export class InventariosController {
               espacios: availableEspacios,
               espacios_count: availableEspacios.length,
               ya_reservado_para_cara: alreadyReservedForCara.has(inv.id),
+              reservas_tentativas_count: tentativasPorInventario.get(inv.id) || 0,
             });
           }
         }
@@ -1352,7 +1440,8 @@ export class InventariosController {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
               inventario_id: { in: espacios.map(e => e.id) },
-              estatus: { in: ['Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'] }
+              // Solo FIRMES ocupan (ver getDisponibles).
+              estatus: { in: [...ESTATUS_FIRME] }
             },
             select: { inventario_id: true }
           });
@@ -2158,14 +2247,42 @@ export class InventariosController {
       });
       const calendarioIds = calendariosOverlap.map(c => c.id);
 
+      // Misma regla que getDisponibles: una pieza SOLO cuenta ocupada si está FIRME
+      // (cualquier propuesta) o la tiene una cara HERMANA del mismo grupo_rt_bf
+      // (cualquier estatus). Las reservas tentativas de OTRAS propuestas NO ocupan
+      // (duplicados permitidos). Se incluye también la cara ACTUAL para poder marcar
+      // 'ya_reservado_para_cara'.
+      let grupoHermanasCaraIds: number[] = [];
+      if (solicitudCaraId) {
+        const caraActual = await prisma.solicitudCaras.findUnique({
+          where: { id: Number(solicitudCaraId) },
+          select: { grupo_rt_bf: true },
+        });
+        if (caraActual?.grupo_rt_bf != null) {
+          const hermanas = await prisma.solicitudCaras.findMany({
+            where: { grupo_rt_bf: caraActual.grupo_rt_bf, id: { not: Number(solicitudCaraId) } },
+            select: { id: true },
+          });
+          grupoHermanasCaraIds = hermanas.map(h => h.id);
+        }
+      }
+
       const espacioIds = espacios.map(e => e.id);
       const reservasActivas = (espacioIds.length > 0 && calendarioIds.length > 0)
         ? await prisma.reservas.findMany({
             where: {
               deleted_at: null,
               calendario_id: { in: calendarioIds },
-              estatus: { in: [...ESTATUS_QUE_BLOQUEAN] },
               inventario_id: { in: espacioIds },
+              OR: [
+                { estatus: { in: [...ESTATUS_FIRME] } },
+                ...(grupoHermanasCaraIds.length > 0
+                  ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
+                  : []),
+                ...(solicitudCaraId
+                  ? [{ solicitudCaras_id: Number(solicitudCaraId) }]
+                  : []),
+              ],
             },
             select: { inventario_id: true, solicitudCaras_id: true },
           })

@@ -27,11 +27,16 @@ const createPrismaClient = () => {
   } else {
     datasourceUrl = datasourceUrl.replace(/connection_limit=\d+/, 'connection_limit=30');
   }
-  // pool_timeout: 60s para esperar conexión disponible del pool
+  // pool_timeout: 10s para esperar conexión disponible del pool.
+  // Antes 60s: bajo saturación las requests se encolaban hasta un minuto
+  // mientras los clientes reintentaban encima → backlog que crecía más rápido
+  // de lo que la BD drenaba → CPU/memoria 100% → caída de main. Con 10s la
+  // fila queda acotada: el exceso falla rápido y el request timeout responde
+  // 503 recuperable en vez de morir el proceso.
   if (!url.includes('pool_timeout')) {
-    datasourceUrl += '&pool_timeout=60';
+    datasourceUrl += '&pool_timeout=10';
   } else {
-    datasourceUrl = datasourceUrl.replace(/pool_timeout=\d+/, 'pool_timeout=60');
+    datasourceUrl = datasourceUrl.replace(/pool_timeout=\d+/, 'pool_timeout=10');
   }
   // socket_timeout: 120s para queries pesados contra BD remota
   if (!url.includes('socket_timeout')) {
@@ -45,50 +50,30 @@ const createPrismaClient = () => {
     datasourceUrl,
   });
 
-  // Retry middleware for transient connection errors (Hostinger drops connections frequently)
+  // Retry SOLO para blips de conexión transitorios (la BD remota puede soltar
+  // una conexión ocasionalmente): un único reintento con espera corta.
+  //
+  // Antes este middleware también reintentaba bajo saturación: "Too many
+  // connections" esperaba 5s y el rate-limit de Hostinger (que ya no aplica
+  // en DigitalOcean) esperaba 30-90s. Esas esperas RETENÍAN las requests en
+  // memoria durante las tormentas y amplificaban la espiral de colapso.
+  // Bajo saturación ahora se falla rápido: el request timeout responde 503
+  // y el cliente reintenta cuando pase el pico.
   client.$use(async (params, next) => {
-    const MAX_RETRIES = 3;
-    const BASE_DELAY = 3000; // 3 seconds
+    try {
+      return await next(params);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isTransientConnError = message.includes("Can't reach database server") ||
+        message.includes('Connection refused') ||
+        message.includes('ETIMEDOUT') ||
+        message.includes('ECONNREFUSED') ||
+        message.includes('Connection lost');
+      if (!isTransientConnError) throw error;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        return await next(params);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        const isConnectionError = message.includes("Can't reach database server") ||
-          message.includes('Connection refused') ||
-          message.includes('ETIMEDOUT') ||
-          message.includes('ECONNREFUSED') ||
-          message.includes('Connection lost');
-
-        const isRateLimited = message.includes('max_connections_per_hour') || message.includes('1226');
-
-        const isPoolExhausted = message.includes('Too many connections') || message.includes('1040');
-
-        if (isPoolExhausted) {
-          if (attempt === 1) {
-            console.warn(`[Prisma] Pool exhausted (attempt 1/${MAX_RETRIES}), waiting 5s...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            continue;
-          }
-          throw error;
-        }
-
-        if (isRateLimited && attempt < MAX_RETRIES) {
-          const delay = 30000 * attempt;
-          console.warn(`[Prisma] Rate limited (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay / 1000}s...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-
-        if (isConnectionError && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY * attempt;
-          console.warn(`[Prisma] Connection error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
-      }
+      console.warn('[Prisma] Error de conexión transitorio, reintento único en 500ms...');
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return next(params);
     }
   });
 

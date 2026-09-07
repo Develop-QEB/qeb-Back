@@ -41,3 +41,7 @@ upload_inventario.js
 scripts/add_grupo_masivo_id.cjs
 scripts/fix_apartado_prod.cjs
 scripts/inspect_prod.cjs
+
+# Scripts locales de debug/seed/prueba (no versionar)
+scripts/_*
+scripts/grupo_masivo.cjs

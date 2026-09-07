@@ -6,6 +6,9 @@ import {
   getTicketById,
   createTicket,
   updateTicketStatus,
+  updateTicketArea,
+  bulkUpdateTicketStatus,
+  bulkUpdateTicketArea,
   getTicketStats,
   getTicketsHistorial,
   getTicketsUnreadCount,
@@ -62,6 +65,14 @@ router.get('/:id', getTicketById);
 
 // Rutas para programadores/admin (obtener todos, actualizar status)
 router.get('/', getAllTickets);
+// Acciones masivas — DEBEN ir ANTES de las rutas con :id para que Express
+// no matchee '/bulk/status' contra '/:id/status' con id='bulk'. Ese matcheo
+// fallaba con "Error al actualizar ticket" (del handler singular con NaN id).
+// Feedback 2026-09-07 (Jos): reportado en prod v1.52.
+router.patch('/bulk/status', bulkUpdateTicketStatus);
+router.patch('/bulk/area', bulkUpdateTicketArea);
 router.patch('/:id/status', updateTicketStatus);
+// Reasignar entre QEB <-> TI. Feedback 2026-08-15.
+router.patch('/:id/area', updateTicketArea);
 
 export default router;

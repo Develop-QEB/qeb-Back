@@ -318,7 +318,7 @@ Modal de cambio de estatus:
 - Dropdown con estatus disponibles (filtrado por permisos del rol).
 - BLOQUEOS antes de cambiar a "Pase a ventas" o "Aprobada":
   1. Autorizacion Pendiente: Si alguna cara tiene autorizacion_dg o autorizacion_dcm = 'pendiente', aparece alerta roja "Esta propuesta tiene X cara(s) pendientes de autorizacion..." y se BLOQUEA el cambio a esos estatus.
-  2. Reservas Incompletas: Si alguna cara NO tiene todas sus reservas asignadas (comparando caras_flujo, caras_contraflujo, bonificacion vs reservas reales), aparece alerta roja "No todos los grupos tienen sus reservas completas..." y se BLOQUEA. EXCEPCION: Articulos IM (Impresion) nunca requieren reservas.
+  2. Reservas Incompletas (SOLO AVISO, ya no bloquea desde 2026-08-25): Si alguna cara NO tiene todas sus reservas asignadas (de menos o de mas, comparando caras_flujo, caras_contraflujo, bonificacion vs reservas reales), aparece un aviso informativo amber "Reservas incompletas", pero el cambio a "Pase a ventas" / "Aprobada" SI se permite. EXCEPCION: Articulos IM (Impresion) nunca requieren reservas.
 - Comentarios: Lista cronologica con avatar + nombre + fecha + texto. Input para agregar nuevo comentario.
 
 Modal de aprobacion (ApproveModal):

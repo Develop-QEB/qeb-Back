@@ -7,13 +7,13 @@ import Anthropic from '@anthropic-ai/sdk';
 import { chatbotController } from './chatbot.controller';
 import { logHistorial } from '../utils/historial';
 
-// Categorias hardcoded que enrutan a TI. Cualquier otra (o null) => QEB.
-const CATEGORIAS_TI = ['Desposteo SAP', 'Posteo SAP', 'Ajuste de Usuario'] as const;
+// Default de enrutamiento: todos los tickets nuevos entran a TI.
+// TI puede reasignar a QEB con el dropdown de la fila cuando el ticket
+// requiere ayuda del equipo QEB.
 type AreaTicket = 'TI' | 'QEB';
 
-function deriveAreaFromCategoria(categoria?: string | null): AreaTicket {
-  if (!categoria) return 'QEB';
-  return (CATEGORIAS_TI as readonly string[]).includes(categoria) ? 'TI' : 'QEB';
+function deriveAreaFromCategoria(_categoria?: string | null): AreaTicket {
+  return 'TI';
 }
 
 // Roles TI: solo ven tickets area='TI'. Roles QEB (DEV/Admin): solo area='QEB'.
@@ -436,6 +436,195 @@ export const updateTicketStatus = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Error updating ticket:', error);
     res.status(500).json({ message: 'Error al actualizar ticket' });
+  }
+};
+
+// Reasignar ticket entre areas QEB <-> TI.
+// Feedback 2026-08-15: cualquier usuario que ya tiene acceso al ticket puede
+// mandarlo a la otra area (roles globales o del area actual del ticket). La
+// categoria se conserva tal cual (decision de producto).
+export const updateTicketArea = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { area } = req.body as { area?: string };
+    const userName = req.user?.nombre || 'Usuario';
+
+    if (area !== 'QEB' && area !== 'TI') {
+      return res.status(400).json({ message: "area debe ser 'QEB' o 'TI'" });
+    }
+
+    const ticket = await prisma.tickets.findUnique({ where: { id: Number(id) } });
+    if (!ticket) return res.status(404).json({ message: 'Ticket no encontrado' });
+
+    // Permiso: el usuario debe tener acceso al ticket actual — o rol global o
+    // area coincidente con ticket.area. Reusamos getAreaFilterForUser.
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
+    if (areaFilter && areaFilter !== ticket.area) {
+      return res.status(403).json({ message: 'No tienes permiso para reasignar este ticket' });
+    }
+
+    if (ticket.area === area) {
+      return res.json({ message: 'Sin cambios', ticket });
+    }
+
+    const updated = await prisma.tickets.update({
+      where: { id: Number(id) },
+      data: { area },
+    });
+
+    await logHistorial({
+      tipo: 'ticket',
+      refId: ticket.id,
+      accion: `Reasignó ticket #${ticket.id} (${ticket.area} → ${area})`,
+      usuario: userName,
+      usuarioId: req.user?.userId,
+      usuarioRol: req.user?.rol,
+      origen: 'tickets',
+      cambios: [{ campo: 'area', label: 'Área', antes: ticket.area, despues: area }],
+      extras: {
+        ticket: { id: ticket.id, titulo: ticket.titulo },
+        categoria: ticket.categoria,
+      },
+    });
+
+    try {
+      const io = getIO();
+      io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, updated);
+    } catch {}
+
+    return res.json(updated);
+  } catch (error) {
+    console.error('Error al reasignar area del ticket:', error);
+    return res.status(500).json({ message: 'Error al reasignar el ticket' });
+  }
+};
+
+// Acciones masivas — cambian el mismo campo (status o area) en un set de
+// tickets. Reusan las mismas reglas de permiso que el handler singular:
+// getAreaFilterForUser define a qué area(s) tiene acceso el usuario, y solo
+// se aplican los cambios a los tickets cuya area coincide. Los demas se
+// devuelven en `saltados` para que la UI avise. Feedback 2026-08-15.
+export const bulkUpdateTicketStatus = async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids, status } = req.body as { ids?: number[]; status?: string };
+    const userName = req.user?.nombre || 'Usuario';
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'ids requerido' });
+    }
+    if (!status || typeof status !== 'string') {
+      return res.status(400).json({ message: 'status requerido' });
+    }
+    const ticketIds = ids.map(n => Number(n)).filter(n => Number.isFinite(n));
+    if (ticketIds.length === 0) {
+      return res.status(400).json({ message: 'ids invalidos' });
+    }
+
+    const tickets = await prisma.tickets.findMany({
+      where: { id: { in: ticketIds } },
+      select: { id: true, status: true, area: true, titulo: true },
+    });
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
+    const permitidos = areaFilter ? tickets.filter(t => t.area === areaFilter) : tickets;
+    const saltados = tickets.length - permitidos.length;
+    const permitidosIds = permitidos.map(t => t.id);
+    if (permitidosIds.length === 0) {
+      return res.status(403).json({ message: 'No tienes permiso sobre ninguno de los tickets seleccionados' });
+    }
+
+    const upd = await prisma.tickets.updateMany({
+      where: { id: { in: permitidosIds } },
+      data: { status, status_cambiado_por: userName },
+    });
+
+    for (const t of permitidos) {
+      if (t.status === status) continue;
+      await logHistorial({
+        tipo: 'ticket',
+        refId: t.id,
+        accion: `Cambió status de ticket #${t.id} (${t.status} → ${status}) [masivo]`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'tickets',
+        cambios: [{ campo: 'status', label: 'Estatus', antes: t.status, despues: status }],
+        extras: { ticket: { id: t.id, titulo: t.titulo }, bulk: true },
+      });
+    }
+
+    try {
+      const io = getIO();
+      for (const id of permitidosIds) {
+        io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, { id, status });
+      }
+    } catch {}
+
+    return res.json({ updated: upd.count, saltados });
+  } catch (error) {
+    console.error('Error bulkUpdateTicketStatus:', error);
+    return res.status(500).json({ message: 'Error al aplicar cambio masivo de estatus' });
+  }
+};
+
+export const bulkUpdateTicketArea = async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids, area } = req.body as { ids?: number[]; area?: string };
+    const userName = req.user?.nombre || 'Usuario';
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'ids requerido' });
+    }
+    if (area !== 'QEB' && area !== 'TI') {
+      return res.status(400).json({ message: "area debe ser 'QEB' o 'TI'" });
+    }
+    const ticketIds = ids.map(n => Number(n)).filter(n => Number.isFinite(n));
+    if (ticketIds.length === 0) {
+      return res.status(400).json({ message: 'ids invalidos' });
+    }
+
+    const tickets = await prisma.tickets.findMany({
+      where: { id: { in: ticketIds } },
+      select: { id: true, area: true, categoria: true, titulo: true },
+    });
+    const areaFilter = await getAreaFilterForUser(req.user?.userId, req.user?.rol);
+    const permitidos = areaFilter ? tickets.filter(t => t.area === areaFilter) : tickets;
+    const saltados = tickets.length - permitidos.length;
+    const permitidosIds = permitidos.map(t => t.id);
+    if (permitidosIds.length === 0) {
+      return res.status(403).json({ message: 'No tienes permiso sobre ninguno de los tickets seleccionados' });
+    }
+
+    const upd = await prisma.tickets.updateMany({
+      where: { id: { in: permitidosIds } },
+      data: { area },
+    });
+
+    for (const t of permitidos) {
+      if (t.area === area) continue;
+      await logHistorial({
+        tipo: 'ticket',
+        refId: t.id,
+        accion: `Reasignó ticket #${t.id} (${t.area} → ${area}) [masivo]`,
+        usuario: userName,
+        usuarioId: req.user?.userId,
+        usuarioRol: req.user?.rol,
+        origen: 'tickets',
+        cambios: [{ campo: 'area', label: 'Área', antes: t.area, despues: area }],
+        extras: { ticket: { id: t.id, titulo: t.titulo }, categoria: t.categoria, bulk: true },
+      });
+    }
+
+    try {
+      const io = getIO();
+      for (const id of permitidosIds) {
+        io.to('tickets-historial').emit(SOCKET_EVENTS.TICKET_STATUS_CHANGED, { id, area });
+      }
+    } catch {}
+
+    return res.json({ updated: upd.count, saltados });
+  } catch (error) {
+    console.error('Error bulkUpdateTicketArea:', error);
+    return res.status(500).json({ message: 'Error al reasignar tickets en masa' });
   }
 };
 

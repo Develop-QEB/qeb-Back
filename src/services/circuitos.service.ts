@@ -221,9 +221,11 @@ export async function autoReservarCircuitoSiAplica(
     });
   }
 
-  // Observador de conflictos: anota los sitios para la verificacion dirigida
-  // (debounced). Solo si la creacion fue FIRME ('Vendido'); 'Bonificado' aqui
-  // es tentativo y el detector no lo cuenta.
+  // Observador de conflictos: anota los sitios para que la verificacion
+  // dirigida (debounced) corra tras la rafaga. El debounce (20s) da margen de
+  // sobra para que la transaccion de este flujo ya este commiteada.
+  // Solo si la creacion fue FIRME ('Vendido'); 'Bonificado' es tentativo y el
+  // detector no lo cuenta.
   if (estatus === 'Vendido') {
     for (const r of aReservar) registrarReservaCreada(r.inventario_id);
   }

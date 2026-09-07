@@ -33,8 +33,10 @@ router.get('/:id/espacios', inventariosController.getEspaciosDisponibles.bind(in
 // y no en un router.use para no afectar al resto de rutas de inventarios.
 // Va antes de las rutas '/:id' y no colisiona con POST '/' ni POST '/bulk'.
 router.post('/conflictos', roleMiddleware('DEV'), inventariosController.getConflictosOcupacion.bind(inventariosController));
-// Limpieza de duplicados y bitacora de limpiezas (automaticas y manuales). Solo DEV.
+// Limpieza de duplicados. Solo DEV y solo duplicados: los choques nunca se
+// resuelven automaticamente (ver limpiarDuplicadosOcupacion).
 router.post('/conflictos/limpiar-duplicados', roleMiddleware('DEV'), inventariosController.limpiarDuplicadosOcupacion.bind(inventariosController));
+// Bitacora de limpiezas de duplicados (automaticas y manuales).
 router.get('/conflictos/limpiezas', roleMiddleware('DEV'), inventariosController.getLimpiezasOcupacion.bind(inventariosController));
 
 // CRUD
