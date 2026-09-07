@@ -136,11 +136,18 @@ async function getGerenteComercialParaSolicitud(
 
 /**
  * Espejo de getGerenteComercialParaSolicitud pero para la dimensión DCM.
- * Busca al Gerente Comercial Aeropuerto del asesor via los mismos equipos
- * con proposito='filtro_autorizacion'. Devuelve null si el asesor no tiene
- * GC DCM asignado — el llamador debe hacer fallback a Autorización DCM
- * directo (mantiene el comportamiento actual y no rompe nada si la matriz
- * aún no está actualizada). Feedback 2026-08-15.
+ * Busca al Gerente Comercial Aeropuerto del asesor:
+ *   1. En equipos con proposito='filtro_autorizacion' del asesor (patron
+ *      simetrico con DG). Si un asesor Aeropuerto lo tiene alli, se usa.
+ *   2. Fallback global: si en el equipo del asesor no hay GC Aeropuerto,
+ *      se busca UN unico usuario activo con rol GC Aeropuerto en toda la
+ *      empresa. Razon: DCM en QEB tiene un solo GC Aeropuerto para todos
+ *      los asesores, no uno por equipo. Feedback 2026-09-03 (Jos, caso
+ *      Aldo/prop 80867): asesores no-Aeropuerto que generan caras con
+ *      dcm=pendiente deben pasar por el mismo filtro Aeropuerto en vez
+ *      de irse directo a Direccion Comercial.
+ *   3. Si tampoco existe en toda la empresa, null → fallback a Autorización
+ *      DCM directo (comportamiento historico).
  */
 async function getGerenteComercialDcmParaSolicitud(
   solicitudId: number
@@ -163,34 +170,49 @@ async function getGerenteComercialDcmParaSolicitud(
   if (!asesorId && sol.usuario_id) {
     asesorId = sol.usuario_id;
   }
-  if (!asesorId) return null;
 
-  const equiposDelAsesor = await prisma.usuario_equipo.findMany({
-    where: {
-      usuario_id: asesorId,
-      equipo: { deleted_at: null, proposito: 'filtro_autorizacion' },
-    },
-    select: { equipo_id: true },
-  });
-  if (equiposDelAsesor.length === 0) return null;
-
-  for (const eq of equiposDelAsesor) {
-    const gerenteMembership = await prisma.usuario_equipo.findFirst({
+  // 1. Buscar en el equipo del asesor (patron simetrico con DG).
+  if (asesorId) {
+    const equiposDelAsesor = await prisma.usuario_equipo.findMany({
       where: {
-        equipo_id: eq.equipo_id,
-        usuario: {
-          deleted_at: null,
-          user_role: { in: GERENTE_COMERCIAL_DCM_ROLES },
-        },
+        usuario_id: asesorId,
+        equipo: { deleted_at: null, proposito: 'filtro_autorizacion' },
       },
-      include: {
-        usuario: { select: { id: true, nombre: true, user_role: true } },
-      },
+      select: { equipo_id: true },
     });
-    if (gerenteMembership?.usuario) {
-      return { id: gerenteMembership.usuario.id, nombre: gerenteMembership.usuario.nombre };
+    for (const eq of equiposDelAsesor) {
+      const gerenteMembership = await prisma.usuario_equipo.findFirst({
+        where: {
+          equipo_id: eq.equipo_id,
+          usuario: {
+            deleted_at: null,
+            user_role: { in: GERENTE_COMERCIAL_DCM_ROLES },
+          },
+        },
+        include: {
+          usuario: { select: { id: true, nombre: true, user_role: true } },
+        },
+      });
+      if (gerenteMembership?.usuario) {
+        return { id: gerenteMembership.usuario.id, nombre: gerenteMembership.usuario.nombre };
+      }
     }
   }
+
+  // 2. Fallback global: DCM en QEB tiene UN solo GC Aeropuerto para toda
+  //    la empresa. Si no esta en el equipo del asesor, lo buscamos por rol
+  //    globalmente. Si hay mas de uno, se usa el primero (id asc) — improbable
+  //    en la practica pero deterministico.
+  const gcAeropuertoGlobal = await prisma.usuario.findFirst({
+    where: {
+      deleted_at: null,
+      user_role: { in: GERENTE_COMERCIAL_DCM_ROLES },
+    },
+    orderBy: { id: 'asc' },
+    select: { id: true, nombre: true },
+  });
+  if (gcAeropuertoGlobal) return gcAeropuertoGlobal;
+
   return null;
 }
 
