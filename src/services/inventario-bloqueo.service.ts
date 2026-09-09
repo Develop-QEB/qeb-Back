@@ -417,7 +417,7 @@ interface EvictRow {
 export async function venderReservasPropuestaConGuardian(
   tx: Prisma.TransactionClient,
   propuestaId: number,
-): Promise<{ vendidas: number; desplazadas: DesplazadaInfo[] }> {
+): Promise<{ vendidas: number; desplazadas: DesplazadaInfo[]; conflictivas: number }> {
   // Reservas tentativas de la propuesta. `reservas.inventario_id` es polimórfico
   // (espacio_inventario.id o inventarios.id) → se resuelve por COALESCE para
   // saber si es Digital y su codigo_unico. ORDER BY espacio para bloquear siempre
@@ -453,6 +453,9 @@ export async function venderReservasPropuestaConGuardian(
 
   const desplazadas: DesplazadaInfo[] = [];
   const idsAEvictar: number[] = [];
+  // Piezas de ESTA propuesta que ya se vendieron firme en OTRA campaña: se
+  // quitan (no se venden aquí) en vez de abortar la aprobación. Ver más abajo.
+  const idsConflicto = new Set<number>();
 
   // BATCH: en vez de 3 queries por reserva (lock+check+evict) en serie —que a 120
   // reservas contra BD remota revienta los 30s de la tx— hacemos ~3 queries TOTAL.
@@ -492,16 +495,13 @@ export async function venderReservasPropuestaConGuardian(
       propuestaId, propuestaId,
     );
 
-    // Fail-closed: cualquier conflicto aborta TODA la venta (la tx se revierte).
-    if (conflictRows.length > 0) {
-      throw new VentaConflictoError(conflictRows.map(x => ({
-        reservaId: x.reserva_id,
-        espacioId: x.espacio_id,
-        codigoUnico: x.codigo_unico,
-        inicioPeriodo: String(x.inicio),
-        finPeriodo: String(x.fin),
-      })));
-    }
+    // Feedback jefe 2026-09-08: las piezas que YA se vendieron firme en OTRA
+    // campaña NO deben BLOQUEAR la aprobación. En vez de abortar (antes:
+    // VentaConflictoError, respondía 409 "N piezas ya se vendieron"), se QUITAN
+    // de esta propuesta: NO se venden aquí (se excluyen del flip) y se
+    // soft-deletean. La propuesta se aprueba igual y puede quedar incompleta.
+    // Sigue sin haber doble venta: esas piezas se quedan con la otra campaña.
+    for (const x of conflictRows) idsConflicto.add(Number(x.reserva_id));
 
     // 3) Desplazamiento (1 query): tentativas de OTRAS propuestas sobre las piezas
     //    ganadas → se soft-deletean y se devuelven para notificar.
@@ -545,18 +545,23 @@ export async function venderReservasPropuestaConGuardian(
     }
   }
 
-  // Flip (batch) + soft-delete de desplazadas (batch).
-  if (idsVendido.length > 0) {
-    await tx.reservas.updateMany({ where: { id: { in: idsVendido } }, data: { estatus: 'Vendido' } });
+  // Excluir del flip las piezas en conflicto (perdieron contra otra campaña firme).
+  const vendido = idsVendido.filter(id => !idsConflicto.has(id));
+  const vendidoBon = idsVendidoBon.filter(id => !idsConflicto.has(id));
+
+  // Flip (batch) + soft-delete de desplazadas y de las conflictivas (batch).
+  if (vendido.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: vendido } }, data: { estatus: 'Vendido' } });
   }
-  if (idsVendidoBon.length > 0) {
-    await tx.reservas.updateMany({ where: { id: { in: idsVendidoBon } }, data: { estatus: 'Vendido bonificado' } });
+  if (vendidoBon.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: vendidoBon } }, data: { estatus: 'Vendido bonificado' } });
   }
-  if (idsAEvictar.length > 0) {
-    await tx.reservas.updateMany({ where: { id: { in: idsAEvictar } }, data: { deleted_at: new Date() } });
+  const idsRemovidas = [...new Set<number>([...idsAEvictar, ...idsConflicto])];
+  if (idsRemovidas.length > 0) {
+    await tx.reservas.updateMany({ where: { id: { in: idsRemovidas } }, data: { deleted_at: new Date() } });
   }
 
-  return { vendidas: idsVendido.length + idsVendidoBon.length, desplazadas };
+  return { vendidas: vendido.length + vendidoBon.length, desplazadas, conflictivas: idsConflicto.size };
 }
 
 /**
