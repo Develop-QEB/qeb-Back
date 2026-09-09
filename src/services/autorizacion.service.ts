@@ -1032,10 +1032,17 @@ export async function crearTareasAutorizacion(
     // tiene GC DCM (Aeropuerto) en su equipo, se crea Filtro Autorización DCM
     // al GC (paso previo). Si no hay GC DCM, va directo a Autorización DCM
     // (fallback = comportamiento actual mientras la matriz se actualiza).
+    //
+    // Feedback 2026-09-09 (Jos): el Filtro DCM aun no esta listo para prod
+    // (falta ajustar equipos + probar); temporalmente lo desactivamos con
+    // este flag para que todas las caras dcm=pendiente vayan directo a
+    // Autorización DCM (Rodrigo Margain). El flag se pondra en true cuando
+    // el ajuste (aprobado en stage) se merge a main. Ver hotfix/desactivar-filtro-dcm.
+    const FILTRO_DCM_HABILITADO = false;
     let tareaDcmId: number | null = null;
     let tareaDcmTipo: 'Filtro Autorización DCM' | 'Autorización DCM' = 'Autorización DCM';
     if (pendientesDcm.length > 0 && !existeTareaDcm) {
-      const usarFiltroDcm = gerenteComercialDcm !== null;
+      const usarFiltroDcm = FILTRO_DCM_HABILITADO && gerenteComercialDcm !== null;
       const asignadosDcm = usarFiltroDcm ? [gerenteComercialDcm!] : usuariosDcm;
       if (asignadosDcm.length > 0) {
         tareaDcmTipo = usarFiltroDcm ? 'Filtro Autorización DCM' : 'Autorización DCM';
