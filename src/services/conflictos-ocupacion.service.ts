@@ -13,12 +13,34 @@
 //                cara. Error de armado; se limpia dejando una (la de APS si
 //                existe; si no, la más antigua).
 //
-// Solo cuentan reservas FIRMES (Vendido/Vendido bonificado/Con Arte/Sin Arte).
-// Las tentativas de propuestas (Reservado/Bonificado) se encimen o no, son
-// flujo normal: quedan totalmente fuera de este detector.
+// QUE CUENTA COMO OCUPACION (misma regla que getEspaciosBloqueados /
+// createReservaConLock en inventario-bloqueo.service.ts — si cambia alla, cambia aca):
 //
-// Los Digitales se excluyen: tienen varios espacios y varias reservas
-// simultáneas son su comportamiento normal, no un conflicto.
+//   ESTATUS FIRME    Vendido · Vendido bonificado  (+ 'Con Arte' / 'Sin Arte')
+//                    = VENTA. Ocupa la cara y bloquea a todos. Es lo unico que
+//                    cuenta este detector.
+//                    DEUDA TECNICA: 'Con Arte'/'Sin Arte' NO son estados de
+//                    ocupacion, son estado del ARTE que se colo en la columna
+//                    estatus. Son ventas: su venta real vive en
+//                    `estatus_original` (Vendido / Vendido bonificado) y el
+//                    estado del arte en `arte_aprobado`. Se siguen contando como
+//                    venta (lo son), pero la fase 3 devuelve las dos cosas por
+//                    separado para que la UI no mezcle ocupacion con gestor de
+//                    artes. Cuando se limpie la columna estatus, esto se cae solo.
+//   ESTATUS TENTATIVO  Reservado · Bonificado
+//                    = HOLD de propuesta. NO ocupa y NO bloquea: varias
+//                    propuestas pueden apartar la misma cara a proposito y el
+//                    ganador se resuelve al vender. Nunca es conflicto.
+//   ARTICULO IM-     Impresion. Es produccion, no renta de la cara: no ocupa el
+//                    espacio fisico, asi que se excluye aunque este vendida.
+//                    Sin esto, una campaña con renta RT + impresion IM sobre la
+//                    misma cara y catorcena aparecia como 'duplicado' y el boton
+//                    de limpieza se llevaba una de las dos.
+//   DIGITAL          Excluido: varios espacios y varias reservas simultaneas son
+//                    su comportamiento normal.
+//
+// Todo lo demas (reservas borradas, estatus 'eliminada') queda fuera por el
+// filtro de deleted_at.
 
 import prisma from '../utils/prisma';
 
@@ -33,12 +55,52 @@ import prisma from '../utils/prisma';
 // masivos y arriesgaba auto-limpiar reservas legitimas de propuestas.
 const ESTATUS_FIRME_CONF = ['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'];
 const FIRME_SQL = ESTATUS_FIRME_CONF.map(e => `'${e}'`).join(',');
+
+// Solo documental: los estatus que NO cuentan aqui. Se exporta para que la UI
+// pueda explicar la particion sin re-declararla.
+export const ESTATUS_TENTATIVO_CONF = ['Reservado', 'Bonificado'];
+
+// Artículos que NO ocupan la cara: impresion (IM-). Mismo criterio que
+// getEspaciosBloqueados. Se aplica en las 3 fases y en el limpiador.
+const NO_OCUPA_ARTICULO_SQL = `(sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')`;
 import { logHistorial } from '../utils/historial';
 import { emitToAll, emitToCampana, emitToPropuesta, SOCKET_EVENTS } from '../config/socket';
 
 export interface CatorcenaRef {
   numero: number;
   anio: number;
+}
+
+/**
+ * Una reserva concreta de las que forman el conflicto: que estatus tiene, de que
+ * artículo es y DONDE vive (campaña o propuesta, circuito, espacio fisico y
+ * periodo). Es lo que la auditoria muestra al expandir la celda.
+ */
+export interface ReservaEnCelda {
+  reserva_id: number;
+  /** Estatus crudo de la columna `reservas.estatus` (puede traer Con/Sin Arte). */
+  estatus: string;
+  /** La VENTA real: `estatus_original`. Es lo que importa para ocupacion. */
+  estatus_original: string | null;
+  /** Estado del arte (`arte_aprobado`). No tiene nada que ver con la ocupacion. */
+  arte_aprobado: string | null;
+  /** true si la reserva ya tiene archivo de arte cargado. */
+  tiene_arte: boolean;
+  /** Artículo del circuito (RT-…, BF-…, CT-…). */
+  articulo: string | null;
+  aps: number | null;
+  /** true = el APS ya se posteo a SAP (aparece en campania.posted_aps). */
+  posted: boolean;
+  campana_id: number | null;
+  campana_nombre: string | null;
+  /** idquote de la propuesta dueña del circuito. */
+  propuesta_id: number | null;
+  /** solicitudCaras.id — el circuito exacto donde vive la reserva. */
+  solicitud_cara_id: number;
+  /** espacio_inventario.id — la pieza fisica reservada. */
+  espacio_id: number;
+  inicio_periodo: string | null;
+  fin_periodo: string | null;
 }
 
 export interface CeldaConflicto {
@@ -58,6 +120,8 @@ export interface CeldaConflicto {
   campanas: { id: number; nombre: string }[];
   /** Propuestas (idquote) con reservas sin campaña en la celda. */
   propuestas: number[];
+  /** Detalle de las reservas que forman el conflicto (fase 3). */
+  reservas: ReservaEnCelda[];
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
@@ -166,6 +230,7 @@ export async function detectarConflictos(
        INNER JOIN inventarios i     ON i.id = ei.inventario_id
      WHERE rsv.deleted_at IS NULL
        AND rsv.estatus IN (${FIRME_SQL})
+       AND ${NO_OCUPA_ARTICULO_SQL}
        AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
        AND sc.inicio_periodo BETWEEN ? AND ?
        AND (cat.año, cat.numero_catorcena) IN (${phCat})
@@ -210,6 +275,7 @@ export async function detectarConflictos(
        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
      WHERE rsv.deleted_at IS NULL
        AND rsv.estatus IN (${FIRME_SQL})
+       AND ${NO_OCUPA_ARTICULO_SQL}
        AND ei.inventario_id IN (${phConf})
        AND sc.inicio_periodo BETWEEN ? AND ?
        AND (cat.año, cat.numero_catorcena) IN (${phCat})
@@ -220,8 +286,94 @@ export async function detectarConflictos(
     ...catorcenas.flatMap(c => [c.anio, c.numero])
   );
 
+  // FASE 3 — detalle por reserva de las celdas ya detectadas: estatus, artículo,
+  // APS/POST y DONDE vive (campaña o propuesta, circuito, espacio, periodo).
+  // Va acotada a los mismos sitios que la fase 2, asi que es igual de barata; sin
+  // esto la auditoria solo podia decir "hay 2 reservas" sin decir de que ni de quien.
+  const detalleRows = await prisma.$queryRawUnsafe<Array<{
+    inventario_id: number;
+    anio: number;
+    numero_catorcena: number;
+    reserva_id: number;
+    estatus: string | null;
+    estatus_original: string | null;
+    arte_aprobado: string | null;
+    tiene_arte: number | null;
+    articulo: string | null;
+    aps: number | null;
+    posted: number | null;
+    campana_id: number | null;
+    campana_nombre: string | null;
+    propuesta_id: number | null;
+    solicitud_cara_id: number;
+    espacio_id: number;
+    inicio_periodo: string | null;
+    fin_periodo: string | null;
+  }>>(
+    `SELECT
+       ei.inventario_id, cat.año AS anio, cat.numero_catorcena,
+       rsv.id AS reserva_id, rsv.estatus, rsv.estatus_original, rsv.arte_aprobado,
+       CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo <> '' THEN 1 ELSE 0 END AS tiene_arte,
+       sc.articulo, rsv.APS AS aps,
+       -- Mismo criterio que getHistorial: el APS cuenta como posteado solo si
+       -- aparece en la lista posted_aps de su campaña.
+       CASE
+         WHEN rsv.APS IS NOT NULL
+           AND cm.posted_aps IS NOT NULL
+           AND cm.posted_aps <> ''
+           AND cm.posted_aps REGEXP CONCAT('(^|[^0-9])', CAST(rsv.APS AS CHAR), '([^0-9]|$)')
+         THEN 1 ELSE 0
+       END AS posted,
+       cm.id AS campana_id, cm.nombre AS campana_nombre,
+       CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+       sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
+       DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
+       DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo
+     FROM espacio_inventario ei
+       INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+       INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+       INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+       LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+       LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+     WHERE rsv.deleted_at IS NULL
+       AND rsv.estatus IN (${FIRME_SQL})
+       AND ${NO_OCUPA_ARTICULO_SQL}
+       AND ei.inventario_id IN (${phConf})
+       AND sc.inicio_periodo BETWEEN ? AND ?
+       AND (cat.año, cat.numero_catorcena) IN (${phCat})
+     ORDER BY rsv.id`,
+    ...idsConflicto,
+    rango.inicio,
+    rango.fin,
+    ...catorcenas.flatMap(c => [c.anio, c.numero])
+  );
+
   const clave = (r: { inventario_id: number; anio: number; numero_catorcena: number }) =>
     `${r.inventario_id}|${r.anio}|${r.numero_catorcena}`;
+
+  const reservasPorCelda = new Map<string, ReservaEnCelda[]>();
+  for (const d of detalleRows) {
+    const k = clave(d);
+    const lista = reservasPorCelda.get(k) ?? [];
+    lista.push({
+      reserva_id: Number(d.reserva_id),
+      estatus: d.estatus || '',
+      estatus_original: d.estatus_original || null,
+      arte_aprobado: d.arte_aprobado || null,
+      tiene_arte: Boolean(Number(d.tiene_arte ?? 0)),
+      articulo: d.articulo ?? null,
+      aps: d.aps != null ? Number(d.aps) : null,
+      posted: Boolean(Number(d.posted ?? 0)),
+      campana_id: d.campana_id != null ? Number(d.campana_id) : null,
+      campana_nombre: d.campana_nombre ?? null,
+      propuesta_id: d.propuesta_id != null ? Number(d.propuesta_id) : null,
+      solicitud_cara_id: Number(d.solicitud_cara_id),
+      espacio_id: Number(d.espacio_id),
+      inicio_periodo: d.inicio_periodo ?? null,
+      fin_periodo: d.fin_periodo ?? null,
+    });
+    reservasPorCelda.set(k, lista);
+  }
   const porCelda = new Map(origenes.map(o => [clave(o), {
     origenes: Number(o.origenes),
     // 'id:nombre||id:nombre' → [{id, nombre}]. Solo el primer ':' separa, por
@@ -250,6 +402,7 @@ export async function detectarConflictos(
       origenes: extra?.origenes ?? 1,
       campanas: extra?.campanas ?? [],
       propuestas: extra?.propuestas ?? [],
+      reservas: reservasPorCelda.get(clave(c)) ?? [],
     };
   });
 }
@@ -331,6 +484,7 @@ export async function limpiarCeldasDuplicadas(
         WHERE ei.inventario_id = ?
           AND rsv.deleted_at IS NULL
           AND rsv.estatus IN (${FIRME_SQL})
+          AND ${NO_OCUPA_ARTICULO_SQL}
           AND cat.año = ? AND cat.numero_catorcena = ?
         GROUP BY rsv.id, rsv.APS, rsv.inventario_id, sc.idquote, cm.id, cm.nombre
         ORDER BY rsv.id`,
