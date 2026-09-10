@@ -215,7 +215,7 @@ export class NotificacionesController {
             SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT t.id FROM tareas t
             LEFT JOIN solicitud sol ON sol.id = CAST(NULLIF(t.id_solicitud, '') AS UNSIGNED)
             LEFT JOIN cliente cl ON cl.CUIC = CAST(NULLIF(sol.cuic, '') AS UNSIGNED)
-            WHERE COALESCE(cl.T0_U_Cliente, sol.razon_social) LIKE ${clienteLike}
+            WHERE COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), sol.razon_social) LIKE ${clienteLike}
                OR sol.asesor LIKE ${clienteLike}
             LIMIT 1000
           `;
@@ -340,7 +340,7 @@ export class NotificacionesController {
         // tabla nueva (permite al front mostrar "Ver historial (N)").
         const solicitudes = await prisma.$queryRaw<{ id: number; asesor: string | null; nombre_usuario: string | null; cliente_nombre: string | null; notas_direccion: string | null; notas_direccion_bitacora_count: bigint | number; descripcion_trafico: string | null }[]>`
           SELECT s.id, s.asesor, s.nombre_usuario,
-                 COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre,
+                 COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), s.razon_social) AS cliente_nombre,
                  COALESCE(
                    (SELECT snd.texto FROM solicitud_nota_direccion snd
                      WHERE snd.id_solicitud = s.id
@@ -622,7 +622,7 @@ export class NotificacionesController {
               (SELECT COUNT(*) FROM solicitud_nota_direccion snd
                 WHERE snd.id_solicitud = s.id) AS notas_direccion_bitacora_count,
               s.descripcion, s.nombre_usuario, s.asesor,
-              COALESCE(cl.T0_U_Cliente, s.razon_social) AS cliente_nombre
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), s.razon_social) AS cliente_nombre
             FROM solicitud s
             LEFT JOIN cliente cl ON cl.CUIC = CAST(s.cuic AS UNSIGNED)
             WHERE s.id = ${solId}
@@ -1954,17 +1954,28 @@ export class NotificacionesController {
       // cliente.CUIC. La query anterior comparaba CUIC contra id y por eso
       // nunca encontraba el registro — se caia al fallback razon_social.
       // Mismo bug que ya se corrigio en inventarios.controller.ts:838.
+      //
+      // Feedback 2026-09-10 (Jos): los clientes lead (creados a mano, sin
+      // CUIC) apuntan al cliente placeholder #152 que tiene T0_U_Cliente='Cliente'
+      // literal. En esos casos el bloque de abajo sobrescribia la buena
+      // razon_social por el string "Cliente" y el modal filtro autorizacion
+      // se veia raro. Solucion: si el cliente es placeholder (T0_U_Cliente='Cliente'
+      // o vacio, o CUIC=0), preferir solicitud.razon_social (que trae el
+      // nombre real del lead).
       let clienteNombre: string | null = solicitud?.razon_social || null;
       if (solicitud?.cliente_id) {
         const clienteRecord = await prisma.cliente.findUnique({
           where: { id: solicitud.cliente_id },
-          select: { T0_U_Cliente: true, T0_U_RazonSocial: true },
+          select: { CUIC: true, T0_U_Cliente: true, T0_U_RazonSocial: true },
         });
-        if (clienteRecord?.T0_U_Cliente) {
-          clienteNombre = clienteRecord.T0_U_Cliente;
-        } else if (clienteRecord?.T0_U_RazonSocial) {
+        const nombreCliente = (clienteRecord?.T0_U_Cliente || '').trim();
+        const esPlaceholder = !clienteRecord?.CUIC || nombreCliente === '' || nombreCliente === 'Cliente';
+        if (!esPlaceholder && nombreCliente) {
+          clienteNombre = nombreCliente;
+        } else if (!esPlaceholder && clienteRecord?.T0_U_RazonSocial) {
           clienteNombre = clienteRecord.T0_U_RazonSocial;
         }
+        // Si es placeholder (lead), clienteNombre se queda como solicitud.razon_social.
       }
 
       const caras = await prisma.solicitudCaras.findMany({
@@ -2129,7 +2140,7 @@ export class NotificacionesController {
       }>>(`
         SELECT DISTINCT
           c.id, c.nombre, c.status,
-          COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+          COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
           s.marca_nombre AS marca
         FROM campania c
         LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
@@ -2176,7 +2187,7 @@ export class NotificacionesController {
       }>>(`
         SELECT
           p.id, p.status,
-          COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+          COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
           s.marca_nombre AS marca
         FROM propuesta p
         LEFT JOIN solicitud s ON s.id = p.solicitud_id
@@ -2281,7 +2292,7 @@ export class NotificacionesController {
             cliente: string | null; marca: string | null; solicitud_id: number | null;
           }>>(`
             SELECT
-              COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
               s.marca_nombre AS marca,
               s.id AS solicitud_id
             FROM campania c
@@ -2305,7 +2316,7 @@ export class NotificacionesController {
             cliente: string | null; marca: string | null; solicitud_id: number | null;
           }>>(`
             SELECT
-              COALESCE(cl.T0_U_Cliente, cl.T0_U_RazonSocial, s.razon_social) AS cliente,
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
               s.marca_nombre AS marca,
               s.id AS solicitud_id
             FROM propuesta p
