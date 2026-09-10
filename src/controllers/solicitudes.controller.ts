@@ -4287,15 +4287,24 @@ export class SolicitudesController {
     }
   }
 
-  // Feedback 2026-08-15: espejo DCM del filtro DG. Solo Gerente Comercial
-  // Aeropuerto (+ Admin/DEV) puede aprobar/rechazar el filtro DCM.
+  // Feedback 2026-09-10 (Jos): el Filtro DCM lo aprueba el MISMO Gerente
+  // Comercial que el Filtro DG del asesor (VP/Plazas), no el GC Aeropuerto.
+  // Solo cambia el director final al que llega la Autorización aprobada
+  // (DCM → Rodrigo Margain). Por eso permitimos los mismos roles GC que en
+  // el filtro DG. Dejamos 'Gerente Comercial Aeropuerto' por si alguna
+  // tarea DCM ya asignada a Aeropuerto necesita procesarla.
   async aprobarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { comentario } = (req.body || {}) as { comentario?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
         'Gerente Comercial Aeropuerto',
         'Administrador',
         'DEV',
@@ -4321,9 +4330,14 @@ export class SolicitudesController {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { motivo } = req.body as { motivo?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
         'Gerente Comercial Aeropuerto',
         'Administrador',
         'DEV',
