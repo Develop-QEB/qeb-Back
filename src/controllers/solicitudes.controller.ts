@@ -2044,6 +2044,35 @@ export class SolicitudesController {
 
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
+      // Guard de rol — Feedback 2026-09-10 (Jos, caso Andrea 81315/81188):
+      // el back no validaba rol al crear solicitud. Cualquier usuario con
+      // token valido podia pegarle al endpoint aunque el front oculte el
+      // boton (ejemplo Analista de Servicio al Cliente creando solicitudes
+      // desde su sesion sin permiso). Whitelist estricta: solo asesores y
+      // roles administrativos pueden crear. Debe estar sincronizado con
+      // canCreateSolicitudes=true de front/src/lib/permissions.ts.
+      const ROLES_CREAR_SOLICITUD = new Set([
+        'Asesor Comercial',
+        'Asesor Comercial Aeropuerto',
+        'Asesor Analista',
+        'Gerente Comercial',
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ]);
+      const userRolReq = req.user?.rol;
+      if (!userRolReq || !ROLES_CREAR_SOLICITUD.has(userRolReq)) {
+        res.status(403).json({
+          success: false,
+          error: `Tu rol (${userRolReq || 'sin rol'}) no tiene permiso para crear solicitudes.`,
+        });
+        return;
+      }
+
       const {
         // Client data
         cliente_id,
