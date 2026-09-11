@@ -2353,17 +2353,6 @@ export async function depurarTareasAutorizacionResueltas(): Promise<number> {
 export const TIPO_FILTRO_ELIMINACION = 'Filtro Autorización Eliminación';
 export const TIPO_AUTORIZACION_ELIMINACION = 'Autorización Eliminación';
 
-const usuariosDgQuery = {
-  deleted_at: null,
-  OR: [
-    { puesto: 'DG' },
-    { puesto: 'Director General' },
-    { puesto: 'Dirección General' },
-    { puesto: 'Direccion General' },
-    { user_role: 'Director General' },
-  ],
-};
-
 /** Ejecuta el borrado REAL de caras de campaña (mismo efecto que el deleteCara
  *  original): soft-delete de reservas + hard-delete de caras + historial. Re-chequea
  *  el candado de APS por si se asignó entre la solicitud y la aprobación. */
@@ -2465,16 +2454,14 @@ export async function crearAutorizacionEliminacionCampana(params: {
     + (motivoTxt ? `\n\nMotivo de eliminación: ${motivoTxt}` : '')
     + (resumen ? `\n${resumen}` : '');
 
-  let responsables: { id: number; nombre: string }[];
-  let tipoTarea: string;
-  if (gc) {
-    responsables = [{ id: gc.id, nombre: gc.nombre }];
-    tipoTarea = TIPO_FILTRO_ELIMINACION;
-  } else {
-    responsables = await prisma.usuario.findMany({ where: usuariosDgQuery, select: { id: true, nombre: true } });
-    if (responsables.length === 0) throw new Error('No hay usuarios Director General configurados');
-    tipoTarea = TIPO_AUTORIZACION_ELIMINACION;
+  // [Solo Gerencia] La eliminación NUNCA va a DG: debe llegar al GERENTE de
+  // autorización del asesor (miembro del equipo con proposito 'filtro_autorizacion').
+  // Si el asesor no tiene gerente configurado, se BLOQUEA (no se escala a Dirección).
+  if (!gc) {
+    throw new Error('No se encontró Gerente de autorización para el asesor de esta campaña. Revisa su equipo de filtro de autorización.');
   }
+  const responsables: { id: number; nombre: string }[] = [{ id: gc.id, nombre: gc.nombre }];
+  const tipoTarea: string = TIPO_FILTRO_ELIMINACION;
 
   const tarea = await prisma.tareas.create({
     data: {
@@ -2526,7 +2513,6 @@ export async function aprobarEliminacionCampana(
   if (!esTareaEliminacion(tarea.tipo)) throw new Error('La tarea no es de autorización de eliminación');
 
   const caraIds = (tarea.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
-  const esGerente = tarea.tipo === TIPO_FILTRO_ELIMINACION;
 
   const res = await ejecutarEliminacionCarasCampana(caraIds, aprobadorNombre);
   await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
@@ -2534,7 +2520,7 @@ export async function aprobarEliminacionCampana(
     data: {
       tipo: 'autorizacion_solicitud_campana',
       ref_id: tarea.campania_id || 0,
-      accion: `${aprobadorNombre} (${esGerente ? 'Gerente Comercial' : 'Dirección General'}) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
+      accion: `${aprobadorNombre} (Gerencia) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
       detalles: JSON.stringify({ tareaId, eliminadas: res.eliminadas, reservas: res.reservas, comentario: (comentario || '').trim() || null }),
     },
   });
@@ -2557,23 +2543,35 @@ export async function rechazarEliminacionCampana(
   const motivoLimpio = (motivo || '').trim();
   if (!motivoLimpio) throw new Error('El motivo del rechazo es obligatorio');
 
+  // Destinatario del rechazo = el ASESOR que solicitó (no el gerente que rechazó).
+  // Mismo patrón que el rechazo normal (rechazarSolicitud): se resuelve por el
+  // creador de la solicitud (solicitud.usuario_id). Feedback Jos 2026-09-02: al
+  // rechazar no le llegaba nada al asesor y no veía el motivo para reintentar.
+  const solicitudId = parseInt(tarea.id_solicitud);
+  const solicitud = !isNaN(solicitudId)
+    ? await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { usuario_id: true, nombre_usuario: true } })
+    : null;
+  const destinatarioId = solicitud?.usuario_id ?? null;
+  const destinatarioNombre = solicitud?.nombre_usuario || '';
+  const nCircuitos = (tarea.ids_reservas || '').split(',').map(s => s.trim()).filter(Boolean).length;
+
   await prisma.$transaction(async (tx) => {
     await tx.tareas.update({ where: { id: tareaId }, data: { estatus: 'Rechazado' } });
-    if (tarea.id_responsable) {
+    if (destinatarioId) {
       await tx.tareas.create({
         data: {
           tipo: 'Rechazo Eliminación',
           titulo: `Eliminación rechazada — Campaña #${tarea.campania_id}`,
-          descripcion: `${rechazadorNombre} rechazó la solicitud de eliminación de circuito(s). Motivo: ${motivoLimpio}.`,
+          descripcion: `Tu solicitud para eliminar ${nCircuitos} circuito(s) de la Campaña #${tarea.campania_id} fue RECHAZADA por ${rechazadorNombre} (Gerencia). Motivo: ${motivoLimpio}.`,
           estatus: 'Pendiente',
-          id_responsable: tarea.id_responsable,
-          responsable: tarea.responsable,
+          id_responsable: destinatarioId,
+          responsable: destinatarioNombre,
           id_solicitud: tarea.id_solicitud,
           id_propuesta: tarea.id_propuesta,
           campania_id: tarea.campania_id,
           contenido: 'campana',
-          id_asignado: String(tarea.id_responsable),
-          asignado: tarea.responsable,
+          id_asignado: String(destinatarioId),
+          asignado: destinatarioNombre,
           fecha_fin: new Date(),
         },
       });
@@ -2583,11 +2581,12 @@ export async function rechazarEliminacionCampana(
         tipo: 'autorizacion_rechazo_campana',
         ref_id: tarea.campania_id || 0,
         accion: `${rechazadorNombre} rechazó la eliminación de circuito(s)`,
-        detalles: JSON.stringify({ tareaId, motivo: motivoLimpio, rechazadorNombre }),
+        detalles: JSON.stringify({ tareaId, motivo: motivoLimpio, rechazadorNombre, destinatarioId }),
       },
     });
   });
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId, tipo: 'Rechazo Eliminación' });
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: 'Rechazo Eliminación' });
 }
 
 /** ¿La tarea es de autorización de eliminación (filtro o DG)? Para ramificar
