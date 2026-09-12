@@ -947,15 +947,16 @@ export class PropuestasController {
             autorizacion_dcm: 'aprobado',
           },
         });
-        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        // Cierre (Rechazada/Cancelada): SOLO bloquea con pendiente. Aprobado
+        // + rechazado + correccion se permiten en cualquier mezcla — feedback
+        // Jos 2026-09-11.
+        const bloquea = totalPend > 0;
         if (bloquea) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
-          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
-          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Espera a que direccion resuelva los pendientes antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,
