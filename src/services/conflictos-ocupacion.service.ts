@@ -59,6 +59,7 @@ const FIRME_SQL = ESTATUS_FIRME_CONF.map(e => `'${e}'`).join(',');
 // Solo documental: los estatus que NO cuentan aqui. Se exporta para que la UI
 // pueda explicar la particion sin re-declararla.
 export const ESTATUS_TENTATIVO_CONF = ['Reservado', 'Bonificado'];
+const TENTATIVO_SQL = ESTATUS_TENTATIVO_CONF.map(e => `'${e}'`).join(',');
 
 // Artículos que NO ocupan la cara: impresion (IM-). Mismo criterio que
 // getEspaciosBloqueados. Se aplica en las 3 fases y en el limpiador.
@@ -101,6 +102,12 @@ export interface ReservaEnCelda {
   espacio_id: number;
   inicio_periodo: string | null;
   fin_periodo: string | null;
+  /**
+   * true = apartado TENTATIVO de propuesta (Reservado/Bonificado).
+   * Solo lo llena `detectarApartadosSobreVenta`; en la auditoría de ventas
+   * firmes todas las reservas son firmes y viene `false`.
+   */
+  es_apartado?: boolean;
 }
 
 export interface CeldaConflicto {
@@ -122,6 +129,10 @@ export interface CeldaConflicto {
   propuestas: number[];
   /** Detalle de las reservas que forman el conflicto (fase 3). */
   reservas: ReservaEnCelda[];
+  /** Solo en apartados-sobre-venta: cuántas reservas firmes hay en la celda. */
+  firmes?: number;
+  /** Solo en apartados-sobre-venta: cuántos apartados tentativos hay encima. */
+  apartados?: number;
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
@@ -405,6 +416,216 @@ export async function detectarConflictos(
       reservas: reservasPorCelda.get(clave(c)) ?? [],
     };
   });
+}
+
+/**
+ * APARTADOS SOBRE VENTA: celdas donde una pieza Tradicional YA está vendida en
+ * firme por una campaña y, encima, OTRA propuesta la sigue teniendo apartada
+ * (Reservado/Bonificado).
+ *
+ * Por qué es su propia categoría y no entra en `detectarConflictos`: ahí solo
+ * cuentan las ventas firmes, porque dos apartados de propuestas SÍ pueden
+ * encimarse por diseño (es el modelo de multireserva). Pero un apartado encima
+ * de algo YA VENDIDO no es multireserva legítima: es inventario que la propuesta
+ * cree tener y no va a poder llevarse. Normalmente el desalojo lo libera al
+ * momento de vender (ver inventario-bloqueo.service); lo que cae aquí es lo que
+ * se quedó colgado cuando ese desalojo no corrió.
+ *
+ * No es doble venta —al aprobar, el guardián descarta esas piezas—, pero el
+ * asesor se entera hasta ese momento. Esta vista lo hace visible antes.
+ */
+export async function detectarApartadosSobreVenta(
+  catorcenas: CatorcenaRef[],
+  ids?: number[] | null
+): Promise<CeldaConflicto[]> {
+  if (catorcenas.length === 0) return [];
+  if (ids && ids.length === 0) return [];
+
+  const rango = await rangoFechasDeCatorcenas(catorcenas);
+  if (!rango) return [];
+
+  const phCat = catorcenas.map(() => '(?,?)').join(',');
+  const filtroIds = ids ? `AND ei.inventario_id IN (${ids.map(() => '?').join(',')})` : '';
+  const params: unknown[] = [
+    rango.inicio,
+    rango.fin,
+    ...catorcenas.flatMap(c => [c.anio, c.numero]),
+    ...(ids ?? []),
+  ];
+
+  // FASE 1 — celdas que tienen a la vez venta firme y apartado tentativo.
+  // El filtro fino ("el apartado es de OTRA propuesta") se hace en JS con el
+  // detalle, porque en un GROUP BY no se puede comparar el conjunto de idquotes
+  // firmes contra el de los tentativos.
+  const celdas = await prisma.$queryRawUnsafe<Array<{
+    inventario_id: number;
+    codigo_unico: string | null;
+    plaza: string | null;
+    mueble: string | null;
+    ubicacion: string | null;
+    tradicional_digital: string | null;
+    anio: number;
+    numero_catorcena: number;
+    n: bigint | number;
+    firmes: bigint | number;
+    apartados: bigint | number;
+  }>>(
+    `SELECT
+       ei.inventario_id, i.codigo_unico, i.plaza, i.mueble, i.ubicacion,
+       i.tradicional_digital, cat.año AS anio, cat.numero_catorcena,
+       COUNT(DISTINCT rsv.id) AS n,
+       SUM(CASE WHEN rsv.estatus IN (${FIRME_SQL}) THEN 1 ELSE 0 END) AS firmes,
+       SUM(CASE WHEN rsv.estatus IN (${TENTATIVO_SQL}) THEN 1 ELSE 0 END) AS apartados
+     FROM espacio_inventario ei
+       INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+       INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+       INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+       INNER JOIN inventarios i     ON i.id = ei.inventario_id
+     WHERE rsv.deleted_at IS NULL
+       AND rsv.estatus IN (${FIRME_SQL}, ${TENTATIVO_SQL})
+       AND ${NO_OCUPA_ARTICULO_SQL}
+       AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
+       AND sc.inicio_periodo BETWEEN ? AND ?
+       AND (cat.año, cat.numero_catorcena) IN (${phCat})
+       ${filtroIds}
+     GROUP BY ei.inventario_id, i.codigo_unico, i.plaza, i.mueble, i.ubicacion,
+              i.tradicional_digital, cat.año, cat.numero_catorcena
+     HAVING firmes >= 1 AND apartados >= 1
+     ORDER BY i.codigo_unico, cat.año, cat.numero_catorcena`,
+    ...params
+  );
+
+  if (celdas.length === 0) return [];
+
+  // FASE 2 — detalle de TODAS las reservas (firmes y apartados) de esas celdas.
+  // Mismo shape que la auditoría de ventas firmes para que la UI lo reutilice.
+  const idsCelda = [...new Set(celdas.map(c => c.inventario_id))];
+  const phConf = idsCelda.map(() => '?').join(',');
+  const detalleRows = await prisma.$queryRawUnsafe<Array<{
+    inventario_id: number;
+    anio: number;
+    numero_catorcena: number;
+    reserva_id: number;
+    estatus: string | null;
+    estatus_original: string | null;
+    arte_aprobado: string | null;
+    tiene_arte: number | null;
+    articulo: string | null;
+    aps: number | null;
+    posted: number | null;
+    campana_id: number | null;
+    campana_nombre: string | null;
+    propuesta_id: number | null;
+    solicitud_cara_id: number;
+    espacio_id: number;
+    inicio_periodo: string | null;
+    fin_periodo: string | null;
+    es_apartado: number;
+  }>>(
+    `SELECT
+       ei.inventario_id, cat.año AS anio, cat.numero_catorcena,
+       rsv.id AS reserva_id, rsv.estatus, rsv.estatus_original, rsv.arte_aprobado,
+       CASE WHEN rsv.archivo IS NOT NULL AND rsv.archivo <> '' THEN 1 ELSE 0 END AS tiene_arte,
+       sc.articulo, rsv.APS AS aps,
+       CASE
+         WHEN rsv.APS IS NOT NULL
+           AND cm.posted_aps IS NOT NULL
+           AND cm.posted_aps <> ''
+           AND cm.posted_aps REGEXP CONCAT('(^|[^0-9])', CAST(rsv.APS AS CHAR), '([^0-9]|$)')
+         THEN 1 ELSE 0
+       END AS posted,
+       cm.id AS campana_id, cm.nombre AS campana_nombre,
+       CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+       sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
+       DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
+       DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo,
+       CASE WHEN rsv.estatus IN (${TENTATIVO_SQL}) THEN 1 ELSE 0 END AS es_apartado
+     FROM espacio_inventario ei
+       INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
+       INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+       INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+       LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+       LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+     WHERE rsv.deleted_at IS NULL
+       AND rsv.estatus IN (${FIRME_SQL}, ${TENTATIVO_SQL})
+       AND ${NO_OCUPA_ARTICULO_SQL}
+       AND ei.inventario_id IN (${phConf})
+       AND sc.inicio_periodo BETWEEN ? AND ?
+       AND (cat.año, cat.numero_catorcena) IN (${phCat})
+     ORDER BY es_apartado, rsv.id`,
+    ...idsCelda,
+    rango.inicio,
+    rango.fin,
+    ...catorcenas.flatMap(c => [c.anio, c.numero])
+  );
+
+  const clave = (r: { inventario_id: number; anio: number; numero_catorcena: number }) =>
+    `${r.inventario_id}|${r.anio}|${r.numero_catorcena}`;
+
+  const reservasPorCelda = new Map<string, ReservaEnCelda[]>();
+  for (const d of detalleRows) {
+    const k = clave(d);
+    const lista = reservasPorCelda.get(k) ?? [];
+    lista.push({
+      reserva_id: Number(d.reserva_id),
+      estatus: d.estatus || '',
+      estatus_original: d.estatus_original || null,
+      arte_aprobado: d.arte_aprobado || null,
+      tiene_arte: Boolean(Number(d.tiene_arte ?? 0)),
+      articulo: d.articulo ?? null,
+      aps: d.aps != null ? Number(d.aps) : null,
+      posted: Boolean(Number(d.posted ?? 0)),
+      campana_id: d.campana_id != null ? Number(d.campana_id) : null,
+      campana_nombre: d.campana_nombre ?? null,
+      propuesta_id: d.propuesta_id != null ? Number(d.propuesta_id) : null,
+      solicitud_cara_id: Number(d.solicitud_cara_id),
+      espacio_id: Number(d.espacio_id),
+      inicio_periodo: d.inicio_periodo ?? null,
+      fin_periodo: d.fin_periodo ?? null,
+      es_apartado: Boolean(Number(d.es_apartado ?? 0)),
+    });
+    reservasPorCelda.set(k, lista);
+  }
+
+  const salida: CeldaConflicto[] = [];
+  for (const c of celdas) {
+    const reservas = reservasPorCelda.get(clave(c)) ?? [];
+    const duenosFirmes = new Set(
+      reservas.filter(r => !r.es_apartado).map(r => r.propuesta_id).filter((x): x is number => x != null)
+    );
+    // Solo interesa el apartado de OTRA propuesta. Si la misma propuesta tiene
+    // firme y tentativo sobre la pieza es un residuo suyo, no un choque con un tercero.
+    const apartadosAjenos = reservas.filter(
+      r => r.es_apartado && r.propuesta_id != null && !duenosFirmes.has(r.propuesta_id)
+    );
+    if (apartadosAjenos.length === 0) continue;
+
+    const campanas = new Map<number, string>();
+    for (const r of reservas) {
+      if (!r.es_apartado && r.campana_id != null) campanas.set(r.campana_id, r.campana_nombre || `Campaña ${r.campana_id}`);
+    }
+    const propuestas = [...new Set(apartadosAjenos.map(r => r.propuesta_id as number))];
+
+    salida.push({
+      inventario_id: Number(c.inventario_id),
+      codigo_unico: c.codigo_unico,
+      plaza: c.plaza,
+      mueble: c.mueble,
+      ubicacion: c.ubicacion,
+      tradicional_digital: c.tradicional_digital,
+      anio: Number(c.anio),
+      numero_catorcena: Number(c.numero_catorcena),
+      n: Number(c.n),
+      // "Orígenes" aquí = quién vendió + quién sigue apartando.
+      origenes: campanas.size + propuestas.length,
+      campanas: [...campanas.entries()].map(([id, nombre]) => ({ id, nombre })),
+      propuestas,
+      reservas,
+      firmes: Number(c.firmes),
+      apartados: apartadosAjenos.length,
+    });
+  }
+  return salida;
 }
 
 export interface ActorLimpieza {
