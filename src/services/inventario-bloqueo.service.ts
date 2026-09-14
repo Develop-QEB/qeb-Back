@@ -417,7 +417,10 @@ interface EvictRow {
 export async function venderReservasPropuestaConGuardian(
   tx: Prisma.TransactionClient,
   propuestaId: number,
-): Promise<{ vendidas: number; desplazadas: DesplazadaInfo[]; conflictivas: number }> {
+  // `vendidasIds` = las reservas que CRUZARON de propuesta a campaña en este
+  // pase a ventas. Las guarda pase-ventas.service para que la Vista Compartir
+  // distinga lo que se vino de la propuesta de lo agregado luego en campaña.
+): Promise<{ vendidas: number; vendidasIds: number[]; desplazadas: DesplazadaInfo[]; conflictivas: number }> {
   // Reservas tentativas de la propuesta. `reservas.inventario_id` es polimórfico
   // (espacio_inventario.id o inventarios.id) → se resuelve por COALESCE para
   // saber si es Digital y su codigo_unico. ORDER BY espacio para bloquear siempre
@@ -566,7 +569,12 @@ export async function venderReservasPropuestaConGuardian(
     await tx.reservas.updateMany({ where: { id: { in: idsRemovidas } }, data: { deleted_at: new Date() } });
   }
 
-  return { vendidas: vendido.length + vendidoBon.length, desplazadas, conflictivas: idsConflicto.size };
+  return {
+    vendidas: vendido.length + vendidoBon.length,
+    vendidasIds: [...vendido, ...vendidoBon],
+    desplazadas,
+    conflictivas: idsConflicto.size,
+  };
 }
 
 /**

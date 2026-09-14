@@ -19,6 +19,7 @@ import {
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
+import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -11144,6 +11145,18 @@ export class CampanasController {
         for (const i of invsOm) codigosOmitidosCamp.set(i.id, i.codigo_unico);
       }
 
+      // Versionado Vista Compartir: la campaña comparte la misma propuesta
+      // (idquote); si un circuito llego a N/N aqui, guardar su version.
+      if (reservasCreadas > 0 && campana.cotizacion_id) {
+        const cotVer = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        await evaluarCompletadoSeguro(cotVer?.id_propuesta, {
+          usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createReservas',
+        });
+      }
+
       res.json({
         success: true,
         data: {
@@ -11597,6 +11610,11 @@ export class CampanasController {
         mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
+      // Versionado Vista Compartir (cambio de caras/bonificacion puede completar el circuito).
+      await evaluarCompletadoSeguro(currentCara.idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.updateCara',
+      });
+
       res.json({
         success: true,
         data: cara,
@@ -11827,6 +11845,12 @@ export class CampanasController {
       if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
         mensaje = 'Circuito creado. Requiere autorización antes de asignar inventario.';
       }
+
+      // Versionado Vista Compartir: los circuitos digitales se auto-reservan al
+      // crearse, asi que este alta puede dejar un circuito completo.
+      await evaluarCompletadoSeguro(cotizacion?.id_propuesta, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createCara',
+      });
 
       res.json({
         success: true,
@@ -12112,6 +12136,12 @@ export class CampanasController {
       }
 
       console.log(`[campanas.bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
+
+      // Versionado Vista Compartir: la edicion masiva redistribuye reservas de
+      // circuito, asi que puede dejar circuitos completos.
+      await evaluarCompletadoSeguro(idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.bulkUpdateCaras',
+      });
 
       res.json({
         success: true,
