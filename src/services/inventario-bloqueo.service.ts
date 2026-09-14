@@ -774,10 +774,18 @@ export async function notificarReservasDesplazadas(
     // su inventario FIRME no se le quita — lo único desplazable es un hold tentativo, que
     // en una campaña ya no debería existir (esos deben estar en 'Vendido bonificado').
     // Se sigue avisando (tarea/notificación/historial), solo NO se toca el status.
+    // OJO: la sola existencia de la fila en campania NO sirve como criterio. Esa
+    // fila se crea junto con la cotización (status 'inactiva'), así que TODA
+    // propuesta la tiene desde que nace y este guard dejaba el status congelado
+    // para todas. "Ya es campaña" = ya hubo pase a ventas: fecha_aprobacion
+    // llena o status Aprobada/Pase a ventas. Mismo criterio que el guard del
+    // desalojo en venderReservasPropuestaConGuardian / desplazarTentativasEnEspacios.
     const campRows = await defaultPrisma.$queryRawUnsafe<{ c: bigint }[]>(
       `SELECT COUNT(*) c FROM campania cam
          INNER JOIN cotizacion cot ON cot.id = cam.cotizacion_id
-        WHERE cot.id_propuesta = ?`,
+         INNER JOIN propuesta p ON p.id = cot.id_propuesta
+        WHERE cot.id_propuesta = ?
+          AND (cam.fecha_aprobacion IS NOT NULL OR p.status IN ('Aprobada', 'Pase a ventas'))`,
       parseInt(idquote),
     );
     const yaEsCampania = Number(campRows[0]?.c ?? 0) > 0;

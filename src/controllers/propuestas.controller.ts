@@ -3008,8 +3008,8 @@ export class PropuestasController {
 
       const placemarks = puntos.map(i => `
     <Placemark>
-      <name>${esc(i.codigo_unico)}${i.estado_version === 'no_vigente' ? ' (No vigente)' : ''}${i.origen_reserva === 'campana' ? ' [Nuevo en campaña]' : ''}</name>
-      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}${i.estado_version === 'no_vigente' ? `<br/><b>No vigente:</b> ${esc(i.motivo_no_vigente || 'desplazada o quitada despues de completar el circuito')}` : ''}]]></description>
+      <name>${esc(i.codigo_unico)}${i.estado_version === 'no_vigente' ? ' (Reasignando)' : ''}${i.origen_reserva === 'campana' ? ' [Nuevo en campaña]' : ''}</name>
+      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}${i.estado_version === 'no_vigente' ? '<br/><b>Estado:</b> Reasignando' : ''}]]></description>
       <Point><coordinates>${i.longitud},${i.latitud},0</coordinates></Point>
     </Placemark>`).join('');
 
@@ -3104,7 +3104,11 @@ export class PropuestasController {
       // Inventario: ultima version completada de cada circuito (las piezas
       // desplazadas/quitadas despues vienen como estado_version 'no_vigente').
       // Endpoint publico: solo lee, NO evalua/escribe versiones.
-      const serializedInventario = await getInventarioPropuestaConVersion(propuestaId);
+      // El motivo técnico de una pieza no vigente (desplazada, eliminada,
+      // reasignada) es información interna: al cliente solo le llega el estado
+      // "Reasignando". Se quita del payload aquí, no en el front.
+      const serializedInventario = (await getInventarioPropuestaConVersion(propuestaId))
+        .map(({ motivo_no_vigente: _motivo, ...fila }) => fila);
 
       res.json({
         success: true,
