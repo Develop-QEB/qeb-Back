@@ -184,7 +184,7 @@ export async function getInventarioPropuestaConVersion(propuestaId: number): Pro
   // round-trips contra una BD remota (cada uno cuesta ~85 ms).
   // Ultima version por circuito: el INNER JOIN a solicitudCaras descarta
   // versiones de circuitos que ya se eliminaron de la propuesta.
-  const [actuales, origenIds, versiones] = await Promise.all([
+  const [actuales, origenIds, versiones, yaEsCampania] = await Promise.all([
     getInventarioActualPropuesta(propuestaId),
     getReservasDePropuesta(propuestaId),
     (async (): Promise<VersionRow[]> => {
@@ -199,6 +199,20 @@ export async function getInventarioPropuestaConVersion(propuestaId: number): Pro
            INNER JOIN solicitudCaras sc ON sc.id = cc.solicitud_caras_id`,
         String(propuestaId),
       );
+    })(),
+    // ¿Ya hubo pase a ventas? Mismo criterio que los guards del desalojo: la
+    // sola existencia de la fila en campania NO sirve (se crea junto con la
+    // cotización, así que la tienen todas desde que nacen).
+    (async (): Promise<boolean> => {
+      const rows = await prisma.$queryRawUnsafe<{ c: bigint | number }[]>(
+        `SELECT COUNT(*) c FROM campania cam
+           INNER JOIN cotizacion cot ON cot.id = cam.cotizacion_id
+           INNER JOIN propuesta p ON p.id = cot.id_propuesta
+          WHERE cot.id_propuesta = ?
+            AND (cam.fecha_aprobacion IS NOT NULL OR p.status IN ('Aprobada', 'Pase a ventas'))`,
+        propuestaId,
+      );
+      return Number(rows[0]?.c ?? 0) > 0;
     })(),
   ]);
 
@@ -239,8 +253,17 @@ export async function getInventarioPropuestaConVersion(propuestaId: number): Pro
   }
 
   // Reservas de la foto que ya no estan: desplazadas, quitadas o reasignadas.
+  //
+  // EN CAMPAÑA NO HAY GRIS: una vez hecho el pase a ventas, lo que se perdió en
+  // ese corte (piezas desplazadas, o quitadas por estar ya vendidas en otra
+  // campaña) deja de ser parte de lo que se le comparte al cliente. La campaña
+  // muestra únicamente el inventario que sí cruzó. Mientras la propuesta NO es
+  // campaña el gris sí se muestra: ahí todavía es información útil para el
+  // asesor, que puede reponer esas piezas antes de vender.
   const faltantes: number[] = [];
-  for (const v of verBySc.values()) for (const id of v.reservas) if (!cubiertas.has(id)) faltantes.push(id);
+  if (!yaEsCampania) {
+    for (const v of verBySc.values()) for (const id of v.reservas) if (!cubiertas.has(id)) faltantes.push(id);
+  }
 
   if (faltantes.length > 0) {
     const CHUNK = 800;
