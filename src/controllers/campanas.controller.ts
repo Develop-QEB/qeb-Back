@@ -10980,7 +10980,9 @@ export class CampanasController {
       // el front solo recibia un numero y el usuario re-reservaba a ciegas).
       const omitidosDetalleCamp: { inventario_id: number; motivo: string }[] = [];
       const workListCamp: WorkItemCamp[] = [];
-      const reactivarList: { reservaId: number; estatus: string }[] = [];
+      // `espacioId` va aquí porque el desalojo de tentativas necesita saber qué
+      // piezas quedaron firmadas, y reactivar cuenta igual que crear.
+      const reactivarList: { reservaId: number; estatus: string; espacioId: number }[] = [];
       for (const reserva of reservas) {
         let espacioId: number;
         if (reserva.espacio_id) {
@@ -11027,7 +11029,7 @@ export class CampanasController {
           }
           const softId = softDeletedCaraC.get(espacioId);
           if (softId) {
-            reactivarList.push({ reservaId: softId, estatus });
+            reactivarList.push({ reservaId: softId, estatus, espacioId });
             espaciosReservadosEnPeriodo.add(espacioId);
             continue;
           }
@@ -11037,6 +11039,10 @@ export class CampanasController {
         espaciosReservadosEnPeriodo.add(espacioId);
         workListCamp.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       }
+
+      // Piezas que quedan FIRMADAS en esta llamada (creadas o reactivadas). Es lo
+      // que alimenta el desalojo de tentativas de otras propuestas.
+      const espaciosFirmados: number[] = [];
 
       // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
       for (const r of reactivarList) {
@@ -11052,6 +11058,10 @@ export class CampanasController {
           },
         });
         reservasCreadas++;
+        // Reactivar es firmar: la pieza vuelve a ocupar, así que tiene que entrar
+        // al desalojo igual que una reserva nueva. Sin esto, el flujo
+        // quitar→volver a agregar inventario en campaña no desalojaba nada.
+        espaciosFirmados.push(r.espacioId);
       }
 
       // PREFETCH invId padre en bulk (solo para el payload del emit).
@@ -11067,7 +11077,6 @@ export class CampanasController {
       // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
       // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
       const BATCH_SIZE_CAMP = 5;
-      const espaciosFirmados: number[] = [];
       for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
         const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
         const resultados = await Promise.all(lote.map(async (w) => {
@@ -11114,8 +11123,18 @@ export class CampanasController {
       // quedaron creadas; solo se pierde el aviso, no la venta.
       if (espaciosFirmados.length > 0) {
         try {
+          // `excludeIdquote` se compara contra solicitudCaras.idquote, que es el
+          // id de la PROPUESTA, no el de la cotización. Pasar cotizacion_id no
+          // excluía a la propia campaña (y podía excluir a una propuesta ajena
+          // cuyo id coincidiera con ese número).
+          const cotProp = campana.cotizacion_id
+            ? await prisma.cotizacion.findUnique({
+                where: { id: campana.cotizacion_id },
+                select: { id_propuesta: true },
+              })
+            : null;
           const desplazadas = await desplazarTentativasEnEspacios(
-            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
+            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(cotProp?.id_propuesta ?? ''),
           );
           if (desplazadas.length > 0) {
             await notificarReservasDesplazadas(desplazadas, {
