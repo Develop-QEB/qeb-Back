@@ -526,11 +526,19 @@ export async function venderReservasPropuestaConGuardian(
        INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
          AND sc2.idquote <> CAST(? AS CHAR)
          AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
-         -- No robar reservas de una CAMPAÑA (es venta): solo se desplazan holds de
-         -- propuestas que aún NO son campaña (bug 81279).
+         -- No robar reservas de una propuesta YA VENDIDA (bug 81279).
+         -- OJO: NO basta con que exista fila en campania. Esa fila se crea junto
+         -- con la cotización (solicitudes.controller, "5. Create campania", status
+         -- 'inactiva'), así que TODA propuesta tiene una desde que nace y este
+         -- guardia terminaba excluyendo al 100% de ellas → el desplazamiento nunca
+         -- ocurría. Lo que identifica una venta real es la aprobación.
          AND NOT EXISTS (
-           SELECT 1 FROM campania cam2 INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
-            WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED))
+           SELECT 1 FROM campania cam2
+             INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
+             INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
+            WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
+              AND (cam2.fecha_aprobacion IS NOT NULL
+                   OR p2.status IN ('Aprobada', 'Pase a ventas')))
        WHERE sc.idquote = CAST(? AS CHAR)
          AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
@@ -619,11 +627,17 @@ export async function desplazarTentativasEnEspacios(
        AND sc2.inicio_periodo <= ? AND sc2.fin_periodo >= ?
        AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
        AND (sc2.articulo IS NULL OR sc2.articulo NOT LIKE 'IM-%')
-       -- No robar reservas de una CAMPAÑA (es venta): solo holds de propuestas
-       -- que aún NO son campaña (bug 81279).
+       -- No robar reservas de una propuesta YA VENDIDA (bug 81279). Mismo criterio
+       -- que en venderReservasPropuestaConGuardian: la sola existencia de la fila
+       -- en campania NO sirve (se crea junto con la cotización, así que la tienen
+       -- todas); lo que marca una venta real es la aprobación.
        AND NOT EXISTS (
-         SELECT 1 FROM campania cam2 INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
-          WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED))`,
+         SELECT 1 FROM campania cam2
+           INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
+           INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
+          WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
+            AND (cam2.fecha_aprobacion IS NOT NULL
+                 OR p2.status IN ('Aprobada', 'Pase a ventas')))`,
     ...espacios, fechaFin, fechaInicio,
   );
   if (rows.length === 0) return [];
