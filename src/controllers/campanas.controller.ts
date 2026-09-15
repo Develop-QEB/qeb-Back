@@ -19,6 +19,7 @@ import {
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
+import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -10979,7 +10980,9 @@ export class CampanasController {
       // el front solo recibia un numero y el usuario re-reservaba a ciegas).
       const omitidosDetalleCamp: { inventario_id: number; motivo: string }[] = [];
       const workListCamp: WorkItemCamp[] = [];
-      const reactivarList: { reservaId: number; estatus: string }[] = [];
+      // `espacioId` va aquí porque el desalojo de tentativas necesita saber qué
+      // piezas quedaron firmadas, y reactivar cuenta igual que crear.
+      const reactivarList: { reservaId: number; estatus: string; espacioId: number }[] = [];
       for (const reserva of reservas) {
         let espacioId: number;
         if (reserva.espacio_id) {
@@ -11026,7 +11029,7 @@ export class CampanasController {
           }
           const softId = softDeletedCaraC.get(espacioId);
           if (softId) {
-            reactivarList.push({ reservaId: softId, estatus });
+            reactivarList.push({ reservaId: softId, estatus, espacioId });
             espaciosReservadosEnPeriodo.add(espacioId);
             continue;
           }
@@ -11036,6 +11039,10 @@ export class CampanasController {
         espaciosReservadosEnPeriodo.add(espacioId);
         workListCamp.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       }
+
+      // Piezas que quedan FIRMADAS en esta llamada (creadas o reactivadas). Es lo
+      // que alimenta el desalojo de tentativas de otras propuestas.
+      const espaciosFirmados: number[] = [];
 
       // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
       for (const r of reactivarList) {
@@ -11051,6 +11058,10 @@ export class CampanasController {
           },
         });
         reservasCreadas++;
+        // Reactivar es firmar: la pieza vuelve a ocupar, así que tiene que entrar
+        // al desalojo igual que una reserva nueva. Sin esto, el flujo
+        // quitar→volver a agregar inventario en campaña no desalojaba nada.
+        espaciosFirmados.push(r.espacioId);
       }
 
       // PREFETCH invId padre en bulk (solo para el payload del emit).
@@ -11066,7 +11077,6 @@ export class CampanasController {
       // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
       // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
       const BATCH_SIZE_CAMP = 5;
-      const espaciosFirmados: number[] = [];
       for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
         const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
         const resultados = await Promise.all(lote.map(async (w) => {
@@ -11113,8 +11123,18 @@ export class CampanasController {
       // quedaron creadas; solo se pierde el aviso, no la venta.
       if (espaciosFirmados.length > 0) {
         try {
+          // `excludeIdquote` se compara contra solicitudCaras.idquote, que es el
+          // id de la PROPUESTA, no el de la cotización. Pasar cotizacion_id no
+          // excluía a la propia campaña (y podía excluir a una propuesta ajena
+          // cuyo id coincidiera con ese número).
+          const cotProp = campana.cotizacion_id
+            ? await prisma.cotizacion.findUnique({
+                where: { id: campana.cotizacion_id },
+                select: { id_propuesta: true },
+              })
+            : null;
           const desplazadas = await desplazarTentativasEnEspacios(
-            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
+            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(cotProp?.id_propuesta ?? ''),
           );
           if (desplazadas.length > 0) {
             await notificarReservasDesplazadas(desplazadas, {
@@ -11143,6 +11163,18 @@ export class CampanasController {
           select: { id: true, codigo_unico: true },
         });
         for (const i of invsOm) codigosOmitidosCamp.set(i.id, i.codigo_unico);
+      }
+
+      // Versionado Vista Compartir: la campaña comparte la misma propuesta
+      // (idquote); si un circuito llego a N/N aqui, guardar su version.
+      if (reservasCreadas > 0 && campana.cotizacion_id) {
+        const cotVer = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        await evaluarCompletadoSeguro(cotVer?.id_propuesta, {
+          usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createReservas',
+        });
       }
 
       res.json({
@@ -11598,6 +11630,11 @@ export class CampanasController {
         mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
+      // Versionado Vista Compartir (cambio de caras/bonificacion puede completar el circuito).
+      await evaluarCompletadoSeguro(currentCara.idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.updateCara',
+      });
+
       res.json({
         success: true,
         data: cara,
@@ -11828,6 +11865,12 @@ export class CampanasController {
       if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
         mensaje = 'Circuito creado. Requiere autorización antes de asignar inventario.';
       }
+
+      // Versionado Vista Compartir: los circuitos digitales se auto-reservan al
+      // crearse, asi que este alta puede dejar un circuito completo.
+      await evaluarCompletadoSeguro(cotizacion?.id_propuesta, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createCara',
+      });
 
       res.json({
         success: true,
@@ -12113,6 +12156,12 @@ export class CampanasController {
       }
 
       console.log(`[campanas.bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
+
+      // Versionado Vista Compartir: la edicion masiva redistribuye reservas de
+      // circuito, asi que puede dejar circuitos completos.
+      await evaluarCompletadoSeguro(idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.bulkUpdateCaras',
+      });
 
       res.json({
         success: true,

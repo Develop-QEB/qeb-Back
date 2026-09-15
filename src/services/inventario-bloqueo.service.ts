@@ -417,7 +417,10 @@ interface EvictRow {
 export async function venderReservasPropuestaConGuardian(
   tx: Prisma.TransactionClient,
   propuestaId: number,
-): Promise<{ vendidas: number; desplazadas: DesplazadaInfo[]; conflictivas: number }> {
+  // `vendidasIds` = las reservas que CRUZARON de propuesta a campaña en este
+  // pase a ventas. Las guarda pase-ventas.service para que la Vista Compartir
+  // distinga lo que se vino de la propuesta de lo agregado luego en campaña.
+): Promise<{ vendidas: number; vendidasIds: number[]; desplazadas: DesplazadaInfo[]; conflictivas: number }> {
   // Reservas tentativas de la propuesta. `reservas.inventario_id` es polimórfico
   // (espacio_inventario.id o inventarios.id) → se resuelve por COALESCE para
   // saber si es Digital y su codigo_unico. ORDER BY espacio para bloquear siempre
@@ -523,6 +526,19 @@ export async function venderReservasPropuestaConGuardian(
        INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
          AND sc2.idquote <> CAST(? AS CHAR)
          AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
+         -- No robar reservas de una propuesta YA VENDIDA (bug 81279).
+         -- OJO: NO basta con que exista fila en campania. Esa fila se crea junto
+         -- con la cotización (solicitudes.controller, "5. Create campania", status
+         -- 'inactiva'), así que TODA propuesta tiene una desde que nace y este
+         -- guardia terminaba excluyendo al 100% de ellas → el desplazamiento nunca
+         -- ocurría. Lo que identifica una venta real es la aprobación.
+         AND NOT EXISTS (
+           SELECT 1 FROM campania cam2
+             INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
+             INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
+            WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
+              AND (cam2.fecha_aprobacion IS NOT NULL
+                   OR p2.status IN ('Aprobada', 'Pase a ventas')))
        WHERE sc.idquote = CAST(? AS CHAR)
          AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
@@ -561,7 +577,12 @@ export async function venderReservasPropuestaConGuardian(
     await tx.reservas.updateMany({ where: { id: { in: idsRemovidas } }, data: { deleted_at: new Date() } });
   }
 
-  return { vendidas: vendido.length + vendidoBon.length, desplazadas, conflictivas: idsConflicto.size };
+  return {
+    vendidas: vendido.length + vendidoBon.length,
+    vendidasIds: [...vendido, ...vendidoBon],
+    desplazadas,
+    conflictivas: idsConflicto.size,
+  };
 }
 
 /**
@@ -605,7 +626,18 @@ export async function desplazarTentativasEnEspacios(
        AND r2.estatus IN ('Reservado', 'Bonificado')
        AND sc2.inicio_periodo <= ? AND sc2.fin_periodo >= ?
        AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
-       AND (sc2.articulo IS NULL OR sc2.articulo NOT LIKE 'IM-%')`,
+       AND (sc2.articulo IS NULL OR sc2.articulo NOT LIKE 'IM-%')
+       -- No robar reservas de una propuesta YA VENDIDA (bug 81279). Mismo criterio
+       -- que en venderReservasPropuestaConGuardian: la sola existencia de la fila
+       -- en campania NO sirve (se crea junto con la cotización, así que la tienen
+       -- todas); lo que marca una venta real es la aprobación.
+       AND NOT EXISTS (
+         SELECT 1 FROM campania cam2
+           INNER JOIN cotizacion cot2 ON cot2.id = cam2.cotizacion_id
+           INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
+          WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
+            AND (cam2.fecha_aprobacion IS NOT NULL
+                 OR p2.status IN ('Aprobada', 'Pase a ventas')))`,
     ...espacios, fechaFin, fechaInicio,
   );
   if (rows.length === 0) return [];
@@ -689,8 +721,9 @@ export async function notificarReservasDesplazadas(
   const now = new Date();
   const fin = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   // Estatus "muertos": la propuesta ya no se trabaja, no tiene sentido mandarla a ajuste.
-  // (Aprobada / Pase a ventas SÍ pasan a "Ajuste Inventario" cuando les roban reservas —
-  //  instrucción del jefe: "cuando a una propuesta le roban reservas, cambia a Ajuste Inventario".)
+  // Aprobada / Pase a ventas SÍ pasan a "Ajuste Inventario" cuando les roban reservas
+  // (instrucción del jefe), PERO si la propuesta YA es campaña su status no se toca
+  // (ver GUARD 81279 abajo): una campaña vendida no regresa a Ajuste Inventario.
   const estatusTerminal = ['Cancelada', 'Descartada', 'Rechazada', 'Liberada'];
   let totalDesplazadas = 0;
   const perdedorasResumen: string[] = [];
@@ -735,9 +768,30 @@ export async function notificarReservasDesplazadas(
 
     // (R4) La propuesta perdedora pasa a "Ajuste Inventario" para que reasignen y se
     //      bloquee la edición de circuitos a los asesores (guards en el controller).
+    //
+    // GUARD (bug 81279): si la propuesta YA es campaña (pase a ventas hecho), su status
+    // NO se mueve. Una campaña vendida/posteada no debe "regresar" a Ajuste Inventario:
+    // su inventario FIRME no se le quita — lo único desplazable es un hold tentativo, que
+    // en una campaña ya no debería existir (esos deben estar en 'Vendido bonificado').
+    // Se sigue avisando (tarea/notificación/historial), solo NO se toca el status.
+    // OJO: la sola existencia de la fila en campania NO sirve como criterio. Esa
+    // fila se crea junto con la cotización (status 'inactiva'), así que TODA
+    // propuesta la tiene desde que nace y este guard dejaba el status congelado
+    // para todas. "Ya es campaña" = ya hubo pase a ventas: fecha_aprobacion
+    // llena o status Aprobada/Pase a ventas. Mismo criterio que el guard del
+    // desalojo en venderReservasPropuestaConGuardian / desplazarTentativasEnEspacios.
+    const campRows = await defaultPrisma.$queryRawUnsafe<{ c: bigint }[]>(
+      `SELECT COUNT(*) c FROM campania cam
+         INNER JOIN cotizacion cot ON cot.id = cam.cotizacion_id
+         INNER JOIN propuesta p ON p.id = cot.id_propuesta
+        WHERE cot.id_propuesta = ?
+          AND (cam.fecha_aprobacion IS NOT NULL OR p.status IN ('Aprobada', 'Pase a ventas'))`,
+      parseInt(idquote),
+    );
+    const yaEsCampania = Number(campRows[0]?.c ?? 0) > 0;
     const estatusAnterior = prop.status || '';
     let estatusCambiado = false;
-    if (!estatusTerminal.includes(estatusAnterior) && estatusAnterior !== 'Ajuste Inventario') {
+    if (!yaEsCampania && !estatusTerminal.includes(estatusAnterior) && estatusAnterior !== 'Ajuste Inventario') {
       try {
         await defaultPrisma.propuesta.update({ where: { id: parseInt(idquote) }, data: { status: 'Ajuste Inventario' } });
         estatusCambiado = true;

@@ -977,3 +977,58 @@ enum proveedores_estado {
   activo
   inactivo
 }
+
+// Versionado de circuitos completados (Vista Compartir). Se crea con
+// scripts/add_tabla_circuito_completado.cjs; el codigo la usa via SQL crudo
+// (src/services/circuito-completado.service.ts), asi que no depende de que el
+// cliente Prisma este regenerado.
+model circuito_completado {
+  id                 Int      @id @default(autoincrement())
+  solicitud_caras_id Int
+  idquote            String   @db.VarChar(255)
+  version            Int
+  fecha_completado   DateTime @default(now()) @db.DateTime(0)
+  caras_esperadas    Int
+  total_reservas     Int
+  /// createReservas | toggleReserva | createCara | updateCara | lectura-compartir | backfill
+  origen             String?  @db.VarChar(50)
+  usuario_id         Int?
+  usuario_nombre     String?  @db.VarChar(255)
+
+  @@unique([solicitud_caras_id, version], map: "uq_cc_sc_version")
+  @@index([idquote], map: "idx_cc_idquote")
+}
+
+/// La "foto": reservas que integraban el circuito al completarse.
+model circuito_completado_reserva {
+  id                    Int     @id @default(autoincrement())
+  completado_id         Int
+  reserva_id            Int
+  espacio_inventario_id Int
+  inventario_id         Int?
+  estatus               String? @db.VarChar(255)
+
+  @@index([completado_id], map: "idx_ccr_completado")
+  @@index([reserva_id], map: "idx_ccr_reserva")
+}
+
+/// Foto del pase a ventas: reservas que CRUZARON de la propuesta a la campaña
+/// al aprobar. Lo que aparezca luego en la campaña y no este aqui = agregado
+/// dentro de la campaña (pase a ventas incompleto). Se crea con
+/// scripts/add_tabla_pase_ventas_reserva.cjs; el codigo la usa via SQL crudo.
+model pase_ventas_reserva {
+  id                    Int      @id @default(autoincrement())
+  propuesta_id          Int
+  campania_id           Int?
+  reserva_id            Int
+  solicitud_caras_id    Int?
+  espacio_inventario_id Int?
+  inventario_id         Int?
+  estatus               String?  @db.VarChar(255)
+  fecha_pase            DateTime @default(now()) @db.DateTime(0)
+  /// 'aprobacion' (exacto) | 'backfill' (aproximado por fecha)
+  origen                String?  @db.VarChar(20)
+
+  @@unique([reserva_id], map: "uq_pvr_reserva")
+  @@index([propuesta_id], map: "idx_pvr_propuesta")
+}
