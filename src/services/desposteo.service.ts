@@ -429,6 +429,16 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
     throw new Error(`Solicitud #${id} no esta en estatus 'solicitado' (actual: ${s.estatus})`);
   }
 
+  // Guard: sin destinatario en Facturacion el flujo queda huerfano (bug historico:
+  // solicitud avanzaba a filtro_aprobado y ninguna tarea se creaba).
+  const facturacion = await getUsuariosFacturacion();
+  if (facturacion.length === 0) {
+    throw new Error(
+      'No hay usuarios activos con rol "Coordinador de Facturación" o "Coordinador de Facturación y Cobranza". ' +
+      'Pide a soporte dar de alta a un usuario con ese rol antes de aprobar.'
+    );
+  }
+
   const upd = await prisma.desposteo_solicitudes.update({
     where: { id },
     data: {
@@ -441,25 +451,20 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
 
   await agregarNota(id, gc, 'aprobacion_gerente', (nota || '').trim() || 'Check gerente comercial');
 
-  const facturacion = await getUsuariosFacturacion();
-  if (facturacion.length === 0) {
-    console.warn(`[desposteo.aprobarFiltroGerente] Sin usuarios de Facturacion configurados — solicitud #${id} queda sin tarea a Facturacion.`);
-  } else {
-    const snapshot = parseSnapshot(s.snapshot_aps);
-    await crearTareaDesposteo({
-      tipo: 'Autorización Desposteo',
-      titulo: `Autorizacion desposteo APS ${s.aps} - ${snapshot?.campania_nombre || `campana #${s.campania_id}`}`,
-      descripcion:
-        `${gc.nombre} aprobo el filtro para desposteo del APS ${s.aps}. ` +
-        (snapshot?.razon_social ? `Cliente: ${snapshot.razon_social}. ` : '') +
-        `Monto $${(snapshot?.monto_estimado || 0).toFixed(2)}. ` +
-        `Aprueba o rechaza con motivo.`,
-      responsable: facturacion[0],
-      asignados: facturacion,
-      campaniaId: s.campania_id,
-      desposteoId: id,
-    });
-  }
+  const snapshot = parseSnapshot(s.snapshot_aps);
+  await crearTareaDesposteo({
+    tipo: 'Autorización Desposteo',
+    titulo: `Autorizacion desposteo APS ${s.aps} - ${snapshot?.campania_nombre || `campana #${s.campania_id}`}`,
+    descripcion:
+      `${gc.nombre} aprobo el filtro para desposteo del APS ${s.aps}. ` +
+      (snapshot?.razon_social ? `Cliente: ${snapshot.razon_social}. ` : '') +
+      `Monto $${(snapshot?.monto_estimado || 0).toFixed(2)}. ` +
+      `Aprueba o rechaza con motivo.`,
+    responsable: facturacion[0],
+    asignados: facturacion,
+    campaniaId: s.campania_id,
+    desposteoId: id,
+  });
 
   try {
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
