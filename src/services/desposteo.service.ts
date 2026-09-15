@@ -56,21 +56,32 @@ const FACTURACION_ROLES = [
 
 const TI_ROLES = ['Gerente de TI', 'Especialista de TI', 'Analista de TI'];
 
-const ROLES_SOLICITA_DESPOSTEO = new Set([
-  'Asesor Comercial',
-  'Asesor Comercial Aeropuerto',
-  'Administrador',
-  'DEV',
-]);
+const ASESOR_ROLES = ['Asesor Comercial', 'Asesor Comercial Aeropuerto'];
+const ANALISTA_ROLES = ['Asesor Analista', 'Analista de Servicio al Cliente', 'Analista de Aeropuerto'];
+
+// Roles que pueden iniciar el flujo (cuando este activo). Feedback Jos:
+// asesores + analistas (analista rutea al mismo GC de su asesor en la red).
+// Admin y TI quedan fuera intencionalmente.
+const ROLES_SOLICITA_DESPOSTEO = new Set([...ASESOR_ROLES, ...ANALISTA_ROLES]);
 
 const ROLES_BYPASS_TI = new Set(['Administrador', 'DEV']);
 
-// Flujo desposteo temporalmente oculto en UI mientras se cierran ajustes
-// pendientes (drawer + finalizar tarea, enriquecer modal, indicadores, rol
-// Analista, permisos finales, tabulador). Al terminar esos ajustes, regresar
-// a la implementacion basada en ROLES_SOLICITA_DESPOSTEO.
-export function puedeSolicitarDesposteo(_rol: string | null | undefined): boolean {
-  return false;
+// Feature flag: si false, el endpoint /desposteo/solicitar rechaza a todos.
+// Reactivar poniendo en true cuando este el paquete de ajustes completo
+// (drawer + finalizar tarea, enriquecer modal, indicadores, tabulador).
+export const FEATURE_SOLICITAR_DESPOSTEO_ACTIVE = false;
+
+export function puedeSolicitarDesposteo(rol: string | null | undefined): boolean {
+  if (!FEATURE_SOLICITAR_DESPOSTEO_ACTIVE) return false;
+  return !!rol && ROLES_SOLICITA_DESPOSTEO.has(rol);
+}
+
+export function esRolAsesor(rol: string | null | undefined): boolean {
+  return !!rol && ASESOR_ROLES.includes(rol);
+}
+
+export function esRolAnalista(rol: string | null | undefined): boolean {
+  return !!rol && ANALISTA_ROLES.includes(rol);
 }
 
 export function esRolTI(rol: string | null | undefined): boolean {
@@ -120,6 +131,57 @@ export async function getGerenteDesposteoParaAsesor(asesorId: number): Promise<A
   return await buscarPorProposito('filtro_autorizacion');
 }
 
+/**
+ * Para un analista busca al asesor "dueño" de su red de trabajo. Estrategia:
+ * cualquier equipo con proposito='red_trabajo' donde milite el analista, y
+ * dentro de ese equipo el primer usuario con rol asesor. Es lo que hace el
+ * resto del sistema (ver equipos.controller / campanas.controller).
+ */
+async function getAsesorParaAnalista(analistaId: number): Promise<{ id: number; nombre: string } | null> {
+  const equipos = await prisma.usuario_equipo.findMany({
+    where: {
+      usuario_id: analistaId,
+      equipo: { deleted_at: null, proposito: 'red_trabajo' },
+    },
+    select: { equipo_id: true },
+  });
+  for (const eq of equipos) {
+    const asesor = await prisma.usuario_equipo.findFirst({
+      where: {
+        equipo_id: eq.equipo_id,
+        usuario: {
+          deleted_at: null,
+          user_role: { in: ASESOR_ROLES },
+        },
+      },
+      include: { usuario: { select: { id: true, nombre: true } } },
+    });
+    if (asesor?.usuario) return { id: asesor.usuario.id, nombre: asesor.usuario.nombre };
+  }
+  return null;
+}
+
+/**
+ * Resuelve el GC de desposteo para cualquier usuario que pueda solicitar:
+ * asesor -> GC directo por equipos filtro_desposteo/filtro_autorizacion.
+ * analista -> primero busca su asesor en red_trabajo, luego el GC de ese asesor.
+ * Devuelve null si en algun paso no hay match.
+ */
+export async function getGerenteDesposteoParaUsuario(
+  userId: number,
+  rol: string | null | undefined,
+): Promise<ActorInfo | null> {
+  if (esRolAsesor(rol) || puedeBypassearDesposteo(rol)) {
+    return getGerenteDesposteoParaAsesor(userId);
+  }
+  if (esRolAnalista(rol)) {
+    const asesor = await getAsesorParaAnalista(userId);
+    if (!asesor) return null;
+    return getGerenteDesposteoParaAsesor(asesor.id);
+  }
+  return null;
+}
+
 async function getUsuariosFacturacion(): Promise<ActorInfo[]> {
   const users = await prisma.usuario.findMany({
     where: { deleted_at: null, user_role: { in: FACTURACION_ROLES } },
@@ -155,6 +217,14 @@ interface SnapshotAPS {
     formato: string | null;
     ciudad: string | null;
     costo: number;
+    caras: number;
+    tarifa_publica: number;
+    inversion: number;
+    tipo: string | null;
+    inicio_periodo: string | null;
+    catorcena_numero: number | null;
+    catorcena_anio: number | null;
+    grupo_masivo_id: number | null;
   }>;
 }
 
@@ -197,16 +267,45 @@ async function armarSnapshot(campaniaId: number, aps: number): Promise<{
   if (ids.length > 0) {
     const rows = await prisma.solicitudCaras.findMany({
       where: { id: { in: ids } },
-      select: { id: true, articulo: true, formato: true, ciudad: true, costo: true },
+      select: {
+        id: true, articulo: true, formato: true, ciudad: true, costo: true,
+        caras: true, tarifa_publica: true, tipo: true, inicio_periodo: true,
+        grupo_masivo_id: true,
+      },
     });
-    circuitos = rows.map(r => ({
-      id: r.id,
-      articulo: r.articulo || null,
-      formato: r.formato || null,
-      ciudad: r.ciudad || null,
-      costo: Number(r.costo || 0),
-    }));
-    monto = circuitos.reduce((acc, c) => acc + (c.costo || 0), 0);
+    // Catalogo de catorcenas para mapear inicio_periodo -> Cat N/AAAA.
+    const cats = await prisma.catorcenas.findMany({
+      select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
+    });
+    const catFor = (fecha: Date): { numero: number | null; anio: number | null } => {
+      const m = cats.find(cc => fecha >= cc.fecha_inicio && fecha <= cc.fecha_fin);
+      return m ? { numero: m.numero_catorcena, anio: m.a_o } : { numero: null, anio: null };
+    };
+    circuitos = rows.map(r => {
+      const caras = Number(r.caras || 0);
+      const tarifa = Number(r.tarifa_publica || 0);
+      const costo = Number(r.costo || 0);
+      const inversion = tarifa * caras;
+      const cat = r.inicio_periodo ? catFor(r.inicio_periodo) : { numero: null, anio: null };
+      return {
+        id: r.id,
+        articulo: r.articulo || null,
+        formato: r.formato || null,
+        ciudad: r.ciudad || null,
+        costo,
+        caras,
+        tarifa_publica: tarifa,
+        inversion,
+        tipo: r.tipo || null,
+        inicio_periodo: r.inicio_periodo ? r.inicio_periodo.toISOString().slice(0, 10) : null,
+        catorcena_numero: cat.numero,
+        catorcena_anio: cat.anio,
+        grupo_masivo_id: r.grupo_masivo_id ?? null,
+      };
+    });
+    // Monto = inversion (tarifa * caras) — refleja lo que Jos ve en el listado.
+    // Costo puede estar en 0 (sin captura) o negociado; inversion es tarifa lista.
+    monto = circuitos.reduce((acc, c) => acc + (c.inversion || 0), 0);
   }
 
   const snapshot: SnapshotAPS = {
@@ -224,6 +323,185 @@ async function armarSnapshot(campaniaId: number, aps: number): Promise<{
   };
 
   return { snapshot, postLogId: postLog?.id ?? null };
+}
+
+// ─── Desglose enriquecido para modal (catorcenas → plaza/formato → APS → articulo) ────
+
+export interface DesgloseArticulo {
+  id: number;
+  articulo: string | null;
+  grupo_masivo_id: number | null;
+  tipo: string | null;
+  caras: number;
+  tarifa_publica: number;
+  inversion: number;
+  costo: number;
+}
+export interface DesglosePlazaFormato {
+  plaza: string;
+  formato: string;
+  caras_total: number;
+  inversion_total: number;
+  articulos: DesgloseArticulo[];
+}
+export interface DesgloseCatorcena {
+  numero: number | null;
+  anio: number | null;
+  inicio_periodo: string | null;
+  caras_total: number;
+  inversion_total: number;
+  plazas: DesglosePlazaFormato[];
+}
+export interface DesgloseAps {
+  campania_id: number;
+  campania_nombre: string;
+  aps: number;
+  razon_social: string | null;
+  cliente_nombre: string | null;
+  cuic: number | null;
+  marca: string | null;
+  post_log_id: number | null;
+  posted_at: string | null;
+  doc_entry: number | null;
+  doc_num: number | null;
+  caras_total: number;
+  inversion_total: number;
+  catorcenas: DesgloseCatorcena[];
+}
+
+/**
+ * Arma el desglose vivo del APS con el formato del listado con APS:
+ * agrupa por catorcena, dentro plaza+formato, dentro articulos. Se usa
+ * en el modal de desposteo para complementar el snapshot historico.
+ */
+export async function armarDesgloseAps(
+  campaniaId: number,
+  aps: number,
+): Promise<DesgloseAps | null> {
+  const campania = await prisma.campania.findFirst({
+    where: { id: campaniaId },
+    select: { id: true, nombre: true, cliente_id: true },
+  });
+  if (!campania) return null;
+
+  const cliente = await prisma.cliente.findFirst({
+    where: { id: campania.cliente_id },
+    select: { T0_U_Cliente: true, T0_U_RazonSocial: true },
+  });
+
+  const postLog = await prisma.campania_post_log.findFirst({
+    where: { campania_id: campaniaId, aps, success: true },
+    orderBy: { id: 'desc' },
+    select: {
+      id: true, posted_at: true, doc_entry: true, doc_num: true,
+      razon_social: true, cliente_nombre: true, solicitud_caras_ids: true,
+      cuic: true, marca: true,
+    },
+  });
+
+  const ids = (postLog?.solicitud_caras_ids || '')
+    .split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+
+  const rows = ids.length === 0 ? [] : await prisma.solicitudCaras.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true, articulo: true, formato: true, ciudad: true, costo: true,
+      caras: true, tarifa_publica: true, tipo: true, inicio_periodo: true,
+      grupo_masivo_id: true,
+    },
+  });
+
+  const cats = await prisma.catorcenas.findMany({
+    select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
+  });
+  const catFor = (fecha: Date | null) => {
+    if (!fecha) return { numero: null, anio: null, inicio: null };
+    const m = cats.find(cc => fecha >= cc.fecha_inicio && fecha <= cc.fecha_fin);
+    return m
+      ? { numero: m.numero_catorcena, anio: m.a_o, inicio: m.fecha_inicio.toISOString().slice(0, 10) }
+      : { numero: null, anio: null, inicio: fecha.toISOString().slice(0, 10) };
+  };
+
+  // Agrupar por catorcena -> plaza+formato -> articulos
+  type KeyCat = string; // `${anio}-${numero}`
+  const catorcenas = new Map<KeyCat, DesgloseCatorcena>();
+
+  for (const r of rows) {
+    const c = catFor(r.inicio_periodo || null);
+    const keyCat: KeyCat = `${c.anio}-${c.numero}`;
+    let bloqueCat = catorcenas.get(keyCat);
+    if (!bloqueCat) {
+      bloqueCat = {
+        numero: c.numero,
+        anio: c.anio,
+        inicio_periodo: c.inicio,
+        caras_total: 0,
+        inversion_total: 0,
+        plazas: [],
+      };
+      catorcenas.set(keyCat, bloqueCat);
+    }
+
+    const plazaKey = `${r.ciudad || '—'}||${r.formato || '—'}`;
+    let bloquePlaza = bloqueCat.plazas.find(p =>
+      p.plaza === (r.ciudad || '—') && p.formato === (r.formato || '—'));
+    if (!bloquePlaza) {
+      bloquePlaza = {
+        plaza: r.ciudad || '—',
+        formato: r.formato || '—',
+        caras_total: 0,
+        inversion_total: 0,
+        articulos: [],
+      };
+      bloqueCat.plazas.push(bloquePlaza);
+    }
+    void plazaKey;
+
+    const caras = Number(r.caras || 0);
+    const tarifa = Number(r.tarifa_publica || 0);
+    const costo = Number(r.costo || 0);
+    const inversion = tarifa * caras;
+
+    bloquePlaza.articulos.push({
+      id: r.id,
+      articulo: r.articulo || null,
+      grupo_masivo_id: r.grupo_masivo_id ?? null,
+      tipo: r.tipo || null,
+      caras,
+      tarifa_publica: tarifa,
+      inversion,
+      costo,
+    });
+    bloquePlaza.caras_total += caras;
+    bloquePlaza.inversion_total += inversion;
+    bloqueCat.caras_total += caras;
+    bloqueCat.inversion_total += inversion;
+  }
+
+  const catorcenasArr = Array.from(catorcenas.values()).sort((a, b) => {
+    if ((a.anio || 0) !== (b.anio || 0)) return (a.anio || 0) - (b.anio || 0);
+    return (a.numero || 0) - (b.numero || 0);
+  });
+
+  const carasTotal = catorcenasArr.reduce((s, c) => s + c.caras_total, 0);
+  const inversionTotal = catorcenasArr.reduce((s, c) => s + c.inversion_total, 0);
+
+  return {
+    campania_id: campaniaId,
+    campania_nombre: campania.nombre,
+    aps,
+    razon_social: postLog?.razon_social || cliente?.T0_U_RazonSocial || null,
+    cliente_nombre: postLog?.cliente_nombre || cliente?.T0_U_Cliente || null,
+    cuic: postLog?.cuic || null,
+    marca: postLog?.marca || null,
+    post_log_id: postLog?.id ?? null,
+    posted_at: postLog?.posted_at ? postLog.posted_at.toISOString() : null,
+    doc_entry: postLog?.doc_entry ?? null,
+    doc_num: postLog?.doc_num ?? null,
+    caras_total: carasTotal,
+    inversion_total: inversionTotal,
+    catorcenas: catorcenasArr,
+  };
 }
 
 // ─── Helpers internos ────────────────────────────────────────────────────
@@ -328,10 +606,11 @@ export interface CrearInput {
   aps: number;
   nota: string;
   asesor: ActorInfo;
+  rol?: string | null;
 }
 
 export async function crearSolicitudDesposteo(input: CrearInput) {
-  const { campaniaId, aps, nota, asesor } = input;
+  const { campaniaId, aps, nota, asesor, rol } = input;
   const notaLimpia = (nota || '').trim();
   if (!notaLimpia) throw new Error('La nota es obligatoria al iniciar el flujo');
 
@@ -354,7 +633,8 @@ export async function crearSolicitudDesposteo(input: CrearInput) {
 
   const { snapshot, postLogId } = await armarSnapshot(campaniaId, aps);
 
-  const gc = await getGerenteDesposteoParaAsesor(asesor.id);
+  // Analistas resuelven GC via su asesor en red_trabajo; asesores directo.
+  const gc = await getGerenteDesposteoParaUsuario(asesor.id, rol);
 
   const solicitud = await prisma.desposteo_solicitudes.create({
     data: {
@@ -749,6 +1029,38 @@ export async function getDetalle(id: number) {
     orderBy: { created_at: 'asc' },
   });
   return { solicitud: s, notas };
+}
+
+/**
+ * Estado por APS para una campaña. Utilizado por el listado con APS del
+ * detalle de campaña para pintar badges: en curso / aprobado / ejecutado.
+ * Devuelve solo un estado por APS — el mas avanzado no-terminal, o el
+ * ultimo ejecutado si no hay activos.
+ */
+export type EstadoAps =
+  | { estatus: 'solicitado' | 'filtro_aprobado' | 'aprobado'; solicitud_id: number }
+  | { estatus: 'ejecutado'; solicitud_id: number }
+  | { estatus: 'rechazado'; solicitud_id: number };
+export async function getEstadosAps(campaniaId: number): Promise<Record<number, EstadoAps>> {
+  const rows = await prisma.desposteo_solicitudes.findMany({
+    where: { campania_id: campaniaId, deleted_at: null },
+    select: { id: true, aps: true, estatus: true },
+    orderBy: { id: 'desc' },
+  });
+  // Prioridad de estatus para "cual mostrar por APS": activo > ejecutado > rechazado
+  const rank: Record<string, number> = {
+    aprobado: 5, filtro_aprobado: 4, solicitado: 3, ejecutado: 2, rechazado: 1,
+  };
+  const out: Record<number, EstadoAps> = {};
+  for (const r of rows) {
+    const prev = out[r.aps];
+    const curRank = rank[r.estatus] ?? 0;
+    const prevRank = prev ? (rank[prev.estatus] ?? 0) : -1;
+    if (curRank > prevRank) {
+      out[r.aps] = { estatus: r.estatus as EstadoAps['estatus'], solicitud_id: r.id };
+    }
+  }
+  return out;
 }
 
 /**

@@ -10,6 +10,8 @@ import {
   aprobar,
   rechazar,
   verificar,
+  apsDetalle,
+  estadosAps,
 } from '../controllers/desposteo.controller';
 
 // Filtro Autorizacion "Quitar Posteo" — endpoints Fase 1.
@@ -19,6 +21,8 @@ router.use(authMiddleware);
 router.post('/solicitar', solicitar);
 router.get('/', listar);
 router.get('/verificar', verificar);
+router.get('/aps-detalle', apsDetalle);
+router.get('/estados-aps', estadosAps);
 router.get('/historial', historial);
 router.get('/:id', detalle);
 router.post('/:id/filtro/aprobar', filtroAprobar);

@@ -11,6 +11,8 @@ import {
   getDetalle,
   getHistorialNotas,
   puedeSolicitarDesposteo,
+  armarDesgloseAps,
+  getEstadosAps,
   EstatusDesposteo,
 } from '../services/desposteo.service';
 
@@ -54,7 +56,7 @@ export async function solicitar(req: AuthRequest, res: Response): Promise<void> 
     if (!Number.isFinite(apsNum) || apsNum <= 0) { res.status(400).json({ success: false, error: 'aps requerido' }); return; }
     if (!notaStr.trim()) { res.status(400).json({ success: false, error: 'nota requerida' }); return; }
 
-    const s = await crearSolicitudDesposteo({ campaniaId, aps: apsNum, nota: notaStr, asesor: actor });
+    const s = await crearSolicitudDesposteo({ campaniaId, aps: apsNum, nota: notaStr, asesor: actor, rol: req.user?.rol });
     res.status(201).json({ success: true, data: s });
   } catch (error) {
     console.error('Error solicitar desposteo:', error);
@@ -189,6 +191,42 @@ export async function rechazar(req: AuthRequest, res: Response): Promise<void> {
     console.error('Error rechazar desposteo:', error);
     const message = error instanceof Error ? error.message : 'Error al rechazar';
     res.status(400).json({ success: false, error: message });
+  }
+}
+
+// Estado de desposteo por APS para el listado (badges: en curso / aprobado /
+// ejecutado / rechazado). Solo se calcula por campania y regresa un mapa.
+export async function estadosAps(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    if (!req.user?.userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    const campaniaId = Number(req.query.campania_id);
+    if (!Number.isFinite(campaniaId) || campaniaId <= 0) { res.status(400).json({ success: false, error: 'campania_id requerido' }); return; }
+    const d = await getEstadosAps(campaniaId);
+    res.json({ success: true, data: d });
+  } catch (error) {
+    console.error('Error estados-aps desposteo:', error);
+    const message = error instanceof Error ? error.message : 'Error al obtener estados de APS';
+    res.status(500).json({ success: false, error: message });
+  }
+}
+
+// Desglose enriquecido del APS (catorcenas -> plaza/formato -> articulos)
+// para complementar el modal. Se calcula en vivo a partir del ultimo POST
+// exitoso, no depende del snapshot historico.
+export async function apsDetalle(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    if (!req.user?.userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    const campaniaId = Number(req.query.campania_id);
+    const apsNum = Number(req.query.aps);
+    if (!Number.isFinite(campaniaId) || campaniaId <= 0) { res.status(400).json({ success: false, error: 'campania_id requerido' }); return; }
+    if (!Number.isFinite(apsNum) || apsNum <= 0) { res.status(400).json({ success: false, error: 'aps requerido' }); return; }
+    const d = await armarDesgloseAps(campaniaId, apsNum);
+    if (!d) { res.status(404).json({ success: false, error: 'APS no encontrado' }); return; }
+    res.json({ success: true, data: d });
+  } catch (error) {
+    console.error('Error aps-detalle desposteo:', error);
+    const message = error instanceof Error ? error.message : 'Error al obtener desglose';
+    res.status(500).json({ success: false, error: message });
   }
 }
 
