@@ -65,8 +65,12 @@ const ROLES_SOLICITA_DESPOSTEO = new Set([
 
 const ROLES_BYPASS_TI = new Set(['Administrador', 'DEV']);
 
-export function puedeSolicitarDesposteo(rol: string | null | undefined): boolean {
-  return !!rol && ROLES_SOLICITA_DESPOSTEO.has(rol);
+// Flujo desposteo temporalmente oculto en UI mientras se cierran ajustes
+// pendientes (drawer + finalizar tarea, enriquecer modal, indicadores, rol
+// Analista, permisos finales, tabulador). Al terminar esos ajustes, regresar
+// a la implementacion basada en ROLES_SOLICITA_DESPOSTEO.
+export function puedeSolicitarDesposteo(_rol: string | null | undefined): boolean {
+  return false;
 }
 
 export function esRolTI(rol: string | null | undefined): boolean {
