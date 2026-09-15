@@ -543,6 +543,35 @@ interface CrearTareaInput {
   desposteoId: number;
 }
 
+/**
+ * Cierra automaticamente las tareas del flujo desposteo asociadas a una
+ * solicitud cuando el usuario ejecuta la accion desde el modal. Antes
+ * quedaban en Pendiente aunque el modal ya no aceptara mas acciones.
+ * - tipo: 'Filtro Desposteo' (gerente) o 'Autorización Desposteo' (facturacion)
+ * - resultado: 'Atendido' cuando se aprobo / ejecuto, 'Rechazado' cuando se rechazo
+ */
+async function resolverTareasDesposteo(
+  desposteoId: number,
+  tipo: 'Filtro Desposteo' | 'Autorización Desposteo',
+  resultado: 'Atendido' | 'Rechazado',
+): Promise<void> {
+  // El json de contenido guarda { "desposteoId": N }. Buscar coincidencia por
+  // texto es suficiente para no depender de JSON functions del driver.
+  const tareas = await prisma.tareas.findMany({
+    where: {
+      tipo,
+      estatus: 'Pendiente',
+      contenido: { contains: `"desposteoId":${desposteoId}` },
+    },
+    select: { id: true },
+  });
+  if (tareas.length === 0) return;
+  await prisma.tareas.updateMany({
+    where: { id: { in: tareas.map(t => t.id) } },
+    data: { estatus: resultado },
+  });
+}
+
 async function crearTareaDesposteo(input: CrearTareaInput): Promise<void> {
   const now = ahoraMx();
   await prisma.tareas.create({
@@ -735,6 +764,9 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
 
   await agregarNota(id, gc, 'aprobacion_gerente', (nota || '').trim() || 'Check gerente comercial');
 
+  // Cierra la tarea Filtro Desposteo del gerente para que no quede huerfana.
+  await resolverTareasDesposteo(id, 'Filtro Desposteo', 'Atendido');
+
   const snapshot = parseSnapshot(s.snapshot_aps);
   await crearTareaDesposteo({
     tipo: 'Autorización Desposteo',
@@ -779,6 +811,8 @@ export async function rechazarFiltroGerente(id: number, gc: ActorInfo, nota: str
 
   await agregarNota(id, gc, 'rechazo_gerente', notaLimpia);
 
+  await resolverTareasDesposteo(id, 'Filtro Desposteo', 'Rechazado');
+
   await notificarUsuarios(
     [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }],
     s.campania_id,
@@ -809,6 +843,8 @@ export async function aprobarFacturacion(id: number, actor: ActorInfo, nota?: st
   });
 
   await agregarNota(id, actor, 'aprobacion_facturacion', (nota || '').trim() || 'Aprobado por facturacion');
+
+  await resolverTareasDesposteo(id, 'Autorización Desposteo', 'Atendido');
 
   // Notificar a TI que hay solicitud aprobada pendiente de ejecutar.
   const ti = await getUsuariosTI();
@@ -857,6 +893,8 @@ export async function rechazarFacturacion(id: number, actor: ActorInfo, nota: st
   });
 
   await agregarNota(id, actor, 'rechazo_facturacion', notaLimpia);
+
+  await resolverTareasDesposteo(id, 'Autorización Desposteo', 'Rechazado');
 
   const otros: ActorInfo[] = [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }];
   if (s.filtro_gc_id && s.filtro_gc_nombre) {
