@@ -24,7 +24,7 @@ import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
@@ -10850,6 +10850,13 @@ export class CampanasController {
         return;
       }
 
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoAC = await bloqueoAjusteComercialCampana(prisma, campanaId, req.user?.rol);
+      if (bloqueoAC) {
+        res.status(403).json({ success: false, error: bloqueoAC });
+        return;
+      }
+
       // Verificar que la campaña existe
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -11204,6 +11211,13 @@ export class CampanasController {
 
       if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina mientras el asesor la tiene.
+      const bloqueoACDel = await bloqueoAjusteComercialCampana(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDel) {
+        res.status(403).json({ success: false, error: bloqueoACDel });
         return;
       }
 
@@ -11665,6 +11679,13 @@ export class CampanasController {
       // se disparen por circuitos recién agregados (que quedan 'pendiente'). La autorización
       // real se resuelve al Guardar (bulkUpdateCaras). Mismo mecanismo que propuestas.
       const deferAuth = data.deferAuth === true || data.deferAuth === 'true';
+
+      // Bloqueo Ajuste Comercial: Tráfico no agrega circuitos mientras el asesor la tiene.
+      const bloqueoACCreateCara = await bloqueoAjusteComercialCampana(prisma, campanaId, req.user?.rol);
+      if (bloqueoACCreateCara) {
+        res.status(403).json({ success: false, error: bloqueoACCreateCara });
+        return;
+      }
 
       // Validar fechas obligatorias.
       if (!data.inicio_periodo || !data.fin_periodo) {
@@ -12185,6 +12206,14 @@ export class CampanasController {
       const { caraId } = req.params;
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina circuitos mientras el asesor
+      // la tiene. OJO: aquí `id` es la CARA — la campaña viene en req.params.id.
+      const bloqueoACDelCara = await bloqueoAjusteComercialCampana(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDelCara) {
+        res.status(403).json({ success: false, error: bloqueoACDelCara });
+        return;
+      }
 
       let idsToDelete: number[] = [id];
       if (eliminarGrupo) {
