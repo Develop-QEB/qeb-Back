@@ -17,13 +17,14 @@ import {
   TIPO_FILTRO_ELIMINACION,
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
+import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
@@ -1322,12 +1323,13 @@ export class CampanasController {
               autorizacion_dcm: 'aprobado',
             },
           });
-          const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+          // Cierre (Rechazada/Cancelada): SOLO bloquea con pendiente. Aprobado
+          // + rechazado + correccion se permiten en cualquier mezcla — feedback
+          // Jos 2026-09-11.
+          const bloquea = totalPend > 0;
           if (bloquea) {
             const partes: string[] = [];
             if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
-            if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
-            if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
             res.status(400).json({
               success: false,
               error: `No se puede ${status === 'Cancelada' ? 'cancelar' : 'rechazar'} la campaña: hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
@@ -10789,6 +10791,13 @@ export class CampanasController {
         return;
       }
 
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoAC = await bloqueoAjusteComercialCampana(prisma, campanaId, req.user?.rol);
+      if (bloqueoAC) {
+        res.status(403).json({ success: false, error: bloqueoAC });
+        return;
+      }
+
       // Verificar que la campaña existe
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -10823,13 +10832,20 @@ export class CampanasController {
         }
       }
 
-      // Crear calendario entry
-      const calendario = await prisma.calendario.create({
-        data: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-        },
-      });
+      // Crear calendario entry. Anti-calendario-inflado (bug 81543): para CATORCENA
+      // se ancla a la catorcena real de la fecha; MENSUAL respeta el rango.
+      const cotizPeriodoCal = campana.cotizacion_id
+        ? await prisma.cotizacion.findUnique({
+            where: { id: campana.cotizacion_id },
+            select: { tipo_periodo: true },
+          })
+        : null;
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodoCal?.tipo_periodo === 'mensual',
+      );
 
       // Espacios ya bloqueados en el período. Helper centralizado: filtra por
       // el rango de fechas contra solicitudCaras (no por calendario_id, que
@@ -10912,7 +10928,9 @@ export class CampanasController {
       // el front solo recibia un numero y el usuario re-reservaba a ciegas).
       const omitidosDetalleCamp: { inventario_id: number; motivo: string }[] = [];
       const workListCamp: WorkItemCamp[] = [];
-      const reactivarList: { reservaId: number; estatus: string }[] = [];
+      // `espacioId` va aquí porque el desalojo de tentativas necesita saber qué
+      // piezas quedaron firmadas, y reactivar cuenta igual que crear.
+      const reactivarList: { reservaId: number; estatus: string; espacioId: number }[] = [];
       for (const reserva of reservas) {
         let espacioId: number;
         if (reserva.espacio_id) {
@@ -10959,7 +10977,7 @@ export class CampanasController {
           }
           const softId = softDeletedCaraC.get(espacioId);
           if (softId) {
-            reactivarList.push({ reservaId: softId, estatus });
+            reactivarList.push({ reservaId: softId, estatus, espacioId });
             espaciosReservadosEnPeriodo.add(espacioId);
             continue;
           }
@@ -10969,6 +10987,10 @@ export class CampanasController {
         espaciosReservadosEnPeriodo.add(espacioId);
         workListCamp.push({ espacioId, estatus, grupoCompletoId, invId: reserva.inventario_id });
       }
+
+      // Piezas que quedan FIRMADAS en esta llamada (creadas o reactivadas). Es lo
+      // que alimenta el desalojo de tentativas de otras propuestas.
+      const espaciosFirmados: number[] = [];
 
       // REACTIVACIONES (raras, en serie): reactivar soft-deleted en vez de crear.
       for (const r of reactivarList) {
@@ -10984,6 +11006,10 @@ export class CampanasController {
           },
         });
         reservasCreadas++;
+        // Reactivar es firmar: la pieza vuelve a ocupar, así que tiene que entrar
+        // al desalojo igual que una reserva nueva. Sin esto, el flujo
+        // quitar→volver a agregar inventario en campaña no desalojaba nada.
+        espaciosFirmados.push(r.espacioId);
       }
 
       // PREFETCH invId padre en bulk (solo para el payload del emit).
@@ -10999,7 +11025,6 @@ export class CampanasController {
       // EJECUCIÓN paralela en lotes de 5 (mismo patrón que propuestas). El SELECT
       // FOR UPDATE dentro de createReservaConLock sigue serializando por-espacio.
       const BATCH_SIZE_CAMP = 5;
-      const espaciosFirmados: number[] = [];
       for (let i = 0; i < workListCamp.length; i += BATCH_SIZE_CAMP) {
         const lote = workListCamp.slice(i, i + BATCH_SIZE_CAMP);
         const resultados = await Promise.all(lote.map(async (w) => {
@@ -11046,8 +11071,18 @@ export class CampanasController {
       // quedaron creadas; solo se pierde el aviso, no la venta.
       if (espaciosFirmados.length > 0) {
         try {
+          // `excludeIdquote` se compara contra solicitudCaras.idquote, que es el
+          // id de la PROPUESTA, no el de la cotización. Pasar cotizacion_id no
+          // excluía a la propia campaña (y podía excluir a una propuesta ajena
+          // cuyo id coincidiera con ese número).
+          const cotProp = campana.cotizacion_id
+            ? await prisma.cotizacion.findUnique({
+                where: { id: campana.cotizacion_id },
+                select: { id_propuesta: true },
+              })
+            : null;
           const desplazadas = await desplazarTentativasEnEspacios(
-            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(campana.cotizacion_id ?? ''),
+            prisma, espaciosFirmados, fechaIni, fechaFinDate, String(cotProp?.id_propuesta ?? ''),
           );
           if (desplazadas.length > 0) {
             await notificarReservasDesplazadas(desplazadas, {
@@ -11078,6 +11113,18 @@ export class CampanasController {
         for (const i of invsOm) codigosOmitidosCamp.set(i.id, i.codigo_unico);
       }
 
+      // Versionado Vista Compartir: la campaña comparte la misma propuesta
+      // (idquote); si un circuito llego a N/N aqui, guardar su version.
+      if (reservasCreadas > 0 && campana.cotizacion_id) {
+        const cotVer = await prisma.cotizacion.findUnique({
+          where: { id: campana.cotizacion_id },
+          select: { id_propuesta: true },
+        });
+        await evaluarCompletadoSeguro(cotVer?.id_propuesta, {
+          usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createReservas',
+        });
+      }
+
       res.json({
         success: true,
         data: {
@@ -11105,6 +11152,13 @@ export class CampanasController {
 
       if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina mientras el asesor la tiene.
+      const bloqueoACDel = await bloqueoAjusteComercialCampana(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDel) {
+        res.status(403).json({ success: false, error: bloqueoACDel });
         return;
       }
 
@@ -11531,6 +11585,11 @@ export class CampanasController {
         mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
+      // Versionado Vista Compartir (cambio de caras/bonificacion puede completar el circuito).
+      await evaluarCompletadoSeguro(currentCara.idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.updateCara',
+      });
+
       res.json({
         success: true,
         data: cara,
@@ -11561,6 +11620,13 @@ export class CampanasController {
       // se disparen por circuitos recién agregados (que quedan 'pendiente'). La autorización
       // real se resuelve al Guardar (bulkUpdateCaras). Mismo mecanismo que propuestas.
       const deferAuth = data.deferAuth === true || data.deferAuth === 'true';
+
+      // Bloqueo Ajuste Comercial: Tráfico no agrega circuitos mientras el asesor la tiene.
+      const bloqueoACCreateCara = await bloqueoAjusteComercialCampana(prisma, campanaId, req.user?.rol);
+      if (bloqueoACCreateCara) {
+        res.status(403).json({ success: false, error: bloqueoACCreateCara });
+        return;
+      }
 
       // Validar fechas obligatorias.
       if (!data.inicio_periodo || !data.fin_periodo) {
@@ -11761,6 +11827,12 @@ export class CampanasController {
       if (estadoResult.autorizacion_dg === 'pendiente' || estadoResult.autorizacion_dcm === 'pendiente') {
         mensaje = 'Circuito creado. Requiere autorización antes de asignar inventario.';
       }
+
+      // Versionado Vista Compartir: los circuitos digitales se auto-reservan al
+      // crearse, asi que este alta puede dejar un circuito completo.
+      await evaluarCompletadoSeguro(cotizacion?.id_propuesta, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createCara',
+      });
 
       res.json({
         success: true,
@@ -12047,6 +12119,12 @@ export class CampanasController {
 
       console.log(`[campanas.bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
 
+      // Versionado Vista Compartir: la edicion masiva redistribuye reservas de
+      // circuito, asi que puede dejar circuitos completos.
+      await evaluarCompletadoSeguro(idquote, {
+        usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.bulkUpdateCaras',
+      });
+
       res.json({
         success: true,
         data: updatedCaras,
@@ -12069,6 +12147,14 @@ export class CampanasController {
       const { caraId } = req.params;
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina circuitos mientras el asesor
+      // la tiene. OJO: aquí `id` es la CARA — la campaña viene en req.params.id.
+      const bloqueoACDelCara = await bloqueoAjusteComercialCampana(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDelCara) {
+        res.status(403).json({ success: false, error: bloqueoACDelCara });
+        return;
+      }
 
       let idsToDelete: number[] = [id];
       if (eliminarGrupo) {

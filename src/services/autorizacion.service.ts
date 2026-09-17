@@ -135,63 +135,24 @@ async function getGerenteComercialParaSolicitud(
 }
 
 /**
- * Espejo de getGerenteComercialParaSolicitud pero para la dimensión DCM.
- * Busca al Gerente Comercial Aeropuerto del asesor via los mismos equipos
- * con proposito='filtro_autorizacion'. Devuelve null si el asesor no tiene
- * GC DCM asignado — el llamador debe hacer fallback a Autorización DCM
- * directo (mantiene el comportamiento actual y no rompe nada si la matriz
- * aún no está actualizada). Feedback 2026-08-15.
+ * GC del asesor para el filtro DCM.
+ *
+ * Feedback 2026-09-10 (Jos): la version anterior buscaba al Gerente Comercial
+ * Aeropuerto y hacia fallback al unico global, pero la regla correcta es que
+ * el Filtro DCM lo aprueba EL MISMO Gerente Comercial que el Filtro DG del
+ * asesor (VP o Plazas segun su equipo). Solo cambia el director final al
+ * que llega la autorizacion ya aprobada: DG => Director General, DCM =>
+ * Director Comercial (Rodrigo Margain).
+ *
+ * Por eso ahora esta funcion es un alias directo de getGerenteComercialPara
+ * Solicitud. Si el asesor no tiene GC en su equipo filtro_autorizacion,
+ * devuelve null y el llamador cae al fallback historico: crear 'Autorización
+ * DCM' directa a Rodrigo Margain sin pasar por filtro.
  */
 async function getGerenteComercialDcmParaSolicitud(
   solicitudId: number
 ): Promise<{ id: number; nombre: string } | null> {
-  const sol = await prisma.solicitud.findFirst({
-    where: { id: solicitudId, deleted_at: null },
-    select: { asesor: true, usuario_id: true, nombre_usuario: true },
-  });
-  if (!sol) return null;
-
-  let asesorId: number | null = null;
-  const asesorNombre = (sol.asesor || '').trim();
-  if (asesorNombre) {
-    const u = await prisma.usuario.findFirst({
-      where: { deleted_at: null, nombre: { equals: asesorNombre } },
-      select: { id: true },
-    });
-    if (u) asesorId = u.id;
-  }
-  if (!asesorId && sol.usuario_id) {
-    asesorId = sol.usuario_id;
-  }
-  if (!asesorId) return null;
-
-  const equiposDelAsesor = await prisma.usuario_equipo.findMany({
-    where: {
-      usuario_id: asesorId,
-      equipo: { deleted_at: null, proposito: 'filtro_autorizacion' },
-    },
-    select: { equipo_id: true },
-  });
-  if (equiposDelAsesor.length === 0) return null;
-
-  for (const eq of equiposDelAsesor) {
-    const gerenteMembership = await prisma.usuario_equipo.findFirst({
-      where: {
-        equipo_id: eq.equipo_id,
-        usuario: {
-          deleted_at: null,
-          user_role: { in: GERENTE_COMERCIAL_DCM_ROLES },
-        },
-      },
-      include: {
-        usuario: { select: { id: true, nombre: true, user_role: true } },
-      },
-    });
-    if (gerenteMembership?.usuario) {
-      return { id: gerenteMembership.usuario.id, nombre: gerenteMembership.usuario.nombre };
-    }
-  }
-  return null;
+  return getGerenteComercialParaSolicitud(solicitudId);
 }
 
 /**
@@ -1493,6 +1454,19 @@ export async function aprobarFiltroDg(
 
   const comentarioLimpio = (comentario || '').trim();
 
+  // Mismo caso que en aprobarFiltroDcm: la descripción del filtro dice
+  // "Revisar N circuito(s) ... antes de enviar a Dirección General" y aquí ya
+  // está CON Dirección General. Feedback 2026-09-17 (Jos).
+  const origenFiltro = filtro.contenido || 'solicitud';
+  const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
+  const idOrigenFiltro = filtro.campania_id
+    || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0)
+    || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
+  const circuitosFiltro = Number(/(\d+)\s*circuito/i.exec(filtro.descripcion || '')?.[1]) || 0;
+  const descripcionDg = circuitosFiltro > 0 && idOrigenFiltro
+    ? `Se requiere autorización de Dirección General para ${circuitosFiltro} circuito(s) de la ${etiquetaFiltro} #${idOrigenFiltro}`
+    : 'Se requiere autorización de Dirección General';
+
   const result = await prisma.$transaction(async (tx) => {
     await tx.tareas.update({
       where: { id: tareaFiltroId },
@@ -1502,7 +1476,7 @@ export async function aprobarFiltroDg(
       data: {
         tipo: 'Autorización DG',
         titulo: filtro.titulo?.replace('Filtro autorización DG', 'Autorización requerida') || 'Autorización requerida',
-        descripcion: filtro.descripcion || 'Se requiere autorización de Dirección General',
+        descripcion: descripcionDg,
         estatus: 'Pendiente',
         id_responsable: filtro.id_responsable,
         responsable: filtro.responsable,
@@ -1618,6 +1592,23 @@ export async function aprobarFiltroDcm(
 
   const comentarioLimpio = (comentario || '').trim();
 
+  // La tarea DCM real NO puede heredar la descripción del filtro: ese texto es
+  // "Revisar N circuito(s) de la X #N antes de enviar a Dirección Comercial" y
+  // en este punto la autorización YA está con Dirección Comercial, así que se
+  // leía al revés. Reconstruimos el mismo texto que usa la tarea DCM directa
+  // en crearTareasAutorizacion. Feedback 2026-09-17 (Jos).
+  const origenFiltro = filtro.contenido || 'solicitud';
+  const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
+  const idOrigenFiltro = filtro.campania_id
+    || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0)
+    || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
+  // El conteo de circuitos solo vive en el texto del filtro; si no se puede
+  // leer, caemos al texto genérico en vez de inventar un número.
+  const circuitosFiltro = Number(/(\d+)\s*circuito/i.exec(filtro.descripcion || '')?.[1]) || 0;
+  const descripcionDcm = circuitosFiltro > 0 && idOrigenFiltro
+    ? `Se requiere autorización de Dirección Comercial para ${circuitosFiltro} circuito(s) de la ${etiquetaFiltro} #${idOrigenFiltro}`
+    : 'Se requiere autorización de Dirección Comercial';
+
   const result = await prisma.$transaction(async (tx) => {
     await tx.tareas.update({
       where: { id: tareaFiltroId },
@@ -1627,7 +1618,7 @@ export async function aprobarFiltroDcm(
       data: {
         tipo: 'Autorización DCM',
         titulo: filtro.titulo?.replace('Filtro autorización DCM', 'Autorización requerida') || 'Autorización requerida',
-        descripcion: filtro.descripcion || 'Se requiere autorización de Dirección Comercial',
+        descripcion: descripcionDcm,
         estatus: 'Pendiente',
         id_responsable: filtro.id_responsable,
         responsable: filtro.responsable,

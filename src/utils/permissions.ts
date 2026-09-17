@@ -74,6 +74,73 @@ export function esAsesorComercial(rol?: string | null): boolean {
 }
 
 /**
+ * Bloqueo "Ajuste Comercial" — espejo del bloqueo de Ajuste CTO.
+ *
+ * Cuando una propuesta/campaña está en "Ajuste Comercial" el balón está del
+ * lado del asesor comercial: Tráfico y los demás roles NO pueden reservar ni
+ * eliminar inventario hasta que el asesor la regrese a "Ajuste Cto-Cliente" o
+ * "Ajuste Inventario".
+ *
+ * Por qué vive en el servidor y no solo en la UI (feedback 2026-09-17, Jos):
+ * el front congela el estatus al abrir el modal, así que si Tráfico ya está
+ * dentro del buscador de formatos y el asesor cambia el estatus en ese momento,
+ * la pantalla sigue creyendo el estatus viejo y dejaba reservar. El guard de
+ * servidor es el único que corta ese caso — y devuelve el mensaje que la UI
+ * le muestra a Tráfico.
+ */
+export const ESTATUS_AJUSTE_COMERCIAL = 'Ajuste Comercial';
+
+// Ojo con los strings: el estatus de CTO se escribe distinto en cada módulo —
+// 'Ajuste Cto-Cliente' en propuestas y 'Ajuste CTO Cliente' en campañas. Y
+// 'Ajuste Inventario' solo existe en propuestas.
+export function mensajeBloqueoAjusteComercial(entidad: 'propuesta' | 'campaña'): string {
+  const regreso = entidad === 'propuesta'
+    ? '"Ajuste Cto-Cliente" o "Ajuste Inventario"'
+    : '"Ajuste CTO Cliente"';
+  const sujeto = entidad === 'propuesta' ? 'La propuesta' : 'La campaña';
+  return `${sujeto} se cambió a "Ajuste Comercial": la tiene el asesor comercial para revisión. `
+    + `No puedes reservar ni eliminar inventario hasta que te la regresen a ${regreso}.`;
+}
+
+/**
+ * Devuelve el mensaje de bloqueo si el usuario NO puede tocar el inventario de
+ * la propuesta por estar en Ajuste Comercial, o `null` si puede continuar.
+ */
+export async function bloqueoAjusteComercialPropuesta(
+  prisma: PrismaClient,
+  propuestaId: number,
+  rol?: string | null
+): Promise<string | null> {
+  if (!Number.isFinite(propuestaId)) return null;
+  if (esAsesorComercial(rol)) return null;
+  const propuesta = await prisma.propuesta.findUnique({
+    where: { id: propuestaId },
+    select: { status: true },
+  });
+  if (propuesta?.status !== ESTATUS_AJUSTE_COMERCIAL) return null;
+  return mensajeBloqueoAjusteComercial('propuesta');
+}
+
+/**
+ * Igual que el anterior pero para campañas. En campañas el estatus vive en
+ * `campania.status` y el de CTO se escribe 'Ajuste CTO Cliente'.
+ */
+export async function bloqueoAjusteComercialCampana(
+  prisma: PrismaClient,
+  campanaId: number,
+  rol?: string | null
+): Promise<string | null> {
+  if (!Number.isFinite(campanaId)) return null;
+  if (esAsesorComercial(rol)) return null;
+  const campana = await prisma.campania.findUnique({
+    where: { id: campanaId },
+    select: { status: true },
+  });
+  if (campana?.status !== ESTATUS_AJUSTE_COMERCIAL) return null;
+  return mensajeBloqueoAjusteComercial('campaña');
+}
+
+/**
  * Obtiene los IDs de todos los miembros de los equipos a los que pertenece el usuario.
  * Incluye al propio usuario.
  *
@@ -100,9 +167,36 @@ export async function getTeamMemberIds(prisma: PrismaClient, userId: number): Pr
   return ids;
 }
 
+// Estatus de tareas que YA NO deben otorgar visibilidad de campana. Una vez
+// que la tarea esta cerrada, su rol fue "avisar en su momento" — no debe
+// arrastrar la campana en la vista del usuario para siempre.
+const TAREA_ESTATUS_TERMINALES = ['Atendido', 'Cerrado', 'Cancelada', 'Cancelado'];
+
+// Tipos de tarea que son puramente informativos o de flujo (autorizacion /
+// notificacion). Aunque tu id este en id_asignado (broadcast historico a
+// todos los asesores), no significa que participes en la campana — solo te
+// avisaron. No deben expandir la visibilidad de campanas.
+//
+// Feedback 2026-09-02 (ticket #517 Elvia): asesores veian campanas ajenas
+// por tareas viejas de "Autorizacion DCM" con id_asignado masivo creadas
+// antes del refactor de equipos.
+const TAREA_TIPOS_INFORMATIVOS = [
+  'Autorización DG',
+  'Autorización DCM',
+  'Filtro Autorización DG',
+  'Filtro Autorización DCM',
+  'Notificación',
+];
+
 /**
  * Pre-computa los IDs de campañas visibles para un usuario (cacheado 2 min).
  * Reemplaza FIND_IN_SET en WHERE con IN(ids) que sí usa índices.
+ *
+ * Reglas de visibilidad por participacion:
+ *   1. Tarea ACTIVA (no terminal, tipo no informativo) donde el usuario es
+ *      responsable o esta en el CSV id_asignado.
+ *   2. Asignado en la propuesta (pr.id_asignado CSV).
+ *   3. Creador de la solicitud original.
  */
 export async function getVisibleCampanaIds(
   prisma: PrismaClient,
@@ -116,6 +210,8 @@ export async function getVisibleCampanaIds(
   const userIdStr = String(userId);
   const allUserIds = teamIds || [userId];
   const placeholders = allUserIds.map(() => '?').join(',');
+  const estatusPlaceholders = TAREA_ESTATUS_TERMINALES.map(() => '?').join(',');
+  const tiposPlaceholders = TAREA_TIPOS_INFORMATIVOS.map(() => '?').join(',');
 
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(`
     SELECT DISTINCT cm.id FROM campania cm
@@ -127,11 +223,20 @@ export async function getVisibleCampanaIds(
         SELECT 1 FROM tareas t
         WHERE t.campania_id = cm.id
           AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          AND (t.estatus IS NULL OR t.estatus NOT IN (${estatusPlaceholders}))
+          AND (t.tipo IS NULL OR t.tipo NOT IN (${tiposPlaceholders}))
       )
       OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
       OR s.usuario_id IN (${placeholders})
     )
-  `, ...allUserIds, userIdStr, userIdStr, ...allUserIds);
+  `,
+    ...allUserIds,
+    userIdStr,
+    ...TAREA_ESTATUS_TERMINALES,
+    ...TAREA_TIPOS_INFORMATIVOS,
+    userIdStr,
+    ...allUserIds,
+  );
 
   const ids = rows.map(r => Number(r.id));
   cache.set(cacheKey, ids, 2 * 60 * 1000); // 2 min

@@ -10,12 +10,15 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
+import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
+import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
+import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
@@ -947,15 +950,16 @@ export class PropuestasController {
             autorizacion_dcm: 'aprobado',
           },
         });
-        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        // Cierre (Rechazada/Cancelada): SOLO bloquea con pendiente. Aprobado
+        // + rechazado + correccion se permiten en cualquier mezcla — feedback
+        // Jos 2026-09-11.
+        const bloquea = totalPend > 0;
         if (bloquea) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
-          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
-          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
+            error: `No se puede cambiar a "${status}": hay circuitos que impiden el cierre — ${partes.join(', ')}. Espera a que direccion resuelva los pendientes antes de continuar.`,
             autorizacion: {
               pendientesDg: autorizacion.pendientesDg.length,
               pendientesDcm: autorizacion.pendientesDcm.length,
@@ -2037,6 +2041,10 @@ export class PropuestasController {
       let campania: any = null;
       // Reservas de OTRAS propuestas desplazadas por esta venta (para notificar).
       let desplazadasVenta: DesplazadaInfo[] = [];
+      // Reservas que CRUZAN de la propuesta a la campaña en este pase a ventas.
+      // Se registran tras el commit (ver pase-ventas.service) para que la Vista
+      // Compartir pinte distinto lo que se agregue despues dentro de la campaña.
+      let vendidasIdsPase: number[] = [];
 
       // Start transaction with extended timeout (30s)
       await prisma.$transaction(async (tx) => {
@@ -2058,6 +2066,7 @@ export class PropuestasController {
         // (Se removió el candado R6 y el VentaConflictoError/409.)
         const ventaResult = await venderReservasPropuestaConGuardian(tx, propuestaId);
         desplazadasVenta = ventaResult.desplazadas;
+        vendidasIdsPase = ventaResult.vendidasIds;
         if (ventaResult.conflictivas > 0) {
           console.log(`[aprobar] propuesta ${propuestaId}: ${ventaResult.conflictivas} pieza(s) ya vendidas en otra campaña se quitaron; puede quedar incompleta.`);
         }
@@ -2313,6 +2322,19 @@ export class PropuestasController {
           }
         }
       }, { timeout: 30000 });
+
+      // Foto del pase a ventas: que reservas se vinieron de la propuesta. Va
+      // DESPUES del commit a propósito — un fallo aquí no debe tumbar la
+      // aprobación; si no se escribe, la Vista Compartir solo deja de colorear
+      // por origen y el backfill puede repararlo.
+      if (vendidasIdsPase.length > 0) {
+        await registrarPaseVentasSeguro(propuestaId, vendidasIdsPase, {
+          campaniaId: campania?.id ?? null,
+          usuarioId: req.user?.userId,
+          usuarioNombre: req.user?.nombre,
+          origen: 'aprobacion',
+        });
+      }
 
       // #4b: notificar a los dueños de las propuestas cuyas reservas se
       // desplazaron (perdieron la pieza porque esta propuesta la vendió). Se hace
@@ -2926,69 +2948,22 @@ export class PropuestasController {
       const { id } = req.params;
       const propuestaId = parseInt(id);
 
-      const query = `
-        SELECT
-          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          MIN(i.id) as id,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          MAX(sc.id) AS solicitud_caras_id,
-          MIN(i.mueble) as mueble,
-          MIN(i.estado) as estado,
-          MIN(i.municipio) as municipio,
-          MIN(i.ubicacion) as ubicacion,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
-          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
-          MIN(i.latitud) as latitud,
-          MIN(i.longitud) as longitud,
-          MIN(i.plaza) as plaza,
-          MAX(rsv.estatus) as estatus_reserva,
-          MAX(sc.articulo) as articulo,
-          MAX(sc.tipo) as tipo_medio,
-          MAX(sc.inicio_periodo) as inicio_periodo,
-          MAX(sc.fin_periodo) as fin_periodo,
-          MIN(i.tradicional_digital) as tradicional_digital,
-          MIN(i.mueble) as tipo_de_mueble,
-          MIN(i.ancho) as ancho,
-          MIN(i.alto) as alto,
-          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
-          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
-          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          MAX(sc.formato) as formato
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-        WHERE sc.idquote = ?
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
-        ORDER BY cat.año DESC, cat.numero_catorcena DESC, MIN(rsv.id) DESC
-      `;
+      // Red de seguridad del versionado: si algun flujo que creo reservas no
+      // paso por los ganchos (o el circuito se completo por otra via), al abrir
+      // la Vista Compartir se registra la version. Es idempotente y barato.
+      await evaluarCompletadoSeguro(propuestaId, {
+        usuarioId: req.user?.userId,
+        usuarioNombre: req.user?.nombre,
+        origen: 'lectura-compartir',
+      });
 
-      const inventario = await prisma.$queryRawUnsafe(query, String(propuestaId)) as any[];
-
-      // Convert BigInts to numbers to avoid serialization errors
-      const serializedInventario = inventario.map(item => ({
-        ...item,
-        caras_totales: Number(item.caras_totales),
-        caras_bonificadas: Number(item.caras_bonificadas),
-        caras_renta: Number(item.caras_renta),
-      }));
+      // Ultima version completada de cada circuito + 'no_vigente' en gris.
+      // Mismo SQL base que el endpoint publico (inventario-propuesta.service).
+      const inventario = await getInventarioPropuestaConVersion(propuestaId);
 
       res.json({
         success: true,
-        data: serializedInventario,
+        data: inventario,
       });
     } catch (error) {
       console.error('Error en getInventarioReservado propuesta:', error);
@@ -3010,45 +2985,21 @@ export class PropuestasController {
         idsParam.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
       );
 
-      // Mismo query que getInventarioReservado (puntos reservados de la propuesta)
-      const query = `
-        SELECT
-          MIN(i.id) as id,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          MIN(i.mueble) as mueble,
-          MIN(i.ubicacion) as ubicacion,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
-          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          MIN(i.latitud) as latitud,
-          MIN(i.longitud) as longitud,
-          MIN(i.plaza) as plaza
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-        WHERE sc.idquote = ?
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id)
-      `;
+      // Mismas filas que la vista publica (ultima version completada por
+      // circuito; las piezas desplazadas/quitadas vienen como 'no_vigente').
+      const inventario = await getInventarioPropuestaConVersion(propuestaId);
 
-      const inventario = await prisma.$queryRawUnsafe(query, String(propuestaId)) as any[];
-
-      // Filtrar por seleccion y dedup por id de inventario (un punto por ubicacion)
-      const seen = new Set<number>();
-      const puntos = inventario.filter(item => {
+      // Filtrar por seleccion y dedup por id de inventario (un punto por ubicacion).
+      // Si una pieza aparece vigente en una catorcena y no vigente en otra, gana la vigente.
+      const porInv = new Map<number, typeof inventario[number]>();
+      for (const item of inventario) {
         const invId = Number(item.id);
-        if (selectedIds.size > 0 && !selectedIds.has(invId)) return false;
-        if (item.latitud == null || item.longitud == null) return false;
-        if (seen.has(invId)) return false;
-        seen.add(invId);
-        return true;
-      });
+        if (selectedIds.size > 0 && !selectedIds.has(invId)) continue;
+        if (item.latitud == null || item.longitud == null) continue;
+        const prev = porInv.get(invId);
+        if (!prev || (prev.estado_version === 'no_vigente' && item.estado_version !== 'no_vigente')) porInv.set(invId, item);
+      }
+      const puntos = [...porInv.values()];
 
       const esc = (v: any) => String(v ?? '')
         .replace(/&/g, '&amp;')
@@ -3057,8 +3008,8 @@ export class PropuestasController {
 
       const placemarks = puntos.map(i => `
     <Placemark>
-      <name>${esc(i.codigo_unico)}</name>
-      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}]]></description>
+      <name>${esc(i.codigo_unico)}${i.estado_version === 'no_vigente' ? ' (Reasignando)' : ''}${i.origen_reserva === 'campana' ? ' [Nuevo en campaña]' : ''}</name>
+      <description><![CDATA[Plaza: ${i.plaza || 'N/A'}<br/>Tipo: ${i.tipo_de_cara || 'N/A'}<br/>Formato: ${i.mueble || 'N/A'}<br/>Ubicacion: ${i.ubicacion || 'N/A'}<br/>Caras: ${Number(i.caras_totales)}${i.estado_version === 'no_vigente' ? '<br/><b>Estado:</b> Reasignando' : ''}]]></description>
       <Point><coordinates>${i.longitud},${i.latitud},0</coordinates></Point>
     </Placemark>`).join('');
 
@@ -3150,66 +3101,14 @@ export class PropuestasController {
         }
       }
 
-      // Get inventory
-      const inventarioQuery = `
-        SELECT
-          GROUP_CONCAT(DISTINCT rsv.id ORDER BY rsv.id SEPARATOR ',') as rsv_ids,
-          MIN(i.id) as id,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL
-            THEN CONCAT(SUBSTRING_INDEX(MIN(i.codigo_unico), '_', 1), '_completo_', SUBSTRING_INDEX(MIN(i.codigo_unico), '_', -1))
-            ELSE MIN(i.codigo_unico)
-          END as codigo_unico,
-          MAX(sc.id) AS solicitud_caras_id,
-          MIN(i.mueble) as mueble,
-          MIN(i.estado) as estado,
-          MIN(i.municipio) as municipio,
-          MIN(i.ubicacion) as ubicacion,
-          CASE
-            WHEN rsv.grupo_completo_id IS NOT NULL THEN 'Completo'
-            ELSE MIN(i.tipo_de_cara)
-          END as tipo_de_cara,
-          CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
-          MIN(i.latitud) as latitud,
-          MIN(i.longitud) as longitud,
-          MIN(i.plaza) as plaza,
-          MAX(rsv.estatus) as estatus_reserva,
-          MAX(sc.articulo) as articulo,
-          MAX(sc.tipo) as tipo_medio,
-          MAX(sc.inicio_periodo) as inicio_periodo,
-          MAX(sc.fin_periodo) as fin_periodo,
-          MIN(i.tradicional_digital) as tradicional_digital,
-          MIN(i.mueble) as tipo_de_mueble,
-          MIN(i.ancho) as ancho,
-          MIN(i.alto) as alto,
-          MIN(i.nivel_socioeconomico) as nivel_socioeconomico,
-          COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica,
-          COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
-          COALESCE(rsv.grupo_completo_id, rsv.id) as grupo_completo_id,
-          cat.numero_catorcena,
-          cat.año as anio_catorcena,
-          MAX(sc.formato) as formato
-        FROM inventarios i
-          INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
-          INNER JOIN reservas rsv ON epIn.id = rsv.inventario_id AND rsv.deleted_at IS NULL
-          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-          LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
-        WHERE sc.idquote = ?
-        GROUP BY COALESCE(rsv.grupo_completo_id, rsv.id), cat.numero_catorcena, cat.año
-        ORDER BY cat.año DESC, cat.numero_catorcena DESC, MIN(rsv.id) DESC
-      `;
-
-      const inventario = await prisma.$queryRawUnsafe(inventarioQuery, String(propuestaId)) as any[];
-
-      // Convert BigInts to numbers
-      const serializedInventario = inventario.map(item => ({
-        ...item,
-        caras_totales: Number(item.caras_totales),
-        caras_bonificadas: Number(item.caras_bonificadas),
-        caras_renta: Number(item.caras_renta),
-      }));
+      // Inventario: ultima version completada de cada circuito (las piezas
+      // desplazadas/quitadas despues vienen como estado_version 'no_vigente').
+      // Endpoint publico: solo lee, NO evalua/escribe versiones.
+      // El motivo técnico de una pieza no vigente (desplazada, eliminada,
+      // reasignada) es información interna: al cliente solo le llega el estado
+      // "Reasignando". Se quita del payload aquí, no en el front.
+      const serializedInventario = (await getInventarioPropuestaConVersion(propuestaId))
+        .map(({ motivo_no_vigente: _motivo, ...fila }) => fila);
 
       res.json({
         success: true,
@@ -3277,6 +3176,13 @@ export class PropuestasController {
         return;
       }
 
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoAC = await bloqueoAjusteComercialPropuesta(prisma, propuestaId, req.user?.rol);
+      if (bloqueoAC) {
+        res.status(403).json({ success: false, error: bloqueoAC });
+        return;
+      }
+
       // 0. Get all solicitudCaras IDs for duplicate check
       const proposalCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: String(propuestaId) },
@@ -3330,13 +3236,18 @@ export class PropuestasController {
         }
       }
 
-      // Create calendario entry
-      const calendario = await prisma.calendario.create({
-        data: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-        },
+      // Create calendario entry. Anti-calendario-inflado (bug 81543): CATORCENA se
+      // ancla a la catorcena real de la fecha; MENSUAL respeta el rango.
+      const cotizPeriodoCr = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: propuestaId },
+        select: { tipo_periodo: true },
       });
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodoCr?.tipo_periodo === 'mensual',
+      );
 
       // Espacios ya bloqueados en el período (excluyendo los de esta propuesta).
       // Helper centralizado: ver inventario-bloqueo.service.ts. Usa rango de
@@ -3606,6 +3517,13 @@ export class PropuestasController {
         for (const i of invsOm) codigosOmitidos.set(i.id, i.codigo_unico);
       }
 
+      // Versionado Vista Compartir: si algun circuito llego a N/N, guardar la
+      // fecha de completado y la foto de sus reservas. Acotado a los circuitos
+      // de lo recien creado (evaluar toda la propuesta cuesta ~0.9 s en las grandes).
+      if (createdReservas.length > 0) {
+        await evaluarCompletadoPorReservasSeguro(createdReservas.map(r => r.id), { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'createReservas' });
+      }
+
       res.json({
         success: true,
         data: {
@@ -3714,6 +3632,13 @@ export class PropuestasController {
 
       if (!reservaIds || !Array.isArray(reservaIds) || reservaIds.length === 0) {
         res.status(400).json({ success: false, error: 'No hay reservas para eliminar' });
+        return;
+      }
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina mientras el asesor la tiene.
+      const bloqueoACDel = await bloqueoAjusteComercialPropuesta(prisma, parseInt(id), req.user?.rol);
+      if (bloqueoACDel) {
+        res.status(403).json({ success: false, error: bloqueoACDel });
         return;
       }
 
@@ -3870,6 +3795,13 @@ export class PropuestasController {
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
 
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoACToggle = await bloqueoAjusteComercialPropuesta(prisma, propuestaId, req.user?.rol);
+      if (bloqueoACToggle) {
+        res.status(403).json({ success: false, error: bloqueoACToggle });
+        return;
+      }
+
       // 0. Get all solicitudCaras IDs for duplicates check
       const proposalCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: String(propuestaId) },
@@ -3971,22 +3903,19 @@ export class PropuestasController {
         }
       }
 
-      let calendario = await prisma.calendario.findFirst({
-        where: {
-          fecha_inicio: new Date(fechaInicio),
-          fecha_fin: new Date(fechaFin),
-          deleted_at: null
-        }
+      // Anti-calendario-inflado (bug 81543): para CATORCENA ancla el calendario a la
+      // catorcena real de la fecha, para que un `fin` inflado no cree un calendario de
+      // varias catorcenas que "sangre" el hold. MENSUAL respeta el rango.
+      const cotizPeriodo = await prisma.cotizacion.findFirst({
+        where: { id_propuesta: Number(propuestaId) },
+        select: { tipo_periodo: true },
       });
-
-      if (!calendario) {
-        calendario = await prisma.calendario.create({
-          data: {
-            fecha_inicio: new Date(fechaInicio),
-            fecha_fin: new Date(fechaFin),
-          },
-        });
-      }
+      const calendario = await resolverCalendarioReserva(
+        prisma,
+        new Date(fechaInicio),
+        new Date(fechaFin),
+        cotizPeriodo?.tipo_periodo === 'mensual',
+      );
 
       const espacio = await prisma.espacio_inventario.findFirst({
         where: { inventario_id: parseInt(inventarioId) }
@@ -4121,6 +4050,11 @@ export class PropuestasController {
       // Emitir evento de socket
       emitToPropuesta(propuestaId, SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
       emitToAll(SOCKET_EVENTS.RESERVA_CREADA, { propuestaId });
+
+      // Versionado Vista Compartir (ver circuito-completado.service). Acotado a
+      // la reserva recien creada: el toggle se usa pieza por pieza y evaluar
+      // toda la propuesta en cada clic era medio segundo extra por clic.
+      await evaluarCompletadoPorReservasSeguro([newReserva.id], { usuarioId: userId, usuarioNombre: userName, origen: 'toggleReserva' });
 
       res.json({
         success: true,
@@ -4743,6 +4677,10 @@ export class PropuestasController {
         mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
       }
 
+      // Versionado Vista Compartir: cambiar caras/bonificacion puede dejar el
+      // circuito en N/N sin tocar reservas.
+      await evaluarCompletadoSeguro(updatedCara?.idquote, { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'updateCara' });
+
       res.json({
         success: true,
         data: updatedCara,
@@ -4793,6 +4731,13 @@ export class PropuestasController {
         deferAuth: deferAuthRaw,
       } = req.body;
       const deferAuth = deferAuthRaw === true || deferAuthRaw === 'true';
+
+      // Bloqueo Ajuste Comercial: Tráfico no agrega circuitos mientras el asesor la tiene.
+      const bloqueoACCreateCara = await bloqueoAjusteComercialPropuesta(prisma, parseInt(id), req.user?.rol);
+      if (bloqueoACCreateCara) {
+        res.status(403).json({ success: false, error: bloqueoACCreateCara });
+        return;
+      }
 
       // Validar fechas obligatorias.
       if (!inicio_periodo || !fin_periodo) {
@@ -4996,6 +4941,9 @@ export class PropuestasController {
           mensaje = `Circuito creado. ${totalPendientes} circuito(s) requieren autorización.`;
         }
       }
+
+      // Versionado Vista Compartir (circuitos digitales se auto-reservan al crearse).
+      await evaluarCompletadoSeguro(id, { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'createCara' });
 
       res.json({
         success: true,
@@ -5274,6 +5222,9 @@ export class PropuestasController {
 
       console.log(`[bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
 
+      // Versionado Vista Compartir.
+      await evaluarCompletadoSeguro(id, { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'bulkUpdateCaras' });
+
       res.json({
         success: true,
         data: updatedCaras,
@@ -5299,6 +5250,14 @@ export class PropuestasController {
       const userName = req.user?.nombre || 'Usuario';
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina circuitos mientras el asesor
+      // la tiene. OJO: aquí `id` es la CARA — la propuesta viene en req.params.id.
+      const bloqueoACDelCara = await bloqueoAjusteComercialPropuesta(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDelCara) {
+        res.status(403).json({ success: false, error: bloqueoACDelCara });
+        return;
+      }
 
       // Si eliminarGrupo: borra todas las caras con el mismo grupo_masivo_id (RT y BF)
       let idsToDelete: number[] = [id];
