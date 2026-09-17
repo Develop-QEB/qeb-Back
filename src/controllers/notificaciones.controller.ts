@@ -33,6 +33,29 @@ function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
   ];
 }
 
+// Tareas de autorización: solo las ve quien debe aprobarlas.
+//
+// En estas filas `id_responsable` es el asesor que SOLICITÓ la autorización y
+// `id_asignado` es quien debe aprobarla (ver services/autorizacion.service.ts).
+// Al traer la bandeja por "responsable O asignado", al asesor le aparecían como
+// tarea pendiente propia autorizaciones que no le toca resolver.
+//
+// Feedback 2026-09-17 (Jos): deben salirle únicamente al aprobador. Se filtra
+// por prefijo para cubrir DG, DCM y sus filtros — y cualquier tipo nuevo.
+// Verificado en PROD y PRUEBAS antes del cambio:
+//  - Ninguna tarea de autorización tiene `id_asignado` vacío, así que ninguna
+//    queda sin destinatario al quitar la rama de `id_responsable`.
+//  - Solo cambia para 'Autorización DG', 'Autorización DCM' y sus filtros. En
+//    Eliminación y Desposteo el responsable YA es el aprobador (va también en
+//    `id_asignado`), así que ahí no cambia nada.
+const PREFIJOS_TAREA_SOLO_APROBADOR = ['Autorización', 'Filtro Autorización'];
+
+const NO_ES_TAREA_DE_AUTORIZACION = {
+  NOT: {
+    OR: PREFIJOS_TAREA_SOLO_APROBADOR.map(prefijo => ({ tipo: { startsWith: prefijo } })),
+  },
+};
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT || '587'),
@@ -110,9 +133,17 @@ export class NotificacionesController {
         }
 
         const porResponsable = ids.map(id => ({ id_responsable: id }));
+        // En la lista de TAREAS, la rama de `id_responsable` excluye las
+        // autorizaciones: esas solo entran por `id_asignado` (el aprobador).
+        // Ver NO_ES_TAREA_DE_AUTORIZACION. La vista de notificaciones no se
+        // toca: ahí el destinatario siempre es `id_responsable`.
+        const porResponsableTareas = porResponsable.map(cond => ({
+          ...cond,
+          ...NO_ES_TAREA_DE_AUTORIZACION,
+        }));
         where.OR = vistaNotificaciones
           ? porResponsable
-          : [...porResponsable, ...ids.flatMap(id => idAsignadoMatch(id))];
+          : [...porResponsableTareas, ...ids.flatMap(id => idAsignadoMatch(id))];
       }
 
       if (vistaNotificaciones || vistaTareas) {
@@ -1195,7 +1226,12 @@ export class NotificacionesController {
 
         const asignadoConds = ids.flatMap(id => idAsignadoMatch(id));
         where.OR = [
-          ...ids.map(id => ({ id_responsable: id })),
+          // Mismo criterio que getAll: las autorizaciones no cuentan por
+          // `id_responsable` (ese es el solicitante), solo por `id_asignado`.
+          // Si el badge y la lista no aplican la MISMA regla se descuadran —
+          // que es justo el bug que corrigió 2a7d3bf (2026-08-12).
+          // Las notificaciones no se ven afectadas: su tipo es 'Notificación'.
+          ...ids.map(id => ({ id_responsable: id, ...NO_ES_TAREA_DE_AUTORIZACION })),
           // En las NOTIFICACIONES, id_asignado es el AUTOR (no el destinatario),
           // así que el match por asignado solo aplica a TAREAS reales. Si no, el
           // badge se inflaba contando notificaciones que el propio usuario generó.
