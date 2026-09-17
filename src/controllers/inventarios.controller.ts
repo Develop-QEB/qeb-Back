@@ -8,6 +8,7 @@ import { logHistorial } from '../utils/historial';
 import {
   CatorcenaRef,
   detectarConflictos,
+  detectarApartadosSobreVenta,
   esChoque,
   limpiarCeldasDuplicadas,
 } from '../services/conflictos-ocupacion.service';
@@ -2420,6 +2421,42 @@ export class InventariosController {
     } catch (error) {
       console.error('Error en getConflictosOcupacion:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener conflictos';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Apartados de propuesta encima de inventario YA VENDIDO. Categoría aparte de
+   * la auditoría de ventas firmes: ahí dos apartados pueden encimarse por
+   * diseño, aquí el apartado está sobre algo que ya se vendió y la propuesta no
+   * va a poder llevárselo. Mismo body que /conflictos.
+   */
+  async getApartadosSobreVenta(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const catorcenas = parseCatorcenasBody(req.body?.catorcenas);
+      if (!catorcenas) {
+        res.status(400).json({
+          success: false,
+          error: 'Se requiere un array de catorcenas ({ numero, anio }), maximo 30',
+        });
+        return;
+      }
+
+      const idsRaw = req.body?.ids;
+      let ids: number[] | null = null;
+      if (idsRaw !== undefined && idsRaw !== null) {
+        if (!Array.isArray(idsRaw)) {
+          res.status(400).json({ success: false, error: 'ids debe ser un array de enteros' });
+          return;
+        }
+        ids = idsRaw.map(Number).filter(n => Number.isInteger(n));
+      }
+
+      const apartados = await detectarApartadosSobreVenta(catorcenas, ids);
+      res.json({ success: true, data: { conflictos: serializeBigInt(apartados) } });
+    } catch (error) {
+      console.error('Error en getApartadosSobreVenta:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener apartados sobre venta';
       res.status(500).json({ success: false, error: message });
     }
   }

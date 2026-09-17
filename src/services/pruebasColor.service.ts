@@ -97,26 +97,39 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
     },
   });
 
-  // Notificacion interna a Produccion — crea una tarea que aparece en su
-  // bandeja de notificaciones. Fase 2: enviar correo al proveedor.
-  await notificarProduccion(prueba.id, propuestaId, scId, sc.articulo || null, createdByNombre);
+  // Efectos secundarios: si alguno falla, log y sigue. La prueba ya se
+  // guardó y no queremos regresar 500 al usuario por una tarea/historial
+  // colgado. Cada uno tiene su propio try/catch para no cortar los otros.
+  try {
+    await notificarProduccion(prueba.id, propuestaId, scId, sc.articulo || null, createdByNombre);
+  } catch (e) {
+    console.error('[pruebasColor.crear] notificarProduccion falló:', e);
+  }
 
-  await logHistorial({
-    tipo: 'Propuesta',
-    refId: propuestaId,
-    accion: `Solicitó prueba de color v${nextVersion} para circuito #${scId}`,
-    usuario: createdByNombre,
-    usuarioId: createdBy,
-    origen: 'pruebas_color',
-    extras: { pruebaId: prueba.id, scId, articulo: sc.articulo, formato: sc.formato, ciudad: sc.ciudad, campaniaId },
-  });
+  try {
+    await logHistorial({
+      tipo: 'Propuesta',
+      refId: propuestaId,
+      accion: `Solicitó prueba de color v${nextVersion} para circuito #${scId}`,
+      usuario: createdByNombre,
+      usuarioId: createdBy,
+      origen: 'pruebas_color',
+      extras: { pruebaId: prueba.id, scId, articulo: sc.articulo, formato: sc.formato, ciudad: sc.ciudad, campaniaId },
+    });
+  } catch (e) {
+    console.error('[pruebasColor.crear] logHistorial falló:', e);
+  }
 
-  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-    tareaId: prueba.id,
-    tipo: 'Prueba de Color',
-    propuestaId,
-    scId,
-  });
+  try {
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: prueba.id,
+      tipo: 'Prueba de Color',
+      propuestaId,
+      scId,
+    });
+  } catch (e) {
+    console.error('[pruebasColor.crear] emitToAll falló:', e);
+  }
 
   return prueba;
 }

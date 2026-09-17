@@ -955,20 +955,22 @@ export class SolicitudesController {
         }) : 0;
 
         const bloqueaAvance = totalPend > 0 || totalCorr > 0 || totalRech > 0;
-        // Cierre: bloquea con pendiente/correccion, o con mezcla rechazado+aprobado.
-        const bloqueaCierre = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        // Cierre (Rechazada/Cancelada): SOLO bloquea si hay circuitos
+        // 'pendiente' (direccion aun no respondio). Rechazado, correccion y
+        // aprobado — en cualquier combinacion — SI permite cerrar. Feedback
+        // Jos 2026-09-11: si el asesor quiere rechazar/cancelar aunque tenga
+        // algunos aprobados/en correccion, se le permite (asume que sabe lo
+        // que hace).
+        const bloqueaCierre = totalPend > 0;
 
         if ((esAvance && bloqueaAvance) || (!esAvance && bloqueaCierre)) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
-          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
+          if (esAvance && totalCorr > 0) partes.push(`${totalCorr} en correccion`);
           if (esAvance && totalRech > 0) partes.push(`${totalRech} rechazado(s)`);
-          if (!esAvance && totalRech > 0 && totalAprob > 0) {
-            partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
-          }
           res.status(400).json({
             success: false,
-            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. ${esAvance ? 'Corrigelos y espera la autorizacion antes de continuar.' : 'Resuelve los aprobados/rechazados primero (para cerrar directo, todos los circuitos deben estar rechazados).'}`,
+            error: `No se puede cambiar el estatus a "${status}": hay circuitos que impiden ${esAvance ? 'el avance' : 'el cierre'} — ${partes.join(', ')}. ${esAvance ? 'Corrigelos y espera la autorizacion antes de continuar.' : 'Espera a que direccion resuelva los pendientes antes de cerrar.'}`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -1175,15 +1177,15 @@ export class SolicitudesController {
             autorizacion_dcm: 'aprobado',
           },
         });
-        const bloquea = totalPend > 0 || totalCorr > 0 || (totalRech > 0 && totalAprob > 0);
+        // Bote de basura: SOLO bloquea con pendiente. Aprobado, rechazado
+        // y correccion se permiten (feedback Jos 2026-09-11).
+        const bloquea = totalPend > 0;
         if (bloquea) {
           const partes: string[] = [];
           if (totalPend > 0) partes.push(`${totalPend} pendiente(s)`);
-          if (totalCorr > 0) partes.push(`${totalCorr} en correccion`);
-          if (totalRech > 0 && totalAprob > 0) partes.push(`${totalRech} rechazado(s) mezclado(s) con ${totalAprob} aprobado(s)`);
           res.status(400).json({
             success: false,
-            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Resuelve los circuitos abiertos o mezclados antes de continuar.`,
+            error: `No se puede eliminar la solicitud: hay circuitos que impiden el cierre — ${partes.join(', ')}. Espera a que direccion resuelva los pendientes antes de continuar.`,
             autorizacion: {
               pendientesDg: auth.pendientesDg.length,
               pendientesDcm: auth.pendientesDcm.length,
@@ -2044,6 +2046,35 @@ export class SolicitudesController {
 
   async create(req: AuthRequest, res: Response): Promise<void> {
     try {
+      // Guard de rol — Feedback 2026-09-10 (Jos, caso Andrea 81315/81188):
+      // el back no validaba rol al crear solicitud. Cualquier usuario con
+      // token valido podia pegarle al endpoint aunque el front oculte el
+      // boton (ejemplo Analista de Servicio al Cliente creando solicitudes
+      // desde su sesion sin permiso). Whitelist estricta: solo asesores y
+      // roles administrativos pueden crear. Debe estar sincronizado con
+      // canCreateSolicitudes=true de front/src/lib/permissions.ts.
+      const ROLES_CREAR_SOLICITUD = new Set([
+        'Asesor Comercial',
+        'Asesor Comercial Aeropuerto',
+        'Asesor Analista',
+        'Gerente Comercial',
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial Aeropuerto',
+        'Administrador',
+        'DEV',
+      ]);
+      const userRolReq = req.user?.rol;
+      if (!userRolReq || !ROLES_CREAR_SOLICITUD.has(userRolReq)) {
+        res.status(403).json({
+          success: false,
+          error: `Tu rol (${userRolReq || 'sin rol'}) no tiene permiso para crear solicitudes.`,
+        });
+        return;
+      }
+
       const {
         // Client data
         cliente_id,
@@ -4287,15 +4318,24 @@ export class SolicitudesController {
     }
   }
 
-  // Feedback 2026-08-15: espejo DCM del filtro DG. Solo Gerente Comercial
-  // Aeropuerto (+ Admin/DEV) puede aprobar/rechazar el filtro DCM.
+  // Feedback 2026-09-10 (Jos): el Filtro DCM lo aprueba el MISMO Gerente
+  // Comercial que el Filtro DG del asesor (VP/Plazas), no el GC Aeropuerto.
+  // Solo cambia el director final al que llega la Autorización aprobada
+  // (DCM → Rodrigo Margain). Por eso permitimos los mismos roles GC que en
+  // el filtro DG. Dejamos 'Gerente Comercial Aeropuerto' por si alguna
+  // tarea DCM ya asignada a Aeropuerto necesita procesarla.
   async aprobarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { comentario } = (req.body || {}) as { comentario?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
         'Gerente Comercial Aeropuerto',
         'Administrador',
         'DEV',
@@ -4321,9 +4361,14 @@ export class SolicitudesController {
     try {
       const tareaId = parseInt(req.params.tareaId);
       const { motivo } = req.body as { motivo?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial Aeropuerto';
+      const userName = req.user?.nombre || 'Gerente Comercial';
       const userRol = req.user?.rol;
       const rolesPermitidos = [
+        'Gerente Comercial Vía Pública',
+        'Gerente Comercial Via Publica',
+        'Gerente Comercial Plazas',
+        'Gerente Comercial (Plazas)',
+        'Gerente Comercial',
         'Gerente Comercial Aeropuerto',
         'Administrador',
         'DEV',

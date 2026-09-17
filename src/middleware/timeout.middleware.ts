@@ -29,6 +29,11 @@ const LONG_ROUTES: Array<{ pattern: RegExp; ms: number; motivo: string }> = [
   // Creación/borrado/toggle de reservas: lotes de transacciones con lock que
   // esperan hasta 20s cada una por diseño (inventario-bloqueo.service.ts).
   { pattern: /^\/propuestas\/[^/]+\/reservas/, ms: 120_000, motivo: 'transacciones de reservas' },
+  // Mismo caso en CAMPAÑAS: alta/borrado de reservas + reactivaciones en serie +
+  // desalojo de tentativas de otras propuestas + avisos. Con el default de 30s
+  // se respondía 503 "servidor saturado" mientras el handler seguía y terminaba
+  // bien por debajo: el usuario veía error pero las reservas sí quedaban.
+  { pattern: /^\/campanas\/[^/]+\/reservas/, ms: 120_000, motivo: 'transacciones de reservas (campaña)' },
   // Todo lo relacionado a artes: uploads de imágenes/videos en base64 grandes
   // (el límite de express.json está en 200mb por esto mismo).
   { pattern: /arte/, ms: 180_000, motivo: 'upload/gestión de artes' },

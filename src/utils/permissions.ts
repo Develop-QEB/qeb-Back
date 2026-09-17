@@ -100,9 +100,36 @@ export async function getTeamMemberIds(prisma: PrismaClient, userId: number): Pr
   return ids;
 }
 
+// Estatus de tareas que YA NO deben otorgar visibilidad de campana. Una vez
+// que la tarea esta cerrada, su rol fue "avisar en su momento" — no debe
+// arrastrar la campana en la vista del usuario para siempre.
+const TAREA_ESTATUS_TERMINALES = ['Atendido', 'Cerrado', 'Cancelada', 'Cancelado'];
+
+// Tipos de tarea que son puramente informativos o de flujo (autorizacion /
+// notificacion). Aunque tu id este en id_asignado (broadcast historico a
+// todos los asesores), no significa que participes en la campana — solo te
+// avisaron. No deben expandir la visibilidad de campanas.
+//
+// Feedback 2026-09-02 (ticket #517 Elvia): asesores veian campanas ajenas
+// por tareas viejas de "Autorizacion DCM" con id_asignado masivo creadas
+// antes del refactor de equipos.
+const TAREA_TIPOS_INFORMATIVOS = [
+  'Autorización DG',
+  'Autorización DCM',
+  'Filtro Autorización DG',
+  'Filtro Autorización DCM',
+  'Notificación',
+];
+
 /**
  * Pre-computa los IDs de campañas visibles para un usuario (cacheado 2 min).
  * Reemplaza FIND_IN_SET en WHERE con IN(ids) que sí usa índices.
+ *
+ * Reglas de visibilidad por participacion:
+ *   1. Tarea ACTIVA (no terminal, tipo no informativo) donde el usuario es
+ *      responsable o esta en el CSV id_asignado.
+ *   2. Asignado en la propuesta (pr.id_asignado CSV).
+ *   3. Creador de la solicitud original.
  */
 export async function getVisibleCampanaIds(
   prisma: PrismaClient,
@@ -116,6 +143,8 @@ export async function getVisibleCampanaIds(
   const userIdStr = String(userId);
   const allUserIds = teamIds || [userId];
   const placeholders = allUserIds.map(() => '?').join(',');
+  const estatusPlaceholders = TAREA_ESTATUS_TERMINALES.map(() => '?').join(',');
+  const tiposPlaceholders = TAREA_TIPOS_INFORMATIVOS.map(() => '?').join(',');
 
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(`
     SELECT DISTINCT cm.id FROM campania cm
@@ -127,11 +156,20 @@ export async function getVisibleCampanaIds(
         SELECT 1 FROM tareas t
         WHERE t.campania_id = cm.id
           AND (t.id_responsable IN (${placeholders}) OR FIND_IN_SET(?, REPLACE(IFNULL(t.id_asignado, ''), ' ', '')) > 0)
+          AND (t.estatus IS NULL OR t.estatus NOT IN (${estatusPlaceholders}))
+          AND (t.tipo IS NULL OR t.tipo NOT IN (${tiposPlaceholders}))
       )
       OR FIND_IN_SET(?, REPLACE(IFNULL(pr.id_asignado, ''), ' ', '')) > 0
       OR s.usuario_id IN (${placeholders})
     )
-  `, ...allUserIds, userIdStr, userIdStr, ...allUserIds);
+  `,
+    ...allUserIds,
+    userIdStr,
+    ...TAREA_ESTATUS_TERMINALES,
+    ...TAREA_TIPOS_INFORMATIVOS,
+    userIdStr,
+    ...allUserIds,
+  );
 
   const ids = rows.map(r => Number(r.id));
   cache.set(cacheKey, ids, 2 * 60 * 1000); // 2 min
