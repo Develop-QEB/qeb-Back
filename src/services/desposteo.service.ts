@@ -1,6 +1,7 @@
 import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { logHistorial } from '../utils/historial';
+import { rolEnLista } from '../utils/permissions';
 
 // Filtro Autorizacion "Quitar Posteo" — flujo:
 //   Comercial (nota inicio) -> Filtro GC (check) -> Facturacion (aprueba/rechaza) -> TI (ejecuta unmarkPostedAPS)
@@ -47,11 +48,27 @@ const GERENTE_COMERCIAL_ROLES = [
   'Gerente Comercial',
 ];
 
-// Facturacion — aprueba o rechaza el desposteo. Dos roles coordinadores
-// que confirmaron Jos/negocio como firmantes.
+// Facturacion — aprueba o rechaza el desposteo.
+//
+// Fix 2026-09-17: antes solo estaban los dos coordinadores, y ademas la
+// comparacion en JS era byte-exacta. Eso rompia el flujo en PRODUCCION por
+// DOS razones distintas (verificado contra las dos bases):
+//   - En PROD los roles estan guardados SIN acento ('Coordinador de
+//     Facturacion y Cobranza' x2, 'Analista de Facturacion y Cobranza' x1);
+//     en PRUEBAS van CON acento. La lista de aqui solo tenia la variante
+//     acentuada.
+//   - Faltaban 'Analista de Facturación y Cobranza' y 'Especialista de
+//     Facturación', que el resto del sistema si contempla (ver la lista
+//     completa en solicitudes.controller.ts).
+// El sintoma era especialmente confuso porque MySQL compara con colacion
+// accent-insensitive: la tarea SI se creaba para el usuario, pero al darle
+// aprobar el guard de JS lo rechazaba con 403. Por eso ahora todas las
+// comparaciones de rol de este flujo pasan por rolEnLista().
 const FACTURACION_ROLES = [
   'Coordinador de Facturación y Cobranza',
   'Coordinador de Facturación',
+  'Analista de Facturación y Cobranza',
+  'Especialista de Facturación',
 ];
 
 const TI_ROLES = ['Gerente de TI', 'Especialista de TI', 'Analista de TI'];
@@ -62,34 +79,49 @@ const ANALISTA_ROLES = ['Asesor Analista', 'Analista de Servicio al Cliente', 'A
 // Roles que pueden iniciar el flujo (cuando este activo). Feedback Jos:
 // asesores + analistas (analista rutea al mismo GC de su asesor en la red).
 // Admin y TI quedan fuera intencionalmente.
-const ROLES_SOLICITA_DESPOSTEO = new Set([...ASESOR_ROLES, ...ANALISTA_ROLES]);
+const ROLES_SOLICITA_DESPOSTEO = [...ASESOR_ROLES, ...ANALISTA_ROLES];
 
-const ROLES_BYPASS_TI = new Set(['Administrador', 'DEV']);
+const ROLES_BYPASS_TI = ['Administrador', 'DEV'];
+
+// Lista de facturacion expuesta para que el controller use la MISMA fuente
+// (antes tenia su propia copia y podian desincronizarse).
+export const ROLES_FACTURACION_DESPOSTEO = FACTURACION_ROLES;
+export const ROLES_GERENTE_COMERCIAL_DESPOSTEO = GERENTE_COMERCIAL_ROLES;
 
 // Feature flag: si false, el endpoint /desposteo/solicitar rechaza a todos.
 // Reactivar poniendo en true cuando este el paquete de ajustes completo
 // (drawer + finalizar tarea, enriquecer modal, indicadores, tabulador).
 export const FEATURE_SOLICITAR_DESPOSTEO_ACTIVE = false;
 
+// Todos los guards de rol de este flujo usan rolEnLista() (insensible a
+// acentos y mayusculas). Ver el porque en utils/permissions.ts.
 export function puedeSolicitarDesposteo(rol: string | null | undefined): boolean {
   if (!FEATURE_SOLICITAR_DESPOSTEO_ACTIVE) return false;
-  return !!rol && ROLES_SOLICITA_DESPOSTEO.has(rol);
+  return rolEnLista(rol, ROLES_SOLICITA_DESPOSTEO);
 }
 
 export function esRolAsesor(rol: string | null | undefined): boolean {
-  return !!rol && ASESOR_ROLES.includes(rol);
+  return rolEnLista(rol, ASESOR_ROLES);
 }
 
 export function esRolAnalista(rol: string | null | undefined): boolean {
-  return !!rol && ANALISTA_ROLES.includes(rol);
+  return rolEnLista(rol, ANALISTA_ROLES);
 }
 
 export function esRolTI(rol: string | null | undefined): boolean {
-  return !!rol && TI_ROLES.includes(rol);
+  return rolEnLista(rol, TI_ROLES);
 }
 
 export function puedeBypassearDesposteo(rol: string | null | undefined): boolean {
-  return !!rol && ROLES_BYPASS_TI.has(rol);
+  return rolEnLista(rol, ROLES_BYPASS_TI);
+}
+
+export function esRolFacturacionDesposteo(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, FACTURACION_ROLES);
+}
+
+export function esRolGerenteComercialDesposteo(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, GERENTE_COMERCIAL_ROLES);
 }
 
 // ─── Resolucion de actores ───────────────────────────────────────────────

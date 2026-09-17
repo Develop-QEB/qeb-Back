@@ -13,27 +13,24 @@ import {
   puedeSolicitarDesposteo,
   armarDesgloseAps,
   getEstadosAps,
+  ROLES_FACTURACION_DESPOSTEO,
+  ROLES_GERENTE_COMERCIAL_DESPOSTEO,
   EstatusDesposteo,
 } from '../services/desposteo.service';
+import { rolEnLista } from '../utils/permissions';
 
 // Roles habilitados para actuar en cada etapa. La resolucion fina de "es
 // ESTE GC el del asesor" la hace el servicio en base a equipos; aca solo
 // se filtra el rol para bloquear a cualquiera que ni siquiera es GC.
-const GC_ROLES = new Set([
-  'Gerente Comercial Vía Pública',
-  'Gerente Comercial Via Publica',
-  'Gerente Comercial Plazas',
-  'Gerente Comercial (Plazas)',
-  'Gerente Comercial',
-  'Administrador',
-  'DEV',
-]);
-const FACTURACION_ROLES = new Set([
-  'Coordinador de Facturación y Cobranza',
-  'Coordinador de Facturación',
-  'Administrador',
-  'DEV',
-]);
+//
+// Fix 2026-09-17: antes este archivo tenia su PROPIA copia de las listas y
+// comparaba con Set.has (byte-exacto). Se desincronizo de la del servicio y
+// ademas fallaba con los roles guardados sin acento en PROD: facturacion
+// recibia la tarea (MySQL compara accent-insensitive) y al aprobar le
+// respondia 403. Ahora se reusa la lista del servicio y se compara con
+// rolEnLista().
+const GC_ROLES = [...ROLES_GERENTE_COMERCIAL_DESPOSTEO, 'Administrador', 'DEV'];
+const FACTURACION_ROLES = [...ROLES_FACTURACION_DESPOSTEO, 'Administrador', 'DEV'];
 
 function actorFromReq(req: AuthRequest): { id: number; nombre: string } | null {
   if (!req.user?.userId) return null;
@@ -116,7 +113,7 @@ export async function filtroAprobar(req: AuthRequest, res: Response): Promise<vo
   try {
     const actor = actorFromReq(req);
     if (!actor) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!GC_ROLES.has(req.user?.rol || '')) {
+    if (!rolEnLista(req.user?.rol, GC_ROLES)) {
       res.status(403).json({ success: false, error: 'Solo el gerente comercial puede filtrar' });
       return;
     }
@@ -136,7 +133,7 @@ export async function filtroRechazar(req: AuthRequest, res: Response): Promise<v
   try {
     const actor = actorFromReq(req);
     if (!actor) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!GC_ROLES.has(req.user?.rol || '')) {
+    if (!rolEnLista(req.user?.rol, GC_ROLES)) {
       res.status(403).json({ success: false, error: 'Solo el gerente comercial puede rechazar filtro' });
       return;
     }
@@ -157,7 +154,7 @@ export async function aprobar(req: AuthRequest, res: Response): Promise<void> {
   try {
     const actor = actorFromReq(req);
     if (!actor) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!FACTURACION_ROLES.has(req.user?.rol || '')) {
+    if (!rolEnLista(req.user?.rol, FACTURACION_ROLES)) {
       res.status(403).json({ success: false, error: 'Solo facturacion puede aprobar' });
       return;
     }
@@ -177,7 +174,7 @@ export async function rechazar(req: AuthRequest, res: Response): Promise<void> {
   try {
     const actor = actorFromReq(req);
     if (!actor) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!FACTURACION_ROLES.has(req.user?.rol || '')) {
+    if (!rolEnLista(req.user?.rol, FACTURACION_ROLES)) {
       res.status(403).json({ success: false, error: 'Solo facturacion puede rechazar' });
       return;
     }
