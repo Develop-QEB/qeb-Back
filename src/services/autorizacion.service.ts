@@ -1447,6 +1447,19 @@ export async function aprobarFiltroDg(
 
   const comentarioLimpio = (comentario || '').trim();
 
+  // Mismo caso que en aprobarFiltroDcm: la descripción del filtro dice
+  // "Revisar N circuito(s) ... antes de enviar a Dirección General" y aquí ya
+  // está CON Dirección General. Feedback 2026-09-17 (Jos).
+  const origenFiltro = filtro.contenido || 'solicitud';
+  const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
+  const idOrigenFiltro = filtro.campania_id
+    || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0)
+    || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
+  const circuitosFiltro = Number(/(\d+)\s*circuito/i.exec(filtro.descripcion || '')?.[1]) || 0;
+  const descripcionDg = circuitosFiltro > 0 && idOrigenFiltro
+    ? `Se requiere autorización de Dirección General para ${circuitosFiltro} circuito(s) de la ${etiquetaFiltro} #${idOrigenFiltro}`
+    : 'Se requiere autorización de Dirección General';
+
   const result = await prisma.$transaction(async (tx) => {
     await tx.tareas.update({
       where: { id: tareaFiltroId },
@@ -1456,7 +1469,7 @@ export async function aprobarFiltroDg(
       data: {
         tipo: 'Autorización DG',
         titulo: filtro.titulo?.replace('Filtro autorización DG', 'Autorización requerida') || 'Autorización requerida',
-        descripcion: filtro.descripcion || 'Se requiere autorización de Dirección General',
+        descripcion: descripcionDg,
         estatus: 'Pendiente',
         id_responsable: filtro.id_responsable,
         responsable: filtro.responsable,
@@ -1572,6 +1585,23 @@ export async function aprobarFiltroDcm(
 
   const comentarioLimpio = (comentario || '').trim();
 
+  // La tarea DCM real NO puede heredar la descripción del filtro: ese texto es
+  // "Revisar N circuito(s) de la X #N antes de enviar a Dirección Comercial" y
+  // en este punto la autorización YA está con Dirección Comercial, así que se
+  // leía al revés. Reconstruimos el mismo texto que usa la tarea DCM directa
+  // en crearTareasAutorizacion. Feedback 2026-09-17 (Jos).
+  const origenFiltro = filtro.contenido || 'solicitud';
+  const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
+  const idOrigenFiltro = filtro.campania_id
+    || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0)
+    || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
+  // El conteo de circuitos solo vive en el texto del filtro; si no se puede
+  // leer, caemos al texto genérico en vez de inventar un número.
+  const circuitosFiltro = Number(/(\d+)\s*circuito/i.exec(filtro.descripcion || '')?.[1]) || 0;
+  const descripcionDcm = circuitosFiltro > 0 && idOrigenFiltro
+    ? `Se requiere autorización de Dirección Comercial para ${circuitosFiltro} circuito(s) de la ${etiquetaFiltro} #${idOrigenFiltro}`
+    : 'Se requiere autorización de Dirección Comercial';
+
   const result = await prisma.$transaction(async (tx) => {
     await tx.tareas.update({
       where: { id: tareaFiltroId },
@@ -1581,7 +1611,7 @@ export async function aprobarFiltroDcm(
       data: {
         tipo: 'Autorización DCM',
         titulo: filtro.titulo?.replace('Filtro autorización DCM', 'Autorización requerida') || 'Autorización requerida',
-        descripcion: filtro.descripcion || 'Se requiere autorización de Dirección Comercial',
+        descripcion: descripcionDcm,
         estatus: 'Pendiente',
         id_responsable: filtro.id_responsable,
         responsable: filtro.responsable,
