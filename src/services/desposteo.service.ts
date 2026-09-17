@@ -89,9 +89,22 @@ export const ROLES_FACTURACION_DESPOSTEO = FACTURACION_ROLES;
 export const ROLES_GERENTE_COMERCIAL_DESPOSTEO = GERENTE_COMERCIAL_ROLES;
 
 // Feature flag: si false, el endpoint /desposteo/solicitar rechaza a todos.
-// Reactivar poniendo en true cuando este el paquete de ajustes completo
-// (drawer + finalizar tarea, enriquecer modal, indicadores, tabulador).
-export const FEATURE_SOLICITAR_DESPOSTEO_ACTIVE = false;
+//
+// PRENDIDO el 2026-09-17: ya estan los cuatro puntos que faltaban del paquete
+// de Jos — ventana lateral con finalizar tarea, modal enriquecido con el
+// desglose real (catorcenas/plaza/caras/tarifa/inversion), indicadores por
+// APS y la matriz de roles (asesores + analistas solicitan; TI solo cancela
+// con aprobacion de facturacion; admins solo emergencia).
+//
+// Lo unico que queda del paquete es el ESCALADO POR TABULADOR (routear a
+// gerencia o direccion segun el monto). Mientras Jos no defina esos rangos,
+// el flujo corre con el comportamiento actual: siempre pasa por el filtro del
+// gerente comercial del asesor. La tabla desposteo_tabuladores existe pero
+// esta vacia y ningun codigo la lee todavia — no se asume ningun rango.
+//
+// Nota: desposteo solo vive en stage y dev; main y release lo excluyen
+// (ver c5b5d9e), asi que prenderlo aqui no afecta produccion.
+export const FEATURE_SOLICITAR_DESPOSTEO_ACTIVE = true;
 
 // Todos los guards de rol de este flujo usan rolEnLista() (insensible a
 // acentos y mayusculas). Ver el porque en utils/permissions.ts.
@@ -790,6 +803,23 @@ export async function crearSolicitudDesposteo(input: CrearInput) {
   // Analistas resuelven GC via su asesor en red_trabajo; asesores directo.
   const gc = await getGerenteDesposteoParaUsuario(asesor.id, rol);
 
+  // Sin gerente NO se crea la solicitud.
+  //
+  // Antes esto solo hacia console.warn y seguia: la solicitud nacia sin tarea
+  // de filtro, asi que NADIE se enteraba, y encima el guard de duplicados de
+  // arriba bloqueaba cualquier reintento para ese (campania, aps). El asesor
+  // quedaba convencido de que ya la habia mandado y el APS atorado para
+  // siempre. Al prender el flujo (2026-09-17) esto pasaba de ser un riesgo
+  // teorico a una trampa real, asi que mejor fallar aqui, sin escribir nada,
+  // con un mensaje que diga que hay que arreglar.
+  if (!gc) {
+    const quien = esRolAnalista(rol) ? 'del asesor al que estas asignada' : 'tuyo';
+    throw new Error(
+      `No se encontro el gerente comercial ${quien} para autorizar el desposteo. `
+      + `Pide a TI que te agregue a un equipo con proposito 'filtro_desposteo' o 'filtro_autorizacion' que tenga un Gerente Comercial.`
+    );
+  }
+
   const solicitud = await prisma.desposteo_solicitudes.create({
     data: {
       campania_id: campaniaId,
@@ -804,24 +834,18 @@ export async function crearSolicitudDesposteo(input: CrearInput) {
 
   await agregarNota(solicitud.id, asesor, 'inicio', notaLimpia);
 
-  if (gc) {
-    await crearTareaDesposteo({
-      tipo: 'Filtro Desposteo',
-      titulo: `Filtro desposteo APS ${aps} - ${snapshot.campania_nombre}`,
-      descripcion:
-        `${asesor.nombre} solicito el desposteo del APS ${aps} de la campana "${snapshot.campania_nombre}"` +
-        (snapshot.razon_social ? ` (${snapshot.razon_social})` : '') +
-        `. Monto estimado $${snapshot.monto_estimado.toFixed(2)}. Da tu check o rechaza con motivo.`,
-      responsable: gc,
-      asignados: [gc],
-      campaniaId,
-      desposteoId: solicitud.id,
-    });
-  } else {
-    console.warn(
-      `[desposteo.crear] Asesor #${asesor.id} (${asesor.nombre}) sin GC de desposteo asignado. La solicitud #${solicitud.id} queda sin tarea Filtro — asignar equipo con proposito='filtro_desposteo' o 'filtro_autorizacion'.`
-    );
-  }
+  await crearTareaDesposteo({
+    tipo: 'Filtro Desposteo',
+    titulo: `Filtro desposteo APS ${aps} - ${snapshot.campania_nombre}`,
+    descripcion:
+      `${asesor.nombre} solicito el desposteo del APS ${aps} de la campana "${snapshot.campania_nombre}"` +
+      (snapshot.razon_social ? ` (${snapshot.razon_social})` : '') +
+      `. Monto estimado $${snapshot.monto_estimado.toFixed(2)}. Da tu check o rechaza con motivo.`,
+    responsable: gc,
+    asignados: [gc],
+    campaniaId,
+    desposteoId: solicitud.id,
+  });
 
   try {
     await logHistorial({
