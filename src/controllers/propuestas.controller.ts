@@ -18,7 +18,7 @@ import { getInventarioPropuestaConVersion } from '../services/inventario-propues
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
@@ -3176,6 +3176,13 @@ export class PropuestasController {
         return;
       }
 
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoAC = await bloqueoAjusteComercialPropuesta(prisma, propuestaId, req.user?.rol);
+      if (bloqueoAC) {
+        res.status(403).json({ success: false, error: bloqueoAC });
+        return;
+      }
+
       // 0. Get all solicitudCaras IDs for duplicate check
       const proposalCaras = await prisma.solicitudCaras.findMany({
         where: { idquote: String(propuestaId) },
@@ -3726,6 +3733,13 @@ export class PropuestasController {
         return;
       }
 
+      // Bloqueo Ajuste Comercial: Tráfico no elimina mientras el asesor la tiene.
+      const bloqueoACDel = await bloqueoAjusteComercialPropuesta(prisma, parseInt(id), req.user?.rol);
+      if (bloqueoACDel) {
+        res.status(403).json({ success: false, error: bloqueoACDel });
+        return;
+      }
+
       // Obtener propuesta para notificar a usuarios asignados
       const propuestaId = id ? parseInt(id) : null;
       const propuesta = propuestaId ? await prisma.propuesta.findFirst({
@@ -3878,6 +3892,13 @@ export class PropuestasController {
       const { inventarioId, solicitudCaraId, clienteId, tipo, fechaInicio, fechaFin } = req.body;
       const userId = req.user?.userId;
       const userName = req.user?.nombre || 'Usuario';
+
+      // Bloqueo Ajuste Comercial: Tráfico no reserva mientras el asesor la tiene.
+      const bloqueoACToggle = await bloqueoAjusteComercialPropuesta(prisma, propuestaId, req.user?.rol);
+      if (bloqueoACToggle) {
+        res.status(403).json({ success: false, error: bloqueoACToggle });
+        return;
+      }
 
       // 0. Get all solicitudCaras IDs for duplicates check
       const proposalCaras = await prisma.solicitudCaras.findMany({
@@ -4809,6 +4830,13 @@ export class PropuestasController {
       } = req.body;
       const deferAuth = deferAuthRaw === true || deferAuthRaw === 'true';
 
+      // Bloqueo Ajuste Comercial: Tráfico no agrega circuitos mientras el asesor la tiene.
+      const bloqueoACCreateCara = await bloqueoAjusteComercialPropuesta(prisma, parseInt(id), req.user?.rol);
+      if (bloqueoACCreateCara) {
+        res.status(403).json({ success: false, error: bloqueoACCreateCara });
+        return;
+      }
+
       // Validar fechas obligatorias.
       if (!inicio_periodo || !fin_periodo) {
         res.status(400).json({
@@ -5320,6 +5348,14 @@ export class PropuestasController {
       const userName = req.user?.nombre || 'Usuario';
       const id = parseInt(caraId);
       const eliminarGrupo = req.query.eliminarGrupo === 'true' || req.body?.eliminarGrupo === true;
+
+      // Bloqueo Ajuste Comercial: Tráfico no elimina circuitos mientras el asesor
+      // la tiene. OJO: aquí `id` es la CARA — la propuesta viene en req.params.id.
+      const bloqueoACDelCara = await bloqueoAjusteComercialPropuesta(prisma, parseInt(req.params.id), req.user?.rol);
+      if (bloqueoACDelCara) {
+        res.status(403).json({ success: false, error: bloqueoACDelCara });
+        return;
+      }
 
       // Si eliminarGrupo: borra todas las caras con el mismo grupo_masivo_id (RT y BF)
       let idsToDelete: number[] = [id];
