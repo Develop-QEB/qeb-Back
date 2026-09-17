@@ -289,22 +289,11 @@ async function armarSnapshot(campaniaId: number, aps: number): Promise<{
     },
   });
 
-  const ids = (postLog?.solicitud_caras_ids || '')
-    .split(',')
-    .map(s => Number(s.trim()))
-    .filter(n => Number.isFinite(n) && n > 0);
-
   let circuitos: SnapshotAPS['circuitos'] = [];
   let monto = 0;
-  if (ids.length > 0) {
-    const rows = await prisma.solicitudCaras.findMany({
-      where: { id: { in: ids } },
-      select: {
-        id: true, articulo: true, formato: true, ciudad: true, costo: true,
-        caras: true, tarifa_publica: true, tipo: true, inicio_periodo: true,
-        grupo_masivo_id: true,
-      },
-    });
+  // Fuente: las RESERVAS del APS, no el post_log. Ver getCircuitosDeAps().
+  const rows = await getCircuitosDeAps(campaniaId, aps);
+  if (rows.length > 0) {
     // Catalogo de catorcenas para mapear inicio_periodo -> Cat N/AAAA.
     const cats = await prisma.catorcenas.findMany({
       select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
@@ -431,17 +420,8 @@ export async function armarDesgloseAps(
     },
   });
 
-  const ids = (postLog?.solicitud_caras_ids || '')
-    .split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n > 0);
-
-  const rows = ids.length === 0 ? [] : await prisma.solicitudCaras.findMany({
-    where: { id: { in: ids } },
-    select: {
-      id: true, articulo: true, formato: true, ciudad: true, costo: true,
-      caras: true, tarifa_publica: true, tipo: true, inicio_periodo: true,
-      grupo_masivo_id: true,
-    },
-  });
+  // Fuente: las RESERVAS del APS, no el post_log. Ver getCircuitosDeAps().
+  const rows = await getCircuitosDeAps(campaniaId, aps);
 
   const cats = await prisma.catorcenas.findMany({
     select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
@@ -537,6 +517,119 @@ export async function armarDesgloseAps(
 }
 
 // ─── Helpers internos ────────────────────────────────────────────────────
+
+export interface CircuitoDeAps {
+  id: number;
+  articulo: string | null;
+  formato: string | null;
+  ciudad: string | null;
+  costo: unknown;
+  caras: unknown;
+  tarifa_publica: unknown;
+  tipo: string | null;
+  inicio_periodo: Date | null;
+  grupo_masivo_id: number | null;
+}
+
+/**
+ * Circuitos que componen un APS, sacados de las RESERVAS.
+ *
+ * Por qué no se usa `campania_post_log.solicitud_caras_ids` (que era la fuente
+ * original): ese log lo escribe el FRONT al postear, así que los APS marcados
+ * con `mark-posted-aps`, o posteados antes de que existiera la bitácora, no
+ * tienen fila. Cuando faltaba, el desglose salía vacío y el modal mostraba
+ * "Monto estimado $0.00" — el bug que reportó Jos el 2026-09-17. No era un
+ * error de cálculo: no había de dónde sacar los datos.
+ *
+ * Este es el mismo camino que usa el listado con APS de la campaña
+ * (`getInventarioConAPS` en campanas.controller.ts), que no depende del log:
+ *   solicitudCaras -> reservas -> espacio_inventario -> inventarios
+ *
+ * Dos detalles que corrigen de paso el monto:
+ *  - `caras` es `COUNT(DISTINCT rsv.id)` de ESE APS, no `sc.caras`. `sc.caras`
+ *    es el total del circuito, así que inflaba el monto cuando un circuito se
+ *    reparte entre varios APS.
+ *  - la tarifa cae a la del inventario si el circuito no trae
+ *    `tarifa_publica` (columna con default 0), que era el otro motivo por el
+ *    que la inversión salía en cero.
+ */
+/**
+ * Asesora(s) y analista(s) ligadas a una campaña.
+ *
+ * Feedback 2026-09-17 (Jos): cuando TI cancela el POST hay que avisarle a la
+ * analista y a la asesora de la campaña. Antes `cerrarPorEjecucion` solo
+ * notificaba al solicitante, al gerente del filtro y a facturación, así que si
+ * la solicitud la había iniciado otra persona, la asesora dueña de la campaña
+ * se enteraba de que le cancelaron el POST por fuera del sistema.
+ *
+ * Camino: campania -> cotizacion -> propuesta -> solicitud. Se juntan el
+ * creador de la solicitud y los asignados de propuesta y solicitud (ambos CSV),
+ * y se filtran por ROL para quedarse solo con asesores y analistas — si no, se
+ * notificaría también a tráfico, diseño y quien más viva en esos campos.
+ */
+async function getAsesorYAnalistaDeCampania(campaniaId: number): Promise<ActorInfo[]> {
+  const rows = await prisma.$queryRawUnsafe<{ ids: string | null }[]>(
+    `SELECT CONCAT_WS(',',
+              NULLIF(CAST(s.usuario_id AS CHAR), ''),
+              NULLIF(pr.id_asignado, ''),
+              NULLIF(s.id_asignado, '')
+            ) AS ids
+     FROM campania cm
+       INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+       INNER JOIN propuesta pr  ON pr.id = ct.id_propuesta
+       LEFT  JOIN solicitud s   ON s.id = pr.solicitud_id
+     WHERE cm.id = ?`,
+    campaniaId
+  );
+
+  const ids = [...new Set(
+    (rows[0]?.ids || '')
+      .split(',')
+      .map(t => Number(String(t).trim()))
+      .filter(n => Number.isFinite(n) && n > 0)
+  )];
+  if (ids.length === 0) return [];
+
+  const usuarios = await prisma.usuario.findMany({
+    where: { id: { in: ids }, deleted_at: null },
+    select: { id: true, nombre: true, user_role: true },
+  });
+
+  return usuarios
+    .filter(u => rolEnLista(u.user_role, [...ASESOR_ROLES, ...ANALISTA_ROLES]))
+    .map(u => ({ id: u.id, nombre: u.nombre }));
+}
+
+async function getCircuitosDeAps(campaniaId: number, aps: number): Promise<CircuitoDeAps[]> {
+  return await prisma.$queryRawUnsafe<CircuitoDeAps[]>(
+    `SELECT
+       sc.id                                   AS id,
+       MAX(sc.articulo)                        AS articulo,
+       MAX(sc.formato)                         AS formato,
+       COALESCE(MAX(sc.ciudad), MIN(i.plaza))  AS ciudad,
+       MAX(sc.costo)                           AS costo,
+       CAST(COUNT(DISTINCT rsv.id) AS SIGNED)  AS caras,
+       COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) AS tarifa_publica,
+       MAX(sc.tipo)                            AS tipo,
+       MAX(sc.inicio_periodo)                  AS inicio_periodo,
+       MAX(sc.grupo_masivo_id)                 AS grupo_masivo_id
+     FROM campania cm
+       INNER JOIN cotizacion ct         ON ct.id = cm.cotizacion_id
+       INNER JOIN solicitudCaras sc     ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+       INNER JOIN reservas rsv          ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+       -- LEFT y no INNER a proposito: hay reservas cuyo inventario_id no
+       -- resuelve a espacio_inventario (APS 81604 de la campana 80596 en
+       -- PRUEBAS es un caso real). Con INNER esas reservas se caian del
+       -- conteo y el APS volvia a salir en $0.00 — el mismo sintoma que
+       -- este fix vino a corregir, por otra via. La tarifa cae entonces a
+       -- sc.tarifa_publica via el COALESCE de arriba.
+       LEFT JOIN espacio_inventario ep  ON ep.id = rsv.inventario_id
+       LEFT JOIN inventarios i          ON i.id = ep.inventario_id
+     WHERE cm.id = ? AND rsv.APS = ?
+     GROUP BY sc.id`,
+    campaniaId, aps
+  );
+}
 
 function ahoraMx(): Date {
   return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -1012,12 +1105,24 @@ export async function cerrarPorEjecucion(
   if (s.facturacion_id && s.facturacion_nombre) {
     dest.push({ id: s.facturacion_id, nombre: s.facturacion_nombre });
   }
+  // Asesora y analista de la campana (feedback 2026-09-17, Jos): aunque no
+  // hayan iniciado la solicitud, es SU campana la que se queda sin POST.
+  // Best-effort: si la consulta falla no se cae la ejecucion, que ya ocurrio.
+  try {
+    dest.push(...await getAsesorYAnalistaDeCampania(s.campania_id));
+  } catch (e) {
+    console.error('[desposteo.cerrarPorEjecucion] no se pudo resolver asesora/analista:', e);
+  }
+  // Dedup: el solicitante suele ser tambien la asesora o la analista.
+  const vistos = new Set<number>();
+  const destUnicos = dest.filter(d => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+
   await notificarUsuarios(
-    dest,
+    destUnicos,
     s.campania_id,
     solicitudId,
-    `Desposteo ejecutado - APS ${s.aps}`,
-    `${ti.nombre} ejecuto el desposteo del APS ${s.aps} en SAP.`,
+    `POST cancelado - APS ${s.aps}`,
+    `${ti.nombre} cancelo el POST del APS ${s.aps} en SAP.`,
   );
 
   return upd;
