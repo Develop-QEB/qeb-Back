@@ -74,6 +74,73 @@ export function esAsesorComercial(rol?: string | null): boolean {
 }
 
 /**
+ * Bloqueo "Ajuste Comercial" — espejo del bloqueo de Ajuste CTO.
+ *
+ * Cuando una propuesta/campaña está en "Ajuste Comercial" el balón está del
+ * lado del asesor comercial: Tráfico y los demás roles NO pueden reservar ni
+ * eliminar inventario hasta que el asesor la regrese a "Ajuste Cto-Cliente" o
+ * "Ajuste Inventario".
+ *
+ * Por qué vive en el servidor y no solo en la UI (feedback 2026-09-17, Jos):
+ * el front congela el estatus al abrir el modal, así que si Tráfico ya está
+ * dentro del buscador de formatos y el asesor cambia el estatus en ese momento,
+ * la pantalla sigue creyendo el estatus viejo y dejaba reservar. El guard de
+ * servidor es el único que corta ese caso — y devuelve el mensaje que la UI
+ * le muestra a Tráfico.
+ */
+export const ESTATUS_AJUSTE_COMERCIAL = 'Ajuste Comercial';
+
+// Ojo con los strings: el estatus de CTO se escribe distinto en cada módulo —
+// 'Ajuste Cto-Cliente' en propuestas y 'Ajuste CTO Cliente' en campañas. Y
+// 'Ajuste Inventario' solo existe en propuestas.
+export function mensajeBloqueoAjusteComercial(entidad: 'propuesta' | 'campaña'): string {
+  const regreso = entidad === 'propuesta'
+    ? '"Ajuste Cto-Cliente" o "Ajuste Inventario"'
+    : '"Ajuste CTO Cliente"';
+  const sujeto = entidad === 'propuesta' ? 'La propuesta' : 'La campaña';
+  return `${sujeto} se cambió a "Ajuste Comercial": la tiene el asesor comercial para revisión. `
+    + `No puedes reservar ni eliminar inventario hasta que te la regresen a ${regreso}.`;
+}
+
+/**
+ * Devuelve el mensaje de bloqueo si el usuario NO puede tocar el inventario de
+ * la propuesta por estar en Ajuste Comercial, o `null` si puede continuar.
+ */
+export async function bloqueoAjusteComercialPropuesta(
+  prisma: PrismaClient,
+  propuestaId: number,
+  rol?: string | null
+): Promise<string | null> {
+  if (!Number.isFinite(propuestaId)) return null;
+  if (esAsesorComercial(rol)) return null;
+  const propuesta = await prisma.propuesta.findUnique({
+    where: { id: propuestaId },
+    select: { status: true },
+  });
+  if (propuesta?.status !== ESTATUS_AJUSTE_COMERCIAL) return null;
+  return mensajeBloqueoAjusteComercial('propuesta');
+}
+
+/**
+ * Igual que el anterior pero para campañas. En campañas el estatus vive en
+ * `campania.status` y el de CTO se escribe 'Ajuste CTO Cliente'.
+ */
+export async function bloqueoAjusteComercialCampana(
+  prisma: PrismaClient,
+  campanaId: number,
+  rol?: string | null
+): Promise<string | null> {
+  if (!Number.isFinite(campanaId)) return null;
+  if (esAsesorComercial(rol)) return null;
+  const campana = await prisma.campania.findUnique({
+    where: { id: campanaId },
+    select: { status: true },
+  });
+  if (campana?.status !== ESTATUS_AJUSTE_COMERCIAL) return null;
+  return mensajeBloqueoAjusteComercial('campaña');
+}
+
+/**
  * Obtiene los IDs de todos los miembros de los equipos a los que pertenece el usuario.
  * Incluye al propio usuario.
  *
