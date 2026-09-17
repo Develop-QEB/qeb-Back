@@ -1,6 +1,7 @@
 import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { logHistorial } from '../utils/historial';
+import { rolEnLista } from '../utils/permissions';
 
 // Filtro Autorizacion "Quitar Posteo" — flujo:
 //   Comercial (nota inicio) -> Filtro GC (check) -> Facturacion (aprueba/rechaza) -> TI (ejecuta unmarkPostedAPS)
@@ -47,38 +48,80 @@ const GERENTE_COMERCIAL_ROLES = [
   'Gerente Comercial',
 ];
 
-// Facturacion — aprueba o rechaza el desposteo. Dos roles coordinadores
-// que confirmaron Jos/negocio como firmantes.
+// Facturacion — aprueba o rechaza el desposteo.
+//
+// Fix 2026-09-17: antes solo estaban los dos coordinadores, y ademas la
+// comparacion en JS era byte-exacta. Eso rompia el flujo en PRODUCCION por
+// DOS razones distintas (verificado contra las dos bases):
+//   - En PROD los roles estan guardados SIN acento ('Coordinador de
+//     Facturacion y Cobranza' x2, 'Analista de Facturacion y Cobranza' x1);
+//     en PRUEBAS van CON acento. La lista de aqui solo tenia la variante
+//     acentuada.
+//   - Faltaban 'Analista de Facturación y Cobranza' y 'Especialista de
+//     Facturación', que el resto del sistema si contempla (ver la lista
+//     completa en solicitudes.controller.ts).
+// El sintoma era especialmente confuso porque MySQL compara con colacion
+// accent-insensitive: la tarea SI se creaba para el usuario, pero al darle
+// aprobar el guard de JS lo rechazaba con 403. Por eso ahora todas las
+// comparaciones de rol de este flujo pasan por rolEnLista().
 const FACTURACION_ROLES = [
   'Coordinador de Facturación y Cobranza',
   'Coordinador de Facturación',
+  'Analista de Facturación y Cobranza',
+  'Especialista de Facturación',
 ];
 
 const TI_ROLES = ['Gerente de TI', 'Especialista de TI', 'Analista de TI'];
 
-const ROLES_SOLICITA_DESPOSTEO = new Set([
-  'Asesor Comercial',
-  'Asesor Comercial Aeropuerto',
-  'Administrador',
-  'DEV',
-]);
+const ASESOR_ROLES = ['Asesor Comercial', 'Asesor Comercial Aeropuerto'];
+const ANALISTA_ROLES = ['Asesor Analista', 'Analista de Servicio al Cliente', 'Analista de Aeropuerto'];
 
-const ROLES_BYPASS_TI = new Set(['Administrador', 'DEV']);
+// Roles que pueden iniciar el flujo (cuando este activo). Feedback Jos:
+// asesores + analistas (analista rutea al mismo GC de su asesor en la red).
+// Admin y TI quedan fuera intencionalmente.
+const ROLES_SOLICITA_DESPOSTEO = [...ASESOR_ROLES, ...ANALISTA_ROLES];
 
-// Flujo desposteo temporalmente oculto en UI mientras se cierran ajustes
-// pendientes (drawer + finalizar tarea, enriquecer modal, indicadores, rol
-// Analista, permisos finales, tabulador). Al terminar esos ajustes, regresar
-// a la implementacion basada en ROLES_SOLICITA_DESPOSTEO.
-export function puedeSolicitarDesposteo(_rol: string | null | undefined): boolean {
-  return false;
+const ROLES_BYPASS_TI = ['Administrador', 'DEV'];
+
+// Lista de facturacion expuesta para que el controller use la MISMA fuente
+// (antes tenia su propia copia y podian desincronizarse).
+export const ROLES_FACTURACION_DESPOSTEO = FACTURACION_ROLES;
+export const ROLES_GERENTE_COMERCIAL_DESPOSTEO = GERENTE_COMERCIAL_ROLES;
+
+// Feature flag: si false, el endpoint /desposteo/solicitar rechaza a todos.
+// Reactivar poniendo en true cuando este el paquete de ajustes completo
+// (drawer + finalizar tarea, enriquecer modal, indicadores, tabulador).
+export const FEATURE_SOLICITAR_DESPOSTEO_ACTIVE = false;
+
+// Todos los guards de rol de este flujo usan rolEnLista() (insensible a
+// acentos y mayusculas). Ver el porque en utils/permissions.ts.
+export function puedeSolicitarDesposteo(rol: string | null | undefined): boolean {
+  if (!FEATURE_SOLICITAR_DESPOSTEO_ACTIVE) return false;
+  return rolEnLista(rol, ROLES_SOLICITA_DESPOSTEO);
+}
+
+export function esRolAsesor(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, ASESOR_ROLES);
+}
+
+export function esRolAnalista(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, ANALISTA_ROLES);
 }
 
 export function esRolTI(rol: string | null | undefined): boolean {
-  return !!rol && TI_ROLES.includes(rol);
+  return rolEnLista(rol, TI_ROLES);
 }
 
 export function puedeBypassearDesposteo(rol: string | null | undefined): boolean {
-  return !!rol && ROLES_BYPASS_TI.has(rol);
+  return rolEnLista(rol, ROLES_BYPASS_TI);
+}
+
+export function esRolFacturacionDesposteo(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, FACTURACION_ROLES);
+}
+
+export function esRolGerenteComercialDesposteo(rol: string | null | undefined): boolean {
+  return rolEnLista(rol, GERENTE_COMERCIAL_ROLES);
 }
 
 // ─── Resolucion de actores ───────────────────────────────────────────────
@@ -120,6 +163,57 @@ export async function getGerenteDesposteoParaAsesor(asesorId: number): Promise<A
   return await buscarPorProposito('filtro_autorizacion');
 }
 
+/**
+ * Para un analista busca al asesor "dueño" de su red de trabajo. Estrategia:
+ * cualquier equipo con proposito='red_trabajo' donde milite el analista, y
+ * dentro de ese equipo el primer usuario con rol asesor. Es lo que hace el
+ * resto del sistema (ver equipos.controller / campanas.controller).
+ */
+async function getAsesorParaAnalista(analistaId: number): Promise<{ id: number; nombre: string } | null> {
+  const equipos = await prisma.usuario_equipo.findMany({
+    where: {
+      usuario_id: analistaId,
+      equipo: { deleted_at: null, proposito: 'red_trabajo' },
+    },
+    select: { equipo_id: true },
+  });
+  for (const eq of equipos) {
+    const asesor = await prisma.usuario_equipo.findFirst({
+      where: {
+        equipo_id: eq.equipo_id,
+        usuario: {
+          deleted_at: null,
+          user_role: { in: ASESOR_ROLES },
+        },
+      },
+      include: { usuario: { select: { id: true, nombre: true } } },
+    });
+    if (asesor?.usuario) return { id: asesor.usuario.id, nombre: asesor.usuario.nombre };
+  }
+  return null;
+}
+
+/**
+ * Resuelve el GC de desposteo para cualquier usuario que pueda solicitar:
+ * asesor -> GC directo por equipos filtro_desposteo/filtro_autorizacion.
+ * analista -> primero busca su asesor en red_trabajo, luego el GC de ese asesor.
+ * Devuelve null si en algun paso no hay match.
+ */
+export async function getGerenteDesposteoParaUsuario(
+  userId: number,
+  rol: string | null | undefined,
+): Promise<ActorInfo | null> {
+  if (esRolAsesor(rol) || puedeBypassearDesposteo(rol)) {
+    return getGerenteDesposteoParaAsesor(userId);
+  }
+  if (esRolAnalista(rol)) {
+    const asesor = await getAsesorParaAnalista(userId);
+    if (!asesor) return null;
+    return getGerenteDesposteoParaAsesor(asesor.id);
+  }
+  return null;
+}
+
 async function getUsuariosFacturacion(): Promise<ActorInfo[]> {
   const users = await prisma.usuario.findMany({
     where: { deleted_at: null, user_role: { in: FACTURACION_ROLES } },
@@ -155,6 +249,14 @@ interface SnapshotAPS {
     formato: string | null;
     ciudad: string | null;
     costo: number;
+    caras: number;
+    tarifa_publica: number;
+    inversion: number;
+    tipo: string | null;
+    inicio_periodo: string | null;
+    catorcena_numero: number | null;
+    catorcena_anio: number | null;
+    grupo_masivo_id: number | null;
   }>;
 }
 
@@ -187,26 +289,44 @@ async function armarSnapshot(campaniaId: number, aps: number): Promise<{
     },
   });
 
-  const ids = (postLog?.solicitud_caras_ids || '')
-    .split(',')
-    .map(s => Number(s.trim()))
-    .filter(n => Number.isFinite(n) && n > 0);
-
   let circuitos: SnapshotAPS['circuitos'] = [];
   let monto = 0;
-  if (ids.length > 0) {
-    const rows = await prisma.solicitudCaras.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, articulo: true, formato: true, ciudad: true, costo: true },
+  // Fuente: las RESERVAS del APS, no el post_log. Ver getCircuitosDeAps().
+  const rows = await getCircuitosDeAps(campaniaId, aps);
+  if (rows.length > 0) {
+    // Catalogo de catorcenas para mapear inicio_periodo -> Cat N/AAAA.
+    const cats = await prisma.catorcenas.findMany({
+      select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
     });
-    circuitos = rows.map(r => ({
-      id: r.id,
-      articulo: r.articulo || null,
-      formato: r.formato || null,
-      ciudad: r.ciudad || null,
-      costo: Number(r.costo || 0),
-    }));
-    monto = circuitos.reduce((acc, c) => acc + (c.costo || 0), 0);
+    const catFor = (fecha: Date): { numero: number | null; anio: number | null } => {
+      const m = cats.find(cc => fecha >= cc.fecha_inicio && fecha <= cc.fecha_fin);
+      return m ? { numero: m.numero_catorcena, anio: m.a_o } : { numero: null, anio: null };
+    };
+    circuitos = rows.map(r => {
+      const caras = Number(r.caras || 0);
+      const tarifa = Number(r.tarifa_publica || 0);
+      const costo = Number(r.costo || 0);
+      const inversion = tarifa * caras;
+      const cat = r.inicio_periodo ? catFor(r.inicio_periodo) : { numero: null, anio: null };
+      return {
+        id: r.id,
+        articulo: r.articulo || null,
+        formato: r.formato || null,
+        ciudad: r.ciudad || null,
+        costo,
+        caras,
+        tarifa_publica: tarifa,
+        inversion,
+        tipo: r.tipo || null,
+        inicio_periodo: r.inicio_periodo ? r.inicio_periodo.toISOString().slice(0, 10) : null,
+        catorcena_numero: cat.numero,
+        catorcena_anio: cat.anio,
+        grupo_masivo_id: r.grupo_masivo_id ?? null,
+      };
+    });
+    // Monto = inversion (tarifa * caras) — refleja lo que Jos ve en el listado.
+    // Costo puede estar en 0 (sin captura) o negociado; inversion es tarifa lista.
+    monto = circuitos.reduce((acc, c) => acc + (c.inversion || 0), 0);
   }
 
   const snapshot: SnapshotAPS = {
@@ -226,7 +346,290 @@ async function armarSnapshot(campaniaId: number, aps: number): Promise<{
   return { snapshot, postLogId: postLog?.id ?? null };
 }
 
+// ─── Desglose enriquecido para modal (catorcenas → plaza/formato → APS → articulo) ────
+
+export interface DesgloseArticulo {
+  id: number;
+  articulo: string | null;
+  grupo_masivo_id: number | null;
+  tipo: string | null;
+  caras: number;
+  tarifa_publica: number;
+  inversion: number;
+  costo: number;
+}
+export interface DesglosePlazaFormato {
+  plaza: string;
+  formato: string;
+  caras_total: number;
+  inversion_total: number;
+  articulos: DesgloseArticulo[];
+}
+export interface DesgloseCatorcena {
+  numero: number | null;
+  anio: number | null;
+  inicio_periodo: string | null;
+  caras_total: number;
+  inversion_total: number;
+  plazas: DesglosePlazaFormato[];
+}
+export interface DesgloseAps {
+  campania_id: number;
+  campania_nombre: string;
+  aps: number;
+  razon_social: string | null;
+  cliente_nombre: string | null;
+  cuic: number | null;
+  marca: string | null;
+  post_log_id: number | null;
+  posted_at: string | null;
+  doc_entry: number | null;
+  doc_num: number | null;
+  caras_total: number;
+  inversion_total: number;
+  catorcenas: DesgloseCatorcena[];
+}
+
+/**
+ * Arma el desglose vivo del APS con el formato del listado con APS:
+ * agrupa por catorcena, dentro plaza+formato, dentro articulos. Se usa
+ * en el modal de desposteo para complementar el snapshot historico.
+ */
+export async function armarDesgloseAps(
+  campaniaId: number,
+  aps: number,
+): Promise<DesgloseAps | null> {
+  const campania = await prisma.campania.findFirst({
+    where: { id: campaniaId },
+    select: { id: true, nombre: true, cliente_id: true },
+  });
+  if (!campania) return null;
+
+  const cliente = await prisma.cliente.findFirst({
+    where: { id: campania.cliente_id },
+    select: { T0_U_Cliente: true, T0_U_RazonSocial: true },
+  });
+
+  const postLog = await prisma.campania_post_log.findFirst({
+    where: { campania_id: campaniaId, aps, success: true },
+    orderBy: { id: 'desc' },
+    select: {
+      id: true, posted_at: true, doc_entry: true, doc_num: true,
+      razon_social: true, cliente_nombre: true, solicitud_caras_ids: true,
+      cuic: true, marca: true,
+    },
+  });
+
+  // Fuente: las RESERVAS del APS, no el post_log. Ver getCircuitosDeAps().
+  const rows = await getCircuitosDeAps(campaniaId, aps);
+
+  const cats = await prisma.catorcenas.findMany({
+    select: { a_o: true, numero_catorcena: true, fecha_inicio: true, fecha_fin: true },
+  });
+  const catFor = (fecha: Date | null) => {
+    if (!fecha) return { numero: null, anio: null, inicio: null };
+    const m = cats.find(cc => fecha >= cc.fecha_inicio && fecha <= cc.fecha_fin);
+    return m
+      ? { numero: m.numero_catorcena, anio: m.a_o, inicio: m.fecha_inicio.toISOString().slice(0, 10) }
+      : { numero: null, anio: null, inicio: fecha.toISOString().slice(0, 10) };
+  };
+
+  // Agrupar por catorcena -> plaza+formato -> articulos
+  type KeyCat = string; // `${anio}-${numero}`
+  const catorcenas = new Map<KeyCat, DesgloseCatorcena>();
+
+  for (const r of rows) {
+    const c = catFor(r.inicio_periodo || null);
+    const keyCat: KeyCat = `${c.anio}-${c.numero}`;
+    let bloqueCat = catorcenas.get(keyCat);
+    if (!bloqueCat) {
+      bloqueCat = {
+        numero: c.numero,
+        anio: c.anio,
+        inicio_periodo: c.inicio,
+        caras_total: 0,
+        inversion_total: 0,
+        plazas: [],
+      };
+      catorcenas.set(keyCat, bloqueCat);
+    }
+
+    const plazaKey = `${r.ciudad || '—'}||${r.formato || '—'}`;
+    let bloquePlaza = bloqueCat.plazas.find(p =>
+      p.plaza === (r.ciudad || '—') && p.formato === (r.formato || '—'));
+    if (!bloquePlaza) {
+      bloquePlaza = {
+        plaza: r.ciudad || '—',
+        formato: r.formato || '—',
+        caras_total: 0,
+        inversion_total: 0,
+        articulos: [],
+      };
+      bloqueCat.plazas.push(bloquePlaza);
+    }
+    void plazaKey;
+
+    const caras = Number(r.caras || 0);
+    const tarifa = Number(r.tarifa_publica || 0);
+    const costo = Number(r.costo || 0);
+    const inversion = tarifa * caras;
+
+    bloquePlaza.articulos.push({
+      id: r.id,
+      articulo: r.articulo || null,
+      grupo_masivo_id: r.grupo_masivo_id ?? null,
+      tipo: r.tipo || null,
+      caras,
+      tarifa_publica: tarifa,
+      inversion,
+      costo,
+    });
+    bloquePlaza.caras_total += caras;
+    bloquePlaza.inversion_total += inversion;
+    bloqueCat.caras_total += caras;
+    bloqueCat.inversion_total += inversion;
+  }
+
+  const catorcenasArr = Array.from(catorcenas.values()).sort((a, b) => {
+    if ((a.anio || 0) !== (b.anio || 0)) return (a.anio || 0) - (b.anio || 0);
+    return (a.numero || 0) - (b.numero || 0);
+  });
+
+  const carasTotal = catorcenasArr.reduce((s, c) => s + c.caras_total, 0);
+  const inversionTotal = catorcenasArr.reduce((s, c) => s + c.inversion_total, 0);
+
+  return {
+    campania_id: campaniaId,
+    campania_nombre: campania.nombre,
+    aps,
+    razon_social: postLog?.razon_social || cliente?.T0_U_RazonSocial || null,
+    cliente_nombre: postLog?.cliente_nombre || cliente?.T0_U_Cliente || null,
+    cuic: postLog?.cuic || null,
+    marca: postLog?.marca || null,
+    post_log_id: postLog?.id ?? null,
+    posted_at: postLog?.posted_at ? postLog.posted_at.toISOString() : null,
+    doc_entry: postLog?.doc_entry ?? null,
+    doc_num: postLog?.doc_num ?? null,
+    caras_total: carasTotal,
+    inversion_total: inversionTotal,
+    catorcenas: catorcenasArr,
+  };
+}
+
 // ─── Helpers internos ────────────────────────────────────────────────────
+
+export interface CircuitoDeAps {
+  id: number;
+  articulo: string | null;
+  formato: string | null;
+  ciudad: string | null;
+  costo: unknown;
+  caras: unknown;
+  tarifa_publica: unknown;
+  tipo: string | null;
+  inicio_periodo: Date | null;
+  grupo_masivo_id: number | null;
+}
+
+/**
+ * Circuitos que componen un APS, sacados de las RESERVAS.
+ *
+ * Por qué no se usa `campania_post_log.solicitud_caras_ids` (que era la fuente
+ * original): ese log lo escribe el FRONT al postear, así que los APS marcados
+ * con `mark-posted-aps`, o posteados antes de que existiera la bitácora, no
+ * tienen fila. Cuando faltaba, el desglose salía vacío y el modal mostraba
+ * "Monto estimado $0.00" — el bug que reportó Jos el 2026-09-17. No era un
+ * error de cálculo: no había de dónde sacar los datos.
+ *
+ * Este es el mismo camino que usa el listado con APS de la campaña
+ * (`getInventarioConAPS` en campanas.controller.ts), que no depende del log:
+ *   solicitudCaras -> reservas -> espacio_inventario -> inventarios
+ *
+ * Dos detalles que corrigen de paso el monto:
+ *  - `caras` es `COUNT(DISTINCT rsv.id)` de ESE APS, no `sc.caras`. `sc.caras`
+ *    es el total del circuito, así que inflaba el monto cuando un circuito se
+ *    reparte entre varios APS.
+ *  - la tarifa cae a la del inventario si el circuito no trae
+ *    `tarifa_publica` (columna con default 0), que era el otro motivo por el
+ *    que la inversión salía en cero.
+ */
+/**
+ * Asesora(s) y analista(s) ligadas a una campaña.
+ *
+ * Feedback 2026-09-17 (Jos): cuando TI cancela el POST hay que avisarle a la
+ * analista y a la asesora de la campaña. Antes `cerrarPorEjecucion` solo
+ * notificaba al solicitante, al gerente del filtro y a facturación, así que si
+ * la solicitud la había iniciado otra persona, la asesora dueña de la campaña
+ * se enteraba de que le cancelaron el POST por fuera del sistema.
+ *
+ * Camino: campania -> cotizacion -> propuesta -> solicitud. Se juntan el
+ * creador de la solicitud y los asignados de propuesta y solicitud (ambos CSV),
+ * y se filtran por ROL para quedarse solo con asesores y analistas — si no, se
+ * notificaría también a tráfico, diseño y quien más viva en esos campos.
+ */
+async function getAsesorYAnalistaDeCampania(campaniaId: number): Promise<ActorInfo[]> {
+  const rows = await prisma.$queryRawUnsafe<{ ids: string | null }[]>(
+    `SELECT CONCAT_WS(',',
+              NULLIF(CAST(s.usuario_id AS CHAR), ''),
+              NULLIF(pr.id_asignado, ''),
+              NULLIF(s.id_asignado, '')
+            ) AS ids
+     FROM campania cm
+       INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+       INNER JOIN propuesta pr  ON pr.id = ct.id_propuesta
+       LEFT  JOIN solicitud s   ON s.id = pr.solicitud_id
+     WHERE cm.id = ?`,
+    campaniaId
+  );
+
+  const ids = [...new Set(
+    (rows[0]?.ids || '')
+      .split(',')
+      .map(t => Number(String(t).trim()))
+      .filter(n => Number.isFinite(n) && n > 0)
+  )];
+  if (ids.length === 0) return [];
+
+  const usuarios = await prisma.usuario.findMany({
+    where: { id: { in: ids }, deleted_at: null },
+    select: { id: true, nombre: true, user_role: true },
+  });
+
+  return usuarios
+    .filter(u => rolEnLista(u.user_role, [...ASESOR_ROLES, ...ANALISTA_ROLES]))
+    .map(u => ({ id: u.id, nombre: u.nombre }));
+}
+
+async function getCircuitosDeAps(campaniaId: number, aps: number): Promise<CircuitoDeAps[]> {
+  return await prisma.$queryRawUnsafe<CircuitoDeAps[]>(
+    `SELECT
+       sc.id                                   AS id,
+       MAX(sc.articulo)                        AS articulo,
+       MAX(sc.formato)                         AS formato,
+       COALESCE(MAX(sc.ciudad), MIN(i.plaza))  AS ciudad,
+       MAX(sc.costo)                           AS costo,
+       CAST(COUNT(DISTINCT rsv.id) AS SIGNED)  AS caras,
+       COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) AS tarifa_publica,
+       MAX(sc.tipo)                            AS tipo,
+       MAX(sc.inicio_periodo)                  AS inicio_periodo,
+       MAX(sc.grupo_masivo_id)                 AS grupo_masivo_id
+     FROM campania cm
+       INNER JOIN cotizacion ct         ON ct.id = cm.cotizacion_id
+       INNER JOIN solicitudCaras sc     ON sc.idquote = CAST(ct.id_propuesta AS CHAR)
+       INNER JOIN reservas rsv          ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+       -- LEFT y no INNER a proposito: hay reservas cuyo inventario_id no
+       -- resuelve a espacio_inventario (APS 81604 de la campana 80596 en
+       -- PRUEBAS es un caso real). Con INNER esas reservas se caian del
+       -- conteo y el APS volvia a salir en $0.00 — el mismo sintoma que
+       -- este fix vino a corregir, por otra via. La tarifa cae entonces a
+       -- sc.tarifa_publica via el COALESCE de arriba.
+       LEFT JOIN espacio_inventario ep  ON ep.id = rsv.inventario_id
+       LEFT JOIN inventarios i          ON i.id = ep.inventario_id
+     WHERE cm.id = ? AND rsv.APS = ?
+     GROUP BY sc.id`,
+    campaniaId, aps
+  );
+}
 
 function ahoraMx(): Date {
   return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -263,6 +666,35 @@ interface CrearTareaInput {
   asignados: ActorInfo[];
   campaniaId: number;
   desposteoId: number;
+}
+
+/**
+ * Cierra automaticamente las tareas del flujo desposteo asociadas a una
+ * solicitud cuando el usuario ejecuta la accion desde el modal. Antes
+ * quedaban en Pendiente aunque el modal ya no aceptara mas acciones.
+ * - tipo: 'Filtro Desposteo' (gerente) o 'Autorización Desposteo' (facturacion)
+ * - resultado: 'Atendido' cuando se aprobo / ejecuto, 'Rechazado' cuando se rechazo
+ */
+async function resolverTareasDesposteo(
+  desposteoId: number,
+  tipo: 'Filtro Desposteo' | 'Autorización Desposteo',
+  resultado: 'Atendido' | 'Rechazado',
+): Promise<void> {
+  // El json de contenido guarda { "desposteoId": N }. Buscar coincidencia por
+  // texto es suficiente para no depender de JSON functions del driver.
+  const tareas = await prisma.tareas.findMany({
+    where: {
+      tipo,
+      estatus: 'Pendiente',
+      contenido: { contains: `"desposteoId":${desposteoId}` },
+    },
+    select: { id: true },
+  });
+  if (tareas.length === 0) return;
+  await prisma.tareas.updateMany({
+    where: { id: { in: tareas.map(t => t.id) } },
+    data: { estatus: resultado },
+  });
 }
 
 async function crearTareaDesposteo(input: CrearTareaInput): Promise<void> {
@@ -328,10 +760,11 @@ export interface CrearInput {
   aps: number;
   nota: string;
   asesor: ActorInfo;
+  rol?: string | null;
 }
 
 export async function crearSolicitudDesposteo(input: CrearInput) {
-  const { campaniaId, aps, nota, asesor } = input;
+  const { campaniaId, aps, nota, asesor, rol } = input;
   const notaLimpia = (nota || '').trim();
   if (!notaLimpia) throw new Error('La nota es obligatoria al iniciar el flujo');
 
@@ -354,7 +787,8 @@ export async function crearSolicitudDesposteo(input: CrearInput) {
 
   const { snapshot, postLogId } = await armarSnapshot(campaniaId, aps);
 
-  const gc = await getGerenteDesposteoParaAsesor(asesor.id);
+  // Analistas resuelven GC via su asesor en red_trabajo; asesores directo.
+  const gc = await getGerenteDesposteoParaUsuario(asesor.id, rol);
 
   const solicitud = await prisma.desposteo_solicitudes.create({
     data: {
@@ -433,6 +867,16 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
     throw new Error(`Solicitud #${id} no esta en estatus 'solicitado' (actual: ${s.estatus})`);
   }
 
+  // Guard: sin destinatario en Facturacion el flujo queda huerfano (bug historico:
+  // solicitud avanzaba a filtro_aprobado y ninguna tarea se creaba).
+  const facturacion = await getUsuariosFacturacion();
+  if (facturacion.length === 0) {
+    throw new Error(
+      'No hay usuarios activos con rol "Coordinador de Facturación" o "Coordinador de Facturación y Cobranza". ' +
+      'Pide a soporte dar de alta a un usuario con ese rol antes de aprobar.'
+    );
+  }
+
   const upd = await prisma.desposteo_solicitudes.update({
     where: { id },
     data: {
@@ -445,25 +889,23 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
 
   await agregarNota(id, gc, 'aprobacion_gerente', (nota || '').trim() || 'Check gerente comercial');
 
-  const facturacion = await getUsuariosFacturacion();
-  if (facturacion.length === 0) {
-    console.warn(`[desposteo.aprobarFiltroGerente] Sin usuarios de Facturacion configurados — solicitud #${id} queda sin tarea a Facturacion.`);
-  } else {
-    const snapshot = parseSnapshot(s.snapshot_aps);
-    await crearTareaDesposteo({
-      tipo: 'Autorización Desposteo',
-      titulo: `Autorizacion desposteo APS ${s.aps} - ${snapshot?.campania_nombre || `campana #${s.campania_id}`}`,
-      descripcion:
-        `${gc.nombre} aprobo el filtro para desposteo del APS ${s.aps}. ` +
-        (snapshot?.razon_social ? `Cliente: ${snapshot.razon_social}. ` : '') +
-        `Monto $${(snapshot?.monto_estimado || 0).toFixed(2)}. ` +
-        `Aprueba o rechaza con motivo.`,
-      responsable: facturacion[0],
-      asignados: facturacion,
-      campaniaId: s.campania_id,
-      desposteoId: id,
-    });
-  }
+  // Cierra la tarea Filtro Desposteo del gerente para que no quede huerfana.
+  await resolverTareasDesposteo(id, 'Filtro Desposteo', 'Atendido');
+
+  const snapshot = parseSnapshot(s.snapshot_aps);
+  await crearTareaDesposteo({
+    tipo: 'Autorización Desposteo',
+    titulo: `Autorizacion desposteo APS ${s.aps} - ${snapshot?.campania_nombre || `campana #${s.campania_id}`}`,
+    descripcion:
+      `${gc.nombre} aprobo el filtro para desposteo del APS ${s.aps}. ` +
+      (snapshot?.razon_social ? `Cliente: ${snapshot.razon_social}. ` : '') +
+      `Monto $${(snapshot?.monto_estimado || 0).toFixed(2)}. ` +
+      `Aprueba o rechaza con motivo.`,
+    responsable: facturacion[0],
+    asignados: facturacion,
+    campaniaId: s.campania_id,
+    desposteoId: id,
+  });
 
   try {
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
@@ -493,6 +935,8 @@ export async function rechazarFiltroGerente(id: number, gc: ActorInfo, nota: str
   });
 
   await agregarNota(id, gc, 'rechazo_gerente', notaLimpia);
+
+  await resolverTareasDesposteo(id, 'Filtro Desposteo', 'Rechazado');
 
   await notificarUsuarios(
     [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }],
@@ -524,6 +968,8 @@ export async function aprobarFacturacion(id: number, actor: ActorInfo, nota?: st
   });
 
   await agregarNota(id, actor, 'aprobacion_facturacion', (nota || '').trim() || 'Aprobado por facturacion');
+
+  await resolverTareasDesposteo(id, 'Autorización Desposteo', 'Atendido');
 
   // Notificar a TI que hay solicitud aprobada pendiente de ejecutar.
   const ti = await getUsuariosTI();
@@ -572,6 +1018,8 @@ export async function rechazarFacturacion(id: number, actor: ActorInfo, nota: st
   });
 
   await agregarNota(id, actor, 'rechazo_facturacion', notaLimpia);
+
+  await resolverTareasDesposteo(id, 'Autorización Desposteo', 'Rechazado');
 
   const otros: ActorInfo[] = [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }];
   if (s.filtro_gc_id && s.filtro_gc_nombre) {
@@ -657,12 +1105,24 @@ export async function cerrarPorEjecucion(
   if (s.facturacion_id && s.facturacion_nombre) {
     dest.push({ id: s.facturacion_id, nombre: s.facturacion_nombre });
   }
+  // Asesora y analista de la campana (feedback 2026-09-17, Jos): aunque no
+  // hayan iniciado la solicitud, es SU campana la que se queda sin POST.
+  // Best-effort: si la consulta falla no se cae la ejecucion, que ya ocurrio.
+  try {
+    dest.push(...await getAsesorYAnalistaDeCampania(s.campania_id));
+  } catch (e) {
+    console.error('[desposteo.cerrarPorEjecucion] no se pudo resolver asesora/analista:', e);
+  }
+  // Dedup: el solicitante suele ser tambien la asesora o la analista.
+  const vistos = new Set<number>();
+  const destUnicos = dest.filter(d => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+
   await notificarUsuarios(
-    dest,
+    destUnicos,
     s.campania_id,
     solicitudId,
-    `Desposteo ejecutado - APS ${s.aps}`,
-    `${ti.nombre} ejecuto el desposteo del APS ${s.aps} en SAP.`,
+    `POST cancelado - APS ${s.aps}`,
+    `${ti.nombre} cancelo el POST del APS ${s.aps} en SAP.`,
   );
 
   return upd;
@@ -744,6 +1204,38 @@ export async function getDetalle(id: number) {
     orderBy: { created_at: 'asc' },
   });
   return { solicitud: s, notas };
+}
+
+/**
+ * Estado por APS para una campaña. Utilizado por el listado con APS del
+ * detalle de campaña para pintar badges: en curso / aprobado / ejecutado.
+ * Devuelve solo un estado por APS — el mas avanzado no-terminal, o el
+ * ultimo ejecutado si no hay activos.
+ */
+export type EstadoAps =
+  | { estatus: 'solicitado' | 'filtro_aprobado' | 'aprobado'; solicitud_id: number }
+  | { estatus: 'ejecutado'; solicitud_id: number }
+  | { estatus: 'rechazado'; solicitud_id: number };
+export async function getEstadosAps(campaniaId: number): Promise<Record<number, EstadoAps>> {
+  const rows = await prisma.desposteo_solicitudes.findMany({
+    where: { campania_id: campaniaId, deleted_at: null },
+    select: { id: true, aps: true, estatus: true },
+    orderBy: { id: 'desc' },
+  });
+  // Prioridad de estatus para "cual mostrar por APS": activo > ejecutado > rechazado
+  const rank: Record<string, number> = {
+    aprobado: 5, filtro_aprobado: 4, solicitado: 3, ejecutado: 2, rechazado: 1,
+  };
+  const out: Record<number, EstadoAps> = {};
+  for (const r of rows) {
+    const prev = out[r.aps];
+    const curRank = rank[r.estatus] ?? 0;
+    const prevRank = prev ? (rank[prev.estatus] ?? 0) : -1;
+    if (curRank > prevRank) {
+      out[r.aps] = { estatus: r.estatus as EstadoAps['estatus'], solicitud_id: r.id };
+    }
+  }
+  return out;
 }
 
 /**

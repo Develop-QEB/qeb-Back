@@ -74,6 +74,39 @@ export function esAsesorComercial(rol?: string | null): boolean {
 }
 
 /**
+ * Compara roles sin depender de acentos ni de mayúsculas.
+ *
+ * Por qué hace falta: los `user_role` de la BD no están normalizados y las dos
+ * bases difieren entre sí. Ejemplo real (2026-09-17): el coordinador de
+ * facturación está guardado como 'Coordinador de Facturacion y Cobranza' en
+ * PROD y 'Coordinador de Facturación y Cobranza' en PRUEBAS.
+ *
+ * Y el efecto era difícil de diagnosticar: MySQL compara con colación
+ * accent-insensitive, así que un `user_role: { in: [...] }` SÍ encontraba al
+ * usuario y le creaba la tarea, pero el chequeo en JS (`includes`/`Set.has`)
+ * es byte-exacto y le devolvía 403 al intentar actuar. Recibía la tarea y no
+ * podía atenderla.
+ *
+ * Usa `rolEnLista()` para cualquier guard de rol nuevo en vez de comparar
+ * strings directo.
+ */
+export function normalizarRol(rol?: string | null): string {
+  return (rol || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // quita diacríticos
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function rolEnLista(rol: string | null | undefined, lista: readonly string[]): boolean {
+  if (!rol) return false;
+  const objetivo = normalizarRol(rol);
+  if (!objetivo) return false;
+  return lista.some(r => normalizarRol(r) === objetivo);
+}
+
+/**
  * Bloqueo "Ajuste Comercial" — espejo del bloqueo de Ajuste CTO.
  *
  * Cuando una propuesta/campaña está en "Ajuste Comercial" el balón está del
