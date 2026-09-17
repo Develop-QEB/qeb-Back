@@ -3709,6 +3709,104 @@ export class PropuestasController {
     }
   }
 
+  // Historial de inventario del circuito: reservas que salieron (quitadas /
+  // desplazadas / por bloqueo) — reservas SOFT-eliminadas (deleted_at != null).
+  // Devuelve además `disponible` (si se puede volver a reservar hoy en el
+  // periodo de la cara) y `motivo_salida` (Bloqueado / Desplazado / Quitado).
+  // El tab "Historial" del buscador filtra por cara en el front.
+  async getReservasHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      // Reservas soft-eliminadas del circuito + estado actual del inventario +
+      // ¿el espacio está ocupado FIRME por alguien más en el periodo de la cara?
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.mueble as formato,
+          i.ubicacion,
+          i.isla,
+          i.plaza,
+          i.municipio,
+          i.ancho,
+          i.alto,
+          i.tradicional_digital,
+          i.estatus as estatus_inventario,
+          rsv.estatus,
+          rsv.estatus_original,
+          rsv.deleted_at,
+          sc.id as solicitud_cara_id,
+          sc.articulo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          CASE
+            WHEN i.estatus IN ('Bloqueado', 'Inactivo') THEN 0
+            WHEN i.tradicional_digital = 'Digital' THEN 1
+            WHEN EXISTS (
+              SELECT 1 FROM reservas r2
+                INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+              WHERE r2.inventario_id = rsv.inventario_id
+                AND r2.deleted_at IS NULL
+                AND r2.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
+                AND sc2.inicio_periodo <= sc.fin_periodo
+                AND sc2.fin_periodo >= sc.inicio_periodo
+            ) THEN 0
+            ELSE 1
+          END as disponible
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NOT NULL
+        ORDER BY rsv.deleted_at DESC, rsv.id DESC
+      `;
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
+
+      // Motivo de salida: cruzar con historial 'Reservas desplazadas' (guarda los
+      // codigo_unico desplazados). Bloqueado manda; si no, desplazado vs quitado.
+      const desplazados = new Set<string>();
+      try {
+        const hist = await prisma.historial.findMany({
+          where: { ref_id: propuestaId, accion: 'Reservas desplazadas' },
+          select: { detalles: true },
+        });
+        for (const h of hist) {
+          try {
+            const d = JSON.parse(h.detalles || '{}');
+            const cods: string[] = Array.isArray(d?.codigos) ? d.codigos : [];
+            cods.forEach(c => desplazados.add(String(c).toUpperCase()));
+          } catch { /* detalles no-JSON: ignorar */ }
+        }
+      } catch { /* sin historial: ignorar */ }
+
+      const data = rows.map(r => {
+        const est = String(r.estatus_inventario || '');
+        const cod = String(r.codigo_unico || '').toUpperCase();
+        const bloqueado = est === 'Bloqueado' || est === 'Inactivo';
+        const motivo_salida = bloqueado ? 'Bloqueado' : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const disponible = Number(r.disponible) === 1;
+        return {
+          ...r,
+          disponible,
+          motivo_salida,
+          motivo_no_disponible: disponible ? null : (bloqueado ? 'Inventario bloqueado' : 'Ocupado en el periodo'),
+        };
+      });
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getReservasHistorial:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Delete reservas
   async deleteReservas(req: AuthRequest, res: Response): Promise<void> {
     try {
