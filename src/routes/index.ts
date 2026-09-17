@@ -22,7 +22,6 @@ import historialRoutes from './historial.routes';
 import auditReservasRoutes from './audit-reservas.routes';
 import reorganizarOcupacionRoutes from './reorganizar-ocupacion.routes';
 import pruebasColorRoutes from './pruebasColor.routes';
-import desposteoRoutes from './desposteo.routes';
 
 import publicRoutes from './public.routes';
 
@@ -52,6 +51,5 @@ router.use('/historial', historialRoutes);
 router.use('/audit-reservas', auditReservasRoutes);
 router.use('/reorganizar-ocupacion', reorganizarOcupacionRoutes);
 router.use('/pruebas-color', pruebasColorRoutes);
-router.use('/desposteo', desposteoRoutes);
 
 export default router;
