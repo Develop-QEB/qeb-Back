@@ -2,6 +2,7 @@ import prisma from '../utils/prisma';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { logHistorial } from '../utils/historial';
 import { rolEnLista } from '../utils/permissions';
+import { filtrarPorPreferenciasNotif } from '../utils/preferenciasNotif';
 
 // Filtro Autorizacion "Quitar Posteo" — flujo:
 //   Comercial (nota inicio) -> Filtro GC (check) -> Facturacion (aprueba/rechaza) -> TI (ejecuta unmarkPostedAPS)
@@ -740,9 +741,27 @@ async function notificarUsuarios(
   mensaje: string,
 ): Promise<void> {
   if (destinatarios.length === 0) return;
+  // Dedup por id antes de crear filas (varias transiciones agregan al asesor
+  // + GC + facturacion y si algun equipo se sobrepone hay repetidos).
+  const seen = new Set<number>();
+  const dedup: ActorInfo[] = [];
+  for (const d of destinatarios) {
+    if (!d || !d.id || seen.has(d.id)) continue;
+    seen.add(d.id);
+    dedup.push(d);
+  }
+  // Opt-out por preferencias de usuario (canal=popup, categoria=desposteo).
+  // Si alguien apago el master global o especificamente 'desposteo' no lo
+  // molestamos con la notificacion; el registro en historial si queda.
+  const activos = await filtrarPorPreferenciasNotif(dedup, {
+    canal: 'popup',
+    clase: 'notificacion',
+    clave: 'desposteo',
+  });
+  if (activos.length === 0) return;
   const now = ahoraMx();
   await prisma.$transaction(
-    destinatarios.map(u =>
+    activos.map(u =>
       prisma.tareas.create({
         data: {
           tipo: 'Notificación',
@@ -764,6 +783,112 @@ async function notificarUsuarios(
       })
     )
   );
+  // Emitir un solo evento socket para que los conectados hagan refetch de sus
+  // notificaciones. Como no hay canal por-usuario en el socket actual, mandamos
+  // el evento global (que ya se usa en otros puntos del flujo).
+  try {
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: desposteoId, tipo: 'Notificación', campaniaId, categoria: 'desposteo',
+    });
+  } catch (e) {
+    console.error('[desposteo.notificarUsuarios] emitToAll:', e);
+  }
+}
+
+// Resuelve los destinatarios "de la campana" para las alertas de desposteo:
+//   1. Los usuarios asignados a la propuesta origen (propuesta.id_asignado
+//      es CSV de user IDs). Es la fuente de verdad de "quien trabaja esta
+//      campana".
+//   2. Para cada asignado: su gerente comercial (via equipos filtro_desposteo
+//      / filtro_autorizacion).
+//   3. Si el asignado es analista, tambien se agrega el asesor titular de su
+//      red_trabajo — el analista suele operar en nombre del asesor.
+//   4. (opcional, gated por opts.incluirRedTrabajo) miembros del red_trabajo
+//      de cada asignado, para avisar al equipo cercano.
+//
+// Devuelve una lista deduplicada por id, sin filtrar por preferencias —
+// eso lo hace notificarUsuarios al final.
+async function resolverDestinatariosCampana(
+  campaniaId: number,
+  opts: { incluirRedTrabajo?: boolean } = {},
+): Promise<ActorInfo[]> {
+  // 1. Bajar de campania -> cotizacion -> propuesta.id_asignado.
+  const campania = await prisma.campania.findFirst({
+    where: { id: campaniaId },
+    select: { cotizacion_id: true },
+  });
+  if (!campania?.cotizacion_id) return [];
+  const cot = await prisma.cotizacion.findFirst({
+    where: { id: campania.cotizacion_id },
+    select: { id_propuesta: true },
+  });
+  if (!cot?.id_propuesta) return [];
+  const prop = await prisma.propuesta.findFirst({
+    where: { id: cot.id_propuesta, deleted_at: null },
+    select: { id_asignado: true },
+  });
+  if (!prop?.id_asignado) return [];
+
+  const asignadosIds = String(prop.id_asignado)
+    .split(',')
+    .map(s => Number(s.trim()))
+    .filter(n => Number.isFinite(n) && n > 0);
+  if (asignadosIds.length === 0) return [];
+
+  // 2. Cargar datos de los asignados (nombre + rol).
+  const asignados = await prisma.usuario.findMany({
+    where: { id: { in: asignadosIds }, deleted_at: null },
+    select: { id: true, nombre: true, user_role: true },
+  });
+
+  const acumulador = new Map<number, ActorInfo>();
+  for (const a of asignados) {
+    acumulador.set(a.id, { id: a.id, nombre: a.nombre });
+  }
+
+  // 3. Por cada asignado, resolver su GC + asesor (si es analista).
+  for (const a of asignados) {
+    if (esRolAnalista(a.user_role)) {
+      const asesor = await getAsesorParaAnalista(a.id);
+      if (asesor && !acumulador.has(asesor.id)) {
+        acumulador.set(asesor.id, { id: asesor.id, nombre: asesor.nombre });
+      }
+      // GC del asesor titular del analista.
+      if (asesor) {
+        const gc = await getGerenteDesposteoParaAsesor(asesor.id);
+        if (gc && !acumulador.has(gc.id)) acumulador.set(gc.id, gc);
+      }
+    } else if (esRolAsesor(a.user_role) || puedeBypassearDesposteo(a.user_role)) {
+      const gc = await getGerenteDesposteoParaAsesor(a.id);
+      if (gc && !acumulador.has(gc.id)) acumulador.set(gc.id, gc);
+    }
+  }
+
+  // 4. (opt) Miembros del red_trabajo de cada asignado.
+  if (opts.incluirRedTrabajo) {
+    for (const a of asignados) {
+      const equipos = await prisma.usuario_equipo.findMany({
+        where: {
+          usuario_id: a.id,
+          equipo: { deleted_at: null, proposito: 'red_trabajo' },
+        },
+        select: { equipo_id: true },
+      });
+      if (equipos.length === 0) continue;
+      const equipoIds = equipos.map(e => e.equipo_id);
+      const miembros = await prisma.usuario_equipo.findMany({
+        where: { equipo_id: { in: equipoIds }, usuario: { deleted_at: null } },
+        include: { usuario: { select: { id: true, nombre: true } } },
+      });
+      for (const m of miembros) {
+        if (m.usuario && !acumulador.has(m.usuario.id)) {
+          acumulador.set(m.usuario.id, { id: m.usuario.id, nombre: m.usuario.nombre });
+        }
+      }
+    }
+  }
+
+  return Array.from(acumulador.values());
 }
 
 // ─── Crear solicitud ─────────────────────────────────────────────────────
@@ -849,16 +974,34 @@ export async function crearSolicitudDesposteo(input: CrearInput) {
 
   try {
     await logHistorial({
-      tipo: 'Campaña',
+      tipo: 'Desposteo',
       refId: campaniaId,
       accion: `Solicito desposteo APS ${aps} (solicitud #${solicitud.id})`,
       usuario: asesor.nombre,
       usuarioId: asesor.id,
       origen: 'desposteo',
-      extras: { desposteoId: solicitud.id, aps, postLogId },
+      extras: { desposteoId: solicitud.id, aps, postLogId, estatus: 'solicitado' },
     });
   } catch (e) {
     console.error('[desposteo.crear] logHistorial fallo:', e);
+  }
+
+  // Notificar al equipo de la campana ademas del GC que recibe la tarea:
+  // asignados + sus GCs + asesor titular (si es analista). Es la que abre el
+  // ticket, entonces conviene que el resto del equipo se entere.
+  try {
+    const dest = await resolverDestinatariosCampana(campaniaId);
+    // Excluir al propio solicitante (ya sabe que la abrio) y al GC (ya tiene tarea).
+    const filtrado = dest.filter(u => u.id !== asesor.id && (!gc || u.id !== gc.id));
+    await notificarUsuarios(
+      filtrado,
+      campaniaId,
+      solicitud.id,
+      `Se inicio desposteo - APS ${aps}`,
+      `${asesor.nombre} solicito el desposteo del APS ${aps} de "${snapshot.campania_nombre}". Nota: ${notaLimpia}`,
+    );
+  } catch (e) {
+    console.error('[desposteo.crear] notificar equipo campana:', e);
   }
 
   try {
@@ -937,6 +1080,38 @@ export async function aprobarFiltroGerente(id: number, gc: ActorInfo, nota?: str
     });
   } catch (e) { console.error('[desposteo.aprobarFiltroGerente] emitToAll:', e); }
 
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: s.campania_id,
+      accion: `Filtro GC aprobo desposteo APS ${s.aps} (solicitud #${id})`,
+      usuario: gc.nombre,
+      usuarioId: gc.id,
+      origen: 'desposteo',
+      extras: { desposteoId: id, aps: s.aps, estatus: 'filtro_aprobado' },
+    });
+  } catch (e) {
+    console.error('[desposteo.aprobarFiltroGerente] logHistorial:', e);
+  }
+
+  // Notificar al equipo de la campana: el asesor solicitante + sus companeros
+  // (asignados a la propuesta) para que sepan que avanzo. Facturacion ya tiene
+  // tarea explicita, no la duplicamos aca.
+  try {
+    const equipo = await resolverDestinatariosCampana(s.campania_id);
+    const solicitante: ActorInfo = { id: s.solicitado_por_id, nombre: s.solicitado_por_nombre };
+    const dest = [solicitante, ...equipo].filter(u => u.id !== gc.id);
+    await notificarUsuarios(
+      dest,
+      s.campania_id,
+      id,
+      `Filtro GC aprobado - APS ${s.aps}`,
+      `${gc.nombre} aprobo el filtro para el desposteo del APS ${s.aps}. Ya paso a facturacion.`,
+    );
+  } catch (e) {
+    console.error('[desposteo.aprobarFiltroGerente] notificar equipo:', e);
+  }
+
   return upd;
 }
 
@@ -962,13 +1137,34 @@ export async function rechazarFiltroGerente(id: number, gc: ActorInfo, nota: str
 
   await resolverTareasDesposteo(id, 'Filtro Desposteo', 'Rechazado');
 
+  // Notificar al solicitante + al equipo asignado a la campana (el rechazo
+  // afecta a todos, no solo al que abrio).
+  const equipoRechFiltro = await resolverDestinatariosCampana(s.campania_id).catch(() => [] as ActorInfo[]);
+  const destRechFiltro = [
+    { id: s.solicitado_por_id, nombre: s.solicitado_por_nombre } as ActorInfo,
+    ...equipoRechFiltro,
+  ].filter(u => u.id !== gc.id);
   await notificarUsuarios(
-    [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }],
+    destRechFiltro,
     s.campania_id,
     id,
     `Desposteo rechazado por gerente - APS ${s.aps}`,
-    `${gc.nombre} rechazo tu solicitud de desposteo del APS ${s.aps}. Motivo: ${notaLimpia}`,
+    `${gc.nombre} rechazo el desposteo del APS ${s.aps}. Motivo: ${notaLimpia}`,
   );
+
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: s.campania_id,
+      accion: `Filtro GC rechazo desposteo APS ${s.aps} (solicitud #${id})`,
+      usuario: gc.nombre,
+      usuarioId: gc.id,
+      origen: 'desposteo',
+      extras: { desposteoId: id, aps: s.aps, estatus: 'rechazado', motivo: notaLimpia },
+    });
+  } catch (e) {
+    console.error('[desposteo.rechazarFiltroGerente] logHistorial:', e);
+  }
 
   return upd;
 }
@@ -1007,18 +1203,37 @@ export async function aprobarFacturacion(id: number, actor: ActorInfo, nota?: st
       `Ya puedes cancelar el POST a SAP del APS ${s.aps} en la campana ${snap?.campania_nombre || `#${s.campania_id}`} desde el detalle de campana.`,
   );
 
-  // Tambien avisar al asesor y GC que su solicitud avanzo.
-  const otros: ActorInfo[] = [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }];
+  // Tambien avisar al asesor + GC + equipo de la campana que su solicitud
+  // avanzo. Facturacion (actor) queda fuera para no auto-notificarse.
+  const equipoAprFact = await resolverDestinatariosCampana(s.campania_id).catch(() => [] as ActorInfo[]);
+  const otros: ActorInfo[] = [
+    { id: s.solicitado_por_id, nombre: s.solicitado_por_nombre },
+    ...equipoAprFact,
+  ];
   if (s.filtro_gc_id && s.filtro_gc_nombre) {
     otros.push({ id: s.filtro_gc_id, nombre: s.filtro_gc_nombre });
   }
   await notificarUsuarios(
-    otros,
+    otros.filter(u => u.id !== actor.id),
     s.campania_id,
     id,
     `Desposteo aprobado por facturacion - APS ${s.aps}`,
     `${actor.nombre} aprobo el desposteo. TI proximamente lo ejecutara.`,
   );
+
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: s.campania_id,
+      accion: `Facturacion aprobo desposteo APS ${s.aps} (solicitud #${id})`,
+      usuario: actor.nombre,
+      usuarioId: actor.id,
+      origen: 'desposteo',
+      extras: { desposteoId: id, aps: s.aps, estatus: 'aprobado' },
+    });
+  } catch (e) {
+    console.error('[desposteo.aprobarFacturacion] logHistorial:', e);
+  }
 
   return upd;
 }
@@ -1045,17 +1260,35 @@ export async function rechazarFacturacion(id: number, actor: ActorInfo, nota: st
 
   await resolverTareasDesposteo(id, 'Autorización Desposteo', 'Rechazado');
 
-  const otros: ActorInfo[] = [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }];
+  const equipoRechFact = await resolverDestinatariosCampana(s.campania_id).catch(() => [] as ActorInfo[]);
+  const otros: ActorInfo[] = [
+    { id: s.solicitado_por_id, nombre: s.solicitado_por_nombre },
+    ...equipoRechFact,
+  ];
   if (s.filtro_gc_id && s.filtro_gc_nombre) {
     otros.push({ id: s.filtro_gc_id, nombre: s.filtro_gc_nombre });
   }
   await notificarUsuarios(
-    otros,
+    otros.filter(u => u.id !== actor.id),
     s.campania_id,
     id,
     `Desposteo rechazado por facturacion - APS ${s.aps}`,
     `${actor.nombre} rechazo el desposteo. Motivo: ${notaLimpia}`,
   );
+
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: s.campania_id,
+      accion: `Facturacion rechazo desposteo APS ${s.aps} (solicitud #${id})`,
+      usuario: actor.nombre,
+      usuarioId: actor.id,
+      origen: 'desposteo',
+      extras: { desposteoId: id, aps: s.aps, estatus: 'rechazado', motivo: notaLimpia },
+    });
+  } catch (e) {
+    console.error('[desposteo.rechazarFacturacion] logHistorial:', e);
+  }
 
   return upd;
 }
@@ -1122,7 +1355,11 @@ export async function cerrarPorEjecucion(
     (notaAdicional || '').trim() || `Desposteo ejecutado en SAP por ${ti.nombre}`,
   );
 
-  const dest: ActorInfo[] = [{ id: s.solicitado_por_id, nombre: s.solicitado_por_nombre }];
+  const equipoEjec = await resolverDestinatariosCampana(s.campania_id).catch(() => [] as ActorInfo[]);
+  const dest: ActorInfo[] = [
+    { id: s.solicitado_por_id, nombre: s.solicitado_por_nombre },
+    ...equipoEjec,
+  ];
   if (s.filtro_gc_id && s.filtro_gc_nombre) {
     dest.push({ id: s.filtro_gc_id, nombre: s.filtro_gc_nombre });
   }
@@ -1142,12 +1379,26 @@ export async function cerrarPorEjecucion(
   const destUnicos = dest.filter(d => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
 
   await notificarUsuarios(
-    destUnicos,
+    destUnicos.filter(u => u.id !== ti.id),
     s.campania_id,
     solicitudId,
     `POST cancelado - APS ${s.aps}`,
     `${ti.nombre} cancelo el POST del APS ${s.aps} en SAP.`,
   );
+
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: s.campania_id,
+      accion: `TI ejecuto desposteo APS ${s.aps} (solicitud #${solicitudId})`,
+      usuario: ti.nombre,
+      usuarioId: ti.id,
+      origen: 'desposteo',
+      extras: { desposteoId: solicitudId, aps: s.aps, estatus: 'ejecutado' },
+    });
+  } catch (e) {
+    console.error('[desposteo.cerrarPorEjecucion] logHistorial:', e);
+  }
 
   return upd;
 }
@@ -1186,6 +1437,36 @@ export async function registrarBypass(
     'ejecucion',
     `BYPASS ${actor.nombre} (${motivo || 'sin motivo especificado'}). Ejecucion sin flujo Comercial-GC-Facturacion.`,
   );
+
+  try {
+    await logHistorial({
+      tipo: 'Desposteo',
+      refId: campaniaId,
+      accion: `BYPASS ${actor.nombre} ejecuto desposteo APS ${aps} sin flujo (solicitud #${s.id})`,
+      usuario: actor.nombre,
+      usuarioId: actor.id,
+      origen: 'desposteo',
+      extras: { desposteoId: s.id, aps, estatus: 'ejecutado', sin_autorizacion: true, motivo: motivo || null },
+    });
+  } catch (e) {
+    console.error('[desposteo.registrarBypass] logHistorial:', e);
+  }
+
+  // Bypass es DEV/Admin; avisamos al equipo asignado a la campana para que
+  // quede claro que se salto el flujo (asesor, sus companeros y GC).
+  try {
+    const equipo = await resolverDestinatariosCampana(campaniaId);
+    await notificarUsuarios(
+      equipo.filter(u => u.id !== actor.id),
+      campaniaId,
+      s.id,
+      `BYPASS de desposteo - APS ${aps}`,
+      `${actor.nombre} (Admin/DEV) ejecuto el desposteo del APS ${aps} sin pasar por el flujo normal. Motivo: ${motivo || 'sin motivo'}`,
+    );
+  } catch (e) {
+    console.error('[desposteo.registrarBypass] notificar equipo:', e);
+  }
+
   return s;
 }
 
