@@ -786,6 +786,7 @@ export class ClientesController {
           continue;
         }
         const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+        dropCrossCompanyCardCode(cambios, db);
         if (Object.keys(cambios).length > 0) {
           conCambios++;
           diffs.push({
@@ -847,6 +848,7 @@ export class ClientesController {
       }
 
       const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+      dropCrossCompanyCardCode(cambios, db);
       if (Object.keys(cambios).length === 0) {
         res.json({ success: true, cambios_aplicados: {}, solicitudes_afectadas: 0, mensaje: 'Sin cambios' });
         return;
@@ -977,6 +979,30 @@ function computeDiffCliente(qeb: Record<string, unknown>, sap: Record<string, un
     }
   }
   return out;
+}
+
+// Candado anti cross-company del CardCode: un cliente NO debe recibir el CardCode
+// de una compañía SAP distinta a la suya. Los códigos de UDC empiezan con "UDC";
+// los de CIMU/TRADE/TEST no (usan IMU*, VID-, TEL-, etc.). Si el comparador
+// propusiera un card_code de otra compañía (p.ej. UDC00119 para un cliente CIMU),
+// se descarta SOLO ese cambio para no corromper el CardCode del cliente. El resto
+// de campos (razón social, asesor, etc.) no son company-specific y se respetan.
+// Ver bug CUIC 9737 (KARLA BASURTO MICHELENA), sep-2026.
+function esCardCodeUDC(cardCode: unknown): boolean {
+  return String(cardCode || '').trim().toUpperCase().startsWith('UDC');
+}
+function dropCrossCompanyCardCode(
+  cambios: Record<string, { actual: unknown; sap: unknown }>,
+  db: string,
+): void {
+  const cc = cambios.card_code;
+  if (!cc) return;
+  const propuestoEsUDC = esCardCodeUDC(cc.sap);
+  const clienteEsUDC = db === 'UDC';
+  // Solo descartamos cuando hay MISMATCH de compañía (UDC* ↔ no-UDC).
+  if (propuestoEsUDC !== clienteEsUDC) {
+    delete cambios.card_code;
+  }
 }
 
 function normalize(v: unknown, tipo: 'string' | 'number'): unknown {
