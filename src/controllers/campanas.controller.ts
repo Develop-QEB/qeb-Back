@@ -17,7 +17,7 @@ import {
   TIPO_FILTRO_ELIMINACION,
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -11566,8 +11566,14 @@ export class CampanasController {
         autorizacion_dg,
         autorizacion_dcm,
       };
-      if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
-      if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+      if (data.inicio_periodo) {
+        // Anclar periodo a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
+        const _anc = await anclarPeriodoCatorcena(prisma, currentCara.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+        updateData.inicio_periodo = _anc.inicio;
+        updateData.fin_periodo = _anc.fin;
+      } else if (data.fin_periodo) {
+        updateData.fin_periodo = new Date(data.fin_periodo);
+      }
       if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
       // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
@@ -11920,8 +11926,17 @@ export class CampanasController {
         autorizacion_dg: estadoResult.autorizacion_dg,
         autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
-      if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
-      if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+      if (data.inicio_periodo) {
+        // Anclar el periodo del sc a su catorcena real: si no, una cara CATORCENA
+        // nace con `fin` inflado (fin de campaña) y el candado (getEspaciosBloqueados,
+        // que filtra por sc.inicio_periodo/fin_periodo) la ve ocupada en varias
+        // catorcenas. Mensual se respeta. Ver anclarPeriodoCatorcena.
+        const _anc = await anclarPeriodoCatorcena(prisma, cotizacion.id_propuesta, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+        createData.inicio_periodo = _anc.inicio;
+        createData.fin_periodo = _anc.fin;
+      } else if (data.fin_periodo) {
+        createData.fin_periodo = new Date(data.fin_periodo);
+      }
       if (data.grupo_rt_bf) createData.grupo_rt_bf = data.grupo_rt_bf;
 
       const cara = await prisma.solicitudCaras.create({
@@ -12180,8 +12195,14 @@ export class CampanasController {
             autorizacion_dg,
             autorizacion_dcm,
           };
-          if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
-          if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+          if (data.inicio_periodo) {
+            // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
+            const _anc = await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+            updateData.inicio_periodo = _anc.inicio;
+            updateData.fin_periodo = _anc.fin;
+          } else if (data.fin_periodo) {
+            updateData.fin_periodo = new Date(data.fin_periodo);
+          }
           if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
           const updatedCara = await tx.solicitudCaras.update({

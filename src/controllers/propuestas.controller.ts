@@ -10,7 +10,7 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
@@ -4586,6 +4586,11 @@ export class PropuestasController {
       const articuloCambioUp = !!articulo && articulo !== currentCara.articulo;
       const motivoLiberacionUp = periodoCambioUp ? 'periodo' : 'artículo';
 
+      // Anclar periodo del sc a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
+      const _scPerUp = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, currentCara.idquote, inicio_periodo, fin_periodo || inicio_periodo)
+        : null;
+
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
@@ -4607,8 +4612,8 @@ export class PropuestasController {
               formato,
               costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
               tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
-              inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
-              fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+              inicio_periodo: _scPerUp ? _scPerUp.inicio : (inicio_periodo ? new Date(inicio_periodo) : undefined),
+              fin_periodo: _scPerUp ? _scPerUp.fin : (fin_periodo ? new Date(fin_periodo) : undefined),
               caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
               caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
               articulo,
@@ -4921,6 +4926,13 @@ export class PropuestasController {
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG).
       const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion, caras_flujo, caras_contraflujo);
+      // Anclar el periodo del sc a su catorcena real: sin esto una cara CATORCENA
+      // nace con `fin` inflado (fin de campaña) y el candado (getEspaciosBloqueados,
+      // por sc.inicio_periodo/fin_periodo) la ve ocupada en varias catorcenas.
+      // Mensual respeta el rango. Ver anclarPeriodoCatorcena.
+      const _scPer = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, id, inicio_periodo, fin_periodo || inicio_periodo)
+        : { inicio: new Date(), fin: new Date() };
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4934,8 +4946,8 @@ export class PropuestasController {
           formato: formato || '',
           costo: costo ? parseFloat(costo) : 0,
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
-          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
-          fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
+          inicio_periodo: _scPer.inicio,
+          fin_periodo: _scPer.fin,
           caras_flujo: bonifOvCrP ? bonifOvCrP.caras_flujo : (caras_flujo ? parseInt(caras_flujo) : 0),
           caras_contraflujo: bonifOvCrP ? bonifOvCrP.caras_contraflujo : (caras_contraflujo ? parseInt(caras_contraflujo) : 0),
           articulo,
@@ -5201,6 +5213,11 @@ export class PropuestasController {
           const effCcBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
           const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any, effCfBk as any, effCcBk as any);
 
+          // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
+          const _scPerBk = data.inicio_periodo
+            ? await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo)
+            : null;
+
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
             data: {
@@ -5214,8 +5231,8 @@ export class PropuestasController {
               formato: data.formato,
               costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
               tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
-              inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
-              fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
+              inicio_periodo: _scPerBk ? _scPerBk.inicio : (data.inicio_periodo ? new Date(data.inicio_periodo) : undefined),
+              fin_periodo: _scPerBk ? _scPerBk.fin : (data.fin_periodo ? new Date(data.fin_periodo) : undefined),
               caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined),
               caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined),
               articulo: data.articulo,
