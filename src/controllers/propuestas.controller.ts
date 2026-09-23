@@ -4759,6 +4759,30 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD (caso 81357): una RT con bonificación SIEMPRE debe llevar su línea BF
+      // aparte (par grupo_rt_bf). Rechazar crear una RT con bonificación "embebida"
+      // (bonificacion>0 sin grupo_rt_bf): eso rompe el conteo de bonificadas y el
+      // posteo (la bonif queda como número dentro de la RT, sin línea ni inventario).
+      // No aplica a artículos que llevan la bonificación en sí mismos (BF/CF/CT) ni a
+      // los que no admiten bonif (IM/IN/ESP/ES-). Solo en ALTA — el update se deja
+      // libre para poder EDITAR caras legacy ya embebidas sin bloquearlas.
+      {
+        const artUpGuard = (articulo || '').toUpperCase();
+        const esArtBonifOSinBonif =
+          artUpGuard.startsWith('BF') || artUpGuard.startsWith('CF') ||
+          artUpGuard.startsWith('CT') || artUpGuard.startsWith('IM') ||
+          artUpGuard.startsWith('IN') || artUpGuard.startsWith('ESP') ||
+          artUpGuard.startsWith('ES-');
+        const bonifNumGuard = Number(bonificacion) || 0;
+        if (!esArtBonifOSinBonif && bonifNumGuard > 0 && !grupoRtBfCreate) {
+          res.status(400).json({
+            success: false,
+            error: 'Una renta con bonificación debe crear su línea BF aparte (grupo_rt_bf). No se permite la bonificación embebida en la RT.',
+          });
+          return;
+        }
+      }
+
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
