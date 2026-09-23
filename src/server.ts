@@ -136,6 +136,35 @@ async function main() {
         console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
       });
 
+      // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
+      // Corre CADA HORA: la deteccion es una query agregada (~2s sobre el
+      // inventario completo). Solo cuenta reservas FIRMES; notifica SOLO lo
+      // nuevo (estado en `conflictos_ocupacion`) en un digest por persona, y
+      // auto-limpia duplicados y choques (en choques conserva la venta mas
+      // antigua). `monitorEnCurso` evita corridas encimadas.
+      {
+        let monitorEnCurso = false;
+        const MONITOR_INTERVALO_MS = 60 * 60 * 1000; // 1 hora
+        setInterval(() => {
+          if (monitorEnCurso) {
+            console.warn('[MonitorConflictos] corrida anterior sigue activa; se salta esta.');
+            return;
+          }
+          monitorEnCurso = true;
+          ejecutarMonitorConflictos()
+            .then(r => console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`))
+            .catch((err: unknown) => console.error('[MonitorConflictos] Error en corrida horaria:', err))
+            .finally(() => { monitorEnCurso = false; });
+        }, MONITOR_INTERVALO_MS);
+      }
+      // Al arrancar corre SIN notificar (y sin limpiar): siembra el estado con
+      // lo que ya existe para que el primer aviso real sea de lo nuevo.
+      ejecutarMonitorConflictos({ notificar: false })
+        .then(r => console.log(`[MonitorConflictos] siembra inicial: ${r.detectados} conflictos registrados sin notificar`))
+        .catch((err: unknown) => {
+          console.error('[MonitorConflictos] Error en ejecucion inicial:', err);
+        });
+
       // Liberacion de reservas por Criterio 1 (30 dias). Cada dia a las 2am CDMX
       // (hora valle) libera las reservas de inventario de las propuestas creadas
       // hace >=30 dias que NO se mandaron a ventas/campañas y cuyo inventario aun
