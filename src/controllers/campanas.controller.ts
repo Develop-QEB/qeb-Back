@@ -2044,7 +2044,17 @@ export class CampanasController {
             if (nombre !== undefined && nombre !== campanaActual.nombre) addC('Nombre', campanaActual.nombre, nombre);
             if (notas !== undefined) addC('Notas', '', notas || '');
             if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
-            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) {
+              // Historial: periodo ANTES→DESPUÉS para que el BI muestre el traslado.
+              // ANTES = fechas viejas de la campaña (campanaActual, aún en memoria);
+              // DESPUÉS = fechas nuevas calculadas (o la vieja si ese extremo no cambió).
+              const fmtP = (d?: Date | null): string => d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}` : '';
+              const oldIni = (campanaActual as { fecha_inicio?: Date | null }).fecha_inicio ?? null;
+              const oldFin = (campanaActual as { fecha_fin?: Date | null }).fecha_fin ?? null;
+              const periodoAntes = `${fmtP(oldIni)} – ${fmtP(oldFin)}`;
+              const periodoDespues = `${fmtP(fechaInicio ?? oldIni)} – ${fmtP(fechaFin ?? oldFin)}`;
+              addC('Período', periodoAntes, periodoDespues || 'modificado');
+            }
             if (reservasSoltadasPorChoque > 0) addC('Reservas liberadas por choque', '', String(reservasSoltadasPorChoque));
             if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
             if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
@@ -11645,6 +11655,30 @@ export class CampanasController {
           error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${data.tipo === undefined ? 'undefined' : `'${data.tipo}'`})`,
         });
         return;
+      }
+
+      // GUARD (caso 81357): una RT con bonificación SIEMPRE debe llevar su línea BF
+      // aparte (par grupo_rt_bf). Rechazar crear una RT con bonificación "embebida"
+      // (bonificacion>0 sin grupo_rt_bf): eso rompe el conteo de bonificadas y el
+      // posteo (la bonif queda como número dentro de la RT, sin línea ni inventario).
+      // No aplica a artículos que llevan la bonificación en sí mismos (BF/CF/CT) ni a
+      // los que no admiten bonif (IM/IN/ESP/ES-). Solo en ALTA — el update se deja
+      // libre para poder EDITAR caras legacy ya embebidas sin bloquearlas.
+      {
+        const artUpGuard = (data.articulo || '').toUpperCase();
+        const esArtBonifOSinBonif =
+          artUpGuard.startsWith('BF') || artUpGuard.startsWith('CF') ||
+          artUpGuard.startsWith('CT') || artUpGuard.startsWith('IM') ||
+          artUpGuard.startsWith('IN') || artUpGuard.startsWith('ESP') ||
+          artUpGuard.startsWith('ES-');
+        const bonifNumGuard = Number(data.bonificacion) || 0;
+        if (!esArtBonifOSinBonif && bonifNumGuard > 0 && !data.grupo_rt_bf) {
+          res.status(400).json({
+            success: false,
+            error: 'Una renta con bonificación debe crear su línea BF aparte (grupo_rt_bf). No se permite la bonificación embebida en la RT.',
+          });
+          return;
+        }
       }
 
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id

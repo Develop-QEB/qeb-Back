@@ -4204,6 +4204,11 @@ export class PropuestasController {
       }
 
       // Update campania dates if provided
+      // Historial: capturar periodo ANTES→DESPUÉS del cambio de fechas para que el
+      // BI pueda mostrar el traslado. fmtP → YYYY-MM-DD en UTC (evita el shift de TZ).
+      let periodoAntes = '';
+      let periodoDespues = '';
+      const fmtP = (d?: Date | null): string => d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}` : '';
       if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) {
         // Find the cotizacion and campania
         const cotizacion = await prisma.cotizacion.findFirst({
@@ -4211,6 +4216,10 @@ export class PropuestasController {
         });
 
         if (cotizacion) {
+          // Periodo ANTERIOR (aún no actualizado): fechas actuales de la cotización.
+          const oldIni = (cotizacion as { fecha_inicio?: Date | null }).fecha_inicio ?? null;
+          const oldFin = (cotizacion as { fecha_fin?: Date | null }).fecha_fin ?? null;
+          periodoAntes = `${fmtP(oldIni)} – ${fmtP(oldFin)}`;
           // Detectar tipo_periodo para interpretar correctamente catorcena_inicio/catorcena_fin
           const tipoPeriodo = (cotizacion as { tipo_periodo?: string }).tipo_periodo || 'catorcena';
           let fechaInicio: Date | undefined;
@@ -4244,6 +4253,11 @@ export class PropuestasController {
             }
           }
 
+          // Periodo NUEVO: fechas calculadas (o las viejas si ese extremo no cambió).
+          const newIni = fechaInicio ?? oldIni;
+          const newFin = fechaFin ?? oldFin;
+          periodoDespues = `${fmtP(newIni)} – ${fmtP(newFin)}`;
+
           if (fechaInicio || fechaFin) {
             // Update cotizacion dates (source of truth for frontend)
             await prisma.cotizacion.update({
@@ -4274,7 +4288,7 @@ export class PropuestasController {
       if (descripcion !== undefined && descripcion !== anterior?.descripcion) addC('Descripción', anterior?.descripcion, descripcion);
       if (cliente_id !== undefined && cliente_id !== anterior?.cliente_id) addC('Cliente', anterior?.cliente_id, razon_social || cliente_id);
       if (nombre_campania !== undefined && nombre_campania !== cotAnterior?.nombre_campania) addC('Nombre de campaña', cotAnterior?.nombre_campania, nombre_campania);
-      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) addC('Período', '', 'modificado');
+      if (year_inicio !== undefined || catorcena_inicio !== undefined || year_fin !== undefined || catorcena_fin !== undefined) addC('Período', periodoAntes, periodoDespues || 'modificado');
 
       if (cambiosDetalle.length > 0) {
         await prisma.historial.create({
@@ -4757,6 +4771,30 @@ export class PropuestasController {
           error: `El campo 'tipo' es obligatorio y debe ser 'Digital' o 'Tradicional' (recibido: ${tipo === undefined ? 'undefined' : `'${tipo}'`})`,
         });
         return;
+      }
+
+      // GUARD (caso 81357): una RT con bonificación SIEMPRE debe llevar su línea BF
+      // aparte (par grupo_rt_bf). Rechazar crear una RT con bonificación "embebida"
+      // (bonificacion>0 sin grupo_rt_bf): eso rompe el conteo de bonificadas y el
+      // posteo (la bonif queda como número dentro de la RT, sin línea ni inventario).
+      // No aplica a artículos que llevan la bonificación en sí mismos (BF/CF/CT) ni a
+      // los que no admiten bonif (IM/IN/ESP/ES-). Solo en ALTA — el update se deja
+      // libre para poder EDITAR caras legacy ya embebidas sin bloquearlas.
+      {
+        const artUpGuard = (articulo || '').toUpperCase();
+        const esArtBonifOSinBonif =
+          artUpGuard.startsWith('BF') || artUpGuard.startsWith('CF') ||
+          artUpGuard.startsWith('CT') || artUpGuard.startsWith('IM') ||
+          artUpGuard.startsWith('IN') || artUpGuard.startsWith('ESP') ||
+          artUpGuard.startsWith('ES-');
+        const bonifNumGuard = Number(bonificacion) || 0;
+        if (!esArtBonifOSinBonif && bonifNumGuard > 0 && !grupoRtBfCreate) {
+          res.status(400).json({
+            success: false,
+            error: 'Una renta con bonificación debe crear su línea BF aparte (grupo_rt_bf). No se permite la bonificación embebida en la RT.',
+          });
+          return;
+        }
       }
 
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
