@@ -466,6 +466,124 @@ async function buildInventarioOcupacionRows(
   return rows;
 }
 
+/**
+ * Búsqueda libre del listado de campañas. Compartida por getAll, getStats y
+ * getExportLayout para que los tres endpoints acoten exactamente el mismo
+ * universo (si difieren, el conteo de KPIs no cuadra con la tabla).
+ *
+ * Tokenización por '|' (tags del frontend) con OR entre tags: "walmart|paramount"
+ * devuelve ambos. Términos numéricos buscan SOLO por cm.id (no por id de
+ * propuesta: en los casos con desfase de IDs confundía a tráfico/asesoras).
+ *
+ * Términos de texto buscan con LIKE en: nombre de campaña, artículo, marca,
+ * cliente, razón social, CUIC, asesor, asignado de la propuesta, creador de la
+ * solicitud, plaza (ciudad del circuito o plaza del inventario reservado) y,
+ * para términos de más de 3 caracteres, código único de inventario.
+ *
+ * Devuelve la condición SQL (ya entre paréntesis) y agrega sus placeholders a
+ * `params` en orden. Debe invocarse en el MISMO punto donde antes se armaba la
+ * condición inline, porque el orden de params sigue al de conditions.
+ */
+async function buildCampanaSearchCondition(
+  search: string | undefined,
+  params: (string | number)[],
+): Promise<string | null> {
+  if (!search) return null;
+  const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+  if (phrases.length === 0) return null;
+
+  const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+  const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+  const orClauses: string[] = [];
+
+  if (numericTerms.length > 0) {
+    orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+    params.push(...numericTerms.map(t => parseInt(t)));
+  }
+
+  // Columnas directas de los joins base (cm, cl, ct, pr, s). Todas estas
+  // tablas ya están en el FROM de los tres endpoints.
+  const LIKE_FIELDS = [
+    'cm.nombre',
+    'cm.articulo',
+    'COALESCE(s.marca_nombre, cl.T2_U_Marca)',
+    'cl.T0_U_Cliente',
+    'cl.T0_U_RazonSocial',
+    'cl.CUIC',
+    'cl.T0_U_Asesor',
+    'pr.asignado',
+    's.nombre_usuario',
+  ];
+
+  for (const term of textTerms) {
+    const searchPattern = `%${term}%`;
+    let searchClause = '(' + LIKE_FIELDS.map(f => `${f} LIKE ?`).join(' OR ');
+    params.push(...LIKE_FIELDS.map(() => searchPattern));
+
+    // Plaza: la propuesta tiene algún circuito cuya ciudad coincide, o con
+    // alguna reserva sobre un inventario cuya plaza coincide. Correlacionado
+    // por idquote (indexado) y reservas.solicitudCaras_id (indexado).
+    searchClause += ` OR EXISTS (
+      SELECT 1 FROM solicitudCaras sc_s
+      WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+        AND (
+          sc_s.ciudad LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM reservas r_s
+            INNER JOIN espacio_inventario ei_s ON ei_s.id = r_s.inventario_id
+            INNER JOIN inventarios i_s ON i_s.id = ei_s.inventario_id
+            WHERE r_s.solicitudCaras_id = sc_s.id AND r_s.deleted_at IS NULL AND i_s.plaza LIKE ?
+          )
+        )
+    )`;
+    params.push(searchPattern, searchPattern);
+
+    // Código único de inventario (pre-query): solo para términos largos para
+    // no disparar un scan de inventarios con 1-3 letras.
+    if (term.length > 3) {
+      const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+        `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
+        searchPattern
+      );
+
+      if (invMatchRows.length > 0) {
+        const invMatchIds = invMatchRows.map(r => r.id);
+        const phInv = invMatchIds.map(() => '?').join(',');
+        const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+          `SELECT DISTINCT sc.idquote
+           FROM espacio_inventario ei
+           INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
+           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+           WHERE ei.inventario_id IN (${phInv})`,
+          ...invMatchIds
+        );
+        const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
+        if (propIdsByInv.length > 0) {
+          const phPr = propIdsByInv.map(() => '?').join(',');
+          const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT cm.id
+             FROM cotizacion ct
+             INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+             WHERE ct.id_propuesta IN (${phPr})`,
+            ...propIdsByInv
+          );
+          if (campRows.length > 0) {
+            const phCm = campRows.map(() => '?').join(',');
+            searchClause += ` OR cm.id IN (${phCm})`;
+            params.push(...campRows.map(c => c.id));
+          }
+        }
+      }
+    }
+    searchClause += ')';
+    orClauses.push(searchClause);
+  }
+
+  if (orClauses.length === 0) return null;
+  return `(${orClauses.join(' OR ')})`;
+}
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -530,74 +648,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
@@ -2161,74 +2213,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
@@ -3502,74 +3488,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
