@@ -2349,7 +2349,8 @@ export const TIPO_AUTORIZACION_ELIMINACION = 'Autorización Eliminación';
  *  el candado de APS por si se asignó entre la solicitud y la aprobación. */
 export async function ejecutarEliminacionCarasCampana(
   caraIds: number[],
-  usuarioNombre: string
+  solicitanteNombre: string,
+  autorizadoPor?: string
 ): Promise<{ eliminadas: number; reservas: number }> {
   if (!caraIds || caraIds.length === 0) return { eliminadas: 0, reservas: 0 };
 
@@ -2390,7 +2391,10 @@ export async function ejecutarEliminacionCarasCampana(
         accion: 'Eliminación de circuito',
         fecha_hora: new Date(),
         detalles: JSON.stringify({
-          usuario: usuarioNombre,
+          // usuario = quien la SOLICITÓ (asesor) → el BI atribuye por este campo.
+          usuario: solicitanteNombre,
+          // autorizadoPor = quien la aprobó (gerente/DG); vacío en el flujo directo.
+          ...(autorizadoPor ? { autorizadoPor } : {}),
           origen: 'campaña',
           via: 'autorización',
           reservas_eliminadas: reservasCount,
@@ -2478,7 +2482,7 @@ export async function crearAutorizacionEliminacionCampana(params: {
       tipo: 'autorizacion_solicitud_campana',
       ref_id: campaniaId,
       accion: `${solicitanteNombre} solicitó autorización para eliminar ${caraIdsNuevas.length} circuito(s)`,
-      detalles: JSON.stringify({ tareaId: tarea.id, caraIds: caraIdsNuevas, conFiltro: !!gc }),
+      detalles: JSON.stringify({ tareaId: tarea.id, solicitanteNombre, caraIds: caraIdsNuevas, conFiltro: !!gc }),
     },
   });
 
@@ -2505,7 +2509,28 @@ export async function aprobarEliminacionCampana(
 
   const caraIds = (tarea.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
 
-  const res = await ejecutarEliminacionCarasCampana(caraIds, aprobadorNombre);
+  // Atribución: la eliminación es de quien la SOLICITÓ (asesor), no del aprobador.
+  // Recuperamos al solicitante del evento de solicitud ligado a esta tarea. Los
+  // eventos nuevos lo traen en detalles.solicitanteNombre; los viejos se parsean
+  // del texto de la acción. Último recurso: el aprobador (comportamiento previo).
+  let solicitanteNombre = '';
+  const evtSolicitud = await prisma.historial.findFirst({
+    where: { tipo: 'autorizacion_solicitud_campana', detalles: { contains: `"tareaId":${tareaId},` } },
+    orderBy: { id: 'desc' },
+  });
+  if (evtSolicitud) {
+    try {
+      const d = JSON.parse(evtSolicitud.detalles || '{}');
+      if (Number(d?.tareaId) === tareaId && d?.solicitanteNombre) solicitanteNombre = String(d.solicitanteNombre);
+    } catch { /* detalles no parseable — se ignora */ }
+    if (!solicitanteNombre && evtSolicitud.accion) {
+      const m = evtSolicitud.accion.match(/^(.*?)\s+solicit[óo]\s+autorizaci[óo]n/i);
+      if (m) solicitanteNombre = m[1].trim();
+    }
+  }
+  if (!solicitanteNombre) solicitanteNombre = aprobadorNombre;
+
+  const res = await ejecutarEliminacionCarasCampana(caraIds, solicitanteNombre, aprobadorNombre);
   await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
   await prisma.historial.create({
     data: {
