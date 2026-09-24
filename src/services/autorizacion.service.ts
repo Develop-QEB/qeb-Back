@@ -746,6 +746,27 @@ export async function crearTareasAutorizacion(
   origen: 'solicitud' | 'propuesta' | 'campana' = 'solicitud',
   campaniaId?: number
 ): Promise<void> {
+  // UDC (aeropuerto AICM): por regla de negocio NO manda NADA a autorización
+  // (el flujo de Dirección para UDC está por definir; junta 2026-09-04). Si la
+  // solicitud es UDC, se auto-aprueban las caras que habrían quedado pendientes
+  // (para que no se atoren en 'pendiente' sin tarea) y NO se crea ninguna tarea.
+  const solUDC = await prisma.solicitud.findUnique({
+    where: { id: solicitudId },
+    select: { sap_database: true },
+  });
+  if ((solUDC?.sap_database || '').toUpperCase() === 'UDC') {
+    const idsAAprobar = [...new Set([...pendientesDg, ...pendientesDcm])]
+      .filter((n) => Number.isFinite(n));
+    if (idsAAprobar.length > 0) {
+      await prisma.solicitudCaras.updateMany({
+        where: { id: { in: idsAAprobar } },
+        data: { autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado' },
+      });
+    }
+    console.log(`[crearTareasAutorizacion] UDC → sin autorización; ${idsAAprobar.length} cara(s) auto-aprobadas`);
+    return;
+  }
+
   console.log('[crearTareasAutorizacion] Iniciando con:', {
     solicitudId,
     propuestaId,
