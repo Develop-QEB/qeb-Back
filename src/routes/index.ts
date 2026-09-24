@@ -23,6 +23,7 @@ import auditReservasRoutes from './audit-reservas.routes';
 import reorganizarOcupacionRoutes from './reorganizar-ocupacion.routes';
 import pruebasColorRoutes from './pruebasColor.routes';
 import desposteoRoutes from './desposteo.routes';
+import capasMapaRoutes from './capas-mapa.routes';
 
 import publicRoutes from './public.routes';
 
@@ -53,5 +54,6 @@ router.use('/audit-reservas', auditReservasRoutes);
 router.use('/reorganizar-ocupacion', reorganizarOcupacionRoutes);
 router.use('/pruebas-color', pruebasColorRoutes);
 router.use('/desposteo', desposteoRoutes);
+router.use('/capas-mapa', capasMapaRoutes);
 
 export default router;

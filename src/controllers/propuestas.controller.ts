@@ -15,6 +15,7 @@ import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaCon
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
+import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -3110,6 +3111,11 @@ export class PropuestasController {
       const serializedInventario = (await getInventarioPropuestaConVersion(propuestaId))
         .map(({ motivo_no_vigente: _motivo, ...fila }) => fila);
 
+      // Capas de POI / poligonos con las que Trafico armo cada circuito. Al
+      // cliente solo le llegan las marcadas visible_cliente (lo decide Trafico
+      // por capa). Ver capas-mapa.service.ts.
+      const capas = await listarCapasPropuesta(propuestaId, { soloVisibles: true });
+
       res.json({
         success: true,
         data: {
@@ -3151,6 +3157,7 @@ export class PropuestasController {
           } : null,
           caras,
           inventario: serializedInventario,
+          capas,
         },
       });
     } catch (error) {
