@@ -2103,7 +2103,17 @@ export class CampanasController {
             if (nombre !== undefined && nombre !== campanaActual.nombre) addC('Nombre', campanaActual.nombre, nombre);
             if (notas !== undefined) addC('Notas', '', notas || '');
             if (descripcion !== undefined) addC('Descripción', '', descripcion || '');
-            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) addC('Período', '', 'modificado');
+            if (catorcenaInicioNum !== undefined || catorcenaFinNum !== undefined) {
+              // Historial: periodo ANTES→DESPUÉS para que el BI muestre el traslado.
+              // ANTES = fechas viejas de la campaña (campanaActual, aún en memoria);
+              // DESPUÉS = fechas nuevas calculadas (o la vieja si ese extremo no cambió).
+              const fmtP = (d?: Date | null): string => d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}` : '';
+              const oldIni = (campanaActual as { fecha_inicio?: Date | null }).fecha_inicio ?? null;
+              const oldFin = (campanaActual as { fecha_fin?: Date | null }).fecha_fin ?? null;
+              const periodoAntes = `${fmtP(oldIni)} – ${fmtP(oldFin)}`;
+              const periodoDespues = `${fmtP(fechaInicio ?? oldIni)} – ${fmtP(fechaFin ?? oldFin)}`;
+              addC('Período', periodoAntes, periodoDespues || 'modificado');
+            }
             if (reservasSoltadasPorChoque > 0) addC('Reservas liberadas por choque', '', String(reservasSoltadasPorChoque));
             if (asignados !== undefined && asignados !== propuesta?.asignado) addC('Asignados', propuesta?.asignado, asignados);
             if (IMU !== undefined) addC('IMU', '', IMU ? 'Sí' : 'No');
