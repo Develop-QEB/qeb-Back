@@ -36,6 +36,7 @@ import {
   esRolTI,
   puedeBypassearDesposteo,
 } from '../services/desposteo.service';
+import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -7439,6 +7440,28 @@ export class CampanasController {
         where: { id: parseInt(tareaId) },
         data: updateData,
       });
+
+      // Hook Prueba de Color: si la tarea es 'Seguimiento Prueba de color' y
+      // acaba de pasar a Finalizada, la prueba asociada pasa a aprobada.
+      // Feedback Jos 2026-09-25.
+      if (
+        estatus === 'Finalizada' &&
+        tarea.tipo === 'Seguimiento Prueba de color' &&
+        userId
+      ) {
+        try {
+          const pruebaAprobadaId = await onFinalizarTareaSeguimiento(
+            { id: tarea.id, tipo: tarea.tipo, contenido: tarea.contenido },
+            userId,
+            userName,
+          );
+          if (pruebaAprobadaId) {
+            console.log(`[updateTarea] Prueba de color #${pruebaAprobadaId} marcada aprobada por finalizar tarea seguimiento #${tarea.id}`);
+          }
+        } catch (e) {
+          console.error('[updateTarea] onFinalizarTareaSeguimiento falló:', e);
+        }
+      }
 
       // Notificar cambios de asignado en tareas de Diseño (Revisión/Corrección):
       // al nuevo asignado le llega una notificación de "te asignaron", al anterior
