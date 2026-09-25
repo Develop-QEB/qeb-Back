@@ -38,13 +38,15 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
     if (!Number.isFinite(propuestaId) || propuestaId <= 0) { res.status(400).json({ success: false, error: 'propuesta_id requerido' }); return; }
     if (!Number.isFinite(scId) || scId <= 0) { res.status(400).json({ success: false, error: 'sc_id requerido' }); return; }
     if (!archivo || typeof archivo !== 'string') { res.status(400).json({ success: false, error: 'archivo requerido' }); return; }
+    const nombreArteLimpio = typeof nombre_arte === 'string' ? nombre_arte.trim() : '';
+    if (!nombreArteLimpio) { res.status(400).json({ success: false, error: 'nombre_arte requerido' }); return; }
 
     const prueba = await crearPruebaColor({
       propuestaId,
       scId,
       archivo,
       archivo_data: archivo_data || null,
-      nombre_arte: nombre_arte || null,
+      nombre_arte: nombreArteLimpio,
       notas: notas || null,
       createdBy: userId,
       createdByNombre: userNombre,
