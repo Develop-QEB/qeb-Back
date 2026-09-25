@@ -2500,6 +2500,19 @@ export class SolicitudesController {
         console.error('[create] Error verificando pendientes (no-blocking):', err);
       }
 
+      // Ligar pruebas de color pre-existentes de la propuesta al campania_id
+      // recién creado. Feedback Jos 2026-09-25: las pruebas hechas desde
+      // propuesta deben aparecer también en el gestor de artes de la campaña.
+      try {
+        const { vincularPruebasConCampania } = await import('../services/pruebasColor.service');
+        const vinculadas = await vincularPruebasConCampania(result.propuesta.id, result.campania.id);
+        if (vinculadas > 0) {
+          console.log(`[create] ${vinculadas} prueba(s) de color vinculadas a campaña #${result.campania.id}`);
+        }
+      } catch (err) {
+        console.error('[create] vincularPruebasConCampania falló (no-blocking):', err);
+      }
+
       // Crear tareas de autorización ANTES de responder, dentro del ciclo de
       // vida del request, con reintentos. Antes esto corría DESPUÉS de res.json
       // (fire-and-forget) y se perdía si el proceso se reciclaba o la conexión
