@@ -9567,6 +9567,7 @@ export class CampanasController {
         CUIC: number | null;
         T1_U_Cliente: string | null;
         T2_U_Marca: string | null;
+        T0_U_Asesor: string | null; // asesor del catálogo SAP (el que trae el CUIC)
         sap_database: string | null;
       };
       type CatRow = { numero_catorcena: number; ano: number; fecha_inicio: Date; fecha_fin: Date };
@@ -9603,7 +9604,7 @@ export class CampanasController {
           ...scIds
         ),
         prisma.$queryRawUnsafe<CliRow[]>(
-          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, sap_database FROM cliente`
+          `SELECT id, CUIC, T1_U_Cliente, T2_U_Marca, T0_U_Asesor, sap_database FROM cliente`
         ),
         prisma.$queryRawUnsafe<CatRow[]>(
           `SELECT numero_catorcena, año as ano, fecha_inicio, fecha_fin FROM catorcenas`
@@ -9801,7 +9802,9 @@ export class CampanasController {
         const base = {
           plaza,
           tipo: sc.formato,
-          asesor: sc.sol_nombre_usuario,
+          // Asesor = nombre del CATÁLOGO SAP que trae el CUIC (cliente.T0_U_Asesor),
+          // no el nombre del usuario QEB creador. Fallback al de QEB si SAP viene vacío.
+          asesor: (cliente?.T0_U_Asesor && cliente.T0_U_Asesor.trim()) || sc.sol_nombre_usuario,
           aps_especifico,
           aps_global: sc.id_propuesta != null ? Number(sc.id_propuesta) : null,
           tipo_periodo: sc.tipo_periodo || 'catorcena',
