@@ -381,6 +381,8 @@ function parseFiltrosReporte(req: Request): FiltrosReporte {
     semanas: nums('semanas'),
     bases: lista('bases'),
     tipos: lista('tipos'),
+    muebles: lista('muebles'),
+    digital: lista('digital'),
   };
 }
 

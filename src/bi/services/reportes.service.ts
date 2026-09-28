@@ -17,6 +17,10 @@ const filtroVacio = (anio: number): FiltrosReporte => ({ anio, mes: null, plaza:
 // Limpia el nombre del mueble: quita "RENTA/BONIFICACIÓN DE ESPACIOS ".
 const limpiaMueble = (v: string) => String(v).replace(/^(RENTA|BONIFICACI[OÓ]N) DE ESPACIOS\s*/i, '').trim() || String(v);
 
+// Grupo "Formato" del tablero: buckets de mueble → patrón LIKE.
+// Gran Formato = Mi Macro. Un mueble combinado (p.ej. "PARABUS, COLUMNA") cae en ambos.
+const MUEBLE_LIKE: Record<string, string> = { PARABUS: '%PARABUS%', COLUMNA: '%COLUMNA%', MACRO: '%MACRO%' };
+
 /**
  * Dado un nombre de asesor CANÓNICO (normalizado), regresa los valores crudos de
  * la columna indicada que normalizan a él. Permite filtrar por asesor aunque la
@@ -73,6 +77,19 @@ async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Re
     tipos.forEach((t, i) => { p[`tipo${i}`] = t; });
     cond.push(`\`Tipo\` COLLATE utf8mb4_unicode_ci IN (${keys.join(',')})`);
   }
+  // Formato (Parabús/Columna/Gran Formato) → columna `Dscription` LIKE (OR entre buckets).
+  const muebles = (f.muebles ?? []).map((m) => String(m).trim().toUpperCase()).filter((m) => MUEBLE_LIKE[m]);
+  if (muebles.length) {
+    const ors = muebles.map((m, i) => { p[`mue${i}`] = MUEBLE_LIKE[m]; return `\`Dscription\` LIKE :mue${i}`; });
+    cond.push(`(${ors.join(' OR ')})`);
+  }
+  // Tradicional / Digital → columna `Tipo Digital`.
+  const digital = (f.digital ?? []).map((v) => String(v).trim()).filter(Boolean);
+  if (digital.length) {
+    const keys = digital.map((_, i) => `:via${i}`);
+    digital.forEach((v, i) => { p[`via${i}`] = v; });
+    cond.push(`\`Tipo Digital\` COLLATE utf8mb4_unicode_ci IN (${keys.join(',')})`);
+  }
   return { where: cond.join(' AND '), params: p };
 }
 
@@ -98,6 +115,19 @@ async function pipelineCond(f: FiltrosReporte, quoteExpr: string): Promise<{ con
   if (f.plaza) { scCond.push('sc.estados LIKE :plazaLike'); p.plazaLike = `%${f.plaza}%`; }
   if (f.formato) { scCond.push('sc.tipo LIKE :formatoLike'); p.formatoLike = `%${f.formato}%`; }
   if (f.mueble) { scCond.push('sc.formato LIKE :muebleLike'); p.muebleLike = `%${f.mueble}%`; }
+  // Formato (Parabús/Columna/Gran Formato) → sc.formato LIKE (OR entre buckets).
+  const mueblesG = (f.muebles ?? []).map((m) => String(m).trim().toUpperCase()).filter((m) => MUEBLE_LIKE[m]);
+  if (mueblesG.length) {
+    const ors = mueblesG.map((m, i) => { p[`mueSc${i}`] = MUEBLE_LIKE[m]; return `sc.formato LIKE :mueSc${i}`; });
+    scCond.push(`(${ors.join(' OR ')})`);
+  }
+  // Tradicional / Digital → sc.tipo.
+  const digitalG = (f.digital ?? []).map((v) => String(v).trim()).filter(Boolean);
+  if (digitalG.length) {
+    const keys = digitalG.map((_, i) => `:viaSc${i}`);
+    digitalG.forEach((v, i) => { p[`viaSc${i}`] = v; });
+    scCond.push(`sc.tipo IN (${keys.join(',')})`);
+  }
   if (scCond.length) {
     cond.push(`EXISTS (SELECT 1 FROM solicitudCaras sc WHERE sc.idquote = ${quoteExpr} AND ${scCond.join(' AND ')})`);
   }
