@@ -363,6 +363,10 @@ function parseFiltrosReporte(req: Request): FiltrosReporte {
     const v = str(k);
     return v ? v.split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
   };
+  const lista = (k: string) => {
+    const v = str(k);
+    return v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  };
   const mes = Number(req.query.mes);
   return {
     anio: Number(req.query.anio) || new Date().getFullYear(),
@@ -375,6 +379,8 @@ function parseFiltrosReporte(req: Request): FiltrosReporte {
     meses: nums('meses'),
     catorcenas: nums('catorcenas'),
     semanas: nums('semanas'),
+    bases: lista('bases'),
+    tipos: lista('tipos'),
   };
 }
 
