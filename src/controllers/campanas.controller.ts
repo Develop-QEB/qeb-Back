@@ -18,7 +18,7 @@ import {
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
@@ -357,7 +357,7 @@ async function buildInventarioOcupacionRows(
     occByInv.set(Number(o.inventario_id), { firme: Number(o.has_firme) === 1, tent: Number(o.has_tent) === 1 });
   }
 
-  // 2) Catálogo de inventario (excluye Bloqueado/Inactivo, igual que getDisponibles).
+  // 2) Catálogo de inventario (excluye Bloqueado/Inhabilitado/Inactivo, igual que getDisponibles).
   const inv = await prisma.$queryRawUnsafe<{
     id: number; codigo_unico: string | null; tipo_de_cara: string | null;
     tipo_de_mueble: string | null; mueble: string | null; plaza: string | null;
@@ -366,7 +366,7 @@ async function buildInventarioOcupacionRows(
     `SELECT id, codigo_unico, tipo_de_cara, tipo_de_mueble, mueble, plaza, municipio,
             tradicional_digital, cto
        FROM inventarios
-      WHERE (estatus IS NULL OR estatus NOT IN ('Bloqueado', 'Inactivo'))`
+      WHERE (estatus IS NULL OR estatus NOT IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}))`
   );
 
   const dateOnly = (d: Date): string => {
@@ -10832,7 +10832,7 @@ export class CampanasController {
           sc.inicio_periodo,
           sc.fin_periodo,
           CASE
-            WHEN i.estatus IN ('Bloqueado', 'Inactivo') THEN 0
+            WHEN i.estatus IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}) THEN 0
             WHEN i.tradicional_digital = 'Digital' THEN 1
             WHEN EXISTS (
               SELECT 1 FROM reservas r2
@@ -10873,14 +10873,16 @@ export class CampanasController {
       const data = rows.map(r => {
         const est = String(r.estatus_inventario || '');
         const cod = String(r.codigo_unico || '').toUpperCase();
-        const bloqueado = est === 'Bloqueado' || est === 'Inactivo';
-        const motivo_salida = bloqueado ? 'Bloqueado' : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const bloqueado = esInventarioNoUtilizable(est);
+        const motivo_salida = bloqueado
+          ? (est === 'Inhabilitado' ? 'Inhabilitado' : 'Bloqueado')
+          : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
         const disponible = Number(r.disponible) === 1;
         return {
           ...r,
           disponible,
           motivo_salida,
-          motivo_no_disponible: disponible ? null : (bloqueado ? 'Inventario bloqueado' : 'Ocupado en el periodo'),
+          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario bloqueado') : 'Ocupado en el periodo'),
         };
       });
 
