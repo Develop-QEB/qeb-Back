@@ -24,12 +24,13 @@ export function attachRealtime(server: Server): void {
     for (const ws of wss.clients) if (ws.readyState === WebSocket.OPEN) ws.send(data);
   };
 
-  // Sin listener de 'error', un frame inválido lanzaría una excepción no capturada y tumbaría el proceso.
-  wss.on('error', (e) => console.error('[BI-WS] error del servidor:', e.message));
+  // Sin wss.on('error') a propósito: ws reenvía ahí los errores del http.Server (p. ej.
+  // EADDRINUSE en listen) y queremos que el proceso truene en ese caso, no que siga vivo sin escuchar.
 
   wss.on('connection', (ws) => {
     vivos.set(ws, true);
     ws.on('pong', () => vivos.set(ws, true));
+    // Sin este listener, un frame inválido de un cliente lanzaría una excepción no capturada y tumbaría el proceso.
     ws.on('error', (e) => console.error('[BI-WS] error de cliente:', e.message));
     ws.send(JSON.stringify({ tipo: 'conectado', ts: new Date().toISOString() }));
   });
