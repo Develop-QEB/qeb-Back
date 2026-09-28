@@ -556,10 +556,37 @@ async function enriquecerAtributos(eventos: EventoHistorial[]): Promise<void> {
     for (const r of apsRows) apsSet.add(Number(r.cid));
   }
 
+  // Cambio de periodo = TRASLADO: la inversión no cambia, solo se mueve de catorcena.
+  // Mostramos el "monto trasladado" = inversión total de la campaña (SUM solicitudCaras.costo),
+  // con antes = después (neutral). QEB no registra $ en estos eventos, así que lo derivamos aquí.
+  const quotesPeriodo = [
+    ...new Set(
+      eventos
+        .filter((e) => e.tipoEdicion === 'Cambio de periodo' && e.invAntes == null)
+        .map((e) => quoteDe(e.refId))
+        .filter((n): n is number => n != null)
+    ),
+  ];
+  const trasladoMap = new Map<number, number>();
+  if (quotesPeriodo.length) {
+    const costoRows = await query<{ q: number; total: number | null }>(
+      `SELECT CAST(idquote AS UNSIGNED) AS q, SUM(costo) AS total
+         FROM solicitudCaras
+        WHERE idquote IN (${quotesPeriodo.join(',')})
+        GROUP BY CAST(idquote AS UNSIGNED)`
+    );
+    for (const r of costoRows) if (r.total != null) trasladoMap.set(Number(r.q), Number(r.total));
+  }
+
   for (const e of eventos) {
     const q = quoteDe(e.refId);
     const p = q != null ? propMap.get(q) : undefined;
     if (p) { e.cliente = p.cliente; e.asesor = p.asesor; e.marca = p.marca; e.status = p.status; e.base = p.base; }
+    // Cambio de periodo: la inversión se traslada, no varía → antes = después = total de la campaña.
+    if (e.tipoEdicion === 'Cambio de periodo' && e.invAntes == null && q != null) {
+      const t = trasladoMap.get(q);
+      if (t != null) { e.invAntes = t; e.invDespues = t; }
+    }
     // Posteado = alguna cara editada ya tiene APS asignado.
     e.tieneAps = (e.caraIds ?? []).some((id) => apsSet.has(id));
     // Unión de atributos sobre las caras realmente editadas.
