@@ -7383,6 +7383,75 @@ export class CampanasController {
         }
       }
 
+      // Hook Actividad Comercial: al cambiar el estatus (Finalizada/Cancelada
+      // u otra transición) dejar registro en historial + espejo en el ID
+      // vinculado (campaña/propuesta). Feedback Jos 2026-09-25.
+      if (
+        tarea.tipo === 'Actividad Comercial' &&
+        userId &&
+        (estatus !== undefined || fecha_fin !== undefined || asignado !== undefined || archivo !== undefined || evidencia !== undefined)
+      ) {
+        try {
+          const contenidoJson = tarea.contenido ? (() => {
+            try { return JSON.parse(tarea.contenido); } catch { return null; }
+          })() : null;
+          const detalle = contenidoJson
+            ? [contenidoJson.subtipo, contenidoJson.ref_id ? `#${contenidoJson.ref_id}` : null].filter(Boolean).join(' ')
+            : '';
+
+          // Cambios relevantes en el UPDATE genérico.
+          const cambios: Array<{ campo: string; label: string; antes: unknown; despues: unknown }> = [];
+          if (estatus !== undefined && tareaPrevia && (tareaPrevia as { estatus?: string }).estatus !== estatus) {
+            cambios.push({ campo: 'estatus', label: 'Estatus', antes: (tareaPrevia as { estatus?: string }).estatus, despues: estatus });
+          }
+
+          const esFinalizacion = estatus === 'Finalizada' || estatus === 'Cerrado';
+          const accionBase = esFinalizacion
+            ? 'Finalizó actividad comercial'
+            : 'Actualizó actividad comercial';
+
+          await logHistorial({
+            tipo: 'Tarea',
+            refId: tarea.id,
+            accion: detalle ? `${accionBase} (${detalle})` : accionBase,
+            usuario: userName,
+            usuarioId: userId,
+            origen: 'notificaciones_actividad_comercial',
+            cambios: cambios.length ? cambios : undefined,
+            extras: contenidoJson ? {
+              cliente: contenidoJson.cliente,
+              marca: contenidoJson.marca,
+              subtipo: contenidoJson.subtipo,
+              ref_id: contenidoJson.ref_id,
+            } : undefined,
+          });
+
+          // Espejo en el historial del ID vinculado.
+          if (tarea.campania_id) {
+            await logHistorial({
+              tipo: 'Campaña', refId: tarea.campania_id,
+              accion: detalle ? `Actividad comercial #${tarea.id} ${esFinalizacion ? 'finalizada' : 'actualizada'} (${detalle})` : `Actividad comercial #${tarea.id} ${esFinalizacion ? 'finalizada' : 'actualizada'}`,
+              usuario: userName, usuarioId: userId,
+              origen: 'notificaciones_actividad_comercial',
+              extras: { tareaId: tarea.id, estatus: estatus ?? undefined },
+            });
+          } else if (tarea.id_propuesta) {
+            const propuestaIdNum = Number(tarea.id_propuesta);
+            if (Number.isFinite(propuestaIdNum) && propuestaIdNum > 0) {
+              await logHistorial({
+                tipo: 'Propuesta', refId: propuestaIdNum,
+                accion: detalle ? `Actividad comercial #${tarea.id} ${esFinalizacion ? 'finalizada' : 'actualizada'} (${detalle})` : `Actividad comercial #${tarea.id} ${esFinalizacion ? 'finalizada' : 'actualizada'}`,
+                usuario: userName, usuarioId: userId,
+                origen: 'notificaciones_actividad_comercial',
+                extras: { tareaId: tarea.id, estatus: estatus ?? undefined },
+              });
+            }
+          }
+        } catch (e) {
+          console.error('[updateTarea] hook Actividad Comercial falló:', e);
+        }
+      }
+
       // Notificar cambios de asignado en tareas de Diseño (Revisión/Corrección):
       // al nuevo asignado le llega una notificación de "te asignaron", al anterior
       // le llega "tu tarea fue reasignada" y la tarea desaparece de su bandeja porque

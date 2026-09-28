@@ -54,6 +54,8 @@ export const TIPOS_TAREA: CatalogoItem[] = [
   { clave: 'Recepción', label: 'Recepción', email: false },
   { clave: 'Producción', label: 'Producción', email: false },
   { clave: 'Seguimiento', label: 'Seguimiento' },
+  { clave: 'Actividad Comercial', label: 'Actividad Comercial', email: false },
+  { clave: 'Seguimiento Prueba de color', label: 'Seguimiento Prueba de color', email: false },
 ];
 
 /**
@@ -76,6 +78,8 @@ export function canonicalizarTipoTarea(tipo: string | null | undefined): string 
   if (t.startsWith('ajuste comercial')) return 'Ajuste Comercial';
   if (t.startsWith('revision de artes')) return 'Revisión de artes';
   if (t.startsWith('correccion')) return 'Corrección';
+  if (t.startsWith('actividad comercial')) return 'Actividad Comercial';
+  if (t.startsWith('seguimiento prueba de color')) return 'Seguimiento Prueba de color';
   // Coincidencia exacta contra el catálogo (normalizada); si no, deja el tipo tal cual.
   const match = TIPOS_TAREA.find((x) => normalizarClave(x.clave) === t);
   return match ? match.clave : (tipo || '');
