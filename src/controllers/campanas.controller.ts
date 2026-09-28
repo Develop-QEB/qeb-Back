@@ -17,7 +17,7 @@ import {
   TIPO_FILTRO_ELIMINACION,
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -467,6 +467,124 @@ async function buildInventarioOcupacionRows(
   return rows;
 }
 
+/**
+ * Búsqueda libre del listado de campañas. Compartida por getAll, getStats y
+ * getExportLayout para que los tres endpoints acoten exactamente el mismo
+ * universo (si difieren, el conteo de KPIs no cuadra con la tabla).
+ *
+ * Tokenización por '|' (tags del frontend) con OR entre tags: "walmart|paramount"
+ * devuelve ambos. Términos numéricos buscan SOLO por cm.id (no por id de
+ * propuesta: en los casos con desfase de IDs confundía a tráfico/asesoras).
+ *
+ * Términos de texto buscan con LIKE en: nombre de campaña, artículo, marca,
+ * cliente, razón social, CUIC, asesor, asignado de la propuesta, creador de la
+ * solicitud, plaza (ciudad del circuito o plaza del inventario reservado) y,
+ * para términos de más de 3 caracteres, código único de inventario.
+ *
+ * Devuelve la condición SQL (ya entre paréntesis) y agrega sus placeholders a
+ * `params` en orden. Debe invocarse en el MISMO punto donde antes se armaba la
+ * condición inline, porque el orden de params sigue al de conditions.
+ */
+async function buildCampanaSearchCondition(
+  search: string | undefined,
+  params: (string | number)[],
+): Promise<string | null> {
+  if (!search) return null;
+  const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
+  if (phrases.length === 0) return null;
+
+  const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
+  const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
+
+  const orClauses: string[] = [];
+
+  if (numericTerms.length > 0) {
+    orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
+    params.push(...numericTerms.map(t => parseInt(t)));
+  }
+
+  // Columnas directas de los joins base (cm, cl, ct, pr, s). Todas estas
+  // tablas ya están en el FROM de los tres endpoints.
+  const LIKE_FIELDS = [
+    'cm.nombre',
+    'cm.articulo',
+    'COALESCE(s.marca_nombre, cl.T2_U_Marca)',
+    'cl.T0_U_Cliente',
+    'cl.T0_U_RazonSocial',
+    'cl.CUIC',
+    'cl.T0_U_Asesor',
+    'pr.asignado',
+    's.nombre_usuario',
+  ];
+
+  for (const term of textTerms) {
+    const searchPattern = `%${term}%`;
+    let searchClause = '(' + LIKE_FIELDS.map(f => `${f} LIKE ?`).join(' OR ');
+    params.push(...LIKE_FIELDS.map(() => searchPattern));
+
+    // Plaza: la propuesta tiene algún circuito cuya ciudad coincide, o con
+    // alguna reserva sobre un inventario cuya plaza coincide. Correlacionado
+    // por idquote (indexado) y reservas.solicitudCaras_id (indexado).
+    searchClause += ` OR EXISTS (
+      SELECT 1 FROM solicitudCaras sc_s
+      WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+        AND (
+          sc_s.ciudad LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM reservas r_s
+            INNER JOIN espacio_inventario ei_s ON ei_s.id = r_s.inventario_id
+            INNER JOIN inventarios i_s ON i_s.id = ei_s.inventario_id
+            WHERE r_s.solicitudCaras_id = sc_s.id AND r_s.deleted_at IS NULL AND i_s.plaza LIKE ?
+          )
+        )
+    )`;
+    params.push(searchPattern, searchPattern);
+
+    // Código único de inventario (pre-query): solo para términos largos para
+    // no disparar un scan de inventarios con 1-3 letras.
+    if (term.length > 3) {
+      const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+        `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
+        searchPattern
+      );
+
+      if (invMatchRows.length > 0) {
+        const invMatchIds = invMatchRows.map(r => r.id);
+        const phInv = invMatchIds.map(() => '?').join(',');
+        const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+          `SELECT DISTINCT sc.idquote
+           FROM espacio_inventario ei
+           INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
+           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+           WHERE ei.inventario_id IN (${phInv})`,
+          ...invMatchIds
+        );
+        const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
+        if (propIdsByInv.length > 0) {
+          const phPr = propIdsByInv.map(() => '?').join(',');
+          const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT cm.id
+             FROM cotizacion ct
+             INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+             WHERE ct.id_propuesta IN (${phPr})`,
+            ...propIdsByInv
+          );
+          if (campRows.length > 0) {
+            const phCm = campRows.map(() => '?').join(',');
+            searchClause += ` OR cm.id IN (${phCm})`;
+            params.push(...campRows.map(c => c.id));
+          }
+        }
+      }
+    }
+    searchClause += ')';
+    orClauses.push(searchClause);
+  }
+
+  if (orClauses.length === 0) return null;
+  return `(${orClauses.join(' OR ')})`;
+}
+
 export class CampanasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -531,74 +649,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
@@ -2172,74 +2224,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
@@ -3513,74 +3499,8 @@ export class CampanasController {
         params.push(tipoPeriodo);
       }
 
-      if (search) {
-        // Tokenización por '|' + OR entre tags y entre campos. Permite sumar
-        // términos (ej. "walmart|paramount" devuelve ambos). Se preserva la
-        // búsqueda por codigo_unico de inventarios (pre-query) para términos largos.
-        const phrases = search.split('|').map(p => p.trim()).filter(Boolean);
-        const numericTerms = phrases.filter(t => !isNaN(parseInt(t)) && String(parseInt(t)) === t);
-        const textTerms = phrases.filter(t => isNaN(parseInt(t)) || String(parseInt(t)) !== t);
-
-        const orClauses: string[] = [];
-
-        if (numericTerms.length > 0) {
-          // Buscar SOLO por cm.id en el listado de campañas. Antes incluía
-          // ct.id_propuesta como OR — en los 68 casos con desfase de IDs,
-          // teclear un prop.id devolvía la cm asociada (con un cm.id distinto),
-          // confundiendo a tráfico/asesoras. Si el usuario quiere buscar por
-          // id propuesta, debe usar la pantalla de Propuestas.
-          orClauses.push(`cm.id IN (${numericTerms.map(() => '?').join(',')})`);
-          params.push(...numericTerms.map(t => parseInt(t)));
-        }
-
-        for (const term of textTerms) {
-          const searchPattern = `%${term}%`;
-          let searchClause = `(cm.nombre LIKE ? OR COALESCE(s.marca_nombre, cl.T2_U_Marca) LIKE ? OR cl.T0_U_RazonSocial LIKE ? OR cl.CUIC LIKE ?`;
-          params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-
-          if (term.length > 3) {
-            const invMatchRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-              `SELECT id FROM inventarios WHERE codigo_unico LIKE ? LIMIT 200`,
-              searchPattern
-            );
-
-            if (invMatchRows.length > 0) {
-              const invMatchIds = invMatchRows.map(r => r.id);
-              const phInv = invMatchIds.map(() => '?').join(',');
-              const scRows = await prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
-                `SELECT DISTINCT sc.idquote
-                 FROM espacio_inventario ei
-                 INNER JOIN reservas rsv ON rsv.inventario_id = ei.id AND rsv.deleted_at IS NULL
-                 INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
-                 WHERE ei.inventario_id IN (${phInv})`,
-                ...invMatchIds
-              );
-              const propIdsByInv = scRows.map(r => Number(r.idquote)).filter(Boolean);
-              if (propIdsByInv.length > 0) {
-                const phPr = propIdsByInv.map(() => '?').join(',');
-                const campRows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-                  `SELECT DISTINCT cm.id
-                   FROM cotizacion ct
-                   INNER JOIN campania cm ON cm.cotizacion_id = ct.id
-                   WHERE ct.id_propuesta IN (${phPr})`,
-                  ...propIdsByInv
-                );
-                if (campRows.length > 0) {
-                  const phCm = campRows.map(() => '?').join(',');
-                  searchClause += ` OR cm.id IN (${phCm})`;
-                  params.push(...campRows.map(c => c.id));
-                }
-              }
-            }
-          }
-          searchClause += ')';
-          orClauses.push(searchClause);
-        }
-
-        if (orClauses.length > 0) {
-          conditions.push(`(${orClauses.join(' OR ')})`);
-        }
-      }
+      const searchCondition = await buildCampanaSearchCondition(search, params);
+      if (searchCondition) conditions.push(searchCondition);
 
       if (yearInicio && yearFin) {
         if (catorcenaInicio && catorcenaFin) {
@@ -10867,6 +10787,111 @@ export class CampanasController {
     }
   }
 
+  // Historial de inventario del circuito (campaña): reservas soft-eliminadas
+  // (quitadas / desplazadas / por bloqueo) con `disponible` y `motivo_salida`.
+  // Espeja getReservasHistorial de propuestas (resuelve campaña→cotización→propuesta).
+  async getReservasHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true },
+      });
+      if (!campana || !campana.cotizacion_id) { res.json({ success: true, data: [] }); return; }
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true },
+      });
+      if (!cotizacion || !cotizacion.id_propuesta) { res.json({ success: true, data: [] }); return; }
+      const propuestaId = cotizacion.id_propuesta;
+
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.mueble as formato,
+          i.ubicacion,
+          i.isla,
+          i.plaza,
+          i.municipio,
+          i.ancho,
+          i.alto,
+          i.tradicional_digital,
+          i.estatus as estatus_inventario,
+          rsv.estatus,
+          rsv.estatus_original,
+          rsv.deleted_at,
+          rsv.APS as aps,
+          sc.id as solicitud_cara_id,
+          sc.articulo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          CASE
+            WHEN i.estatus IN ('Bloqueado', 'Inactivo') THEN 0
+            WHEN i.tradicional_digital = 'Digital' THEN 1
+            WHEN EXISTS (
+              SELECT 1 FROM reservas r2
+                INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+              WHERE r2.inventario_id = rsv.inventario_id
+                AND r2.deleted_at IS NULL
+                AND r2.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
+                AND sc2.inicio_periodo <= sc.fin_periodo
+                AND sc2.fin_periodo >= sc.inicio_periodo
+            ) THEN 0
+            ELSE 1
+          END as disponible
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NOT NULL
+        ORDER BY rsv.deleted_at DESC, rsv.id DESC
+      `;
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
+
+      const desplazados = new Set<string>();
+      try {
+        const hist = await prisma.historial.findMany({
+          where: { ref_id: propuestaId, accion: 'Reservas desplazadas' },
+          select: { detalles: true },
+        });
+        for (const h of hist) {
+          try {
+            const d = JSON.parse(h.detalles || '{}');
+            const cods: string[] = Array.isArray(d?.codigos) ? d.codigos : [];
+            cods.forEach(c => desplazados.add(String(c).toUpperCase()));
+          } catch { /* detalles no-JSON */ }
+        }
+      } catch { /* sin historial */ }
+
+      const data = rows.map(r => {
+        const est = String(r.estatus_inventario || '');
+        const cod = String(r.codigo_unico || '').toUpperCase();
+        const bloqueado = est === 'Bloqueado' || est === 'Inactivo';
+        const motivo_salida = bloqueado ? 'Bloqueado' : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const disponible = Number(r.disponible) === 1;
+        return {
+          ...r,
+          disponible,
+          motivo_salida,
+          motivo_no_disponible: disponible ? null : (bloqueado ? 'Inventario bloqueado' : 'Ocupado en el periodo'),
+        };
+      });
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getReservasHistorial (campaña):', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async createReservas(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
@@ -11494,8 +11519,14 @@ export class CampanasController {
         autorizacion_dg,
         autorizacion_dcm,
       };
-      if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
-      if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+      if (data.inicio_periodo) {
+        // Anclar periodo a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
+        const _anc = await anclarPeriodoCatorcena(prisma, currentCara.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+        updateData.inicio_periodo = _anc.inicio;
+        updateData.fin_periodo = _anc.fin;
+      } else if (data.fin_periodo) {
+        updateData.fin_periodo = new Date(data.fin_periodo);
+      }
       if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
       // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
@@ -11739,6 +11770,30 @@ export class CampanasController {
         return;
       }
 
+      // GUARD (caso 81357): una RT con bonificación SIEMPRE debe llevar su línea BF
+      // aparte (par grupo_rt_bf). Rechazar crear una RT con bonificación "embebida"
+      // (bonificacion>0 sin grupo_rt_bf): eso rompe el conteo de bonificadas y el
+      // posteo (la bonif queda como número dentro de la RT, sin línea ni inventario).
+      // No aplica a artículos que llevan la bonificación en sí mismos (BF/CF/CT) ni a
+      // los que no admiten bonif (IM/IN/ESP/ES-). Solo en ALTA — el update se deja
+      // libre para poder EDITAR caras legacy ya embebidas sin bloquearlas.
+      {
+        const artUpGuard = (data.articulo || '').toUpperCase();
+        const esArtBonifOSinBonif =
+          artUpGuard.startsWith('BF') || artUpGuard.startsWith('CF') ||
+          artUpGuard.startsWith('CT') || artUpGuard.startsWith('IM') ||
+          artUpGuard.startsWith('IN') || artUpGuard.startsWith('ESP') ||
+          artUpGuard.startsWith('ES-');
+        const bonifNumGuard = Number(data.bonificacion) || 0;
+        if (!esArtBonifOSinBonif && bonifNumGuard > 0 && !data.grupo_rt_bf) {
+          res.status(400).json({
+            success: false,
+            error: 'Una renta con bonificación debe crear su línea BF aparte (grupo_rt_bf). No se permite la bonificación embebida en la RT.',
+          });
+          return;
+        }
+      }
+
       // Obtener la campaña para conseguir el cotizacion_id/propuesta_id
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
@@ -11848,8 +11903,17 @@ export class CampanasController {
         autorizacion_dg: estadoResult.autorizacion_dg,
         autorizacion_dcm: estadoResult.autorizacion_dcm,
       };
-      if (data.inicio_periodo) createData.inicio_periodo = new Date(data.inicio_periodo);
-      if (data.fin_periodo) createData.fin_periodo = new Date(data.fin_periodo);
+      if (data.inicio_periodo) {
+        // Anclar el periodo del sc a su catorcena real: si no, una cara CATORCENA
+        // nace con `fin` inflado (fin de campaña) y el candado (getEspaciosBloqueados,
+        // que filtra por sc.inicio_periodo/fin_periodo) la ve ocupada en varias
+        // catorcenas. Mensual se respeta. Ver anclarPeriodoCatorcena.
+        const _anc = await anclarPeriodoCatorcena(prisma, cotizacion.id_propuesta, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+        createData.inicio_periodo = _anc.inicio;
+        createData.fin_periodo = _anc.fin;
+      } else if (data.fin_periodo) {
+        createData.fin_periodo = new Date(data.fin_periodo);
+      }
       if (data.grupo_rt_bf) createData.grupo_rt_bf = data.grupo_rt_bf;
 
       const cara = await prisma.solicitudCaras.create({
@@ -12108,8 +12172,14 @@ export class CampanasController {
             autorizacion_dg,
             autorizacion_dcm,
           };
-          if (data.inicio_periodo) updateData.inicio_periodo = new Date(data.inicio_periodo);
-          if (data.fin_periodo) updateData.fin_periodo = new Date(data.fin_periodo);
+          if (data.inicio_periodo) {
+            // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
+            const _anc = await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+            updateData.inicio_periodo = _anc.inicio;
+            updateData.fin_periodo = _anc.fin;
+          } else if (data.fin_periodo) {
+            updateData.fin_periodo = new Date(data.fin_periodo);
+          }
           if (data.grupo_rt_bf !== undefined) updateData.grupo_rt_bf = data.grupo_rt_bf || null;
 
           const updatedCara = await tx.solicitudCaras.update({

@@ -1032,3 +1032,33 @@ model pase_ventas_reserva {
   @@unique([reserva_id], map: "uq_pvr_reserva")
   @@index([propuesta_id], map: "idx_pvr_propuesta")
 }
+
+/// Capas de puntos de interes / poligonos KML con las que Trafico armo un
+/// circuito en el Buscador de Formatos (conservar cerca de / excluir dentro
+/// de). Se muestran como capas activables en la Vista Compartir (interna y
+/// publica). Ancla = solicitud_caras_id; idquote (= propuesta.id) va
+/// denormalizado. Se crea con scripts/add_tabla_capa_mapa.cjs; el codigo la
+/// usa via SQL crudo (capas-mapa.service.ts).
+model capa_mapa {
+  id                 Int       @id @default(autoincrement())
+  solicitud_caras_id Int
+  idquote            String    @db.VarChar(255)
+  nombre             String    @db.VarChar(255)
+  /// 'incluir' | 'excluir'
+  modo               String    @db.VarChar(10)
+  /// 'poi' | 'custom' | 'address' | 'kml' | 'mixto'
+  origen             String    @db.VarChar(10)
+  /// JSON {pines:[{lat,lng,name,range}], poligonos:[{name,paths:[{lat,lng}]}]}
+  geometria          String    @db.LongText
+  archivo_url        String?   @db.VarChar(500)
+  visible_cliente    Boolean   @default(true)
+  total_pines        Int       @default(0)
+  total_poligonos    Int       @default(0)
+  creado_por         Int?
+  creado_por_nombre  String?   @db.VarChar(255)
+  created_at         DateTime  @default(now()) @db.DateTime(0)
+  deleted_at         DateTime? @db.DateTime(0)
+
+  @@index([solicitud_caras_id, deleted_at], map: "idx_capa_sc")
+  @@index([idquote, deleted_at], map: "idx_capa_idquote")
+}

@@ -10,11 +10,12 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
+import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
@@ -3110,6 +3111,11 @@ export class PropuestasController {
       const serializedInventario = (await getInventarioPropuestaConVersion(propuestaId))
         .map(({ motivo_no_vigente: _motivo, ...fila }) => fila);
 
+      // Capas de POI / poligonos con las que Trafico armo cada circuito. Al
+      // cliente solo le llegan las marcadas visible_cliente (lo decide Trafico
+      // por capa). Ver capas-mapa.service.ts.
+      const capas = await listarCapasPropuesta(propuestaId, { soloVisibles: true });
+
       res.json({
         success: true,
         data: {
@@ -3151,6 +3157,7 @@ export class PropuestasController {
           } : null,
           caras,
           inventario: serializedInventario,
+          capas,
         },
       });
     } catch (error) {
@@ -3618,6 +3625,104 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error en getReservasForModal:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Historial de inventario del circuito: reservas que salieron (quitadas /
+  // desplazadas / por bloqueo) — reservas SOFT-eliminadas (deleted_at != null).
+  // Devuelve además `disponible` (si se puede volver a reservar hoy en el
+  // periodo de la cara) y `motivo_salida` (Bloqueado / Desplazado / Quitado).
+  // El tab "Historial" del buscador filtra por cara en el front.
+  async getReservasHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      // Reservas soft-eliminadas del circuito + estado actual del inventario +
+      // ¿el espacio está ocupado FIRME por alguien más en el periodo de la cara?
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.mueble as formato,
+          i.ubicacion,
+          i.isla,
+          i.plaza,
+          i.municipio,
+          i.ancho,
+          i.alto,
+          i.tradicional_digital,
+          i.estatus as estatus_inventario,
+          rsv.estatus,
+          rsv.estatus_original,
+          rsv.deleted_at,
+          sc.id as solicitud_cara_id,
+          sc.articulo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          CASE
+            WHEN i.estatus IN ('Bloqueado', 'Inactivo') THEN 0
+            WHEN i.tradicional_digital = 'Digital' THEN 1
+            WHEN EXISTS (
+              SELECT 1 FROM reservas r2
+                INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+              WHERE r2.inventario_id = rsv.inventario_id
+                AND r2.deleted_at IS NULL
+                AND r2.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
+                AND sc2.inicio_periodo <= sc.fin_periodo
+                AND sc2.fin_periodo >= sc.inicio_periodo
+            ) THEN 0
+            ELSE 1
+          END as disponible
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NOT NULL
+        ORDER BY rsv.deleted_at DESC, rsv.id DESC
+      `;
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
+
+      // Motivo de salida: cruzar con historial 'Reservas desplazadas' (guarda los
+      // codigo_unico desplazados). Bloqueado manda; si no, desplazado vs quitado.
+      const desplazados = new Set<string>();
+      try {
+        const hist = await prisma.historial.findMany({
+          where: { ref_id: propuestaId, accion: 'Reservas desplazadas' },
+          select: { detalles: true },
+        });
+        for (const h of hist) {
+          try {
+            const d = JSON.parse(h.detalles || '{}');
+            const cods: string[] = Array.isArray(d?.codigos) ? d.codigos : [];
+            cods.forEach(c => desplazados.add(String(c).toUpperCase()));
+          } catch { /* detalles no-JSON: ignorar */ }
+        }
+      } catch { /* sin historial: ignorar */ }
+
+      const data = rows.map(r => {
+        const est = String(r.estatus_inventario || '');
+        const cod = String(r.codigo_unico || '').toUpperCase();
+        const bloqueado = est === 'Bloqueado' || est === 'Inactivo';
+        const motivo_salida = bloqueado ? 'Bloqueado' : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const disponible = Number(r.disponible) === 1;
+        return {
+          ...r,
+          disponible,
+          motivo_salida,
+          motivo_no_disponible: disponible ? null : (bloqueado ? 'Inventario bloqueado' : 'Ocupado en el periodo'),
+        };
+      });
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getReservasHistorial:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({ success: false, error: message });
     }
   }
@@ -4502,6 +4607,11 @@ export class PropuestasController {
       const articuloCambioUp = !!articulo && articulo !== currentCara.articulo;
       const motivoLiberacionUp = periodoCambioUp ? 'periodo' : 'artículo';
 
+      // Anclar periodo del sc a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
+      const _scPerUp = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, currentCara.idquote, inicio_periodo, fin_periodo || inicio_periodo)
+        : null;
+
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
@@ -4523,8 +4633,8 @@ export class PropuestasController {
               formato,
               costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
               tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
-              inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
-              fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+              inicio_periodo: _scPerUp ? _scPerUp.inicio : (inicio_periodo ? new Date(inicio_periodo) : undefined),
+              fin_periodo: _scPerUp ? _scPerUp.fin : (fin_periodo ? new Date(fin_periodo) : undefined),
               caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
               caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
               articulo,
@@ -4773,6 +4883,30 @@ export class PropuestasController {
         return;
       }
 
+      // GUARD (caso 81357): una RT con bonificación SIEMPRE debe llevar su línea BF
+      // aparte (par grupo_rt_bf). Rechazar crear una RT con bonificación "embebida"
+      // (bonificacion>0 sin grupo_rt_bf): eso rompe el conteo de bonificadas y el
+      // posteo (la bonif queda como número dentro de la RT, sin línea ni inventario).
+      // No aplica a artículos que llevan la bonificación en sí mismos (BF/CF/CT) ni a
+      // los que no admiten bonif (IM/IN/ESP/ES-). Solo en ALTA — el update se deja
+      // libre para poder EDITAR caras legacy ya embebidas sin bloquearlas.
+      {
+        const artUpGuard = (articulo || '').toUpperCase();
+        const esArtBonifOSinBonif =
+          artUpGuard.startsWith('BF') || artUpGuard.startsWith('CF') ||
+          artUpGuard.startsWith('CT') || artUpGuard.startsWith('IM') ||
+          artUpGuard.startsWith('IN') || artUpGuard.startsWith('ESP') ||
+          artUpGuard.startsWith('ES-');
+        const bonifNumGuard = Number(bonificacion) || 0;
+        if (!esArtBonifOSinBonif && bonifNumGuard > 0 && !grupoRtBfCreate) {
+          res.status(400).json({
+            success: false,
+            error: 'Una renta con bonificación debe crear su línea BF aparte (grupo_rt_bf). No se permite la bonificación embebida en la RT.',
+          });
+          return;
+        }
+      }
+
       // Bloqueo: no permitir AGREGAR un circuito nuevo si la propuesta ya tiene
       // circuito(s) con autorización de dirección pendiente (DG/DCM). Candado de
       // servidor — el front ya deshabilita el botón, esto evita saltarlo por API.
@@ -4837,6 +4971,13 @@ export class PropuestasController {
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG).
       const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion, caras_flujo, caras_contraflujo);
+      // Anclar el periodo del sc a su catorcena real: sin esto una cara CATORCENA
+      // nace con `fin` inflado (fin de campaña) y el candado (getEspaciosBloqueados,
+      // por sc.inicio_periodo/fin_periodo) la ve ocupada en varias catorcenas.
+      // Mensual respeta el rango. Ver anclarPeriodoCatorcena.
+      const _scPer = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, id, inicio_periodo, fin_periodo || inicio_periodo)
+        : { inicio: new Date(), fin: new Date() };
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4850,8 +4991,8 @@ export class PropuestasController {
           formato: formato || '',
           costo: costo ? parseFloat(costo) : 0,
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
-          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
-          fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
+          inicio_periodo: _scPer.inicio,
+          fin_periodo: _scPer.fin,
           caras_flujo: bonifOvCrP ? bonifOvCrP.caras_flujo : (caras_flujo ? parseInt(caras_flujo) : 0),
           caras_contraflujo: bonifOvCrP ? bonifOvCrP.caras_contraflujo : (caras_contraflujo ? parseInt(caras_contraflujo) : 0),
           articulo,
@@ -5117,6 +5258,11 @@ export class PropuestasController {
           const effCcBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
           const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any, effCfBk as any, effCcBk as any);
 
+          // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
+          const _scPerBk = data.inicio_periodo
+            ? await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo)
+            : null;
+
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
             data: {
@@ -5130,8 +5276,8 @@ export class PropuestasController {
               formato: data.formato,
               costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
               tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
-              inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
-              fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
+              inicio_periodo: _scPerBk ? _scPerBk.inicio : (data.inicio_periodo ? new Date(data.inicio_periodo) : undefined),
+              fin_periodo: _scPerBk ? _scPerBk.fin : (data.fin_periodo ? new Date(data.fin_periodo) : undefined),
               caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined),
               caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined),
               articulo: data.articulo,

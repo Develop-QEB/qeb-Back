@@ -44,6 +44,7 @@ router.get('/:id/historial', campanasController.getHistorial.bind(campanasContro
 
 // Reservas (para modal de asignación)
 router.get('/:id/reservas-modal', campanasController.getReservasForModal.bind(campanasController));
+router.get('/:id/reservas-historial', campanasController.getReservasHistorial.bind(campanasController));
 router.post('/:id/reservas', campanasController.createReservas.bind(campanasController));
 router.delete('/:id/reservas', campanasController.deleteReservas.bind(campanasController));
 
