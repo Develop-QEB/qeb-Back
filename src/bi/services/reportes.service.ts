@@ -8,6 +8,10 @@ import type {
 
 const toISO = (v: unknown): string | null => (v == null ? null : v instanceof Date ? v.toISOString() : String(v));
 
+// Mes de la catorcena por su FECHA DE FIN (QEB cuenta la catorcena que cruza meses en el
+// mes donde TERMINA). Validado vs QEB: Jun=103M, Sep=97M. Sin fecha de periodo, cae a `Mes`.
+const MES_FIN = 'COALESCE(MONTH(`Fecha Fin Periodo`), `Mes`)';
+
 const filtroVacio = (anio: number): FiltrosReporte => ({ anio, mes: null, plaza: null, formato: null, mueble: null, cliente: null, asesor: null });
 
 // Limpia el nombre del mueble: quita "RENTA/BONIFICACIÓN DE ESPACIOS ".
@@ -28,11 +32,11 @@ async function variantesAsesor(canonico: string, sql: string): Promise<string[]>
 async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Record<string, unknown> }> {
   const cond: string[] = ['`Año` = :anio'];
   const p: Record<string, unknown> = { anio: f.anio };
-  if (f.mes) { cond.push('`Mes` = :mes'); p.mes = f.mes; }
+  if (f.mes) { cond.push(`${MES_FIN} = :mes`); p.mes = f.mes; }
   // Multi-selección de período (sobre la venta real del período).
   const enteros = (a?: number[]) => (a ?? []).filter((n) => Number.isFinite(n));
   const meses = enteros(f.meses), catorcenas = enteros(f.catorcenas), semanas = enteros(f.semanas);
-  if (meses.length) cond.push(`\`Mes\` IN (${meses.join(',')})`);
+  if (meses.length) cond.push(`${MES_FIN} IN (${meses.join(',')})`);
   if (catorcenas.length) {
     cond.push("`Periodo` COLLATE utf8mb4_unicode_ci LIKE 'CATORCENA %'");
     cond.push(`CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(\`Periodo\`,' ',-1),'-',1) AS UNSIGNED) IN (${catorcenas.join(',')})`);
@@ -227,11 +231,10 @@ export async function getVentasPeriodo(periodo: Periodo, f: FiltrosReporte): Pro
   const cond = [where];
   let expr: string;
   if (periodo === 'mes') {
-    // OJO: la columna `Mes` asigna la catorcena por su FECHA DE INICIO, así que una
-    // catorcena que cruza meses (p.ej. Cat 20 = 29-sep → 12-oct) cae en el mes equivocado
-    // (septiembre) cuando QEB la cuenta en octubre. Asignamos por el PUNTO MEDIO de la
-    // catorcena (inicio + 7 días) → coincide con QEB. Sin fecha de periodo, cae a `Mes`.
-    expr = 'COALESCE(MONTH(DATE_ADD(`Fecha Ini Periodo`, INTERVAL 7 DAY)), `Mes`)';
+    // La catorcena que cruza meses (p.ej. Cat 20 = 29-sep → 12-oct) la cuenta QEB en el
+    // mes donde TERMINA (octubre), no en el de inicio (que usa la columna `Mes`).
+    // Validado vs QEB: Jun=103M, Sep=97M. Sin fecha de periodo, cae a `Mes`.
+    expr = MES_FIN;
   } else if (periodo === 'catorcena') {
     expr = "CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(`Periodo`,' ',-1),'-',1) AS UNSIGNED)";
     cond.push("`Periodo` COLLATE utf8mb4_unicode_ci LIKE 'CATORCENA %'");

@@ -86,6 +86,8 @@ export function parseEvento(row: RowEvento): EventoHistorial {
   let tarifaDespues: number | null = null;
   let cambioCaras = false;                  // cambió el # de caras
   let cambioTarifa = false;                 // cambió la tarifa pública (distinto de que cambie la inversión)
+  let periodoAntes: string | null = null;   // periodo antes/después (QEB ya lo registra en el cambio "Período")
+  let periodoDespues: string | null = null;
 
   let json: any = null;
   const raw = row.detalles ?? '';
@@ -157,6 +159,16 @@ export function parseEvento(row: RowEvento): EventoHistorial {
           // OJO: el back de QEB escribe el campo como "Período" (con acento í), así que
           // el patrón debe aceptar i/í o no detecta los cambios de periodo.
           cambioPeriodo = true;
+          // QEB ya guarda el antes/después real (p.ej. "2026-10-13 – 2026-11-09"). Tomamos
+          // el primer par con valores reales (ignora el viejo placeholder "modificado").
+          if (periodoAntes == null && periodoDespues == null) {
+            const a = c?.antes != null ? String(c.antes).trim() : '';
+            const d = c?.despues != null ? String(c.despues).trim() : '';
+            if ((a && a.toLowerCase() !== 'modificado') || (d && d.toLowerCase() !== 'modificado')) {
+              periodoAntes = a || null;
+              periodoDespues = d || null;
+            }
+          }
         } else if (/tarifa/.test(campo) || /tarifa/.test(label)) {
           // Tarifa pública (precio unitario). Tomamos el primer par como representativo
           // y marcamos cambioTarifa solo si de verdad cambió (antes ≠ después).
@@ -235,6 +247,8 @@ export function parseEvento(row: RowEvento): EventoHistorial {
     tarifaDespues,
     cambioCaras,
     cambioTarifa,
+    periodoAntes,
+    periodoDespues,
     viaAutorizacion: !!(json && typeof json === 'object' && json.via === 'autorización'),
     tipoEdicion,
   };

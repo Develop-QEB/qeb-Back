@@ -59,10 +59,11 @@ function where(anio: number, f: FiltrosResumen, opts: { conMes?: boolean } = {})
 }
 
 const MONTO = 'SUM(`Monto Total`)';
-// Mes de la catorcena por su PUNTO MEDIO (inicio + 7 días), no por su fecha de inicio.
-// La columna `Mes` usa la fecha de inicio → una catorcena que cruza meses (p.ej.
-// 29-sep→12-oct) cae en el mes equivocado. QEB la cuenta por donde caen más días.
-const MES_EXPR = 'COALESCE(MONTH(DATE_ADD(`Fecha Ini Periodo`, INTERVAL 7 DAY)), `Mes`)';
+// Mes de la catorcena por su FECHA DE FIN (no por la de inicio, que es lo que usa la
+// columna `Mes`). Una catorcena que cruza meses (p.ej. 29-sep→12-oct) la cuenta QEB en
+// el mes donde TERMINA (octubre). Validado vs QEB: Jun=103M y Sep=97M cuadran. Sin fecha
+// de periodo, cae a `Mes`.
+const MES_EXPR = 'COALESCE(MONTH(`Fecha Fin Periodo`), `Mes`)';
 
 async function ventasPorMes(anio: number, f: FiltrosResumen): Promise<Map<number, number>> {
   const w = where(anio, f);
