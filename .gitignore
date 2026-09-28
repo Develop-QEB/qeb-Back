@@ -49,6 +49,3 @@ scripts/grupo_masivo.cjs
 # Variables de entorno por ambiente (nunca subir: .env.dev, .env.main, etc.)
 .env.*
 !.env.example
-
-# bi-back (componente aparte en DO): su lockfile SI se versiona (npm ci en App Platform)
-!bi-back/package-lock.json

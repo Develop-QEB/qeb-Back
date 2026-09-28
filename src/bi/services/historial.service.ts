@@ -1,6 +1,6 @@
-import { query } from '../db.js';
-import { normalizaAsesor } from '../lib/asesores.js';
-import { normalizaPlaza } from '../lib/plazas.js';
+import { query } from '../db';
+import { normalizaAsesor } from '../lib/asesores';
+import { normalizaPlaza } from '../lib/plazas';
 import type {
   CategoriaAccion,
   ConteoNombre,
@@ -10,7 +10,7 @@ import type {
   Impacto,
   PuntoActividad,
   ResumenHistorial,
-} from '../types.js';
+} from '../types';
 
 /**
  * Lee y normaliza la tabla `historial` (historial de acciones) — SOLO SELECT.

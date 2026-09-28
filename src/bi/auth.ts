@@ -1,13 +1,17 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { env } from './env.js';
-import { porCorreoConHash, type Permisos } from './services/usuarios.service.js';
+import { getBiConfig } from './config';
+import { porCorreoConHash, type Permisos } from './services/usuarios.service';
 
 /**
  * Login contra los usuarios EXCLUSIVOS de QEBI (tabla `qebi_usuario` en Hostinger,
- * separada de QEB): correo + bcrypt. bi-back firma su propio JWT (HS256) con los
+ * separada de QEB): correo + bcrypt. El BI firma su propio JWT (HS256) con los
  * permisos por pestaña, para proteger sus endpoints y que el front oculte tabs.
+ *
+ * Usa BI_JWT_SECRET (nunca el JWT_SECRET de qeb-Back) y marca sus tokens con
+ * audience/issuer propios: un token de QEB no sirve aquí aunque se parezca.
  */
+const JWT_OPTS = { audience: 'qebi', issuer: 'qebi-bi' } as const;
 
 export interface Payload {
   userId: number;
@@ -36,10 +40,10 @@ export async function login(correo: string, password: string): Promise<{ token: 
     esAdmin: u.esAdmin,
     permisos: u.permisos,
   };
-  const token = jwt.sign(payload, env.jwtSecret, { expiresIn: EXPIRY });
+  const token = jwt.sign(payload, getBiConfig().jwtSecret, { expiresIn: EXPIRY, algorithm: 'HS256', ...JWT_OPTS });
   return { token, user: payload };
 }
 
 export function verificarToken(token: string): Payload {
-  return jwt.verify(token, env.jwtSecret) as Payload;
+  return jwt.verify(token, getBiConfig().jwtSecret, { algorithms: ['HS256'], ...JWT_OPTS }) as Payload;
 }

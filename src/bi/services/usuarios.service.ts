@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { query, queryWrite } from '../db.js';
+import { query, queryWrite } from '../db';
 
 /**
  * Usuarios EXCLUSIVOS de QEBI, en la BD escribible de Hostinger (tabla

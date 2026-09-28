@@ -1,10 +1,10 @@
-import { query } from '../db.js';
-import { normalizaAsesor } from '../lib/asesores.js';
-import { normalizaPlaza } from '../lib/plazas.js';
+import { query } from '../db';
+import { normalizaAsesor } from '../lib/asesores';
+import { normalizaPlaza } from '../lib/plazas';
 import type {
   CampaniaDetalle, Ciclo, ConteoMonto, ConteoNombre, ConteoPeriodo, Dimension,
   Embudo, EtapaEmbudo, FiltrosReporte, OpcionesReporte, Periodo,
-} from '../types.js';
+} from '../types';
 
 const toISO = (v: unknown): string | null => (v == null ? null : v instanceof Date ? v.toISOString() : String(v));
 

@@ -1,15 +1,14 @@
-import http from 'node:http';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
-import { env } from './env.js';
-import { pool } from './db.js';
-import { login as authLogin, verificarToken, type Payload } from './auth.js';
-import { listar as listarUsuarios, crear as crearUsuario, actualizar as actualizarUsuario, setPassword as setPasswordUsuario, verificarPasswordActual, sembrarDesdeProd } from './services/usuarios.service.js';
-import { getAnios, getAsesores, getClientes, getResumenVentas } from './services/resumenVentas.service.js';
-import { getPresupuesto, upsertPresupuesto } from './services/presupuesto.service.js';
-import { getContexto, getEventos, getImpacto, getResumen } from './services/historial.service.js';
-import { dimensionValida, getCampanias, getCatorcenas, getCiclo, getDistribucion, getEmbudo, getOpciones, getTarifas, getVentasPeriodo, getVentaTotal } from './services/reportes.service.js';
-import type { FiltrosReporte } from './types.js';
+import { getBiConfig } from './config';
+import { getPool } from './db';
+import { login as authLogin, verificarToken, type Payload } from './auth';
+import { listar as listarUsuarios, crear as crearUsuario, actualizar as actualizarUsuario, setPassword as setPasswordUsuario, verificarPasswordActual, sembrarDesdeProd } from './services/usuarios.service';
+import { getAnios, getAsesores, getClientes, getResumenVentas } from './services/resumenVentas.service';
+import { getPresupuesto, upsertPresupuesto } from './services/presupuesto.service';
+import { getContexto, getEventos, getImpacto, getResumen } from './services/historial.service';
+import { dimensionValida, getCampanias, getCatorcenas, getCiclo, getDistribucion, getEmbudo, getOpciones, getTarifas, getVentasPeriodo, getVentaTotal } from './services/reportes.service';
+import type { FiltrosReporte } from './types';
 import {
   getObjetivos,
   limpiarAsesores as limpiarObjAsesores,
@@ -18,26 +17,61 @@ import {
   setAsesorBulk as setObjAsesorBulk,
   setMensual as setObjMensual,
   setMensualBulk as setObjMensualBulk,
-} from './services/objetivos.service.js';
-import { attachRealtime } from './realtime.js';
-import type { BaseDatos, CategoriaAccion, FiltrosHistorial, FiltrosResumen } from './types.js';
+} from './services/objetivos.service';
+import type { BaseDatos, CategoriaAccion, FiltrosHistorial, FiltrosResumen } from './types';
+
+/**
+ * API del BI (QEBI), montada bajo /bi dentro del proceso de qeb-Back (ver ./index).
+ * Este módulo solo se carga si BI_ENABLED=true y la config ya se validó. Tiene su propio
+ * CORS, body parser, 404 y manejo de errores: nada de esto toca las rutas de qeb-Back.
+ */
+
+/**
+ * Orígenes permitidos: la lista de BI_CORS_ORIGIN (para prod) + cualquier localhost/127.0.0.1
+ * en dev, sin importar el puerto, + el front en Vercel (bi-qeb.vercel.app) y el dominio qeb.mx.
+ * Sin Origin (curl/Postman/same-origin) se permite. Lo usan el CORS y el WebSocket.
+ */
+export function origenPermitido(origin: string | undefined): boolean {
+  if (!origin) return true;
+  if (getBiConfig().corsOrigin.includes(origin)) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  return /^https:\/\/([a-z0-9-]+\.)*(vercel\.app|qeb\.mx)$/i.test(origin);
+}
+
+/** Limita cuántas peticiones de un endpoint pesado corren a la vez (las demás esperan turno). */
+function limitar(max: number) {
+  let activas = 0;
+  const cola: (() => void)[] = [];
+  const liberar = () => {
+    activas--;
+    const siguiente = cola.shift();
+    if (siguiente) { activas++; siguiente(); }
+  };
+  return (_req: Request, res: Response, next: NextFunction) => {
+    const correr = () => {
+      let hecho = false;
+      const fin = () => { if (!hecho) { hecho = true; liberar(); } };
+      res.on('finish', fin);
+      res.on('close', fin);
+      next();
+    };
+    if (activas < max) { activas++; correr(); } else cola.push(correr);
+  };
+}
+// Las consultas de historial/impacto traen miles de filas: comparten memoria con qeb-Back.
+const pesado = limitar(2);
 
 const app = express();
-// CORS: la lista de BI_CORS_ORIGIN (para prod) + cualquier localhost/127.0.0.1 en dev,
-// sin importar el puerto. Así abrir el front por localhost o por 127.0.0.1 funciona igual.
+app.disable('x-powered-by');
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true); // curl/Postman/same-origin
-      if (env.corsOrigin.includes(origin)) return cb(null, true);
-      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
-      // El front vive en Vercel (bi-qeb.vercel.app) y en el dominio qeb.mx.
-      if (/^https:\/\/([a-z0-9-]+\.)*(vercel\.app|qeb\.mx)$/i.test(origin)) return cb(null, true);
+      if (origenPermitido(origin)) return cb(null, true);
       cb(new Error(`CORS: origen no permitido (${origin})`));
     },
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const BASES = new Set<BaseDatos>(['CIMU', 'Trade', 'UDC']);
 function parseBase(v: unknown): BaseDatos | null {
@@ -101,7 +135,7 @@ app.get('/', (_req, res) =>
 );
 
 app.get('/health', wrap(async (_req, res) => {
-  await pool.query('SELECT 1');
+  await getPool().query('SELECT 1');
   res.json({ ok: true, ts: new Date().toISOString() });
 }));
 
@@ -199,7 +233,8 @@ const SEED_MANUALES_QEBI: { nombre: string; correo: string }[] = [
 // Apagado salvo que BI_SEED_KEY esté definida (en DO no se define). La llave ya no
 // vive en el código: la anterior quedó en el historial y por eso deja de servir.
 app.post('/usuarios/_seed', wrap(async (req, res) => {
-  if (!env.seedKey || req.query.k !== env.seedKey) { res.status(404).end(); return; }
+  const { seedKey } = getBiConfig();
+  if (!seedKey || req.query.k !== seedKey) { res.status(404).end(); return; }
   const extra = Array.isArray(req.body?.correosExactos) ? req.body.correosExactos.map(String) : [];
   const adminCorreos = [...SEED_ADMINS_QEBI, ...(Array.isArray(req.body?.adminCorreos) ? req.body.adminCorreos.map(String) : [])];
   const sembrados = await sembrarDesdeProd({
@@ -240,11 +275,11 @@ app.get('/anios', wrap(async (_req, res) => {
 }));
 
 // --- Historial de acciones ---
-app.get('/historial/eventos', wrap(async (req, res) => {
+app.get('/historial/eventos', pesado, wrap(async (req, res) => {
   res.json(await getEventos(parseFiltrosHistorial(req)));
 }));
 
-app.get('/historial/resumen', wrap(async (req, res) => {
+app.get('/historial/resumen', pesado, wrap(async (req, res) => {
   const f = parseFiltrosHistorial(req);
   res.json(await getResumen({ desde: f.desde, hasta: f.hasta }));
 }));
@@ -320,7 +355,7 @@ app.get('/reportes/campanias', wrap(async (req, res) => {
   res.json(await getCampanias(Number(req.query.limit) || 120, parseFiltrosReporte(req)));
 }));
 
-app.get('/reportes/impacto', wrap(async (req, res) => {
+app.get('/reportes/impacto', pesado, wrap(async (req, res) => {
   const anio = Number(req.query.anio) || null;
   const desde = typeof req.query.desde === 'string' ? req.query.desde : null;
   const hasta = typeof req.query.hasta === 'string' ? req.query.hasta : null;
@@ -393,16 +428,19 @@ app.put('/presupuesto', wrap(async (req, res) => {
   res.json(fila);
 }));
 
-// 404 + manejo de errores
+// 404 + manejo de errores (solo para /bi; qeb-Back conserva los suyos)
 app.use((_req, res) => res.status(404).json({ error: 'not found' }));
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const msg = err instanceof Error ? err.message : 'error';
-  console.error('❌', msg);
+  console.error('[BI] ❌', msg);
   res.status(500).json({ error: msg });
 });
 
-const server = http.createServer(app);
-attachRealtime(server);
-server.listen(env.port, () => {
-  console.log(`🚀 bi-back en http://localhost:${env.port}  (CORS: ${env.corsOrigin.join(', ')})`);
-});
+/** App raíz: todo el BI cuelga de /bi (bi-front usa VITE_API_URL=https://<host>/bi). */
+export function crearBiApp(): express.Express {
+  const raiz = express();
+  raiz.disable('x-powered-by');
+  raiz.use('/bi', app);
+  raiz.use((_req, res) => res.status(404).json({ error: 'not found' }));
+  return raiz;
+}

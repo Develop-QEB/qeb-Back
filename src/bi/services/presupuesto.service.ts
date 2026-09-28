@@ -1,13 +1,14 @@
-import { pool, query } from '../db.js';
-import { env } from '../env.js';
-import type { BaseDatos, PresupuestoMes } from '../types.js';
+import { getPool, query } from '../db';
+import { getBiConfig } from '../config';
+import type { BaseDatos, PresupuestoMes } from '../types';
 
 /**
  * Tabla NUEVA y aislada `bi_presupuesto`: la "meta" mensual que pone IMU (editable
  * con el lapicito del front). Es la ÚNICA escritura del back; no toca datos productivos.
  * base='ALL' = meta global del mes (sin desglose por base).
  */
-const TABLA = `\`${env.writeDb}\`.\`bi_presupuesto\``;
+/** Se calcula al usarse: la config del BI solo existe si el BI está montado. */
+const tabla = () => `\`${getBiConfig().writeDb}\`.\`bi_presupuesto\``;
 const BASES_VALIDAS = new Set(['ALL', 'CIMU', 'TRADE', 'SAP']);
 
 /** null (todas) -> 'ALL'; 'Trade' -> 'TRADE'; etc. */
@@ -24,9 +25,9 @@ function dbToBase(b: string): BaseDatos | null {
 let asegurada = false;
 /** Crea la tabla SOLO si BI_ALLOW_CREATE=true. Si no, no toca la base. */
 export async function ensureTable(): Promise<void> {
-  if (asegurada || !env.allowCreate) return;
-  await pool.query(
-    `CREATE TABLE IF NOT EXISTS ${TABLA} (
+  if (asegurada || !getBiConfig().allowCreate) return;
+  await getPool().query(
+    `CREATE TABLE IF NOT EXISTS ${tabla()} (
       anio INT NOT NULL,
       mes TINYINT NOT NULL,
       base VARCHAR(10) NOT NULL DEFAULT 'ALL',
@@ -45,7 +46,7 @@ export async function getPresupuesto(anio: number, base: BaseDatos | null): Prom
   let rows: { mes: number; base: string; monto: string }[] = [];
   try {
     rows = await query<{ mes: number; base: string; monto: string }>(
-      `SELECT mes, base, monto FROM ${TABLA} WHERE anio = :anio AND base IN ('ALL', :bdb)`,
+      `SELECT mes, base, monto FROM ${tabla()} WHERE anio = :anio AND base IN ('ALL', :bdb)`,
       { anio, bdb }
     );
   } catch (e: any) {
@@ -74,7 +75,7 @@ export async function upsertPresupuesto(
   base: BaseDatos | null,
   monto: number
 ): Promise<PresupuestoMes> {
-  if (!env.allowCreate) {
+  if (!getBiConfig().allowCreate) {
     // Sin permiso de creación no podemos garantizar la tabla; evitamos un error críptico.
     throw new Error(
       'Edición deshabilitada: pon BI_ALLOW_CREATE=true (crea la tabla aislada bi_presupuesto) o corre sql/bi_presupuesto.sql'
@@ -86,8 +87,8 @@ export async function upsertPresupuesto(
   if (!Number.isFinite(monto) || monto < 0) throw new Error('monto inválido');
   const bdb = baseToDb(base);
   if (!BASES_VALIDAS.has(bdb)) throw new Error('base inválida');
-  await pool.query(
-    `INSERT INTO ${TABLA} (anio, mes, base, monto) VALUES (:anio, :mes, :bdb, :monto)
+  await getPool().query(
+    `INSERT INTO ${tabla()} (anio, mes, base, monto) VALUES (:anio, :mes, :bdb, :monto)
      ON DUPLICATE KEY UPDATE monto = VALUES(monto)`,
     { anio, mes, bdb, monto }
   );

@@ -1,7 +1,7 @@
-import { query } from '../db.js';
-import { env } from '../env.js';
-import { mapaPresupuesto } from './presupuesto.service.js';
-import { MESES_ES, type FiltrosResumen, type Kpi, type ResumenVentas } from '../types.js';
+import { query } from '../db';
+import { getBiConfig } from '../config';
+import { mapaPresupuesto } from './presupuesto.service';
+import { MESES_ES, type FiltrosResumen, type Kpi, type ResumenVentas } from '../types';
 
 /**
  * Agregaciones del Resumen de Ventas desde la vista QEB `V_APS_Globales` (SOLO SELECT).
@@ -54,7 +54,7 @@ function where(anio: number, f: FiltrosResumen, opts: { conMes?: boolean } = {})
   // "Cliente" en el negocio = MARCA (APPLE, AEROMEXICO, SEARS…), no la razón social.
   if (f.cliente) { cond.push('`U_Marca` = :cliente'); params.cliente = f.cliente; }
   if (opts.conMes && f.mes) { cond.push('`Mes` = :mes'); params.mes = f.mes; }
-  if (env.ventaDef === 'VENTA') cond.push("`U_dscTAsig` = 'Venta'");
+  if (getBiConfig().ventaDef === 'VENTA') cond.push("`U_dscTAsig` = 'Venta'");
   return { sql: cond.join(' AND '), params };
 }
 

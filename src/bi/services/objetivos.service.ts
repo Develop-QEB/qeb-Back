@@ -1,4 +1,4 @@
-import { poolWrite, queryWrite } from '../db.js';
+import { getPoolWrite, queryWrite } from '../db';
 
 /**
  * Objetivos/metas del equipo, guardados en la BD propia ESCRIBIBLE (Hostinger).
@@ -14,6 +14,7 @@ export interface ObjetivosData {
 
 let listo = false;
 async function ensureTablas(): Promise<void> {
+  const poolWrite = getPoolWrite();
   if (listo || !poolWrite) return;
   await poolWrite.query(`CREATE TABLE IF NOT EXISTS objetivo_mensual (
     anio INT NOT NULL,
