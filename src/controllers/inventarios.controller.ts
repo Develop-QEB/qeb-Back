@@ -3,7 +3,15 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
 import { cache, CACHE_TTL } from '../utils/cache';
-import { ESTATUS_QUE_BLOQUEAN, ESTATUS_FIRME } from '../services/inventario-bloqueo.service';
+import {
+  ESTATUS_QUE_BLOQUEAN,
+  ESTATUS_FIRME,
+  ESTATUS_INVENTARIO_BLOQUEO,
+  ESTATUS_INVENTARIO_NO_UTILIZABLE,
+  TipoBloqueoInventario,
+  esInventarioBloqueado,
+  esInventarioNoUtilizable,
+} from '../services/inventario-bloqueo.service';
 import { logHistorial } from '../utils/historial';
 import {
   CatorcenaRef,
@@ -201,7 +209,7 @@ export class InventariosController {
       const dataWithRealStatus = inventarios.map(inv => {
         const reservaEstatus = reservedMap[inv.id];
         let estatus_real = inv.estatus || 'Activo';
-        if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento' && inv.estatus !== 'Inactivo') {
+        if (!esInventarioNoUtilizable(inv.estatus) && inv.estatus !== 'Mantenimiento') {
           if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
           else if (reservaEstatus) estatus_real = 'Reservado';
           else estatus_real = 'Activo';
@@ -246,9 +254,9 @@ export class InventariosController {
       if (estatus) {
         where.estatus = estatus;
       } else {
-        // Excluir Inactivos (fantasmas) y Bloqueados del mapa por default.
+        // Excluir Inactivos (fantasmas) y Bloqueados/Inhabilitados del mapa por default.
         // Si quieren verlos hay que filtrar explícitamente por ?estatus=Inactivo.
-        where.estatus = { notIn: ['Bloqueado', 'Inactivo'] };
+        where.estatus = { notIn: [...ESTATUS_INVENTARIO_NO_UTILIZABLE] };
       }
 
       if (plaza) {
@@ -385,7 +393,8 @@ export class InventariosController {
         prisma.inventarios.count({ where: { ...where, estatus: 'Ocupado' } }),
         prisma.inventarios.count({ where: { ...where, estatus: 'Mantenimiento' } }),
         prisma.inventarios.count({ where: { ...where, estatus: 'Reservado' } }),
-        prisma.inventarios.count({ where: { ...where, estatus: 'Bloqueado' } }),
+        // Bloqueado + Inhabilitado: ambos cuentan como "bloqueados" en el KPI.
+        prisma.inventarios.count({ where: { ...where, estatus: { in: [...ESTATUS_INVENTARIO_BLOQUEO] } } }),
         prisma.inventarios.groupBy({
           by: ['mueble'],
           where,
@@ -520,13 +529,14 @@ export class InventariosController {
       } = req.query;
 
       // Build where clause for inventarios
-      // Excluye Bloqueado (mandado a reparar) e Inactivo (fantasmas archivados).
-      // Si en el futuro se agrega otro estatus para "no disponible", también va aquí
-      // y en `getEspaciosBloqueados` (inventario-bloqueo.service.ts) — ver comentario ahí.
+      // Excluye Bloqueado/Inhabilitado (bloqueo administrativo) e Inactivo (fantasmas
+      // archivados). La lista vive en ESTATUS_INVENTARIO_NO_UTILIZABLE
+      // (inventario-bloqueo.service.ts): un estatus nuevo de "no disponible" se
+      // agrega allá y aplica aquí solo.
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
-        estatus: { notIn: ['Bloqueado', 'Inactivo'] },
+        estatus: { notIn: [...ESTATUS_INVENTARIO_NO_UTILIZABLE] },
       };
 
       // Filter by city (municipio) - puede ser múltiples ciudades separadas por coma
@@ -1990,15 +2000,14 @@ export class InventariosController {
           // In overwrite list - check if occupied
           const reservaEstatus = reservedMap[existingItem.id];
           let estatus_real = existingItem.estatus || 'Disponible';
-          if (existingItem.estatus !== 'Bloqueado' && existingItem.estatus !== 'Mantenimiento' && existingItem.estatus !== 'Inactivo') {
+          if (!esInventarioNoUtilizable(existingItem.estatus) && existingItem.estatus !== 'Mantenimiento') {
             if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
             else if (reservaEstatus) estatus_real = 'Reservado';
             else estatus_real = 'Disponible';
           }
 
           const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
-            existingItem.estatus === 'Bloqueado' || existingItem.estatus === 'Mantenimiento' ||
-            existingItem.estatus === 'Inactivo';
+            esInventarioNoUtilizable(existingItem.estatus) || existingItem.estatus === 'Mantenimiento';
 
           if (isOcupado) {
             duplicados_ocupados++;
@@ -2195,15 +2204,14 @@ export class InventariosController {
           // Compute estatus_real
           const reservaEstatus = reservedMap[inv.id];
           let estatus_real = inv.estatus || 'Disponible';
-          if (inv.estatus !== 'Bloqueado' && inv.estatus !== 'Mantenimiento' && inv.estatus !== 'Inactivo') {
+          if (!esInventarioNoUtilizable(inv.estatus) && inv.estatus !== 'Mantenimiento') {
             if (reservaEstatus === 'Vendido') estatus_real = 'Ocupado';
             else if (reservaEstatus) estatus_real = 'Reservado';
             else estatus_real = 'Disponible';
           }
 
           const isOcupado = estatus_real === 'Ocupado' || estatus_real === 'Reservado' ||
-            inv.estatus === 'Bloqueado' || inv.estatus === 'Mantenimiento' ||
-            inv.estatus === 'Inactivo';
+            esInventarioNoUtilizable(inv.estatus) || inv.estatus === 'Mantenimiento';
 
           if (isOcupado) {
             ocupados.push({ codigo_unico: inv.codigo_unico, estatus: inv.estatus, estatus_real, id: inv.id, campana: campanaMap[inv.id] || undefined });
@@ -2293,12 +2301,36 @@ export class InventariosController {
         res.status(404).json({ success: false, error: 'Inventario no encontrado' });
         return;
       }
-      const wasBloqueado = inventario.estatus === 'Bloqueado';
-      const newEstatus = wasBloqueado ? 'Disponible' : 'Bloqueado';
-      const userName = req.user?.nombre || req.user?.email || 'Sistema';
-      const accion = newEstatus === 'Bloqueado' ? 'Bloqueado' : 'Desbloqueado';
+      // Clasificación del bloqueo: 'Bloqueado' (default, compat con clientes que
+      // no mandan body) o 'Inhabilitado'. Ambas se comportan IGUAL: liberan
+      // reservas y sacan la pieza de disponibles. Solo cambia la etiqueta.
+      const tipoRaw = req.body?.tipo;
+      if (tipoRaw !== undefined && !(ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(tipoRaw)) {
+        res.status(400).json({
+          success: false,
+          error: `Tipo de bloqueo inválido. Opciones: ${ESTATUS_INVENTARIO_BLOQUEO.join(', ')}`,
+        });
+        return;
+      }
+      const tipoBloqueo: TipoBloqueoInventario = tipoRaw ?? 'Bloqueado';
 
-      // Cuando se PASA a Bloqueado, soft-delete las reservas activas del
+      const wasBloqueado = esInventarioBloqueado(inventario.estatus);
+      // Con `tipo` explícito la intención es BLOQUEAR con esa clasificación, nunca
+      // desbloquear: si la pieza ya estaba bloqueada solo se reclasifica. Así los
+      // flujos masivos no "desbloquean" por accidente una pieza que ya lo estaba.
+      // Sin `tipo` se conserva el toggle de siempre (el desbloqueo no manda body).
+      const desbloquear = wasBloqueado && tipoRaw === undefined;
+      const newEstatus = desbloquear ? 'Disponible' : tipoBloqueo;
+      const userName = req.user?.nombre || req.user?.email || 'Sistema';
+      const accion = desbloquear
+        ? (inventario.estatus === 'Inhabilitado' ? 'Habilitado' : 'Desbloqueado')
+        : tipoBloqueo;
+      const verbo = accion === 'Bloqueado' ? 'bloqueó'
+        : accion === 'Inhabilitado' ? 'inhabilitó'
+        : accion === 'Habilitado' ? 'habilitó'
+        : 'desbloqueó';
+
+      // Cuando se PASA a Bloqueado/Inhabilitado, soft-delete las reservas activas del
       // inventario (`deleted_at = NOW()`). El estatus de la reserva se
       // preserva para auditoría — solo el deleted_at las saca del flujo.
       // Esto "desocupa" el espacio: la campaña que tenía la cara la pierde
@@ -2314,7 +2346,7 @@ export class InventariosController {
       // de verdad que usa `inventario-bloqueo.service.ts`.
       let liberadas = 0;
       await prisma.$transaction(async (tx) => {
-        if (!wasBloqueado) {
+        if (!desbloquear) {
           // Resolver inventario polimórfico: r.inventario_id puede apuntar a
           // inventarios.id directamente o a espacio_inventario.id (que a su
           // vez apunta a inventarios.id). Soft-delete ambos casos.
@@ -2344,11 +2376,15 @@ export class InventariosController {
             accion,
             fecha_hora: new Date(),
             detalles: liberadas > 0
-              ? `${userName} bloqueó el inventario ${inventario.codigo_unico || id} — ${liberadas} reservas liberadas`
-              : `${userName} ${accion === 'Bloqueado' ? 'bloqueó' : 'desbloqueó'} el inventario ${inventario.codigo_unico || id}`,
+              ? `${userName} ${verbo} el inventario ${inventario.codigo_unico || id} — ${liberadas} reservas liberadas`
+              : `${userName} ${verbo} el inventario ${inventario.codigo_unico || id}`,
           },
         });
       });
+
+      // El catálogo de estatus (filtro de la tabla) se cachea 1h: se invalida para
+      // que un estatus que aparece por primera vez salga en el filtro de inmediato.
+      cache.delete('inventarios:estatus');
 
       const updated = await prisma.inventarios.findUnique({ where: { id } });
       res.json({ success: true, data: updated, reservas_liberadas: liberadas });
