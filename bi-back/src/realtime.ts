@@ -10,20 +10,37 @@ import { getEventosDesdeId, getMaxId } from './services/historial.service.js';
  * último visto y empujamos SOLO las nuevas a los clientes por WebSocket.
  */
 const POLL_MS = 5000;
+/** Ping periódico: mantiene viva la conexión a través del proxy de App Platform y limpia clientes muertos. */
+const PING_MS = 30000;
 
 export function attachRealtime(server: Server): void {
   const wss = new WebSocketServer({ server, path: '/ws/historial' });
   let lastId = 0;
   let iniciado = false;
+  const vivos = new WeakMap<WebSocket, boolean>();
 
   const broadcast = (msg: unknown) => {
     const data = JSON.stringify(msg);
     for (const ws of wss.clients) if (ws.readyState === WebSocket.OPEN) ws.send(data);
   };
 
+  // Sin listener de 'error', un frame inválido lanzaría una excepción no capturada y tumbaría el proceso.
+  wss.on('error', (e) => console.error('[BI-WS] error del servidor:', e.message));
+
   wss.on('connection', (ws) => {
+    vivos.set(ws, true);
+    ws.on('pong', () => vivos.set(ws, true));
+    ws.on('error', (e) => console.error('[BI-WS] error de cliente:', e.message));
     ws.send(JSON.stringify({ tipo: 'conectado', ts: new Date().toISOString() }));
   });
+
+  setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!vivos.get(ws)) { ws.terminate(); continue; }
+      vivos.set(ws, false);
+      ws.ping();
+    }
+  }, PING_MS);
 
   const tick = async () => {
     try {

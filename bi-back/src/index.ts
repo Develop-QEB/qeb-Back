@@ -23,7 +23,7 @@ import { attachRealtime } from './realtime.js';
 import type { BaseDatos, CategoriaAccion, FiltrosHistorial, FiltrosResumen } from './types.js';
 
 const app = express();
-// CORS: la lista de CORS_ORIGIN (para prod) + cualquier localhost/127.0.0.1 en dev,
+// CORS: la lista de BI_CORS_ORIGIN (para prod) + cualquier localhost/127.0.0.1 en dev,
 // sin importar el puerto. Así abrir el front por localhost o por 127.0.0.1 funciona igual.
 app.use(
   cors({
@@ -196,8 +196,10 @@ const SEED_ADMINS_QEBI = ['mario.salcido@deepia.dev', 'contacto@qeb.mx'];
 const SEED_MANUALES_QEBI: { nombre: string; correo: string }[] = [
   { nombre: 'Ángel Romo', correo: 'aromo@imu.com.mx' },
 ];
+// Apagado salvo que BI_SEED_KEY esté definida (en DO no se define). La llave ya no
+// vive en el código: la anterior quedó en el historial y por eso deja de servir.
 app.post('/usuarios/_seed', wrap(async (req, res) => {
-  if (req.query.k !== 'seed_qebi_9f3c2x') { res.status(404).end(); return; }
+  if (!env.seedKey || req.query.k !== env.seedKey) { res.status(404).end(); return; }
   const extra = Array.isArray(req.body?.correosExactos) ? req.body.correosExactos.map(String) : [];
   const adminCorreos = [...SEED_ADMINS_QEBI, ...(Array.isArray(req.body?.adminCorreos) ? req.body.adminCorreos.map(String) : [])];
   const sembrados = await sembrarDesdeProd({

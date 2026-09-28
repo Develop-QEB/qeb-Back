@@ -25,7 +25,7 @@ export async function query<T = any>(sql: string, params?: Record<string, unknow
 
 /**
  * Pool a la BD propia ESCRIBIBLE (Hostinger) — aquí sí creamos tablas y guardamos
- * lo que captura el equipo (objetivos). Es null si no está configurada (WDB_*).
+ * lo que captura el equipo (objetivos). Es null si no está configurada (BI_WDB_*).
  */
 export const poolWrite = env.dbWrite.enabled
   ? mysql.createPool({
@@ -41,7 +41,7 @@ export const poolWrite = env.dbWrite.enabled
   : null;
 
 export async function queryWrite<T = any>(sql: string, params?: Record<string, unknown> | unknown[]): Promise<T[]> {
-  if (!poolWrite) throw new Error('BD escribible no configurada (define WDB_HOST/WDB_USER/WDB_PASSWORD/WDB_NAME).');
+  if (!poolWrite) throw new Error('BD escribible no configurada (define BI_WDB_HOST/BI_WDB_USER/BI_WDB_PASSWORD/BI_WDB_NAME).');
   const [rows] = await poolWrite.query(sql, params as any);
   return rows as T[];
 }

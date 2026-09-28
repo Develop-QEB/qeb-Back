@@ -5,7 +5,7 @@ import { MESES_ES, type FiltrosResumen, type Kpi, type ResumenVentas } from '../
 
 /**
  * Agregaciones del Resumen de Ventas desde la vista QEB `V_APS_Globales` (SOLO SELECT).
- * "aps" = venta real (Monto Total). Definición de venta configurable con VENTA_DEF.
+ * "aps" = venta real (Monto Total). Definición de venta configurable con BI_VENTA_DEF.
  *
  * SUPUESTOS (ajustables contra el Power BI de IMU):
  *  - Mes/Catorcena: se toman de la columna `Mes` / `Periodo` (mes en que corre el periodo).
