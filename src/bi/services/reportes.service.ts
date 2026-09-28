@@ -1,4 +1,5 @@
 import { query } from '../db';
+import { getBiConfig } from '../config';
 import { normalizaAsesor } from '../lib/asesores';
 import { normalizaPlaza } from '../lib/plazas';
 import type {
@@ -90,6 +91,10 @@ async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Re
     digital.forEach((v, i) => { p[`via${i}`] = v; });
     cond.push(`\`Tipo Digital\` COLLATE utf8mb4_unicode_ci IN (${keys.join(',')})`);
   }
+  // Definición de "venta" igual que la pestaña BI (resumenVentas): con BI_VENTA_DEF=VENTA
+  // solo cuentan las filas confirmadas (U_dscTAsig='Venta'), excluyendo "Pendiente".
+  // Así el Monto de Embudo/Variaciones cuadra con BI en vez de sumar todo el pipeline.
+  if (getBiConfig().ventaDef === 'VENTA') cond.push("`U_dscTAsig` COLLATE utf8mb4_unicode_ci = 'Venta'");
   return { where: cond.join(' AND '), params: p };
 }
 
