@@ -258,6 +258,9 @@ export interface FiltrosReporte {
   meses?: number[];        // 1–12
   catorcenas?: number[];   // número de catorcena
   semanas?: number[];      // semana ISO
+  // Filtros extra (Embudo, para igualar Variaciones): base y tipo de artículo.
+  bases?: string[];        // CIMU/TRADE/UDC (sap_database → columna BASE). Vacío = todas.
+  tipos?: string[];        // Tipo de artículo RT/BF/IN/IM. Vacío = todos (excluir IM = sin impresiones).
 }
 
 /** Opciones para los dropdowns de la barra de filtros. */

@@ -59,6 +59,20 @@ async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Re
       cond.push(`\`U_Asesor\` IN (${keys.join(',')})`);
     }
   }
+  // BASE (CIMU/TRADE/UDC).
+  const bases = (f.bases ?? []).map((b) => String(b).trim().toUpperCase()).filter(Boolean);
+  if (bases.length) {
+    const keys = bases.map((_, i) => `:base${i}`);
+    bases.forEach((b, i) => { p[`base${i}`] = b; });
+    cond.push(`UPPER(\`BASE\`) IN (${keys.join(',')})`);
+  }
+  // Tipo de artículo (columna `Tipo`: RT/BF/IN/IM). Excluir IM = sin impresiones.
+  const tipos = (f.tipos ?? []).map((t) => String(t).trim().toUpperCase()).filter(Boolean);
+  if (tipos.length) {
+    const keys = tipos.map((_, i) => `:tipo${i}`);
+    tipos.forEach((t, i) => { p[`tipo${i}`] = t; });
+    cond.push(`\`Tipo\` COLLATE utf8mb4_unicode_ci IN (${keys.join(',')})`);
+  }
   return { where: cond.join(' AND '), params: p };
 }
 
