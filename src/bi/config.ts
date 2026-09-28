@@ -72,6 +72,10 @@ export function loadBiConfig(): BiConfigResult {
     jwtSecret,
     seedKey: opt('BI_SEED_KEY') ?? '',
   };
+  const puertoValido = (p: number) => Number.isInteger(p) && p > 0 && p < 65536;
+  if (!puertoValido(cfg.db.port)) missing.push('BI_DB_PORT (número inválido)');
+  if (cfg.dbWrite.enabled && !puertoValido(cfg.dbWrite.port)) missing.push('BI_WDB_PORT (número inválido)');
+
   return missing.length ? { ok: false, missing } : { ok: true, cfg };
 }
 

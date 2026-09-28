@@ -18,7 +18,11 @@ let origenPermitido: ((origin: string | undefined) => boolean) | null = null;
 const esRutaBi = (url = '') => url === '/bi' || url.startsWith('/bi/') || url.startsWith('/bi?');
 
 export function withBi(app: RequestListener): RequestListener {
-  if (process.env.BI_ENABLED !== 'true') return app;
+  if (process.env.BI_ENABLED !== 'true') {
+    // Sin la variable (p. ej. producción) no se imprime nada; con un valor mal escrito, sí.
+    if (process.env.BI_ENABLED !== undefined) console.warn(`[BI] BI_ENABLED=${JSON.stringify(process.env.BI_ENABLED)} (no es 'true'): /bi apagado`);
+    return app;
+  }
   try {
     const { loadBiConfig, setBiConfig } = require('./config') as typeof import('./config');
     const r = loadBiConfig();

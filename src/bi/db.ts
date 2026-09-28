@@ -10,8 +10,31 @@ import { getBiConfig } from './config';
  * emitiría un 'error' sin listener y el uncaughtException de server.ts tumbaría todo.
  */
 
-/** Tope de espera por consulta (ms): evita que una consulta colgada retenga el proceso. */
+/** Tope de espera por consulta (ms). Al vencer se descarta la conexión (MySQL puede seguir la consulta). */
 const QUERY_TIMEOUT_MS = 120000;
+
+type Params = Record<string, unknown> | unknown[];
+
+/**
+ * Ejecuta SIEMPRE sobre una conexión explícita del pool. Con pool.query(), mysql2 relanza
+ * dentro de un callback los errores síncronos de format() (p. ej. un parámetro que es un
+ * objeto con toString inválido) y eso sería un uncaughtException que tumba qeb-Back.
+ * PoolConnection.query() los convierte en un rechazo normal de la promesa.
+ */
+async function consultar<T>(p: mysql.Pool, sql: string, params?: Params): Promise<T[]> {
+  const c = await p.getConnection();
+  let descartar = false;
+  try {
+    const [rows] = await c.query({ sql, timeout: QUERY_TIMEOUT_MS }, params as any);
+    return rows as T[];
+  } catch (e) {
+    descartar = (e as { code?: string }).code === 'PROTOCOL_SEQUENCE_TIMEOUT';
+    throw e;
+  } finally {
+    if (descartar) c.destroy();
+    else c.release();
+  }
+}
 
 function conListeners(p: mysql.Pool, nombre: string): mysql.Pool {
   p.pool.on('connection', (c) => {
@@ -52,9 +75,8 @@ export function getPool(): mysql.Pool {
   return pool;
 }
 
-export async function query<T = any>(sql: string, params?: Record<string, unknown> | unknown[]): Promise<T[]> {
-  const [rows] = await getPool().query({ sql, timeout: QUERY_TIMEOUT_MS }, params as any);
-  return rows as T[];
+export async function query<T = any>(sql: string, params?: Params): Promise<T[]> {
+  return consultar<T>(getPool(), sql, params);
 }
 
 let poolWrite: mysql.Pool | null = null;
@@ -88,9 +110,8 @@ export function getPoolWrite(): mysql.Pool | null {
   return poolWrite;
 }
 
-export async function queryWrite<T = any>(sql: string, params?: Record<string, unknown> | unknown[]): Promise<T[]> {
+export async function queryWrite<T = any>(sql: string, params?: Params): Promise<T[]> {
   const pw = getPoolWrite();
   if (!pw) throw new Error('BD escribible no configurada (define BI_WDB_HOST/BI_WDB_USER/BI_WDB_PASSWORD/BI_WDB_NAME).');
-  const [rows] = await pw.query({ sql, timeout: QUERY_TIMEOUT_MS }, params as any);
-  return rows as T[];
+  return consultar<T>(pw, sql, params);
 }

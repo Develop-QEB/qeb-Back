@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
 import { getBiConfig } from './config';
-import { getPool } from './db';
+import { query } from './db';
 import { login as authLogin, verificarToken, type Payload } from './auth';
 import { listar as listarUsuarios, crear as crearUsuario, actualizar as actualizarUsuario, setPassword as setPasswordUsuario, verificarPasswordActual, sembrarDesdeProd } from './services/usuarios.service';
 import { getAnios, getAsesores, getClientes, getResumenVentas } from './services/resumenVentas.service';
@@ -38,26 +38,74 @@ export function origenPermitido(origin: string | undefined): boolean {
   return /^https:\/\/([a-z0-9-]+\.)*(vercel\.app|qeb\.mx)$/i.test(origin);
 }
 
-/** Limita cuántas peticiones de un endpoint pesado corren a la vez (las demás esperan turno). */
-function limitar(max: number) {
+/**
+ * Limita cuántas peticiones de un endpoint pesado corren a la vez; las demás esperan turno
+ * en una cola con tope (si se llena: 503). Si el cliente se va mientras espera, sale de la
+ * cola sin ocupar lugar, así nunca se "pierden" lugares.
+ */
+function limitar(max: number, maxCola = 20) {
   let activas = 0;
-  const cola: (() => void)[] = [];
-  const liberar = () => {
-    activas--;
-    const siguiente = cola.shift();
-    if (siguiente) { activas++; siguiente(); }
+  const cola: { res: Response; correr: () => void }[] = [];
+  const siguiente = () => {
+    while (activas < max && cola.length) {
+      const t = cola.shift()!;
+      if (t.res.destroyed || t.res.writableEnded) continue; // el cliente ya se fue
+      t.correr();
+    }
   };
   return (_req: Request, res: Response, next: NextFunction) => {
     const correr = () => {
+      activas++;
       let hecho = false;
-      const fin = () => { if (!hecho) { hecho = true; liberar(); } };
-      res.on('finish', fin);
-      res.on('close', fin);
+      const fin = () => {
+        if (hecho) return;
+        hecho = true;
+        activas--;
+        siguiente();
+      };
+      res.once('finish', fin);
+      res.once('close', fin);
       next();
     };
-    if (activas < max) { activas++; correr(); } else cola.push(correr);
+    if (activas < max) return correr();
+    if (cola.length >= maxCola) {
+      res.status(503).json({ error: 'Servidor ocupado, intenta de nuevo en un momento' });
+      return;
+    }
+    const turno = { res, correr };
+    cola.push(turno);
+    res.once('close', () => {
+      const i = cola.indexOf(turno);
+      if (i >= 0) cola.splice(i, 1);
+    });
   };
 }
+
+/**
+ * Tope de intentos fallidos de login (en memoria): por correo y por IP, en una ventana.
+ * bcrypt corre en el mismo hilo que qeb-Back, así que no conviene dejarlo abierto a fuerza bruta.
+ */
+const LOGIN_VENTANA_MS = 15 * 60 * 1000;
+const LOGIN_MAX_POR_CORREO = 10;
+const LOGIN_MAX_POR_IP = 30;
+const fallosLogin = new Map<string, number[]>();
+function recientes(clave: string, ahora: number): number[] {
+  const v = (fallosLogin.get(clave) ?? []).filter((t) => ahora - t < LOGIN_VENTANA_MS);
+  if (v.length) fallosLogin.set(clave, v);
+  else fallosLogin.delete(clave);
+  return v;
+}
+function ipCliente(req: Request): string {
+  // Detrás del proxy de App Platform la IP real viene en X-Forwarded-For (primer valor).
+  const xff = req.headers['x-forwarded-for'];
+  const primera = (Array.isArray(xff) ? xff[0] : xff ?? '').split(',')[0].trim();
+  return primera || req.socket.remoteAddress || '?';
+}
+const barrido = setInterval(() => {
+  const ahora = Date.now();
+  for (const clave of [...fallosLogin.keys()]) recientes(clave, ahora);
+}, LOGIN_VENTANA_MS);
+barrido.unref();
 // Las consultas de historial/impacto traen miles de filas: comparten memoria con qeb-Back.
 const pesado = limitar(2);
 
@@ -135,17 +183,34 @@ app.get('/', (_req, res) =>
 );
 
 app.get('/health', wrap(async (_req, res) => {
-  await getPool().query('SELECT 1');
+  try {
+    await query('SELECT 1');
+  } catch (e) {
+    // Público: sin detalle (el mensaje de mysql2 trae host/usuario de la BD). Solo al log.
+    console.error('[BI] /health:', (e as Error).message);
+    res.status(503).json({ ok: false });
+    return;
+  }
   res.json({ ok: true, ts: new Date().toISOString() });
 }));
 
 // --- Auth (login con los usuarios de QEB) ---
 app.post('/auth/login', wrap(async (req, res) => {
   const { correo, email, password } = req.body ?? {};
+  const correoNorm = String(correo ?? email ?? '').trim().toLowerCase();
+  const ahora = Date.now();
+  const claveCorreo = `c:${correoNorm}`;
+  const claveIp = `ip:${ipCliente(req)}`;
+  if (recientes(claveCorreo, ahora).length >= LOGIN_MAX_POR_CORREO || recientes(claveIp, ahora).length >= LOGIN_MAX_POR_IP) {
+    res.status(429).json({ error: 'Demasiados intentos. Espera unos minutos e intenta de nuevo.' });
+    return;
+  }
   try {
     const r = await authLogin(String(correo ?? email ?? ''), String(password ?? ''));
+    fallosLogin.delete(claveCorreo);
     res.json(r);
   } catch {
+    for (const clave of [claveCorreo, claveIp]) fallosLogin.set(clave, [...recientes(clave, ahora), ahora]);
     res.status(401).json({ error: 'Credenciales inválidas' });
   }
 }));
@@ -431,8 +496,24 @@ app.put('/presupuesto', wrap(async (req, res) => {
 // 404 + manejo de errores (solo para /bi; qeb-Back conserva los suyos)
 app.use((_req, res) => res.status(404).json({ error: 'not found' }));
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const e = (err ?? {}) as { status?: number; statusCode?: number; code?: unknown; errno?: unknown; sqlMessage?: unknown };
   const msg = err instanceof Error ? err.message : 'error';
   console.error('[BI] ❌', msg);
+  if (msg.startsWith('CORS:')) {
+    res.status(403).json({ error: msg });
+    return;
+  }
+  const status = e.status ?? e.statusCode;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json({ error: msg }); // JSON inválido (400), cuerpo muy grande (413), etc.
+    return;
+  }
+  // Errores de BD/red de mysql2: el mensaje trae host, usuario o SQL. Al cliente, genérico.
+  const code = typeof e.code === 'string' ? e.code : '';
+  if (e.errno !== undefined || e.sqlMessage !== undefined || /^(ER_|ECONN|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|EAI_AGAIN|PROTOCOL_)/.test(code)) {
+    res.status(500).json({ error: 'Error de base de datos' });
+    return;
+  }
   res.status(500).json({ error: msg });
 });
 

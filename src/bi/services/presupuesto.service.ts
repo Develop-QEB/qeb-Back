@@ -1,4 +1,4 @@
-import { getPool, query } from '../db';
+import { query } from '../db';
 import { getBiConfig } from '../config';
 import type { BaseDatos, PresupuestoMes } from '../types';
 
@@ -26,7 +26,7 @@ let asegurada = false;
 /** Crea la tabla SOLO si BI_ALLOW_CREATE=true. Si no, no toca la base. */
 export async function ensureTable(): Promise<void> {
   if (asegurada || !getBiConfig().allowCreate) return;
-  await getPool().query(
+  await query(
     `CREATE TABLE IF NOT EXISTS ${tabla()} (
       anio INT NOT NULL,
       mes TINYINT NOT NULL,
@@ -87,7 +87,7 @@ export async function upsertPresupuesto(
   if (!Number.isFinite(monto) || monto < 0) throw new Error('monto inválido');
   const bdb = baseToDb(base);
   if (!BASES_VALIDAS.has(bdb)) throw new Error('base inválida');
-  await getPool().query(
+  await query(
     `INSERT INTO ${tabla()} (anio, mes, base, monto) VALUES (:anio, :mes, :bdb, :monto)
      ON DUPLICATE KEY UPDATE monto = VALUES(monto)`,
     { anio, mes, bdb, monto }
