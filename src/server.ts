@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
+import { withBi, attachBiRealtime } from './bi';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
@@ -18,8 +19,8 @@ if (process.env.NODE_ENV !== 'production') {
  
 const PORT = process.env.PORT || 3000;
 
-// Crear servidor HTTP para Socket.io
-const httpServer = createServer(app);
+// Crear servidor HTTP para Socket.io (withBi devuelve el mismo app si BI_ENABLED no es 'true')
+const httpServer = createServer(withBi(app));
 
 /**
  * Programa una ejecución diaria a una hora fija en zona horaria America/Mexico_City.
@@ -75,6 +76,7 @@ async function main() {
   // Inicializar Socket.io
   initializeSocket(httpServer);
   console.log('[Socket] WebSocket server inicializado');
+  attachBiRealtime(httpServer);
 
   // Arrancar servidor HTTP PRIMERO para pasar health checks
   httpServer.listen(PORT, () => {
