@@ -179,7 +179,7 @@ app.get('/', (_req, res) =>
     service: 'bi-back',
     ok: true,
     // Sello para verificar qué build está vivo en prod (abrir <url>/bi/ ).
-    version: '2026-09-29-ciclo-hist',
+    version: '2026-09-29-ciclo-real',
     ventaDef: getBiConfig().ventaDef,          // 'VENTA' = Embudo/Variaciones cuentan solo U_dscTAsig='Venta' (igual que BI)
     mesRule: 'fecha_fin',                       // mes de la catorcena por Fecha Fin Periodo
     endpoints: ['/health', '/resumen-ventas', '/asesores', '/clientes', '/anios', '/presupuesto', '/historial/eventos', '/historial/resumen', 'ws:/ws/historial'],
@@ -270,7 +270,28 @@ app.get('/_diag_ciclo', wrap(async (_req, res) => {
   const hEstatus = Object.assign({}, ...(await Promise.all(
     ['Por iniciar', 'Atendida', 'Aprobada', 'inactiva', 'Liberada', 'Pase a ventas', 'finalizada', 'En Operacion'].map(probe)
   )));
-  res.json({ solProp: dist, muestra, getCicloActual: actual, limpio, hCount, hEstatus, hSample });
+  // CICLO REAL leído del historial (fecha_hora de cada cambio de estatus por propuesta).
+  // "Atendid" cubre Atendido/Atendida; "Aprobad" cubre Aprobado/Aprobada.
+  const [real] = await query<Record<string, unknown>>(
+    `SELECT COUNT(*) n,
+            SUM(atendido IS NOT NULL) conAtendido,
+            SUM(aprob IS NOT NULL) conAprobado,
+            ROUND(AVG(DATEDIFF(atendido, creado)),2) diasSolProp,
+            ROUND(AVG(DATEDIFF(aprob, atendido)),2) diasPropAprob,
+            ROUND(AVG(DATEDIFF(aprob, creado)),2) diasTotal,
+            ROUND(AVG(TIMESTAMPDIFF(HOUR, creado, atendido)),1) hrsSolProp,
+            ROUND(AVG(TIMESTAMPDIFF(HOUR, atendido, aprob)),1) hrsPropAprob
+       FROM (
+         SELECT s.fecha creado,
+           (SELECT MIN(h.fecha_hora) FROM historial h WHERE h.ref_id=p.id AND h.tipo ${CO2}='Propuesta'
+              AND h.accion ${CO2}='Cambio de estado' AND h.detalles ${CO2} LIKE '%"despues":"Atendid%') atendido,
+           (SELECT MIN(h.fecha_hora) FROM historial h WHERE h.ref_id=p.id AND h.tipo ${CO2}='Propuesta'
+              AND h.accion ${CO2}='Cambio de estado' AND h.detalles ${CO2} LIKE '%"despues":"Aprobad%') aprob
+         FROM propuesta p JOIN solicitud s ON s.id=p.solicitud_id
+         WHERE YEAR(s.fecha)=2026 AND p.deleted_at IS NULL
+       ) t`
+  );
+  res.json({ solProp: dist, muestra, getCicloActual: actual, limpio, hCount, hEstatus, hSample, cicloReal: real });
 }));
 
 // --- Auth (login con los usuarios de QEB) ---
