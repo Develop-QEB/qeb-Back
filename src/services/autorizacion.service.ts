@@ -2152,9 +2152,21 @@ export default {
  * pero cuyas caras ya fueron todas resueltas (aprobadas o rechazadas).
  */
 export async function depurarTareasAutorizacionResueltas(): Promise<number> {
+  // BUG ticket #81359 (Aylin 29-sep-2026): las tareas de tipo
+  // 'Filtro Autorización Eliminación' y 'Autorización Eliminación'
+  // caían en este cron por el LIKE '%Autorización%' y se marcaban
+  // como Atendido sin ejecutar la eliminación real (7 tareas cerradas
+  // → 0 circuitos eliminados). El cron las dedupaba por
+  // (id_propuesta + tipo) y a la última la marcaba Atendido porque las
+  // caras ya estaban DG-aprobadas. Estos tipos tienen su propio flujo
+  // (aprobarEliminacionCampana / rechazarEliminacionCampana) que hace
+  // el soft-delete y no deben ser tocados por el cron.
   const tareasAbiertas = await prisma.tareas.findMany({
     where: {
       tipo: { contains: 'Autorización' },
+      NOT: {
+        tipo: { in: [TIPO_FILTRO_ELIMINACION, TIPO_AUTORIZACION_ELIMINACION] },
+      },
       estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
     },
     select: { id: true, tipo: true, id_propuesta: true, id_solicitud: true },
