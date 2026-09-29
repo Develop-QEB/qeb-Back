@@ -179,7 +179,7 @@ app.get('/', (_req, res) =>
     service: 'bi-back',
     ok: true,
     // Sello para verificar qué build está vivo en prod (abrir <url>/bi/ ).
-    version: '2026-09-29-collate-fix',
+    version: '2026-09-29-diag',
     ventaDef: getBiConfig().ventaDef,          // 'VENTA' = Embudo/Variaciones cuentan solo U_dscTAsig='Venta' (igual que BI)
     mesRule: 'fecha_fin',                       // mes de la catorcena por Fecha Fin Periodo
     endpoints: ['/health', '/resumen-ventas', '/asesores', '/clientes', '/anios', '/presupuesto', '/historial/eventos', '/historial/resumen', 'ws:/ws/historial'],
@@ -196,6 +196,22 @@ app.get('/health', wrap(async (_req, res) => {
     return;
   }
   res.json({ ok: true, ts: new Date().toISOString() });
+}));
+
+// DIAGNÓSTICO TEMPORAL (público, sin datos sensibles): corre las funciones REALES
+// que alimentan BI (getResumenVentas) y Embudo (getDistribucion) para Julio 2026 con
+// los mismos filtros, para ver por qué difieren. Quitar cuando se resuelva.
+app.get('/_diag', wrap(async (_req, res) => {
+  const fBI: FiltrosResumen = { base: null, bases: ['CIMU', 'Trade'], tipos: ['RT', 'BF', 'IN'], muebles: ['PARABUS', 'COLUMNA'], digital: ['Tradicional', 'Digital'], asesor: null, cliente: null, anio: 2026, mes: null };
+  const fEmb: FiltrosReporte = { anio: 2026, mes: 7, plaza: null, formato: null, mueble: null, cliente: null, asesor: null, bases: ['CIMU', 'TRADE'], tipos: ['RT', 'BF', 'IN'], muebles: ['PARABUS', 'COLUMNA'], digital: ['Tradicional', 'Digital'] };
+  const [resumen, plaza] = await Promise.all([getResumenVentas(fBI), getDistribucion('plaza', fEmb)]);
+  const biJul = resumen.ventasMensuales.find((m) => m.mes === 7)?.aps ?? 0;
+  const embudoJul = plaza.reduce((a, d) => a + d.monto, 0);
+  res.json({
+    ventaDef: getBiConfig().ventaDef,
+    biJul, embudoJul, diff: embudoJul - biJul,
+    biMensual: resumen.ventasMensuales.map((m) => ({ mes: m.mes, aps: Math.round(m.aps) })),
+  });
 }));
 
 // --- Auth (login con los usuarios de QEB) ---
