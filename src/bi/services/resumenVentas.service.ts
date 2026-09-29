@@ -54,7 +54,7 @@ function where(anio: number, f: FiltrosResumen, opts: { conMes?: boolean } = {})
   // "Cliente" en el negocio = MARCA (APPLE, AEROMEXICO, SEARS…), no la razón social.
   if (f.cliente) { cond.push('`U_Marca` = :cliente'); params.cliente = f.cliente; }
   if (opts.conMes && f.mes) { cond.push('`Mes` = :mes'); params.mes = f.mes; }
-  if (getBiConfig().ventaDef === 'VENTA') cond.push("`U_dscTAsig` = 'Venta'");
+  if (getBiConfig().ventaDef === 'VENTA') cond.push(`\`U_dscTAsig\` ${CO} = 'Venta'`);
   return { sql: cond.join(' AND '), params };
 }
 
