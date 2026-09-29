@@ -179,7 +179,7 @@ app.get('/', (_req, res) =>
     service: 'bi-back',
     ok: true,
     // Sello para verificar qué build está vivo en prod (abrir <url>/bi/ ).
-    version: '2026-09-29-groupby-fix',
+    version: '2026-09-29-groupby-ciclo',
     ventaDef: getBiConfig().ventaDef,          // 'VENTA' = Embudo/Variaciones cuentan solo U_dscTAsig='Venta' (igual que BI)
     mesRule: 'fecha_fin',                       // mes de la catorcena por Fecha Fin Periodo
     endpoints: ['/health', '/resumen-ventas', '/asesores', '/clientes', '/anios', '/presupuesto', '/historial/eventos', '/historial/resumen', 'ws:/ws/historial'],
@@ -212,6 +212,44 @@ app.get('/_diag', wrap(async (_req, res) => {
     biJul, embudoJul, diff: embudoJul - biJul,
     biMensual: resumen.ventasMensuales.map((m) => ({ mes: m.mes, aps: Math.round(m.aps) })),
   });
+}));
+
+// DIAGNÓSTICO TEMPORAL del "Ciclo de venta" (público, solo agregados/fechas, sin PII).
+// Revisa por qué Solicitud->Propuesta sale 0 días y cómo se calcula la conversión.
+app.get('/_diag_ciclo', wrap(async (_req, res) => {
+  const [dist] = await query<Record<string, number>>(
+    `SELECT COUNT(*) n,
+            ROUND(AVG(DATEDIFF(p.fecha, s.fecha)),2) avgDias,
+            SUM(DATEDIFF(p.fecha, s.fecha)=0) d0,
+            SUM(DATEDIFF(p.fecha, s.fecha)=1) d1,
+            SUM(DATEDIFF(p.fecha, s.fecha) BETWEEN 2 AND 7) d2a7,
+            SUM(DATEDIFF(p.fecha, s.fecha)>7) d8plus,
+            SUM(DATEDIFF(p.fecha, s.fecha)<0) neg
+       FROM solicitud s JOIN propuesta p ON p.solicitud_id=s.id
+      WHERE YEAR(s.fecha)=2026 AND s.deleted_at IS NULL AND p.deleted_at IS NULL`
+  );
+  const muestra = await query<Record<string, unknown>>(
+    `SELECT s.id sol, s.fecha sFecha, p.fecha pFecha, DATEDIFF(p.fecha,s.fecha) dias
+       FROM solicitud s JOIN propuesta p ON p.solicitud_id=s.id
+      WHERE YEAR(s.fecha)=2026 AND s.deleted_at IS NULL AND p.deleted_at IS NULL
+      ORDER BY s.id DESC LIMIT 6`
+  );
+  // Cómo lo calcula HOY getCiclo (con LEFT JOIN campania → infla) vs limpio.
+  const [actual] = await query<Record<string, number>>(
+    `SELECT COUNT(*) totalConJoin, SUM(ca.fecha_aprobacion IS NOT NULL) aprobConJoin,
+            ROUND(AVG(DATEDIFF(ca.fecha_aprobacion, p.fecha)),2) avgPropAprob
+       FROM solicitud s JOIN propuesta p ON p.solicitud_id=s.id
+       LEFT JOIN campania ca ON ca.cotizacion_id=p.id
+      WHERE YEAR(s.fecha)=2026`
+  );
+  const [limpio] = await query<Record<string, number>>(
+    `SELECT
+       (SELECT COUNT(*) FROM solicitud s WHERE YEAR(s.fecha)=2026 AND s.deleted_at IS NULL) solicitudes,
+       (SELECT COUNT(*) FROM propuesta p JOIN solicitud s ON s.id=p.solicitud_id WHERE YEAR(s.fecha)=2026 AND p.deleted_at IS NULL) propuestas,
+       (SELECT COUNT(DISTINCT p.id) FROM propuesta p JOIN solicitud s ON s.id=p.solicitud_id JOIN campania ca ON ca.cotizacion_id=p.id
+          WHERE YEAR(s.fecha)=2026 AND p.deleted_at IS NULL AND ca.fecha_aprobacion IS NOT NULL) propAprobadas`
+  );
+  res.json({ solProp: dist, muestra, getCicloActual: actual, limpio });
 }));
 
 // --- Auth (login con los usuarios de QEB) ---
