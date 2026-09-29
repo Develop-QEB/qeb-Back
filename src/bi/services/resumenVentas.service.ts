@@ -68,7 +68,9 @@ const MES_EXPR = 'COALESCE(MONTH(`Fecha Fin Periodo`), `Mes`)';
 async function ventasPorMes(anio: number, f: FiltrosResumen): Promise<Map<number, number>> {
   const w = where(anio, f);
   const rows = await query<{ mes: number; monto: string }>(
-    `SELECT ${MES_EXPR} mes, ${MONTO} monto FROM V_APS_Globales WHERE ${w.sql} GROUP BY mes`,
+    // OJO: GROUP BY por la EXPRESIÓN, no por el alias `mes` — el alias choca con la
+    // columna real `Mes` (MySQL ignora mayúsculas) y agruparía por el mes de INICIO.
+    `SELECT ${MES_EXPR} mes, ${MONTO} monto FROM V_APS_Globales WHERE ${w.sql} GROUP BY ${MES_EXPR}`,
     w.params
   );
   return new Map(rows.filter((r) => r.mes != null).map((r) => [Number(r.mes), Number(r.monto)]));
@@ -100,7 +102,7 @@ async function catorcenaMesMap(anio: number, f: FiltrosResumen): Promise<Map<num
             ${MES_EXPR} mes, COUNT(*) n
        FROM V_APS_Globales
       WHERE ${w.sql} AND \`Periodo\` COLLATE utf8mb4_unicode_ci LIKE 'CATORCENA %' AND \`Mes\` IS NOT NULL
-      GROUP BY catorcena, mes`,
+      GROUP BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(\`Periodo\`,' ',-1),'-',1) AS UNSIGNED), ${MES_EXPR}`,
     w.params
   );
   const best = new Map<number, { mes: number; n: number }>();
