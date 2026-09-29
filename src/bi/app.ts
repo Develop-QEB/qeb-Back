@@ -179,7 +179,7 @@ app.get('/', (_req, res) =>
     service: 'bi-back',
     ok: true,
     // Sello para verificar qué build está vivo en prod (abrir <url>/bi/ ).
-    version: '2026-09-29-groupby-ciclo',
+    version: '2026-09-29-ciclo-hist',
     ventaDef: getBiConfig().ventaDef,          // 'VENTA' = Embudo/Variaciones cuentan solo U_dscTAsig='Venta' (igual que BI)
     mesRule: 'fecha_fin',                       // mes de la catorcena por Fecha Fin Periodo
     endpoints: ['/health', '/resumen-ventas', '/asesores', '/clientes', '/anios', '/presupuesto', '/historial/eventos', '/historial/resumen', 'ws:/ws/historial'],
@@ -249,7 +249,28 @@ app.get('/_diag_ciclo', wrap(async (_req, res) => {
        (SELECT COUNT(DISTINCT p.id) FROM propuesta p JOIN solicitud s ON s.id=p.solicitud_id JOIN campania ca ON ca.cotizacion_id=p.id
           WHERE YEAR(s.fecha)=2026 AND p.deleted_at IS NULL AND ca.fecha_aprobacion IS NOT NULL) propAprobadas`
   );
-  res.json({ solProp: dist, muestra, getCicloActual: actual, limpio });
+  // --- HISTORIAL de cambios de estatus: formato real + prevalencia ---
+  const CO2 = 'COLLATE utf8mb4_unicode_ci';
+  const hCount = await query<Record<string, unknown>>(
+    `SELECT tipo, COUNT(*) n FROM historial WHERE accion ${CO2} = 'Cambio de estado' GROUP BY tipo ORDER BY n DESC LIMIT 15`
+  );
+  const hSample = await query<Record<string, unknown>>(
+    `SELECT tipo, ref_id, accion, fecha_hora, LEFT(detalles, 400) detalles
+       FROM historial
+      WHERE accion ${CO2} = 'Cambio de estado' AND tipo ${CO2} IN ('Propuesta','Campaña','Campania','Solicitud')
+      ORDER BY id DESC LIMIT 6`
+  );
+  const probe = async (txt: string) => {
+    const [r] = await query<Record<string, number>>(
+      `SELECT COUNT(*) n FROM historial WHERE accion ${CO2} = 'Cambio de estado' AND detalles ${CO2} LIKE :t`,
+      { t: `%${txt}%` }
+    );
+    return { [txt]: r.n };
+  };
+  const hEstatus = Object.assign({}, ...(await Promise.all(
+    ['Por iniciar', 'Atendida', 'Aprobada', 'inactiva', 'Liberada', 'Pase a ventas', 'finalizada', 'En Operacion'].map(probe)
+  )));
+  res.json({ solProp: dist, muestra, getCicloActual: actual, limpio, hCount, hEstatus, hSample });
 }));
 
 // --- Auth (login con los usuarios de QEB) ---
