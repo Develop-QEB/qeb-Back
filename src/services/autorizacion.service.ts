@@ -2369,6 +2369,57 @@ export async function depurarTareasAutorizacionResueltas(): Promise<number> {
 // (propuestas conservan su borrado directo).
 export const TIPO_FILTRO_ELIMINACION = 'Filtro Autorización Eliminación';
 export const TIPO_AUTORIZACION_ELIMINACION = 'Autorización Eliminación';
+// Tarea de aviso al asesor de que su circuito YA fue eliminado (tras aprobar).
+export const TIPO_AVISO_ELIMINACION = 'Aviso Eliminación';
+
+// Arma el detalle de los circuitos (catorcena, artículo, formato, caras, tarifa,
+// inversión) para tareas e historial. Debe llamarse ANTES de borrar las caras.
+export interface CircuitoDetalle {
+  articulo: string; formato: string; catorcena: string;
+  caras: number; tarifa: number; inversion: number;
+}
+export async function construirDetalleCircuitos(caraIds: number[]): Promise<{ items: CircuitoDetalle[]; resumen: string }> {
+  if (!caraIds || caraIds.length === 0) return { items: [], resumen: '' };
+  const caras = await prisma.solicitudCaras.findMany({
+    where: { id: { in: caraIds } },
+    select: {
+      articulo: true, formato: true, caras: true, caras_flujo: true,
+      caras_contraflujo: true, bonificacion: true, tarifa_publica: true,
+      costo: true, inicio_periodo: true,
+    },
+  });
+  const catorcenas = await prisma.catorcenas.findMany({
+    select: { numero_catorcena: true, a_o: true, fecha_inicio: true, fecha_fin: true },
+  });
+  const fmtCat = (d: unknown): string => {
+    if (!d) return '';
+    const t = d instanceof Date ? d : new Date(d as string);
+    if (isNaN(t.getTime())) return '';
+    const cat = catorcenas.find(c => {
+      const fi = c.fecha_inicio instanceof Date ? c.fecha_inicio : new Date(c.fecha_inicio as unknown as string);
+      const ff = c.fecha_fin instanceof Date ? c.fecha_fin : new Date(c.fecha_fin as unknown as string);
+      return t >= fi && t <= ff;
+    });
+    if (cat) return `Cat ${cat.numero_catorcena}/${cat.a_o}`;
+    return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+  };
+  const items: CircuitoDetalle[] = caras.map(c => {
+    const numCaras = ((Number(c.caras_flujo) || 0) + (Number(c.caras_contraflujo) || 0)) || Number(c.caras) || Number(c.bonificacion) || 0;
+    return {
+      articulo: c.articulo || '',
+      formato: c.formato || '',
+      catorcena: fmtCat(c.inicio_periodo),
+      caras: numCaras,
+      tarifa: Number(c.tarifa_publica) || 0,
+      inversion: Number(c.costo) || 0,
+    };
+  });
+  const money = (n: number) => `$${(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const resumen = items.map(i =>
+    `• ${i.catorcena} — ${i.articulo}${i.formato ? ` (${i.formato})` : ''} — ${i.caras} cara(s) — tarifa ${money(i.tarifa)} — inversión ${money(i.inversion)}`
+  ).join('\n');
+  return { items, resumen };
+}
 
 /** Ejecuta el borrado REAL de caras de campaña (mismo efecto que el deleteCara
  *  original): soft-delete de reservas + hard-delete de caras + historial. Re-chequea
@@ -2377,14 +2428,14 @@ export async function ejecutarEliminacionCarasCampana(
   caraIds: number[],
   solicitanteNombre: string,
   autorizadoPor?: string
-): Promise<{ eliminadas: number; reservas: number }> {
-  if (!caraIds || caraIds.length === 0) return { eliminadas: 0, reservas: 0 };
+): Promise<{ eliminadas: number; reservas: number; circuitos: CircuitoDetalle[]; resumen: string }> {
+  if (!caraIds || caraIds.length === 0) return { eliminadas: 0, reservas: 0, circuitos: [], resumen: '' };
 
   const carasParaHistorial = await prisma.solicitudCaras.findMany({
     where: { id: { in: caraIds } },
     select: { id: true, idquote: true, articulo: true, formato: true },
   });
-  if (carasParaHistorial.length === 0) return { eliminadas: 0, reservas: 0 };
+  if (carasParaHistorial.length === 0) return { eliminadas: 0, reservas: 0, circuitos: [], resumen: '' };
 
   // Candado APS (defensivo): si alguna reserva ya tiene APS, no se borra.
   const apsAsignados = await prisma.reservas.findMany({
@@ -2399,6 +2450,9 @@ export async function ejecutarEliminacionCarasCampana(
   const reservasCount = await prisma.reservas.count({
     where: { solicitudCaras_id: { in: caraIds }, deleted_at: null },
   });
+
+  // Detalle de los circuitos ANTES de borrarlos (para el historial completo).
+  const detalle = await construirDetalleCircuitos(caraIds);
 
   await prisma.$transaction([
     prisma.reservas.updateMany({
@@ -2424,12 +2478,16 @@ export async function ejecutarEliminacionCarasCampana(
           origen: 'campaña',
           via: 'autorización',
           reservas_eliminadas: reservasCount,
-          circuitos: carasParaHistorial.map((c) => ({ articulo: c.articulo, formato: c.formato })),
+          // Detalle completo para que el historial se lea claro: cada circuito
+          // con catorcena, artículo, formato, caras, tarifa e inversión, más un
+          // resumen textual listo para mostrar.
+          circuitos: detalle.items,
+          resumen: detalle.resumen,
         }),
       },
     });
   }
-  return { eliminadas: caraIds.length, reservas: reservasCount };
+  return { eliminadas: caraIds.length, reservas: reservasCount, circuitos: detalle.items, resumen: detalle.resumen };
 }
 
 /** Crea la tarea de autorización de eliminación (Filtro GC si el asesor tiene
@@ -2471,9 +2529,11 @@ export async function crearAutorizacionEliminacionCampana(params: {
 
   const tituloBase = `Eliminación de ${caraIdsNuevas.length} circuito(s) — Campaña #${campaniaId}`;
   const motivoTxt = (motivo || '').trim();
-  const desc = `${solicitanteNombre} solicita eliminar ${caraIdsNuevas.length} circuito(s) de la Campaña #${campaniaId}.`
+  // Detalle claro de qué se va a eliminar (cat, artículo, caras, tarifa, inversión).
+  const { resumen: detalleCircuitos } = await construirDetalleCircuitos(caraIdsNuevas);
+  const desc = `🗑️ ELIMINACIÓN DE CIRCUITOS — ${solicitanteNombre} solicita eliminar ${caraIdsNuevas.length} circuito(s) de la Campaña #${campaniaId}.`
     + (motivoTxt ? `\n\nMotivo de eliminación: ${motivoTxt}` : '')
-    + (resumen ? `\n${resumen}` : '');
+    + (detalleCircuitos ? `\n\nCircuitos a eliminar:\n${detalleCircuitos}` : (resumen ? `\n${resumen}` : ''));
 
   // [Solo Gerencia] La eliminación NUNCA va a DG: debe llegar al GERENTE de
   // autorización del asesor (miembro del equipo con proposito 'filtro_autorizacion').
@@ -2563,9 +2623,57 @@ export async function aprobarEliminacionCampana(
       tipo: 'autorizacion_solicitud_campana',
       ref_id: tarea.campania_id || 0,
       accion: `${aprobadorNombre} (Gerencia) aprobó la eliminación de ${res.eliminadas} circuito(s)`,
-      detalles: JSON.stringify({ tareaId, eliminadas: res.eliminadas, reservas: res.reservas, comentario: (comentario || '').trim() || null }),
+      detalles: JSON.stringify({
+        tareaId,
+        eliminadas: res.eliminadas,
+        reservas: res.reservas,
+        comentario: (comentario || '').trim() || null,
+        // Qué se eliminó, a detalle: cat / artículo / caras / tarifa / inversión.
+        circuitos: res.circuitos,
+        resumen: res.resumen,
+      }),
     },
   });
+
+  // Aviso al ASESOR que lo solicitó: su circuito ya fue eliminado (tras la
+  // autorización). Mismo patrón de destinatario que el rechazo (solicitud
+  // .usuario_id). Se le detalla exactamente qué se eliminó.
+  try {
+    const solicitudId = parseInt(tarea.id_solicitud);
+    const solicitud = !isNaN(solicitudId)
+      ? await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { usuario_id: true, nombre_usuario: true } })
+      : null;
+    const destinatarioId = solicitud?.usuario_id ?? null;
+    const destinatarioNombre = solicitud?.nombre_usuario || solicitanteNombre;
+    if (destinatarioId) {
+      await prisma.tareas.create({
+        data: {
+          tipo: TIPO_AVISO_ELIMINACION,
+          titulo: `Circuito(s) eliminado(s) — Campaña #${tarea.campania_id}`,
+          descripcion:
+            `✅ Se autorizó y eliminó ${res.eliminadas} circuito(s) que solicitaste de la Campaña #${tarea.campania_id}`
+            + ` (autorizó ${aprobadorNombre}, Gerencia).`
+            + (res.resumen ? `\n\nCircuitos eliminados:\n${res.resumen}` : '')
+            + ((comentario || '').trim() ? `\n\nComentario: ${(comentario || '').trim()}` : ''),
+          estatus: 'Pendiente',
+          id_responsable: destinatarioId,
+          responsable: destinatarioNombre,
+          id_solicitud: tarea.id_solicitud,
+          id_propuesta: tarea.id_propuesta,
+          campania_id: tarea.campania_id,
+          contenido: 'campana',
+          id_asignado: String(destinatarioId),
+          asignado: destinatarioNombre,
+          fecha_fin: new Date(),
+        },
+      });
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId, tipo: TIPO_AVISO_ELIMINACION });
+    }
+  } catch (e) {
+    // El aviso es best-effort: si falla no debe tumbar la aprobación ya hecha.
+    console.error('[aprobarEliminacionCampana] no se pudo crear el aviso al asesor:', e);
+  }
+
   emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: tarea.tipo || TIPO_AUTORIZACION_ELIMINACION });
   return { accion: 'eliminado', eliminadas: res.eliminadas };
 }
