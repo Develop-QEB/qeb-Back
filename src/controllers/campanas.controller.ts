@@ -12441,6 +12441,21 @@ export class CampanasController {
         return;
       }
 
+      // Excepción puntual: Luis Alberto Flores Pedraza, y SOLO para artículos de
+      // CORTESÍA (prefijo CT-), no pasa por autorización — borra al momento.
+      // (Pedido de negocio; aplica solo a ese usuario y solo a sus cortesías.)
+      const normNombreUsr = (s: string | null | undefined): string =>
+        (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim().replace(/\s+/g, ' ');
+      const esLuisCortesias =
+        normNombreUsr(req.user?.nombre) === 'luis alberto flores pedraza' &&
+        carasParaHistorial.length > 0 &&
+        carasParaHistorial.every(c => /^\s*CT-/i.test(String(c.articulo || '')));
+      if (esLuisCortesias) {
+        const r = await ejecutarEliminacionCarasCampana(idsToDelete, req.user?.nombre || 'Usuario');
+        res.json({ success: true, message: 'Cara eliminada (excepción cortesías)', eliminadas: r.eliminadas });
+        return;
+      }
+
       // [Autorización de Eliminación — SOLO campañas] En vez de borrar al instante,
       // se crea una tarea de autorización (Filtro Gerente Comercial → DG, como las
       // autorizaciones normales de DG). La cara y sus reservas quedan INTACTAS
