@@ -10344,17 +10344,17 @@ export class CampanasController {
         // Traemos las filas crudas y agregamos en JS (evita el límite de
         // group_concat_max_len al concatenar URLs largas de Spaces).
         const artesRowsQuery = `
-          SELECT id_reserva, archivo, archivo_data, nombre_arte, comentario, spot
+          SELECT id_reserva, archivo, archivo_data, nombre_arte, comentario, spot, nombre_generico
           FROM imagenes_digitales
           WHERE id_reserva IN (${placeholdersRsv})
           ORDER BY id_reserva, spot
         `;
         const artesRows = (await prisma.$queryRawUnsafe(artesRowsQuery, ...rsvIds)) as any[];
         const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
-        const acc = new Map<number, { names: string[]; dataNames: string[]; manual: string[]; notas: string[]; urls: string[]; seen: Set<string> }>();
+        const acc = new Map<number, { names: string[]; dataNames: string[]; manual: string[]; genericos: Set<string>; notas: string[]; urls: string[]; seen: Set<string> }>();
         for (const r of artesRows) {
           const rid = Number(r.id_reserva);
-          if (!acc.has(rid)) acc.set(rid, { names: [], dataNames: [], manual: [], notas: [], urls: [], seen: new Set() });
+          if (!acc.has(rid)) acc.set(rid, { names: [], dataNames: [], manual: [], genericos: new Set(), notas: [], urls: [], seen: new Set() });
           const a = acc.get(rid)!;
           // Dedup por archivo (= versión de arte). Un mismo archivo repetido —
           // porque el arte se reasignó/recargó varias veces — cuenta como UNA
@@ -10367,6 +10367,11 @@ export class CampanasController {
           a.dataNames.push(fileNameOf(r.archivo_data));
           // nombre_arte manual; si está vacío caemos al nombre de archivo.
           a.manual.push(String(r.nombre_arte || '').trim() || fileNameOf(r.archivo_data || r.archivo));
+          // Modo Genérico: el arte trae nombre_generico (mismo texto en todas las
+          // ubicaciones del arte). Si existe, la columna Arte lo usa en vez del
+          // nombre por-ubicación (Versionado). Set para no repetirlo.
+          const gen = String(r.nombre_generico || '').trim();
+          if (gen) a.genericos.add(gen);
           a.notas.push(String(r.comentario || '').trim());
           const url = (r.archivo_data || r.archivo || '').toString().trim();
           if (url) a.urls.push(url);
@@ -10375,7 +10380,10 @@ export class CampanasController {
           artesCountMap.set(rid, a.names.length);
           if (a.names.length) artesNamesMap.set(rid, a.names.filter(Boolean).join(', '));
           if (a.dataNames.length) artesDataFilenamesMap.set(rid, a.dataNames.filter(Boolean).join(', '));
-          if (a.manual.length) artesNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
+          // Genérico prevalece sobre el nombre por-ubicación (Versionado).
+          const genericosArr = Array.from(a.genericos).filter(Boolean);
+          if (genericosArr.length) artesNombreManualMap.set(rid, genericosArr.join(', '));
+          else if (a.manual.length) artesNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
           if (a.notas.some(Boolean)) artesNotasMap.set(rid, a.notas.filter(Boolean).join(', '));
           if (a.urls.length) artesUrlsDoMap.set(rid, a.urls.join(', '));
         }
@@ -10390,17 +10398,17 @@ export class CampanasController {
       if (rsvIds.length > 0) {
         const placeholdersRsv = rsvIds.map(() => '?').join(',');
         const tradRowsQuery = `
-          SELECT id_reserva, archivo, nombre_arte, nota, spot
+          SELECT id_reserva, archivo, nombre_arte, nota, spot, nombre_generico
           FROM artes_tradicionales
           WHERE id_reserva IN (${placeholdersRsv})
           ORDER BY id_reserva, spot
         `;
         const tradRows = (await prisma.$queryRawUnsafe(tradRowsQuery, ...rsvIds)) as any[];
         const fileNameOf = (p: string | null): string => p ? (String(p).split('/').pop() || '') : '';
-        const acc = new Map<number, { manual: string[]; notas: string[]; urls: string[]; seen: Set<string> }>();
+        const acc = new Map<number, { manual: string[]; genericos: Set<string>; notas: string[]; urls: string[]; seen: Set<string> }>();
         for (const r of tradRows) {
           const rid = Number(r.id_reserva);
-          if (!acc.has(rid)) acc.set(rid, { manual: [], notas: [], urls: [], seen: new Set() });
+          if (!acc.has(rid)) acc.set(rid, { manual: [], genericos: new Set(), notas: [], urls: [], seen: new Set() });
           const a = acc.get(rid)!;
           // Dedup por archivo (= versión de arte): mismo archivo repetido cuenta
           // como una sola versión. Igual que el Versionario. Antes la orden de
@@ -10409,12 +10417,18 @@ export class CampanasController {
           if (dedupKey && a.seen.has(dedupKey)) continue;
           if (dedupKey) a.seen.add(dedupKey);
           a.manual.push(String(r.nombre_arte || '').trim() || fileNameOf(r.archivo));
+          // Modo Genérico: mismo criterio que en digital (ver arriba).
+          const gen = String(r.nombre_generico || '').trim();
+          if (gen) a.genericos.add(gen);
           a.notas.push(String(r.nota || '').trim());
           const url = (r.archivo || '').toString().trim();
           if (url) a.urls.push(url);
         }
         for (const [rid, a] of acc) {
-          if (a.manual.some(Boolean)) tradNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
+          // Genérico prevalece sobre el nombre por-ubicación (Versionado).
+          const genericosArr = Array.from(a.genericos).filter(Boolean);
+          if (genericosArr.length) tradNombreManualMap.set(rid, genericosArr.join(', '));
+          else if (a.manual.some(Boolean)) tradNombreManualMap.set(rid, a.manual.filter(Boolean).join(', '));
           if (a.notas.some(Boolean)) tradNotasMap.set(rid, a.notas.filter(Boolean).join(', '));
           if (a.urls.length) tradUrlsMap.set(rid, a.urls.join(', '));
         }
