@@ -6,6 +6,8 @@ import {
   listarPruebasColor,
   eliminarPruebaColor,
   puedeGestionarPruebaColor,
+  listarTareasAsociadas,
+  resolverTareaAsociada,
   EstatusPruebaColor,
 } from '../services/pruebasColor.service';
 
@@ -131,5 +133,65 @@ export async function eliminar(req: AuthRequest, res: Response): Promise<void> {
     console.error('Error eliminar prueba color:', error);
     const message = error instanceof Error ? error.message : 'Error al eliminar';
     res.status(500).json({ success: false, error: message });
+  }
+}
+
+// Lista las tareas asociadas a una prueba de color (revisión + seguimiento).
+// Feedback Jos 2026-10-02: la ventana de prueba de color las muestra para
+// que el analista no vaya al módulo de Tareas.
+export async function listarTareas(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const pruebaId = Number(req.params.id);
+    if (!Number.isFinite(pruebaId) || pruebaId <= 0) {
+      res.status(400).json({ success: false, error: 'id invalido' });
+      return;
+    }
+    const tareas = await listarTareasAsociadas(pruebaId);
+    res.json({ success: true, data: tareas });
+  } catch (error) {
+    console.error('Error listar tareas prueba color:', error);
+    const message = error instanceof Error ? error.message : 'Error al listar tareas';
+    res.status(500).json({ success: false, error: message });
+  }
+}
+
+// Resuelve una tarea asociada (aprobar / rechazar / finalizar) desde el
+// modal de prueba de color. Reusa los endpoints internos de aprobar y
+// finalizar pero validando que la tarea pertenezca a la prueba.
+export async function resolverTarea(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const rol = req.user?.rol;
+    const userId = req.user?.userId;
+    const userNombre = req.user?.nombre || 'Usuario';
+    if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    if (!puedeGestionarPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Rol no autorizado' });
+      return;
+    }
+
+    const pruebaId = Number(req.params.id);
+    const tareaId = Number(req.params.tareaId);
+    if (!Number.isFinite(pruebaId) || pruebaId <= 0) { res.status(400).json({ success: false, error: 'id invalido' }); return; }
+    if (!Number.isFinite(tareaId) || tareaId <= 0) { res.status(400).json({ success: false, error: 'tareaId invalido' }); return; }
+
+    const { accion, comentario } = req.body as { accion?: string; comentario?: string };
+    if (accion !== 'aprobar' && accion !== 'rechazar' && accion !== 'finalizar') {
+      res.status(400).json({ success: false, error: "accion debe ser 'aprobar' | 'rechazar' | 'finalizar'" });
+      return;
+    }
+
+    const result = await resolverTareaAsociada({
+      pruebaId,
+      tareaId,
+      accion,
+      comentario: comentario || undefined,
+      userId,
+      userNombre,
+    });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error resolver tarea prueba color:', error);
+    const message = error instanceof Error ? error.message : 'Error al resolver tarea';
+    res.status(400).json({ success: false, error: message });
   }
 }

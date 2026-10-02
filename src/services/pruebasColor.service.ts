@@ -55,6 +55,9 @@ const TRANSICIONES: Record<EstatusPruebaColor, EstatusPruebaColor[]> = {
 };
 
 // Roles con permiso para solicitar / editar estatus de pruebas de color.
+// Feedback Jos 2026-10-02: habilitar también a Analista de Servicio al
+// Cliente — este rol es quien manejaria el flujo de prueba de color desde
+// la propuesta (como lo hacen hoy con gestor de artes).
 export const ROLES_PRUEBA_COLOR = new Set([
   'Coordinador de Diseño',
   'Coordinador de Diseno',
@@ -65,6 +68,7 @@ export const ROLES_PRUEBA_COLOR = new Set([
   'Producción',
   'Asesor Comercial',
   'Asesor Comercial Aeropuerto',
+  'Analista de Servicio al Cliente',
   'Administrador',
   'DEV',
 ]);
@@ -131,7 +135,7 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   // guardó y no queremos regresar 500 al usuario por una tarea/historial
   // colgado. Cada uno tiene su propio try/catch para no cortar los otros.
   try {
-    await crearTareaRevisionArte(prueba.id, propuestaId, scId, sc.articulo || null, sc.formato || null, sc.ciudad || null, createdByNombre, createdBy);
+    await crearTareaRevisionArte(prueba.id, propuestaId, scId, sc.articulo || null, sc.formato || null, sc.ciudad || null, createdByNombre, createdBy, archivo, nombre_arte || null);
   } catch (e) {
     console.error('[pruebasColor.crear] crearTareaRevisionArte falló:', e);
   }
@@ -183,6 +187,12 @@ async function resolverCampaniaIdDePropuesta(propuestaId: number): Promise<numbe
 // Feedback Jos 2026-09-25: la prueba de color arranca con revisión del
 // arte, y solo cuando se aprueba se genera la tarea de Seguimiento para
 // el analista que la solicitó.
+// Feedback Jos 2026-10-02: mientras la prueba vive en propuesta las tareas
+// NO deben aparecer en el gestor de artes de la campaña (que aún no
+// existe); se consumen desde la ventana de prueba de color via los
+// endpoints de aprobar/rechazar/finalizar que leen la tarea por
+// contenido.pruebaColorId. Por eso `campania_id` queda null al crear y
+// solo se sincroniza cuando la propuesta avanza (ver sincronizarTareasConCampania).
 async function crearTareaRevisionArte(
   pruebaId: number,
   propuestaId: number,
@@ -192,6 +202,8 @@ async function crearTareaRevisionArte(
   ciudad: string | null,
   solicitanteNombre: string,
   solicitanteId: number,
+  arteUrl: string,
+  nombreArte: string | null,
 ) {
   const usuariosDiseno = await prisma.usuario.findMany({
     where: {
@@ -218,24 +230,43 @@ async function crearTareaRevisionArte(
   const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 3);
 
   const detalleCircuito = [articulo, formato, ciudad].filter(Boolean).join(' · ') || `#${scId}`;
-  const campaniaId = await resolverCampaniaIdDePropuesta(propuestaId);
+
+  const nombreArteSafe = nombreArte || 'sin nombre';
+  const descripcion = [
+    `${solicitanteNombre} solicitó una prueba de color para el circuito #${scId} (${detalleCircuito}).`,
+    `Arte: ${nombreArteSafe}.`,
+    arteUrl ? `URL del arte: ${arteUrl}.` : null,
+    `Revisar el arte y aprobar o rechazar antes de enviar al proveedor.`,
+  ].filter(Boolean).join(' ');
 
   await prisma.tareas.create({
     data: {
       tipo: 'Revisión de artes',
       titulo: `Revisión de arte para prueba de color - Propuesta #${propuestaId}`,
-      descripcion: `${solicitanteNombre} solicitó una prueba de color para el circuito #${scId} (${detalleCircuito}). Revisar el arte cargado y aprobar o rechazar antes de enviar al proveedor.`,
+      descripcion,
       estatus: 'Pendiente',
       id_responsable: responsable.id,
       responsable: responsable.nombre,
       id_solicitud: '',
       id_propuesta: String(propuestaId),
-      // Si la propuesta ya avanzó a campaña, ligar la tarea a la campaña
-      // para que aparezca en la tablita de tareas del gestor de artes.
-      campania_id: campaniaId ?? undefined,
+      // Feedback Jos 2026-10-02: mientras es propuesta la tarea no se
+      // vincula a la campaña aunque exista. Se sincronizará vía hook
+      // cuando la propuesta avance a campaña definitiva.
+      campania_id: null,
+      // Archivo del arte queda accesible desde la tarea para que el
+      // revisor pueda abrirlo directo sin volver al modal.
+      archivo: arteUrl || null,
       id_asignado: usuariosDiseno.map(u => u.id).join(','),
       asignado: usuariosDiseno.map(u => u.nombre).join(', '),
-      contenido: JSON.stringify({ pruebaColorId: pruebaId, scId, propuestaId, solicitanteId, origen: 'prueba_color_revision' }),
+      contenido: JSON.stringify({
+        pruebaColorId: pruebaId,
+        scId,
+        propuestaId,
+        solicitanteId,
+        arte: arteUrl || null,
+        nombreArte: nombreArte || null,
+        origen: 'prueba_color_revision',
+      }),
       fecha_inicio: now,
       fecha_fin: fechaFin,
     },
@@ -416,6 +447,10 @@ export async function eliminarPruebaColor(pruebaId: number, userId: number, user
 /**
  * Hook: al aprobar propuesta y crear campaña, ligar todas las pruebas de
  * color pendientes de esa propuesta al campania_id nuevo. Idempotente.
+ * Feedback Jos 2026-10-02: también se sincronizan las tareas asociadas
+ * (Revisión de artes y Seguimiento Prueba de color) actualizando su
+ * campania_id para que empiecen a verse en el gestor de artes de la
+ * campaña (sin dejar de ser visibles desde la ventana de prueba de color).
  */
 export async function vincularPruebasConCampania(propuestaId: number, campaniaId: number): Promise<number> {
   const r = await prisma.pruebas_color.updateMany({
@@ -425,6 +460,27 @@ export async function vincularPruebasConCampania(propuestaId: number, campaniaId
   if (r.count > 0) {
     console.log(`[pruebasColor.vincularConCampania] Propuesta #${propuestaId} → Campaña #${campaniaId}: ${r.count} prueba(s) vinculadas`);
   }
+
+  // Sincronizar tareas asociadas: filtrar por id_propuesta + tipo relevante +
+  // sin campania_id, y actualizar en bloque. La relación semántica real está
+  // en contenido.pruebaColorId, pero id_propuesta + tipo basta para delimitar
+  // el conjunto correcto sin tener que parsear JSON de cada fila.
+  try {
+    const sync = await prisma.tareas.updateMany({
+      where: {
+        id_propuesta: String(propuestaId),
+        tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color'] },
+        campania_id: null,
+      },
+      data: { campania_id: campaniaId },
+    });
+    if (sync.count > 0) {
+      console.log(`[pruebasColor.vincularConCampania] ${sync.count} tarea(s) de prueba de color sincronizadas con campaña #${campaniaId}`);
+    }
+  } catch (e) {
+    console.error('[pruebasColor.vincularConCampania] fallo sincronizando tareas:', e);
+  }
+
   return r.count;
 }
 
@@ -453,8 +509,10 @@ async function crearTareaSeguimiento(
     'Gestiona el envío al proveedor y finaliza esta tarea cuando la prueba esté aprobada.',
   ].join(' ');
 
-  const campaniaId = await resolverCampaniaIdDePropuesta(prueba.propuesta_id);
-
+  // Feedback Jos 2026-10-02: la tarea queda sin campania_id al crear;
+  // se sincroniza vía hook (sincronizarTareasConCampania) cuando la
+  // propuesta avanza a campaña. Mientras tanto es consumible solo desde
+  // la ventana de prueba de color.
   await prisma.tareas.create({
     data: {
       tipo: 'Seguimiento Prueba de color',
@@ -465,7 +523,8 @@ async function crearTareaSeguimiento(
       responsable: prueba.created_by_nombre,
       id_solicitud: '',
       id_propuesta: String(prueba.propuesta_id),
-      campania_id: campaniaId ?? undefined,
+      campania_id: null,
+      archivo: prueba.archivo || null,
       id_asignado: String(prueba.created_by),
       asignado: prueba.created_by_nombre,
       contenido: JSON.stringify({
@@ -509,6 +568,109 @@ async function cerrarTareaAsociada(pruebaId: number, tipo: string, actorNombre: 
     },
   });
   console.log(`[pruebasColor] ${objetivo.length} tarea(s) '${tipo}' cerradas por ${actorNombre} (prueba #${pruebaId})`);
+}
+
+/**
+ * Lista las tareas asociadas a una prueba de color específica. Las tareas
+ * se asocian via contenido JSON (pruebaColorId). Feedback Jos 2026-10-02:
+ * la ventana de prueba de color muestra estas tareas para que el analista
+ * las consuma sin ir al módulo de Tareas.
+ */
+export async function listarTareasAsociadas(pruebaId: number) {
+  // Pre-filtrar por tipos relevantes para no scanear toda la tabla tareas.
+  const tareas = await prisma.tareas.findMany({
+    where: {
+      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color'] },
+    },
+    orderBy: { id: 'desc' },
+    take: 100,
+  });
+  return tareas.filter(t => {
+    if (!t.contenido) return false;
+    try {
+      const c = JSON.parse(t.contenido);
+      return Number(c.pruebaColorId) === pruebaId;
+    } catch { return false; }
+  });
+}
+
+/**
+ * Resuelve una tarea asociada a una prueba de color desde el modal.
+ * Soporta las transiciones:
+ *   - 'aprobar' sobre Revisión de artes → marca tarea Atendido + llama al
+ *     flujo de arte_aprobado (crea tarea Seguimiento).
+ *   - 'rechazar' sobre Revisión de artes → marca tarea Rechazado + llama
+ *     al flujo rechazada (crea v2 implícita el siguiente POST).
+ *   - 'finalizar' sobre Seguimiento Prueba de color → marca tarea
+ *     Finalizada + llama al hook que pone prueba en 'aprobada'.
+ */
+export async function resolverTareaAsociada(input: {
+  pruebaId: number;
+  tareaId: number;
+  accion: 'aprobar' | 'rechazar' | 'finalizar';
+  comentario?: string;
+  userId: number;
+  userNombre: string;
+}): Promise<{ tareaId: number; nuevoEstatus: string }> {
+  const { pruebaId, tareaId, accion, userId, userNombre } = input;
+
+  const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
+  if (!tarea) throw new Error('Tarea no encontrada');
+  // Validar que la tarea pertenece a la prueba (anti-tampering).
+  const contenido = tarea.contenido ? (() => {
+    try { return JSON.parse(tarea.contenido); } catch { return null; }
+  })() : null;
+  if (!contenido || Number(contenido.pruebaColorId) !== pruebaId) {
+    throw new Error('La tarea no pertenece a esta prueba de color');
+  }
+
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+
+  if (accion === 'aprobar' && tarea.tipo === 'Revisión de artes') {
+    // Marcar la tarea de revisión como Atendido y transicionar la prueba
+    // al estado arte_aprobado (que a su vez crea tarea Seguimiento).
+    await prisma.tareas.update({
+      where: { id: tareaId },
+      data: { estatus: 'Atendido', fecha_fin: now },
+    });
+    await actualizarEstatusPruebaColor({
+      pruebaId,
+      nuevoEstatus: 'arte_aprobado',
+      userId,
+      userNombre,
+    });
+    return { tareaId, nuevoEstatus: 'Atendido' };
+  }
+
+  if (accion === 'rechazar' && tarea.tipo === 'Revisión de artes') {
+    await prisma.tareas.update({
+      where: { id: tareaId },
+      data: { estatus: 'Rechazado', fecha_fin: now },
+    });
+    await actualizarEstatusPruebaColor({
+      pruebaId,
+      nuevoEstatus: 'rechazada',
+      userId,
+      userNombre,
+    });
+    return { tareaId, nuevoEstatus: 'Rechazado' };
+  }
+
+  if (accion === 'finalizar' && tarea.tipo === 'Seguimiento Prueba de color') {
+    await prisma.tareas.update({
+      where: { id: tareaId },
+      data: { estatus: 'Finalizada', fecha_fin: now },
+    });
+    // Hook: pasa la prueba a aprobada.
+    await onFinalizarTareaSeguimiento(
+      { id: tarea.id, tipo: tarea.tipo, contenido: tarea.contenido },
+      userId,
+      userNombre,
+    );
+    return { tareaId, nuevoEstatus: 'Finalizada' };
+  }
+
+  throw new Error(`Acción '${accion}' inválida para tarea tipo '${tarea.tipo}'`);
 }
 
 /**
