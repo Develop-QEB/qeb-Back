@@ -104,7 +104,11 @@ const uploadTestigo = multer({
   storage: storageMemory,
   fileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max
+    // 25MB: cubre PDFs grandes de guia del proveedor (feedback Jos 2026-10-02:
+    // el front validaba hasta 20MB pero el back cortaba a 10MB y multer tiraba
+    // 413/entity-too-large sin mensaje visible al usuario). Se deja un pequeno
+    // colchón arriba del limite UI para no toparnos de nuevo con el mismo caso.
+    fileSize: 25 * 1024 * 1024,
   },
 });
 
