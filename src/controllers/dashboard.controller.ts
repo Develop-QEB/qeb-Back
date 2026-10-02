@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
+import { ESTATUS_INVENTARIO_BLOQUEO_SQL, esInventarioBloqueado } from '../services/inventario-bloqueo.service';
 
 // Convierte un valor de query (string, string[], undefined) a array limpio
 // Soporta tanto formato CSV ("a,b,c") como repetido (?x=a&x=b)
@@ -442,9 +443,10 @@ export class DashboardController {
       });
 
       // Estatus efectivo: Bloqueado del inventario manda sobre cualquier reserva,
-      // luego prevalece el estatus de reserva (Vendido/Reservado/etc), default Disponible
+      // luego prevalece el estatus de reserva (Vendido/Reservado/etc), default Disponible.
+      // 'Inhabilitado' se agrupa como 'Bloqueado' en el dashboard (mismo KPI).
       const getEstatusEfectivo = (inv: { id: number; estatus: string | null }): string => {
-        if (inv.estatus === 'Bloqueado') return 'Bloqueado';
+        if (esInventarioBloqueado(inv.estatus)) return 'Bloqueado';
         return inventarioEstatus[inv.id] || 'Disponible';
       };
 
@@ -678,7 +680,7 @@ export class DashboardController {
       // Filtrar inventarios por estatus seleccionado
       // Bloqueado del inventario manda sobre cualquier reserva
       const inventariosFiltrados = inventariosBase.filter((inv) => {
-        const est = inv.estatus === 'Bloqueado'
+        const est = esInventarioBloqueado(inv.estatus)
           ? 'Bloqueado'
           : inventarioEstatus[inv.id] || 'Disponible';
 
@@ -1303,7 +1305,7 @@ export class DashboardController {
         i.id, i.codigo_unico, i.plaza, i.mueble, i.tipo_de_mueble,
         i.tradicional_digital, i.municipio, i.estado, i.latitud, i.longitud,
         CASE
-          WHEN i.estatus = 'Bloqueado' THEN 'Bloqueado'
+          WHEN i.estatus IN (${ESTATUS_INVENTARIO_BLOQUEO_SQL}) THEN 'Bloqueado'
           WHEN r.top_estatus IS NULL   THEN 'Disponible'
           ELSE r.top_estatus
         END AS estatus_efectivo,
@@ -1369,7 +1371,7 @@ export class DashboardController {
           ${calendarioClause}
         GROUP BY ei.inventario_id, rsv.cliente_id
       ) pc ON pc.inventario_id = i.id
-      WHERE i.estatus <> 'Bloqueado'
+      WHERE i.estatus NOT IN (${ESTATUS_INVENTARIO_BLOQUEO_SQL})
         ${columnFiltersClause}
     `;
 
@@ -1759,7 +1761,7 @@ export class DashboardController {
 
     const allResults: InventoryDetailItem[] = inventarios.map(inv => {
       const info = inventarioInfo[inv.id];
-      const estatusActual = inv.estatus === 'Bloqueado' ? 'Bloqueado' : info?.estatus || 'Disponible';
+      const estatusActual = esInventarioBloqueado(inv.estatus) ? 'Bloqueado' : info?.estatus || 'Disponible';
       return {
         id: inv.id,
         codigo_unico: inv.codigo_unico,
