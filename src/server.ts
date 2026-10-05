@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
+import { withBi, attachBiRealtime } from './bi';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
@@ -18,8 +19,8 @@ if (process.env.NODE_ENV !== 'production') {
  
 const PORT = process.env.PORT || 3000;
 
-// Crear servidor HTTP para Socket.io
-const httpServer = createServer(app);
+// Crear servidor HTTP para Socket.io (withBi devuelve el mismo app si BI_ENABLED no es 'true')
+const httpServer = createServer(withBi(app));
 
 /**
  * Programa una ejecución diaria a una hora fija en zona horaria America/Mexico_City.
@@ -75,6 +76,7 @@ async function main() {
   // Inicializar Socket.io
   initializeSocket(httpServer);
   console.log('[Socket] WebSocket server inicializado');
+  attachBiRealtime(httpServer);
 
   // Arrancar servidor HTTP PRIMERO para pasar health checks
   httpServer.listen(PORT, () => {
@@ -135,6 +137,35 @@ async function main() {
       finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
         console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
       });
+
+      // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
+      // Corre CADA HORA: la deteccion es una query agregada (~2s sobre el
+      // inventario completo). Solo cuenta reservas FIRMES; notifica SOLO lo
+      // nuevo (estado en `conflictos_ocupacion`) en un digest por persona, y
+      // auto-limpia duplicados y choques (en choques conserva la venta mas
+      // antigua). `monitorEnCurso` evita corridas encimadas.
+      {
+        let monitorEnCurso = false;
+        const MONITOR_INTERVALO_MS = 60 * 60 * 1000; // 1 hora
+        setInterval(() => {
+          if (monitorEnCurso) {
+            console.warn('[MonitorConflictos] corrida anterior sigue activa; se salta esta.');
+            return;
+          }
+          monitorEnCurso = true;
+          ejecutarMonitorConflictos()
+            .then(r => console.log(`[MonitorConflictos] detectados=${r.detectados} nuevos=${r.nuevos} (choque=${r.nuevosChoque} dup=${r.nuevosDuplicado}) resueltos=${r.resueltos} avisados=${r.notificados}`))
+            .catch((err: unknown) => console.error('[MonitorConflictos] Error en corrida horaria:', err))
+            .finally(() => { monitorEnCurso = false; });
+        }, MONITOR_INTERVALO_MS);
+      }
+      // Al arrancar corre SIN notificar (y sin limpiar): siembra el estado con
+      // lo que ya existe para que el primer aviso real sea de lo nuevo.
+      ejecutarMonitorConflictos({ notificar: false })
+        .then(r => console.log(`[MonitorConflictos] siembra inicial: ${r.detectados} conflictos registrados sin notificar`))
+        .catch((err: unknown) => {
+          console.error('[MonitorConflictos] Error en ejecucion inicial:', err);
+        });
 
       // Liberacion de reservas por Criterio 1 (30 dias). Cada dia a las 2am CDMX
       // (hora valle) libera las reservas de inventario de las propuestas creadas

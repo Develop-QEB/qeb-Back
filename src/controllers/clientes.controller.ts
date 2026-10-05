@@ -11,6 +11,7 @@ const SAP_ENDPOINTS: Record<string, string> = {
   CIMU: '/cuic',
   TEST: '/cuic-test',
   TRADE: '/cuic-trade',
+  UDC: '/cuic-udc',
 };
 
 // Cache por base de datos SAP (15 minutes)
@@ -641,8 +642,8 @@ export class ClientesController {
   async getSAPClientesByDatabase(req: AuthRequest, res: Response): Promise<void> {
     try {
       const database = (req.params.database || 'CIMU').toUpperCase();
-      if (!['CIMU', 'TEST', 'TRADE'].includes(database)) {
-        res.status(400).json({ success: false, error: 'Database must be CIMU, TEST, or TRADE' });
+      if (!['CIMU', 'TEST', 'TRADE', 'UDC'].includes(database)) {
+        res.status(400).json({ success: false, error: 'Database must be CIMU, TEST, TRADE, or UDC' });
         return;
       }
 
@@ -723,10 +724,11 @@ export class ClientesController {
   // ===========================================================================
   async syncPreview(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // 1. Traer SAP de las DBs activas (CIMU + TRADE) con cache.
-      const [sapCimu, sapTrade] = await Promise.all([
+      // 1. Traer SAP de las DBs activas (CIMU + TRADE + UDC) con cache.
+      const [sapCimu, sapTrade, sapUdc] = await Promise.all([
         fetchSapClientesPorDb('CIMU'),
         fetchSapClientesPorDb('TRADE'),
+        fetchSapClientesPorDb('UDC'),
       ]);
       // Si una DB devuelve 0 rows, asumimos endpoint caído (sesión expirada,
       // 401, etc.) — NO marcamos sus clientes como huérfanos (sería falso
@@ -734,6 +736,7 @@ export class ClientesController {
       const dbsNoDisponibles: string[] = [];
       if (sapCimu.length === 0) dbsNoDisponibles.push('CIMU');
       if (sapTrade.length === 0) dbsNoDisponibles.push('TRADE');
+      if (sapUdc.length === 0) dbsNoDisponibles.push('UDC');
       const sapMap = new Map<string, Record<string, unknown>>();
       for (const row of sapCimu) {
         const r = row as Record<string, unknown>;
@@ -744,6 +747,11 @@ export class ClientesController {
         const r = row as Record<string, unknown>;
         const cuic = r.CUIC as number | undefined;
         if (cuic != null) sapMap.set(`TRADE|${cuic}`, r);
+      }
+      for (const row of sapUdc) {
+        const r = row as Record<string, unknown>;
+        const cuic = r.CUIC as number | undefined;
+        if (cuic != null) sapMap.set(`UDC|${cuic}`, r);
       }
 
       // 2. Traer todos los clientes QEB con CUIC + sap_database válidos.
@@ -758,7 +766,7 @@ export class ClientesController {
       let conCambios = 0;
       for (const qeb of qebClientes) {
         const db = (qeb.sap_database || '').toUpperCase();
-        if (!db || (db !== 'CIMU' && db !== 'TRADE')) continue; // sin db conocido, no comparable
+        if (!db || (db !== 'CIMU' && db !== 'TRADE' && db !== 'UDC')) continue; // sin db conocido, no comparable
         // Si la DB SAP no respondió, no podemos saber si es huérfano.
         if (dbsNoDisponibles.includes(db)) {
           noComparables++;
@@ -778,6 +786,7 @@ export class ClientesController {
           continue;
         }
         const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+        dropCrossCompanyCardCode(cambios, db);
         if (Object.keys(cambios).length > 0) {
           conCambios++;
           diffs.push({
@@ -823,7 +832,7 @@ export class ClientesController {
         return;
       }
       const db = (qeb.sap_database || '').toUpperCase();
-      if (qeb.CUIC == null || (db !== 'CIMU' && db !== 'TRADE')) {
+      if (qeb.CUIC == null || (db !== 'CIMU' && db !== 'TRADE' && db !== 'UDC')) {
         res.status(400).json({ success: false, error: 'Cliente sin CUIC o sap_database válido' });
         return;
       }
@@ -839,6 +848,7 @@ export class ClientesController {
       }
 
       const cambios = computeDiffCliente(qeb as unknown as Record<string, unknown>, sapRow as Record<string, unknown>);
+      dropCrossCompanyCardCode(cambios, db);
       if (Object.keys(cambios).length === 0) {
         res.json({ success: true, cambios_aplicados: {}, solicitudes_afectadas: 0, mensaje: 'Sin cambios' });
         return;
@@ -969,6 +979,30 @@ function computeDiffCliente(qeb: Record<string, unknown>, sap: Record<string, un
     }
   }
   return out;
+}
+
+// Candado anti cross-company del CardCode: un cliente NO debe recibir el CardCode
+// de una compañía SAP distinta a la suya. Los códigos de UDC empiezan con "UDC";
+// los de CIMU/TRADE/TEST no (usan IMU*, VID-, TEL-, etc.). Si el comparador
+// propusiera un card_code de otra compañía (p.ej. UDC00119 para un cliente CIMU),
+// se descarta SOLO ese cambio para no corromper el CardCode del cliente. El resto
+// de campos (razón social, asesor, etc.) no son company-specific y se respetan.
+// Ver bug CUIC 9737 (KARLA BASURTO MICHELENA), sep-2026.
+function esCardCodeUDC(cardCode: unknown): boolean {
+  return String(cardCode || '').trim().toUpperCase().startsWith('UDC');
+}
+function dropCrossCompanyCardCode(
+  cambios: Record<string, { actual: unknown; sap: unknown }>,
+  db: string,
+): void {
+  const cc = cambios.card_code;
+  if (!cc) return;
+  const propuestoEsUDC = esCardCodeUDC(cc.sap);
+  const clienteEsUDC = db === 'UDC';
+  // Solo descartamos cuando hay MISMATCH de compañía (UDC* ↔ no-UDC).
+  if (propuestoEsUDC !== clienteEsUDC) {
+    delete cambios.card_code;
+  }
 }
 
 function normalize(v: unknown, tipo: 'string' | 'number'): unknown {

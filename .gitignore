@@ -45,3 +45,7 @@ scripts/inspect_prod.cjs
 # Scripts locales de debug/seed/prueba (no versionar)
 scripts/_*
 scripts/grupo_masivo.cjs
+
+# Variables de entorno por ambiente (nunca subir: .env.dev, .env.main, etc.)
+.env.*
+!.env.example

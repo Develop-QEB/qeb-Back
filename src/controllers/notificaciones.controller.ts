@@ -2390,8 +2390,8 @@ export class NotificacionesController {
         : null;
       const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
         estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
-      const baseValida: 'CIMU' | 'TRADE' | null =
-        base === 'CIMU' || base === 'TRADE' ? base : null;
+      const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
+        base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
       const contenido = JSON.stringify({
         cliente,
@@ -2451,6 +2451,26 @@ export class NotificacionesController {
         },
       });
 
+      // Espejo en el historial del ID vinculado para que desde la campaña
+      // o propuesta también se vea la actividad — feedback Jos 2026-09-25.
+      if (campaniaId) {
+        await logHistorial({
+          tipo: 'Campaña', refId: campaniaId,
+          accion: `Actividad comercial #${tarea.id} creada`,
+          usuario: userName, usuarioId: userId, usuarioRol: rol,
+          origen: 'notificaciones_actividad_comercial',
+          extras: { tareaId: tarea.id, descripcion: descripcionTrim.slice(0, 200) },
+        });
+      } else if (idPropuestaStr) {
+        await logHistorial({
+          tipo: 'Propuesta', refId: Number(idPropuestaStr),
+          accion: `Actividad comercial #${tarea.id} creada`,
+          usuario: userName, usuarioId: userId, usuarioRol: rol,
+          origen: 'notificaciones_actividad_comercial',
+          extras: { tareaId: tarea.id, descripcion: descripcionTrim.slice(0, 200) },
+        });
+      }
+
       emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
         tareaId: tarea.id,
         tipo: tarea.tipo,
@@ -2477,6 +2497,258 @@ export class NotificacionesController {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al crear actividad comercial';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Edita una tarea de tipo "Actividad Comercial" existente. Reusa el mismo
+  // modelo de campos que crearActividadComercial. Solo el creador o roles
+  // Admin/DEV pueden editar. Feedback Jos 2026-09-25: al editar se debe
+  // dejar registro en historial con el diff completo.
+  async editarActividadComercial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const rol = req.user?.rol;
+      if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+      if (!puedeCrearActividadComercial(rol)) {
+        res.status(403).json({ success: false, error: 'Rol no autorizado' });
+        return;
+      }
+
+      const tareaId = Number(req.params.id);
+      if (!Number.isFinite(tareaId) || tareaId <= 0) {
+        res.status(400).json({ success: false, error: 'id invalido' });
+        return;
+      }
+
+      const previa = await prisma.tareas.findUnique({ where: { id: tareaId } });
+      if (!previa) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
+      if (previa.tipo !== 'Actividad Comercial') {
+        res.status(400).json({ success: false, error: 'La tarea no es de tipo Actividad Comercial' });
+        return;
+      }
+      // Solo el creador o roles administrativos pueden editar.
+      const esCreador = previa.id_responsable === userId;
+      const esAdmin = rol === 'Administrador' || rol === 'DEV';
+      if (!esCreador && !esAdmin) {
+        res.status(403).json({ success: false, error: 'Solo el creador puede editar esta actividad' });
+        return;
+      }
+
+      const {
+        subtipo,
+        ref_id,
+        cliente: clienteInput,
+        marca: marcaInput,
+        descripcion,
+        fecha_fin,
+        activar_recordatorio,
+        recordar_dias_antes,
+        anio,
+        catorcena,
+        estatus_actividad,
+        base,
+      } = req.body as {
+        subtipo?: string;
+        ref_id?: number | string;
+        cliente?: string;
+        marca?: string;
+        descripcion?: string;
+        fecha_fin?: string;
+        activar_recordatorio?: boolean;
+        recordar_dias_antes?: number;
+        anio?: number | string;
+        catorcena?: number | string;
+        estatus_actividad?: string;
+        base?: string;
+      };
+
+      const descripcionTrim = (descripcion || '').trim();
+      if (!descripcionTrim) {
+        res.status(400).json({ success: false, error: 'Descripción requerida' });
+        return;
+      }
+
+      // Reusamos la misma logica de resolucion de subtipo/ref_id de crear.
+      let subtipoOut: string | null = null;
+      let refIdOut: number | null = null;
+      let cliente: string | null = (clienteInput || '').trim() || null;
+      let marca: string | null = (marcaInput || '').trim() || null;
+      let campaniaId: number | null = null;
+      let idPropuestaStr: string | null = null;
+      let idSolicitud = previa.id_solicitud || '';
+
+      const refIdNum = ref_id != null ? Number(ref_id) : NaN;
+      const hasRef = subtipo && ['Campaña', 'Propuesta'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
+
+      if (!hasRef && subtipo === 'Lead') {
+        subtipoOut = 'Lead';
+      }
+
+      if (hasRef) {
+        subtipoOut = subtipo as string;
+        refIdOut = refIdNum;
+        if (subtipo === 'Campaña') {
+          const rows = await prisma.$queryRawUnsafe<Array<{
+            cliente: string | null; marca: string | null; solicitud_id: number | null;
+          }>>(`
+            SELECT
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
+              s.marca_nombre AS marca,
+              s.id AS solicitud_id
+            FROM campania c
+            LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
+            LEFT JOIN propuesta p ON p.id = ct.id_propuesta
+            LEFT JOIN solicitud s ON s.id = p.solicitud_id
+            LEFT JOIN cliente cl ON cl.id = c.cliente_id
+            WHERE c.id = ?
+            LIMIT 1
+          `, refIdNum);
+          if (!rows.length) { res.status(404).json({ success: false, error: 'Campaña no encontrada' }); return; }
+          if (!cliente) cliente = rows[0].cliente;
+          if (!marca) marca = rows[0].marca;
+          campaniaId = refIdNum;
+          idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+        } else {
+          const rows = await prisma.$queryRawUnsafe<Array<{
+            cliente: string | null; marca: string | null; solicitud_id: number | null;
+          }>>(`
+            SELECT
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
+              s.marca_nombre AS marca,
+              s.id AS solicitud_id
+            FROM propuesta p
+            LEFT JOIN solicitud s ON s.id = p.solicitud_id
+            LEFT JOIN cliente cl ON cl.id = p.cliente_id
+            WHERE p.id = ?
+            LIMIT 1
+          `, refIdNum);
+          if (!rows.length) { res.status(404).json({ success: false, error: 'Propuesta no encontrada' }); return; }
+          if (!cliente) cliente = rows[0].cliente;
+          if (!marca) marca = rows[0].marca;
+          idPropuestaStr = String(refIdNum);
+          idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+        }
+      }
+
+      const anioNum = anio != null && anio !== '' ? Number(anio) : null;
+      const anioValido = Number.isFinite(anioNum as number) && (anioNum as number) >= 2020 && (anioNum as number) <= 2035
+        ? (anioNum as number) : null;
+      const catorcenaNum = catorcena != null && catorcena !== '' ? Number(catorcena) : null;
+      const catorcenaValida = Number.isFinite(catorcenaNum as number) && (catorcenaNum as number) >= 1 && (catorcenaNum as number) <= 26
+        ? Math.trunc(catorcenaNum as number) : null;
+      const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
+        estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
+      const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
+        base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
+
+      const contenidoNuevo = JSON.stringify({
+        cliente, marca,
+        subtipo: subtipoOut, ref_id: refIdOut,
+        activar_recordatorio: !!activar_recordatorio,
+        recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
+          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0)) : null,
+        anio: anioValido, catorcena: catorcenaValida,
+        estatus_actividad: estatusActividadValido, base: baseValida,
+      });
+
+      const tituloExtra = [cliente, marca].filter(Boolean).join(' · ');
+      const tituloNuevo = hasRef
+        ? `Actividad Comercial · ${subtipoOut} #${refIdOut}`
+        : (tituloExtra ? `Actividad Comercial · ${tituloExtra}` : 'Actividad Comercial');
+
+      // Snapshot para diff.
+      const prevContenido = previa.contenido ? (() => {
+        try { return JSON.parse(previa.contenido); } catch { return {}; }
+      })() : {};
+
+      const tareaUpd = await prisma.tareas.update({
+        where: { id: tareaId },
+        data: {
+          titulo: tituloNuevo,
+          descripcion: descripcionTrim,
+          fecha_fin: fecha_fin ? new Date(fecha_fin) : previa.fecha_fin,
+          id_solicitud: idSolicitud,
+          id_propuesta: idPropuestaStr,
+          campania_id: campaniaId,
+          contenido: contenidoNuevo,
+        },
+      });
+
+      // Diff de cambios legibles para el historial.
+      const cambios: Array<{ campo: string; label: string; antes: unknown; despues: unknown }> = [];
+      const cmp = (campo: string, label: string, antes: unknown, despues: unknown) => {
+        const a = antes == null || antes === '' ? null : antes;
+        const d = despues == null || despues === '' ? null : despues;
+        if (JSON.stringify(a) !== JSON.stringify(d)) cambios.push({ campo, label, antes: a, despues: d });
+      };
+      cmp('descripcion', 'Descripción', previa.descripcion, descripcionTrim);
+      cmp('fecha_fin', 'Fecha fin', previa.fecha_fin, tareaUpd.fecha_fin);
+      cmp('subtipo', 'Vínculo', prevContenido.subtipo, subtipoOut);
+      cmp('ref_id', 'ID vinculado', prevContenido.ref_id, refIdOut);
+      cmp('cliente', 'Cliente', prevContenido.cliente, cliente);
+      cmp('marca', 'Marca', prevContenido.marca, marca);
+      cmp('anio', 'Año', prevContenido.anio, anioValido);
+      cmp('catorcena', 'Catorcena', prevContenido.catorcena, catorcenaValida);
+      cmp('estatus_actividad', 'Estatus', prevContenido.estatus_actividad, estatusActividadValido);
+      cmp('base', 'Base', prevContenido.base, baseValida);
+      cmp('activar_recordatorio', 'Recordatorio', !!prevContenido.activar_recordatorio, !!activar_recordatorio);
+
+      await logHistorial({
+        tipo: 'Tarea',
+        refId: tareaUpd.id,
+        accion: `Editó actividad comercial${cambios.length ? ` (${cambios.length} cambio${cambios.length === 1 ? '' : 's'})` : ''}`,
+        usuario: userName,
+        usuarioId: userId,
+        usuarioRol: rol,
+        origen: 'notificaciones_actividad_comercial',
+        cambios: cambios.length > 0 ? cambios : undefined,
+        extras: {
+          cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
+          anio: anioValido, catorcena: catorcenaValida,
+          estatus_actividad: estatusActividadValido, base: baseValida,
+        },
+      });
+
+      // Espejo en el historial del ID vinculado (campaña o propuesta) para que
+      // desde ahí también se vea la actividad — feedback Jos 2026-09-25.
+      if (campaniaId) {
+        await logHistorial({
+          tipo: 'Campaña', refId: campaniaId,
+          accion: `Actividad comercial #${tareaUpd.id} editada`,
+          usuario: userName, usuarioId: userId, usuarioRol: rol,
+          origen: 'notificaciones_actividad_comercial',
+          extras: { tareaId: tareaUpd.id, descripcion: descripcionTrim.slice(0, 200) },
+        });
+      } else if (idPropuestaStr) {
+        await logHistorial({
+          tipo: 'Propuesta', refId: Number(idPropuestaStr),
+          accion: `Actividad comercial #${tareaUpd.id} editada`,
+          usuario: userName, usuarioId: userId, usuarioRol: rol,
+          origen: 'notificaciones_actividad_comercial',
+          extras: { tareaId: tareaUpd.id, descripcion: descripcionTrim.slice(0, 200) },
+        });
+      }
+
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tareaId: tareaUpd.id, tipo: tareaUpd.tipo, editada: true,
+      });
+
+      res.json({
+        success: true,
+        data: {
+          id: tareaUpd.id,
+          titulo: tareaUpd.titulo,
+          descripcion: tareaUpd.descripcion,
+          tipo: tareaUpd.tipo,
+          estatus: tareaUpd.estatus,
+          fecha_fin: tareaUpd.fecha_fin,
+          cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al editar actividad comercial';
       res.status(500).json({ success: false, error: message });
     }
   }

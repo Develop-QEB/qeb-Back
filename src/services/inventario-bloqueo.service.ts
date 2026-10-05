@@ -145,6 +145,34 @@ export function articuloOcupaInventario(articulo: string | null | undefined): bo
   return !/^\s*IM-/i.test(articulo);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BLOQUEO ADMINISTRATIVO del inventario (inventarios.estatus).
+//
+// Dos clasificaciones que se comportan IGUAL para efectos de ocupación: la pieza
+// NO se puede utilizar/reservar, sale de disponibles y del mapa, y al aplicarse
+// se liberan sus reservas actuales/futuras. La diferencia es solo de etiqueta.
+// Cualquier check de "¿se puede usar esta pieza?" debe pasar por estas
+// constantes — no comparar contra 'Bloqueado' suelto.
+// ─────────────────────────────────────────────────────────────────────────────
+export const ESTATUS_INVENTARIO_BLOQUEO = ['Bloqueado', 'Inhabilitado'] as const;
+export type TipoBloqueoInventario = (typeof ESTATUS_INVENTARIO_BLOQUEO)[number];
+
+// Bloqueo + 'Inactivo' (fantasmas archivados): todo lo que NO se puede ocupar.
+export const ESTATUS_INVENTARIO_NO_UTILIZABLE = [...ESTATUS_INVENTARIO_BLOQUEO, 'Inactivo'] as const;
+
+export const ESTATUS_INVENTARIO_BLOQUEO_SQL = ESTATUS_INVENTARIO_BLOQUEO.map((e) => `'${e}'`).join(',');
+export const ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL = ESTATUS_INVENTARIO_NO_UTILIZABLE.map((e) => `'${e}'`).join(',');
+
+/** ¿El inventario está bloqueado administrativamente (Bloqueado o Inhabilitado)? */
+export function esInventarioBloqueado(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(estatus);
+}
+
+/** ¿El inventario NO se puede utilizar/ocupar (Bloqueado, Inhabilitado o Inactivo)? */
+export function esInventarioNoUtilizable(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_INVENTARIO_NO_UTILIZABLE as readonly string[]).includes(estatus);
+}
+
 type TxClient = PrismaClient | Prisma.TransactionClient;
 
 interface GetEspaciosBloqueadosArgs {
