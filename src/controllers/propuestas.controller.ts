@@ -4534,13 +4534,20 @@ export class PropuestasController {
       // recalc cuando el usuario solo cambiaba NSE.
       const decimalEq = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const periodoCambioAuth = (
+        (inicio_periodo !== undefined && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+        (fin_periodo !== undefined && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+      );
       const authFieldsChanged = (
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
         (bonificacion !== undefined && !decimalEq(bonificacion, currentCara.bonificacion)) ||
         (tarifa_publica !== undefined && !decimalEq(tarifa_publica, currentCara.tarifa_publica)) ||
         (formato !== undefined && formato !== currentCara.formato) ||
         (tipo !== undefined && tipo !== currentCara.tipo) ||
-        (articulo !== undefined && articulo !== currentCara.articulo)
+        (articulo !== undefined && articulo !== currentCara.articulo) ||
+        // Cambio de periodo tambien debe recalcular autorizacion (ver fix equivalente
+        // en campanas.controller.ts). Feedback Jos 2026-10-06 campania 81633.
+        periodoCambioAuth
       );
 
       let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
@@ -5202,7 +5209,9 @@ export class PropuestasController {
             (data.tarifa_publica !== undefined && !decimalEqP(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
-            (data.articulo !== undefined && data.articulo !== currentCara.articulo)
+            (data.articulo !== undefined && data.articulo !== currentCara.articulo) ||
+            // Cambio de periodo tambien recalcula autorizacion. Feedback Jos 2026-10-06 campania 81633.
+            periodoCambioP
           );
 
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
