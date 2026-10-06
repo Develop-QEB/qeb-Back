@@ -6806,6 +6806,39 @@ export class CampanasController {
               console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
             }
           }
+          // Enriquecer faltantesPorArte con nombre_arte desde biblioteca_artes.
+          // Feedback Jos 2026-10-06: el drawer ASC mostraba el nombre del archivo
+          // (ej. 1790963-xyz-Captura.png) en vez del nombre legible del arte.
+          // Al guardar aqui el nombre_arte, el drawer y las tareas ASC derivadas
+          // tienen el display correcto sin necesidad de un extra fetch desde el front.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            Array.isArray(evidenciaObj.faltantesPorArte) &&
+            evidenciaObj.faltantesPorArte.length > 0
+          ) {
+            try {
+              const urls: string[] = evidenciaObj.faltantesPorArte
+                .map((f: any) => f?.arte)
+                .filter((a: unknown): a is string => typeof a === 'string' && !!a);
+              if (urls.length > 0) {
+                const biblio = await prisma.biblioteca_artes.findMany({
+                  where: { campania_id: campanaId, archivo: { in: urls } },
+                  select: { archivo: true, nombre_arte: true, nombre_generico: true },
+                });
+                const nombrePorUrl = new Map<string, string | null>(
+                  biblio.map(b => [b.archivo, b.nombre_arte || b.nombre_generico || null])
+                );
+                evidenciaObj.faltantesPorArte = evidenciaObj.faltantesPorArte.map((f: any) => ({
+                  ...f,
+                  nombre_arte: f?.nombre_arte || nombrePorUrl.get(f?.arte) || null,
+                }));
+              }
+            } catch (nombErr) {
+              console.warn('createTarea - no se pudo enriquecer faltantesPorArte con nombre_arte:', nombErr);
+            }
+          }
+
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
@@ -6816,7 +6849,7 @@ export class CampanasController {
             }));
             evidenciaData = JSON.stringify(evidenciaObj);
           } else {
-            evidenciaData = evidencia;
+            evidenciaData = JSON.stringify(evidenciaObj);
           }
         } catch (parseError) {
           // Si no es JSON válido, usar como está
@@ -6907,7 +6940,12 @@ export class CampanasController {
             campania_nombre: campanaNombre,
           });
 
-          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => {
+            // Preferimos nombre_arte legible; fallback al nombre del archivo.
+            // Feedback Jos 2026-10-06.
+            const nombre = f?.nombre_arte || (f?.arte ? (String(f.arte).split('/').pop() || 'Sin arte') : 'Sin arte');
+            return `- ${nombre}: ${f?.cantidad ?? 0} faltante(s)`;
+          }).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
 
           for (const asc of ascs) {
             try {
@@ -11322,13 +11360,23 @@ export class CampanasController {
       // 120 * 3327.28 = 399273.59999999997 en JS).
       const decimalEqC = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const periodoCambioAuth = currentCaraFull && (
+        (data.inicio_periodo !== undefined && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
+        (data.fin_periodo !== undefined && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
+      );
       const authFieldsChanged = currentCaraFull && (
         (data.caras !== undefined && parseInt(data.caras) !== currentCaraFull.caras) ||
         (data.bonificacion !== undefined && !decimalEqC(data.bonificacion, currentCaraFull.bonificacion)) ||
         (data.tarifa_publica !== undefined && !decimalEqC(data.tarifa_publica, currentCaraFull.tarifa_publica)) ||
         (data.formato !== undefined && data.formato !== currentCaraFull.formato) ||
         (data.tipo !== undefined && data.tipo !== currentCaraFull.tipo) ||
-        (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo)
+        (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo) ||
+        // Cambio de periodo tambien debe recalcular autorizacion: al mover el
+        // circuito a una nueva quincena las reservas se liberan y las caracteristicas
+        // SAP del nuevo periodo (tarifa/caras) pueden exigir DG/DCM. Feedback
+        // Jos 2026-10-06 (campania 81633): el badge Pend. DG aparecia pero no se
+        // creaba la tarea porque authFieldsChanged ignoraba inicio_periodo/fin_periodo.
+        periodoCambioAuth
       );
 
       let autorizacion_dg = currentCaraFull?.autorizacion_dg || 'aprobado';
@@ -11965,7 +12013,10 @@ export class CampanasController {
             (data.tarifa_publica !== undefined && !decimalEqB(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
-            (data.articulo !== undefined && data.articulo !== currentCara.articulo)
+            (data.articulo !== undefined && data.articulo !== currentCara.articulo) ||
+            // Cambio de periodo tambien recalcula autorizacion (ver fix equivalente
+            // en updateCara). Feedback Jos 2026-10-06 campania 81633.
+            periodoCambioBk
           );
 
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
