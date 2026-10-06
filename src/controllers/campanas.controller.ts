@@ -11517,13 +11517,23 @@ export class CampanasController {
       // 120 * 3327.28 = 399273.59999999997 en JS).
       const decimalEqC = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const periodoCambioAuth = currentCaraFull && (
+        (data.inicio_periodo !== undefined && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
+        (data.fin_periodo !== undefined && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
+      );
       const authFieldsChanged = currentCaraFull && (
         (data.caras !== undefined && parseInt(data.caras) !== currentCaraFull.caras) ||
         (data.bonificacion !== undefined && !decimalEqC(data.bonificacion, currentCaraFull.bonificacion)) ||
         (data.tarifa_publica !== undefined && !decimalEqC(data.tarifa_publica, currentCaraFull.tarifa_publica)) ||
         (data.formato !== undefined && data.formato !== currentCaraFull.formato) ||
         (data.tipo !== undefined && data.tipo !== currentCaraFull.tipo) ||
-        (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo)
+        (data.articulo !== undefined && data.articulo !== currentCaraFull.articulo) ||
+        // Cambio de periodo tambien debe recalcular autorizacion: al mover el
+        // circuito a una nueva quincena las reservas se liberan y las caracteristicas
+        // SAP del nuevo periodo (tarifa/caras) pueden exigir DG/DCM. Feedback
+        // Jos 2026-10-06 (campania 81633): el badge Pend. DG aparecia pero no se
+        // creaba la tarea porque authFieldsChanged ignoraba inicio_periodo/fin_periodo.
+        periodoCambioAuth
       );
 
       let autorizacion_dg = currentCaraFull?.autorizacion_dg || 'aprobado';
@@ -12175,7 +12185,10 @@ export class CampanasController {
             (data.tarifa_publica !== undefined && !decimalEqB(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
-            (data.articulo !== undefined && data.articulo !== currentCara.articulo)
+            (data.articulo !== undefined && data.articulo !== currentCara.articulo) ||
+            // Cambio de periodo tambien recalcula autorizacion (ver fix equivalente
+            // en updateCara). Feedback Jos 2026-10-06 campania 81633.
+            periodoCambioBk
           );
 
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
