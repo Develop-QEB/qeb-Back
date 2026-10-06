@@ -6940,7 +6940,12 @@ export class CampanasController {
             campania_nombre: campanaNombre,
           });
 
-          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => {
+            // Preferimos nombre_arte legible; fallback al nombre del archivo.
+            // Feedback Jos 2026-10-06.
+            const nombre = f?.nombre_arte || (f?.arte ? (String(f.arte).split('/').pop() || 'Sin arte') : 'Sin arte');
+            return `- ${nombre}: ${f?.cantidad ?? 0} faltante(s)`;
+          }).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
 
           for (const asc of ascs) {
             try {
