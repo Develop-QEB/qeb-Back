@@ -82,11 +82,39 @@ const fileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFil
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   ];
 
+  // Fallback por extensión cuando el mimetype es genérico (application/octet-stream
+  // o vacío). Pasa cuando el OS del cliente no reconoce el tipo del archivo —
+  // reportado por Jos 2026-10-06: PDFs de guia del proveedor adjuntados desde
+  // algunos sistemas llegaban como octet-stream y el back retornaba 400 antes
+  // de siquiera leer el archivo. Mantenemos la lista permitida como fuente de
+  // verdad; solo relajamos el check para extensiones conocidas.
+  const extAllowed: Record<string, string> = {
+    pdf: 'application/pdf',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+    mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', avi: 'video/x-msvideo',
+    csv: 'text/csv',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  };
+  const genericMimetypes = new Set(['application/octet-stream', 'binary/octet-stream', '']);
+  const extMatch = (file.originalname || '').match(/\.([a-z0-9]+)$/i);
+  const ext = extMatch ? extMatch[1].toLowerCase() : '';
+
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
-  } else {
-    cb(new Error('Tipo de archivo no permitido. Solo se permiten: JPG, PNG, GIF, WEBP, PDF, MP4, MOV, WEBM, AVI, CSV, XLS, XLSX, DOC, DOCX'));
+    return;
   }
+  if (genericMimetypes.has(file.mimetype) && extAllowed[ext]) {
+    // Mimetype genérico pero extensión reconocida — aceptar y marcar el
+    // mimetype real para que el resto del pipeline (validateImageBuffer,
+    // Spaces, metadata) use el correcto.
+    file.mimetype = extAllowed[ext];
+    cb(null, true);
+    return;
+  }
+  cb(new Error('Tipo de archivo no permitido. Solo se permiten: JPG, PNG, GIF, WEBP, PDF, MP4, MOV, WEBM, AVI, CSV, XLS, XLSX, DOC, DOCX'));
 };
 
 // Límite alto para soportar videos digitales (cartelera digital MP4 suele pesar 50-200MB).
