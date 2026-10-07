@@ -78,6 +78,66 @@ export function esAsesorComercial(rol?: string | null): boolean {
 }
 
 /**
+ * Tráfico (cualquier variante del rol) NO puede editar tarifa ni costo de las
+ * caras. Espejo EXACTO de la regla del front
+ * (front/src/lib/permissions.ts: `esTrafico = /trafico/i.test(role)`,
+ * `canEditTarifaCaras = ... && !esTrafico`). El front ya lo bloquea en la UI;
+ * estos helpers cierran el bypass por API directa / sesión o caché vieja.
+ * Caso real: propuesta 70508, Mónica (Tráfico) bajó la tarifa 33%.
+ */
+export const esTrafico = (rol?: string | null): boolean => /trafico/i.test(String(rol || ''));
+
+// toFixed(2) para comparar decimales sin falsos positivos por precisión float
+// (mismo criterio que decimalEq/decimalEqC en los controllers).
+const dec2Tarifa = (v: unknown): string => {
+  const n = Number.parseFloat(String(v ?? ''));
+  return Number.isNaN(n) ? '' : n.toFixed(2);
+};
+
+/**
+ * Devuelve los campos (`tarifa_publica`/`costo`) que el request intenta CAMBIAR
+ * respecto al valor actual de la cara en BD. Vacío = permitido (no es Tráfico,
+ * o el valor no cambia). Solo evalúa campos presentes en el payload.
+ */
+export function cambiosTarifaCostoProhibidos(
+  rol: string | null | undefined,
+  data: { tarifa_publica?: unknown; costo?: unknown } | null | undefined,
+  actual: { tarifa_publica?: unknown; costo?: unknown } | null | undefined
+): string[] {
+  if (!esTrafico(rol) || !data || !actual) return [];
+  const changed: string[] = [];
+  if (data.tarifa_publica !== undefined && dec2Tarifa(data.tarifa_publica) !== dec2Tarifa(actual.tarifa_publica)) {
+    changed.push('tarifa_publica');
+  }
+  if (data.costo !== undefined && dec2Tarifa(data.costo) !== dec2Tarifa(actual.costo)) {
+    changed.push('costo');
+  }
+  return changed;
+}
+
+/** Mensaje 403 legible a partir de los campos bloqueados. */
+export function mensajeBloqueoTrafico(campos: string[]): string {
+  const label = (c: string) => (c === 'tarifa_publica' ? 'tarifa' : c === 'costo' ? 'costo' : c);
+  return `Tráfico no puede modificar ${campos.map(label).join(' ni ')} de los circuitos.`;
+}
+
+/** Log de auditoría del intento bloqueado (usuario + cara + valores). */
+export function logIntentoTrafico(
+  ctx: { userId?: number | string | null; userName?: string | null },
+  caraId: number | string,
+  campos: string[],
+  data: { tarifa_publica?: unknown; costo?: unknown },
+  actual: { tarifa_publica?: unknown; costo?: unknown } | null | undefined
+): void {
+  console.warn(
+    `[traficoGuard] BLOQUEADO: ${ctx.userName || '?'} (id ${ctx.userId ?? '?'}, Tráfico) intentó cambiar ` +
+    `${campos.join('/')} de la cara ${caraId} | ` +
+    `tarifa_publica ${String(actual?.tarifa_publica)}→${String(data.tarifa_publica)} · ` +
+    `costo ${String(actual?.costo)}→${String(data.costo)}`
+  );
+}
+
+/**
  * Compara roles sin depender de acentos ni de mayúsculas.
  *
  * Por qué hace falta: los `user_role` de la BD no están normalizados y las dos

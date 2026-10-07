@@ -24,7 +24,7 @@ import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
@@ -11693,6 +11693,15 @@ export class CampanasController {
         where: { id: parseInt(caraId) },
       });
 
+      // Candado Tráfico (server-side): Tráfico no puede modificar tarifa/costo.
+      // Espejo de la regla del front; cierra el bypass por API directa.
+      const bloqTrafUp = cambiosTarifaCostoProhibidos(userRol, data, currentCaraFull);
+      if (bloqTrafUp.length) {
+        logIntentoTrafico({ userId, userName }, caraId, bloqTrafUp, data, currentCaraFull);
+        res.status(403).json({ success: false, error: mensajeBloqueoTrafico(bloqTrafUp) });
+        return;
+      }
+
       // Only recalculate authorization if auth-affecting fields changed (not ciudad/NSE).
       // toFixed(2) en decimales evita falsos positivos por precisión float (ej.
       // 120 * 3327.28 = 399273.59999999997 en JS).
@@ -12312,6 +12321,26 @@ export class CampanasController {
       // Snapshot antes de modificar para historial
       const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
       const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
+
+      // Candado Tráfico (server-side): si Tráfico intenta cambiar tarifa/costo de
+      // CUALQUIER cara del batch, se rechaza TODO (nada se muta). Espejo del front.
+      if (esTrafico(userRol)) {
+        const actuales = await prisma.solicitudCaras.findMany({
+          where: { id: { in: allCaraIds } },
+          select: { id: true, tarifa_publica: true, costo: true },
+        });
+        const mapActuales = new Map(actuales.map((c) => [c.id, c] as const));
+        for (const item of carasToUpdate) {
+          const cid = parseInt(String(item.caraId));
+          const bloq = cambiosTarifaCostoProhibidos(userRol, item.data, mapActuales.get(cid));
+          if (bloq.length) {
+            logIntentoTrafico({ userId, userName }, cid, bloq, item.data, mapActuales.get(cid));
+            res.status(403).json({ success: false, error: mensajeBloqueoTrafico(bloq) });
+            return;
+          }
+        }
+      }
+
       const beforeSnap = await snapshotCaras(allCaraIds);
 
       // Pre-compute BF bonif map from batch for RT auth evaluation
