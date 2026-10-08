@@ -10975,6 +10975,15 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
         WHERE sc.idquote = ?
           AND rsv.deleted_at IS NOT NULL
+          -- R5 (Jos): si el espacio ya se REGRESÓ (existe reserva ACTIVA de la
+          -- MISMA cara), sale del historial. Solo quedan los que se quitaron y
+          -- siguen fuera; al regresar uno, desaparece del historial.
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas ract
+            WHERE ract.inventario_id = rsv.inventario_id
+              AND ract.solicitudCaras_id = rsv.solicitudCaras_id
+              AND ract.deleted_at IS NULL
+          )
         ORDER BY rsv.deleted_at DESC, rsv.id DESC
       `;
       const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
