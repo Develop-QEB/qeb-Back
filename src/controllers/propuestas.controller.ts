@@ -3456,10 +3456,10 @@ export class PropuestasController {
             createdReservas.push(lockResult.reserva);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
-            omitidosDetalle.push({
-              inventario_id: w.invId,
-              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
-            });
+            const motivo = lockResult.reason === 'BLOCKED'
+              ? 'Inventario bloqueado/inhabilitado'
+              : inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)';
+            omitidosDetalle.push({ inventario_id: w.invId, motivo });
           }
         }
         // Progreso por lote
@@ -4112,7 +4112,9 @@ export class PropuestasController {
         if (!lockResult.ok) {
           res.status(409).json({
             success: false,
-            error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
+            error: lockResult.reason === 'BLOCKED'
+              ? 'Este inventario está bloqueado/inhabilitado y no se puede reservar.'
+              : 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
           });
           return;
         }

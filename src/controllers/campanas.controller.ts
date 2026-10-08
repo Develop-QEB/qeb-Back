@@ -11299,10 +11299,10 @@ export class CampanasController {
             espaciosFirmados.push(w.espacioId);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
-            omitidosDetalleCamp.push({
-              inventario_id: w.invId,
-              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
-            });
+            const motivo = lockResult.reason === 'BLOCKED'
+              ? 'Inventario bloqueado/inhabilitado'
+              : inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)';
+            omitidosDetalleCamp.push({ inventario_id: w.invId, motivo });
             reservasOmitidas++;
           }
         }
