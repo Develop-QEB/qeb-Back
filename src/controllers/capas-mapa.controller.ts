@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../types';
 import { logHistorial } from '../utils/historial';
 import {
-  listarCapasPropuesta, listarCapasCircuito, crearCapa, actualizarCapa, eliminarCapa,
+  listarCapasPropuesta, crearCapa, actualizarCapa, eliminarCapa,
   type ModoCapa, type OrigenCapa,
 } from '../services/capas-mapa.service';
 
@@ -22,22 +22,6 @@ export class CapasMapaController {
       res.json({ success: true, data: capas });
     } catch (error) {
       console.error('Error en listarPorPropuesta capas-mapa:', error);
-      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Error al listar capas' });
-    }
-  }
-
-  /** Buscador de Formatos: capas vivas del circuito abierto (para borrarlas ahi mismo). */
-  async listarPorCircuito(req: AuthRequest, res: Response): Promise<void> {
-    try {
-      const solicitudCarasId = parseInt(req.params.id, 10);
-      if (!Number.isFinite(solicitudCarasId)) {
-        res.status(400).json({ success: false, error: 'Circuito inválido' });
-        return;
-      }
-      const capas = await listarCapasCircuito(solicitudCarasId);
-      res.json({ success: true, data: capas });
-    } catch (error) {
-      console.error('Error en listarPorCircuito capas-mapa:', error);
       res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Error al listar capas' });
     }
   }
