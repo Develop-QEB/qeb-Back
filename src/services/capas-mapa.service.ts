@@ -226,22 +226,6 @@ export async function listarCapasPropuesta(
   return rows.map(mapRow);
 }
 
-/**
- * Capas vivas de UN circuito. Lo usa el Buscador de Formatos para listar y
- * poder borrar las capas ya guardadas sin salir del modal.
- */
-export async function listarCapasCircuito(solicitudCarasId: number): Promise<CapaMapa[]> {
-  if (!Number.isFinite(solicitudCarasId) || solicitudCarasId <= 0) return [];
-  if (!(await tablaCapasDisponible())) return [];
-  const rows = await prisma.$queryRawUnsafe<CapaRow[]>(
-    `${SELECT_CAPA}
-      WHERE solicitud_caras_id = ? AND deleted_at IS NULL
-      ORDER BY created_at, id`,
-    solicitudCarasId,
-  );
-  return rows.map(mapRow);
-}
-
 export async function obtenerCapa(id: number): Promise<CapaMapa | null> {
   if (!Number.isFinite(id) || id <= 0) return null;
   if (!(await tablaCapasDisponible())) return null;
