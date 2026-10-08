@@ -522,23 +522,43 @@ async function buildCampanaSearchCondition(
     let searchClause = '(' + LIKE_FIELDS.map(f => `${f} LIKE ?`).join(' OR ');
     params.push(...LIKE_FIELDS.map(() => searchPattern));
 
-    // Plaza: la propuesta tiene algún circuito cuya ciudad coincide, o con
-    // alguna reserva sobre un inventario cuya plaza coincide. Correlacionado
-    // por idquote (indexado) y reservas.solicitudCaras_id (indexado).
-    searchClause += ` OR EXISTS (
-      SELECT 1 FROM solicitudCaras sc_s
-      WHERE sc_s.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
-        AND (
-          sc_s.ciudad LIKE ?
-          OR EXISTS (
-            SELECT 1 FROM reservas r_s
-            INNER JOIN espacio_inventario ei_s ON ei_s.id = r_s.inventario_id
-            INNER JOIN inventarios i_s ON i_s.id = ei_s.inventario_id
-            WHERE r_s.solicitudCaras_id = sc_s.id AND r_s.deleted_at IS NULL AND i_s.plaza LIKE ?
-          )
-        )
-    )`;
-    params.push(searchPattern, searchPattern);
+    // Plaza (pre-query): propuestas con algún circuito cuya ciudad coincide,
+    // o con alguna reserva sobre un inventario cuya plaza coincide. Antes era
+    // un EXISTS correlacionado que recorría reservas POR CADA campaña del
+    // listado: con cualquier término de texto la query pasaba de los 30s del
+    // MAX_EXECUTION_TIME y el buscador se quedaba "cargando". Resolverlo aquí
+    // una sola vez lo convierte en un IN de ids (mismo truco que la rama de
+    // codigo_unico de abajo).
+    if (term.length >= 2) {
+      const [ciudadRows, plazaRows] = await Promise.all([
+        prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+          `SELECT /*+ MAX_EXECUTION_TIME(15000) */ DISTINCT idquote
+             FROM solicitudCaras
+            WHERE ciudad LIKE ? AND idquote IS NOT NULL
+            LIMIT 5000`,
+          searchPattern,
+        ),
+        prisma.$queryRawUnsafe<{ idquote: string | null }[]>(
+          `SELECT /*+ MAX_EXECUTION_TIME(15000) */ DISTINCT sc.idquote
+             FROM inventarios i
+            INNER JOIN espacio_inventario ei ON ei.inventario_id = i.id
+            INNER JOIN reservas r ON r.inventario_id = ei.id AND r.deleted_at IS NULL
+            INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+            WHERE i.plaza LIKE ?
+            LIMIT 5000`,
+          searchPattern,
+        ),
+      ]);
+      const propIdsPlaza = Array.from(new Set(
+        [...ciudadRows, ...plazaRows]
+          .map(r => Number(r.idquote))
+          .filter(n => Number.isFinite(n) && n > 0)
+      ));
+      if (propIdsPlaza.length > 0) {
+        searchClause += ` OR ct.id_propuesta IN (${propIdsPlaza.map(() => '?').join(',')})`;
+        params.push(...propIdsPlaza);
+      }
+    }
 
     // Código único de inventario (pre-query): solo para términos largos para
     // no disparar un scan de inventarios con 1-3 letras.
