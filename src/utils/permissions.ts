@@ -50,6 +50,10 @@ export function hasFullVisibility(rol: string): boolean {
 const TEAM_VISIBILITY_ROLES = [
   'Asesor Analista',
   'Analista de Servicio al Cliente',
+  // [#265] Nuevos roles con mismo perfil que Analista de Servicio al Cliente.
+  // Matriz Roles QEB 2026-10-09.
+  'Supervisor de Call Center',
+  'Tecnico en Programacion Digital y WIFI',
 ];
 
 export function hasTeamVisibility(rol: string): boolean {
