@@ -32,6 +32,8 @@ export type InventoryDetailParams = {
   nses: string[];
   tipos: string[];
   micromacro: string; // '' | 'excluir' | 'solo' (circuito Mi Macro Periférico)
+  /** Detalle de UNA pieza (tarjeta del pin en el mapa del dashboard). */
+  inventarioId: number | null;
   catorcena_id: string | undefined;
   fecha_inicio: string | undefined;
   fecha_fin: string | undefined;
@@ -93,6 +95,7 @@ function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
     nses: toMultiValue(req.query.nse),
     tipos: toMultiValue(req.query.tipo),
     micromacro: (req.query.micromacro as string) || '',
+    inventarioId: req.query.inventario_id ? parseInt(req.query.inventario_id as string) || null : null,
     catorcena_id: catorcena_id as string | undefined,
     fecha_inicio: fecha_inicio as string | undefined,
     fecha_fin: fecha_fin as string | undefined,
@@ -1387,6 +1390,10 @@ export class DashboardController {
     }
     addIn('i.nivel_socioeconomico', params.nses);
     addIn('i.tradicional_digital', params.tipos);
+    if (params.inventarioId) {
+      colFilterParts.push('i.id = ?');
+      colFilterVals.push(String(params.inventarioId));
+    }
     // Circuito Mi Macro Periférico: se distingue por tipo_de_mueble (comparte mueble con la calle).
     if (params.micromacro === 'excluir') {
       colFilterParts.push('i.tipo_de_mueble NOT LIKE ?');
