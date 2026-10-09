@@ -7510,6 +7510,60 @@ export class CampanasController {
         }
       }
 
+      // [Fix #264] Hook Recepción: dejar registro en historial cuando cambia
+      // el estatus de una tarea de Recepción o Recepción Parcial (atender,
+      // completar). Jos pidió integrar las recepciones al Historial de
+      // Acciones para que operaciones vea cuando se gestionan.
+      const esRecepcion = tarea.tipo === 'Recepción';
+      let esRecepcionParcial = false;
+      try {
+        if (tarea.evidencia) {
+          const ev = JSON.parse(tarea.evidencia);
+          esRecepcionParcial = ev?.tipo === 'recepcion_parcial' || ev?.tipo === 'recepcion_faltantes';
+        }
+      } catch {}
+      if ((esRecepcion || esRecepcionParcial) && userId && estatus !== undefined) {
+        try {
+          const nombreTipo = esRecepcionParcial ? 'Recepción Parcial' : 'Recepción';
+          const esAtencion = estatus === 'Atendido' || estatus === 'Completado' || estatus === 'Finalizada';
+          const accionBase = esAtencion ? `Atendió ${nombreTipo.toLowerCase()}` : `Actualizó ${nombreTipo.toLowerCase()}`;
+          const detalleCampana = tarea.campania_id ? ` de campaña #${tarea.campania_id}` : '';
+          const accionFinal = `${accionBase} #${tarea.id}${detalleCampana}`;
+
+          await logHistorial({
+            tipo: 'Tarea',
+            refId: tarea.id,
+            accion: accionFinal,
+            usuario: userName,
+            usuarioId: userId,
+            origen: 'gestor_artes_recepcion',
+            extras: {
+              tareaId: tarea.id,
+              tareaTipo: nombreTipo,
+              estatus: estatus,
+              campaniaId: tarea.campania_id ?? undefined,
+              titulo: tarea.titulo ?? undefined,
+            },
+          });
+
+          // Espejo en el historial de la campaña para que aparezca al filtrar
+          // por esa campaña en el Historial de Acciones.
+          if (tarea.campania_id) {
+            await logHistorial({
+              tipo: 'Campaña',
+              refId: tarea.campania_id,
+              accion: `${nombreTipo} #${tarea.id} ${esAtencion ? 'atendida' : 'actualizada'}`,
+              usuario: userName,
+              usuarioId: userId,
+              origen: 'gestor_artes_recepcion',
+              extras: { tareaId: tarea.id, estatus },
+            });
+          }
+        } catch (e) {
+          console.error('[updateTarea] hook Recepción falló:', e);
+        }
+      }
+
       // Notificar cambios de asignado en tareas de Diseño (Revisión/Corrección):
       // al nuevo asignado le llega una notificación de "te asignaron", al anterior
       // le llega "tu tarea fue reasignada" y la tarea desaparece de su bandeja porque
