@@ -9442,7 +9442,11 @@ export class CampanasController {
             MAX(pc.notas) COLLATE utf8mb4_unicode_ci as nota,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_generico,
-            CAST('aprobado' AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
+            -- Jos 2026-10-12: NO forzar estatus del flujo normal. Las esquinas
+            -- derecha/izquierda son para estatus_operaciones y arte_aprobado
+            -- reales. El origen prueba de color se pinta aparte en un badge
+            -- combinado 'PC vN · aprobada' en una esquina dedicada.
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
             0 as tiene_instalado,
             1 as origen_prueba_color,
             MAX(pc.version) as prueba_color_version,
