@@ -9316,7 +9316,10 @@ export class CampanasController {
           MAX(estatus_operaciones) as estatus_operaciones,
           MAX(nombre_generico) as nombre_generico,
           MAX(estatus) as estatus,
-          MAX(tiene_instalado) as tiene_instalado
+          MAX(tiene_instalado) as tiene_instalado,
+          MAX(origen_prueba_color) as origen_prueba_color,
+          MAX(prueba_color_version) as prueba_color_version,
+          MAX(prueba_color_enlace_externo) as prueba_color_enlace_externo
         FROM (
           SELECT
             r.archivo COLLATE utf8mb4_unicode_ci as url,
@@ -9331,7 +9334,10 @@ export class CampanasController {
               WHEN r.instalado = 1 THEN 1
               WHEN tr.tipo = 'Instalación' AND tr.estatus IN ('Atendido','Completado') THEN 1
               ELSE 0
-            END) as tiene_instalado
+            END) as tiene_instalado,
+            0 as origen_prueba_color,
+            CAST(NULL AS SIGNED) as prueba_color_version,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -9358,7 +9364,10 @@ export class CampanasController {
               WHEN r2.instalado = 1 THEN 1
               WHEN tr2.tipo = 'Instalación' AND tr2.estatus IN ('Atendido','Completado') THEN 1
               ELSE 0
-            END) as tiene_instalado
+            END) as tiene_instalado,
+            0 as origen_prueba_color,
+            CAST(NULL AS SIGNED) as prueba_color_version,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
@@ -9383,7 +9392,10 @@ export class CampanasController {
               WHEN r3.instalado = 1 THEN 1
               WHEN tr3.tipo = 'Instalación' AND tr3.estatus IN ('Atendido','Completado') THEN 1
               ELSE 0
-            END) as tiene_instalado
+            END) as tiene_instalado,
+            0 as origen_prueba_color,
+            CAST(NULL AS SIGNED) as prueba_color_version,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
           FROM imagenes_digitales imd
           JOIN reservas r3 ON r3.id = imd.id_reserva
           JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
@@ -9410,16 +9422,56 @@ export class CampanasController {
             MAX(ba.estatus_operaciones) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
             MAX(ba.nombre_generico) COLLATE utf8mb4_unicode_ci as nombre_generico,
             CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
-            0 as tiene_instalado
+            0 as tiene_instalado,
+            0 as origen_prueba_color,
+            CAST(NULL AS SIGNED) as prueba_color_version,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
           FROM biblioteca_artes ba
           WHERE ba.campania_id = ?
           GROUP BY ba.archivo
+          UNION ALL
+          -- Jos 2026-10-12: pruebas de color APROBADAS de la campaña como
+          -- fuente adicional de artes en la biblioteca. Flag origen_prueba_color
+          -- es un marcador ADICIONAL (no reemplaza estatus del flujo).
+          -- Incluimos tanto el archivo subido como el enlace_externo si existe.
+          SELECT
+            COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo) COLLATE utf8mb4_unicode_ci as url,
+            CONCAT('Prueba color v', pc.version, COALESCE(CONCAT(' - ', pc.nombre_arte), '')) COLLATE utf8mb4_unicode_ci as nombre,
+            0 as uso_count,
+            MAX(pc.nombre_arte) COLLATE utf8mb4_unicode_ci as nombre_arte,
+            MAX(pc.notas) COLLATE utf8mb4_unicode_ci as nota,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as estatus_operaciones,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as nombre_generico,
+            CAST('aprobado' AS CHAR) COLLATE utf8mb4_unicode_ci as estatus,
+            0 as tiene_instalado,
+            1 as origen_prueba_color,
+            MAX(pc.version) as prueba_color_version,
+            MAX(pc.enlace_externo) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+          FROM pruebas_color pc
+          WHERE pc.campania_id = ?
+            AND pc.estatus = 'aprobada'
+            AND pc.deleted_at IS NULL
+            AND (NULLIF(pc.archivo, '') IS NOT NULL OR pc.enlace_externo IS NOT NULL)
+          GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte
         ) combined
         GROUP BY url
         ORDER BY uso_count DESC
       `;
 
-      const artes = await prisma.$queryRawUnsafe<{ url: string; nombre: string; uso_count: bigint; nombre_arte: string | null; nota: string | null; estatus_operaciones: string | null; nombre_generico: string | null; estatus: string | null; tiene_instalado: number | bigint | null }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id));
+      const artes = await prisma.$queryRawUnsafe<{
+        url: string;
+        nombre: string;
+        uso_count: bigint;
+        nombre_arte: string | null;
+        nota: string | null;
+        estatus_operaciones: string | null;
+        nombre_generico: string | null;
+        estatus: string | null;
+        tiene_instalado: number | bigint | null;
+        origen_prueba_color: number | bigint | null;
+        prueba_color_version: number | bigint | null;
+        prueba_color_enlace_externo: string | null;
+      }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
         id: `arte-${index + 1}`,
@@ -9432,6 +9484,10 @@ export class CampanasController {
         nombre_generico: arte.nombre_generico || null,
         estatus: arte.estatus || null,
         tiene_instalado: Number(arte.tiene_instalado || 0) === 1,
+        // Jos 2026-10-12: etiqueta adicional 'Prueba de color aprobada'.
+        origen_prueba_color: Number(arte.origen_prueba_color || 0) === 1,
+        prueba_color_version: arte.prueba_color_version != null ? Number(arte.prueba_color_version) : null,
+        prueba_color_enlace_externo: arte.prueba_color_enlace_externo || null,
       }));
 
       res.json({
