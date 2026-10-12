@@ -8,6 +8,7 @@ import {
   puedeGestionarPruebaColor,
   listarTareasAsociadas,
   resolverTareaAsociada,
+  reenviarPruebaRechazada,
   EstatusPruebaColor,
 } from '../services/pruebasColor.service';
 
@@ -192,6 +193,53 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
   } catch (error) {
     console.error('Error resolver tarea prueba color:', error);
     const message = error instanceof Error ? error.message : 'Error al resolver tarea';
+    res.status(400).json({ success: false, error: message });
+  }
+}
+
+// Reenviar una prueba rechazada — edita en sitio sobre la misma prueba
+// (archivo, nombre, notas), vuelve a revision_artes y crea nueva tarea
+// para los reviewers. Jos 2026-10-12.
+export async function reenviar(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const rol = req.user?.rol;
+    const userId = req.user?.userId;
+    const userNombre = req.user?.nombre || 'Usuario';
+    if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    if (!puedeGestionarPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Rol no autorizado para reenviar prueba de color' });
+      return;
+    }
+
+    const pruebaId = Number(req.params.id);
+    if (!Number.isFinite(pruebaId) || pruebaId <= 0) {
+      res.status(400).json({ success: false, error: 'id de prueba invalido' });
+      return;
+    }
+    const { archivo, archivo_data, nombre_arte, notas } = req.body as {
+      archivo?: string;
+      archivo_data?: string;
+      nombre_arte?: string;
+      notas?: string;
+    };
+    if (!archivo || typeof archivo !== 'string' || !archivo.trim()) {
+      res.status(400).json({ success: false, error: 'archivo es requerido' });
+      return;
+    }
+
+    const result = await reenviarPruebaRechazada({
+      pruebaId,
+      archivo: archivo.trim(),
+      archivo_data: archivo_data || null,
+      nombre_arte: nombre_arte != null ? String(nombre_arte).trim() : undefined,
+      notas: notas != null ? String(notas) : undefined,
+      userId,
+      userNombre,
+    });
+
+    res.json({ success: true, data: result });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Error al reenviar prueba';
     res.status(400).json({ success: false, error: message });
   }
 }
