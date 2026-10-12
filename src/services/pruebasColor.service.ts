@@ -354,11 +354,14 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
   // Notificar al creador de la prueba con una tarea "Notificación" — asi
   // el asesor (o quien haya solicitado) se entera del avance sin depender
   // de que este mirando el modal. Feedback 2026-08-24.
+  // Jos 2026-10-12: incluir el motivo del rechazo para que el creador no
+  // tenga que entrar al modal a buscarlo.
   await notificarActualizacionEstatus({
     prueba,
     nuevoEstatus,
     actor: userNombre,
     actorId: userId,
+    comentario: comentarioTrim,
   });
 
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
@@ -378,8 +381,12 @@ async function notificarActualizacionEstatus(input: {
   nuevoEstatus: EstatusPruebaColor;
   actor: string;
   actorId: number;
+  // Motivo capturado al rechazar (opcional). Se incluye en la descripcion
+  // de la tarea del creador y en el contenido JSON para que el frontend
+  // pueda renderizar un flujo de 'subir nueva version' con el contexto.
+  comentario?: string;
 }) {
-  const { prueba, nuevoEstatus, actor, actorId } = input;
+  const { prueba, nuevoEstatus, actor, actorId, comentario } = input;
   if (prueba.created_by === actorId) return; // el mismo creador no se auto-notifica
 
   const labelEstatus: Record<EstatusPruebaColor, string> = {
@@ -393,11 +400,22 @@ async function notificarActualizacionEstatus(input: {
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 7);
 
+  const motivoTrim = (comentario || '').trim();
+  const esRechazo = nuevoEstatus === 'rechazada';
+  const descripcionBase = `${actor} marcó la prueba de color v${prueba.version} del circuito #${prueba.sc_id} como ${labelEstatus[nuevoEstatus]}.`;
+  const descripcion = esRechazo && motivoTrim
+    ? `${descripcionBase}\nMotivo: ${motivoTrim}\nAbre la tarea para subir una nueva versión del arte.`
+    : esRechazo
+      ? `${descripcionBase}\nAbre la tarea para subir una nueva versión del arte.`
+      : descripcionBase;
+
   await prisma.tareas.create({
     data: {
       tipo: 'Prueba de Color',
-      titulo: `Prueba de color ${labelEstatus[nuevoEstatus]} - Propuesta #${prueba.propuesta_id}`,
-      descripcion: `${actor} marcó la prueba de color v${prueba.version} del circuito #${prueba.sc_id} como ${labelEstatus[nuevoEstatus]}.`,
+      titulo: esRechazo
+        ? `Prueba de color rechazada - Propuesta #${prueba.propuesta_id} (subir nueva versión)`
+        : `Prueba de color ${labelEstatus[nuevoEstatus]} - Propuesta #${prueba.propuesta_id}`,
+      descripcion,
       estatus: 'Pendiente',
       id_responsable: prueba.created_by,
       responsable: prueba.created_by_nombre,
@@ -405,7 +423,17 @@ async function notificarActualizacionEstatus(input: {
       id_propuesta: String(prueba.propuesta_id),
       id_asignado: String(prueba.created_by),
       asignado: prueba.created_by_nombre,
-      contenido: JSON.stringify({ pruebaColorId: prueba.id, scId: prueba.sc_id, estatus: nuevoEstatus }),
+      contenido: JSON.stringify({
+        pruebaColorId: prueba.id,
+        scId: prueba.sc_id,
+        propuestaId: prueba.propuesta_id,
+        version: prueba.version,
+        estatus: nuevoEstatus,
+        // Flags para el drawer de notificaciones (front)
+        origen: esRechazo ? 'prueba_color_rechazo' : 'prueba_color_estatus',
+        requiereNuevaVersion: esRechazo,
+        ...(motivoTrim ? { motivoRechazo: motivoTrim } : {}),
+      }),
       fecha_inicio: now,
       fecha_fin: fechaFin,
     },
