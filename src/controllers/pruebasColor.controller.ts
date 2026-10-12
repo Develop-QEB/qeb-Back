@@ -183,7 +183,12 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
     if (!Number.isFinite(pruebaId) || pruebaId <= 0) { res.status(400).json({ success: false, error: 'id invalido' }); return; }
     if (!Number.isFinite(tareaId) || tareaId <= 0) { res.status(400).json({ success: false, error: 'tareaId invalido' }); return; }
 
-    const { accion, comentario } = req.body as { accion?: string; comentario?: string };
+    const { accion, comentario, archivo_adjunto, enlace_adjunto } = req.body as {
+      accion?: string;
+      comentario?: string;
+      archivo_adjunto?: string | null;
+      enlace_adjunto?: string | null;
+    };
     if (accion !== 'aprobar' && accion !== 'rechazar' && accion !== 'finalizar') {
       res.status(400).json({ success: false, error: "accion debe ser 'aprobar' | 'rechazar' | 'finalizar'" });
       return;
@@ -194,6 +199,8 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
       tareaId,
       accion,
       comentario: comentario || undefined,
+      archivo_adjunto: archivo_adjunto || null,
+      enlace_adjunto: enlace_adjunto || null,
       userId,
       userNombre,
     });

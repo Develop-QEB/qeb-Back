@@ -381,10 +381,14 @@ interface ActualizarEstatusInput {
   // Comentario opcional (ej. motivo de rechazo capturado desde el modal).
   // Se concatena a la accion del historial para que quede trazabilidad.
   comentario?: string;
+  // Jos 2026-10-12: al rechazar se pueden adjuntar archivo/link para dar
+  // mas contexto al creador en la notificacion.
+  archivo_adjunto?: string | null;
+  enlace_adjunto?: string | null;
 }
 
 export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput) {
-  const { pruebaId, nuevoEstatus, userId, userNombre, comentario } = input;
+  const { pruebaId, nuevoEstatus, userId, userNombre, comentario, archivo_adjunto, enlace_adjunto } = input;
   if (!ESTATUS_VALIDOS.includes(nuevoEstatus)) {
     throw new Error(`estatus invalido: ${nuevoEstatus}`);
   }
@@ -462,6 +466,8 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     actor: userNombre,
     actorId: userId,
     comentario: comentarioTrim,
+    archivo_adjunto,
+    enlace_adjunto,
   });
 
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
@@ -485,8 +491,11 @@ async function notificarActualizacionEstatus(input: {
   // de la tarea del creador y en el contenido JSON para que el frontend
   // pueda renderizar un flujo de 'subir nueva version' con el contexto.
   comentario?: string;
+  // Jos 2026-10-12: adjuntos opcionales del rechazo (archivo/link).
+  archivo_adjunto?: string | null;
+  enlace_adjunto?: string | null;
 }) {
-  const { prueba, nuevoEstatus, actor, actorId, comentario } = input;
+  const { prueba, nuevoEstatus, actor, actorId, comentario, archivo_adjunto, enlace_adjunto } = input;
   if (prueba.created_by === actorId) return; // el mismo creador no se auto-notifica
 
   const labelEstatus: Record<EstatusPruebaColor, string> = {
@@ -533,6 +542,10 @@ async function notificarActualizacionEstatus(input: {
         origen: esRechazo ? 'prueba_color_rechazo' : 'prueba_color_estatus',
         requiereNuevaVersion: esRechazo,
         ...(motivoTrim ? { motivoRechazo: motivoTrim } : {}),
+        // Adjuntos opcionales del rechazo (archivo/link). Si existen, el
+        // drawer del creador los muestra junto al motivo.
+        ...(archivo_adjunto ? { archivoAdjunto: archivo_adjunto } : {}),
+        ...(enlace_adjunto ? { enlaceAdjunto: enlace_adjunto } : {}),
       }),
       fecha_inicio: now,
       fecha_fin: fechaFin,
@@ -745,10 +758,14 @@ export async function resolverTareaAsociada(input: {
   tareaId: number;
   accion: 'aprobar' | 'rechazar' | 'finalizar';
   comentario?: string;
+  // Jos 2026-10-12: al rechazar se pueden adjuntar archivo o link para que
+  // el revisor justifique mejor y el creador vea referencia en su notif.
+  archivo_adjunto?: string | null;
+  enlace_adjunto?: string | null;
   userId: number;
   userNombre: string;
 }): Promise<{ tareaId: number; nuevoEstatus: string }> {
-  const { pruebaId, tareaId, accion, comentario, userId, userNombre } = input;
+  const { pruebaId, tareaId, accion, comentario, archivo_adjunto, enlace_adjunto, userId, userNombre } = input;
 
   const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
   if (!tarea) throw new Error('Tarea no encontrada');
@@ -762,20 +779,21 @@ export async function resolverTareaAsociada(input: {
 
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
 
-  // Helper: persiste el comentario de resolucion en tarea.evidencia (JSON)
-  // junto con el autor y fecha. Si ya habia evidencia JSON la respeta y
-  // solo agrega los nuevos campos; si no era JSON parseable la reemplaza.
+  // Helper: persiste el comentario de resolucion (y/o adjuntos opcionales)
+  // en tarea.evidencia (JSON). Si no hay nada que persistir devuelve undefined.
   const buildEvidenciaConComentario = (): string | undefined => {
     const texto = (comentario || '').trim();
-    if (!texto) return undefined;
+    if (!texto && !archivo_adjunto && !enlace_adjunto) return undefined;
     const base: Record<string, unknown> = (() => {
       if (!tarea.evidencia) return {};
       try { return JSON.parse(tarea.evidencia); } catch { return {}; }
     })();
-    base[accion === 'rechazar' ? 'motivoRechazo' : 'comentarioResolucion'] = texto;
+    if (texto) base[accion === 'rechazar' ? 'motivoRechazo' : 'comentarioResolucion'] = texto;
     base.resueltaPor = userNombre;
     base.resueltaPorId = userId;
     base.resueltaAt = now.toISOString();
+    if (archivo_adjunto) base.archivoAdjunto = archivo_adjunto;
+    if (enlace_adjunto) base.enlaceAdjunto = enlace_adjunto;
     return JSON.stringify(base);
   };
 
@@ -817,6 +835,8 @@ export async function resolverTareaAsociada(input: {
       userId,
       userNombre,
       comentario,
+      archivo_adjunto,
+      enlace_adjunto,
     });
     return { tareaId, nuevoEstatus: 'Rechazado' };
   }
