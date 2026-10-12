@@ -77,6 +77,29 @@ export function puedeGestionarPruebaColor(rol: string | null | undefined): boole
   return !!rol && ROLES_PRUEBA_COLOR.has(rol);
 }
 
+// Jos 2026-10-12: separar permisos.
+// CREAR / SOLICITAR / REENVIAR: solo analistas y administradores.
+const ROLES_CREAR_PRUEBA_COLOR = new Set<string>([
+  'Analista de Servicio al Cliente',
+  'Administrador',
+  'DEV',
+]);
+// APROBAR / RECHAZAR tarea de Revisión: solo área de Diseño.
+const ROLES_REVISAR_PRUEBA_COLOR = new Set<string>([
+  'Coordinador de Diseño',
+  'Coordinador de Diseno',
+  'Diseñador',
+  'Diseñadores',
+  'Administrador',
+  'DEV',
+]);
+export function puedeCrearPruebaColor(rol: string | null | undefined): boolean {
+  return !!rol && ROLES_CREAR_PRUEBA_COLOR.has(rol);
+}
+export function puedeRevisarPruebaColor(rol: string | null | undefined): boolean {
+  return !!rol && ROLES_REVISAR_PRUEBA_COLOR.has(rol);
+}
+
 interface CrearPruebaInput {
   propuestaId: number;
   scId: number;

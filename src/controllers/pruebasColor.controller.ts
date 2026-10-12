@@ -6,6 +6,8 @@ import {
   listarPruebasColor,
   eliminarPruebaColor,
   puedeGestionarPruebaColor,
+  puedeCrearPruebaColor,
+  puedeRevisarPruebaColor,
   listarTareasAsociadas,
   resolverTareaAsociada,
   reenviarPruebaRechazada,
@@ -22,8 +24,9 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
     const userId = req.user?.userId;
     const userNombre = req.user?.nombre || 'Usuario';
     if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!puedeGestionarPruebaColor(rol)) {
-      res.status(403).json({ success: false, error: 'Rol no autorizado para solicitar pruebas de color' });
+    // Jos 2026-10-12: solo analistas y administradores crean pruebas.
+    if (!puedeCrearPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo analistas y administradores pueden solicitar pruebas de color' });
       return;
     }
 
@@ -173,10 +176,6 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
     const userId = req.user?.userId;
     const userNombre = req.user?.nombre || 'Usuario';
     if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!puedeGestionarPruebaColor(rol)) {
-      res.status(403).json({ success: false, error: 'Rol no autorizado' });
-      return;
-    }
 
     const pruebaId = Number(req.params.id);
     const tareaId = Number(req.params.tareaId);
@@ -191,6 +190,22 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
     };
     if (accion !== 'aprobar' && accion !== 'rechazar' && accion !== 'finalizar') {
       res.status(400).json({ success: false, error: "accion debe ser 'aprobar' | 'rechazar' | 'finalizar'" });
+      return;
+    }
+    // Jos 2026-10-12: permisos separados por accion.
+    // - aprobar / rechazar → area de Diseño
+    // - finalizar (seguimiento) → analista / admin (quien la solicito)
+    if ((accion === 'aprobar' || accion === 'rechazar') && !puedeRevisarPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo el area de Diseño puede aprobar o rechazar' });
+      return;
+    }
+    if (accion === 'finalizar' && !puedeCrearPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo analistas y administradores pueden finalizar la tarea de seguimiento' });
+      return;
+    }
+    // Jos 2026-10-12: motivo obligatorio al rechazar.
+    if (accion === 'rechazar' && (!comentario || typeof comentario !== 'string' || !comentario.trim())) {
+      res.status(400).json({ success: false, error: 'El motivo del rechazo es obligatorio' });
       return;
     }
 
@@ -221,8 +236,11 @@ export async function reenviar(req: AuthRequest, res: Response): Promise<void> {
     const userId = req.user?.userId;
     const userNombre = req.user?.nombre || 'Usuario';
     if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
-    if (!puedeGestionarPruebaColor(rol)) {
-      res.status(403).json({ success: false, error: 'Rol no autorizado para reenviar prueba de color' });
+    // Jos 2026-10-12: solo analistas/admins reenvian (el analista
+    // que la solicito originalmente); diseñadores NO pueden editar
+    // una tarea ya rechazada.
+    if (!puedeCrearPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo analistas y administradores pueden reenviar una prueba rechazada' });
       return;
     }
 
