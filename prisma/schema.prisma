@@ -334,6 +334,9 @@ model artes_tradicionales {
   // Modo Genérico del modal Asignar Arte: valor único compartido por todos
   // los artes cargados en el mismo batch. Null en modo Versionado.
   nombre_generico String?  @db.VarChar(255)
+  // Estatus del flujo de operaciones (ver imagenes_digitales). Jos
+  // 2026-10-12 pidió restablecerlo tras perderlo en db push.
+  estatus_operaciones String? @db.VarChar(500)
 
   @@index([id_reserva], map: "idx_at_id_reserva")
 }
