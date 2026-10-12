@@ -80,8 +80,12 @@ export function puedeGestionarPruebaColor(rol: string | null | undefined): boole
 interface CrearPruebaInput {
   propuestaId: number;
   scId: number;
+  // Archivo: URL del upload (opcional si viene enlace_externo).
   archivo: string;
   archivo_data?: string | null;
+  // Jos 2026-10-12: link externo (Drive, Dropbox, etc.). Puede venir junto
+  // al archivo o en lugar del archivo. Al menos uno debe existir.
+  enlace_externo?: string | null;
   nombre_arte?: string | null;
   notas?: string | null;
   createdBy: number;
@@ -94,7 +98,11 @@ interface CrearPruebaInput {
  * queda vinculado desde el inicio. Feedback 2026-08-15.
  */
 export async function crearPruebaColor(input: CrearPruebaInput) {
-  const { propuestaId, scId, archivo, archivo_data, nombre_arte, notas, createdBy, createdByNombre } = input;
+  const { propuestaId, scId, archivo, archivo_data, enlace_externo, nombre_arte, notas, createdBy, createdByNombre } = input;
+  // Al menos uno de archivo o enlace_externo debe existir.
+  if ((!archivo || !archivo.trim()) && (!enlace_externo || !enlace_externo.trim())) {
+    throw new Error('Debes subir un archivo o pegar un link del arte');
+  }
 
   // Validar propuesta y circuito
   const sc = await prisma.solicitudCaras.findFirst({
@@ -120,8 +128,9 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
       sc_id: scId,
       campania_id: campaniaId,
       reserva_id: null,
-      archivo,
+      archivo: archivo || '',
       archivo_data: archivo_data || null,
+      enlace_externo: enlace_externo || null,
       nombre_arte: nombre_arte || null,
       notas: notas || null,
       estatus: 'revision_artes',
@@ -178,12 +187,16 @@ export async function reenviarPruebaRechazada(input: {
   pruebaId: number;
   archivo: string;
   archivo_data?: string | null;
+  enlace_externo?: string | null;
   nombre_arte?: string | null;
   notas?: string | null;
   userId: number;
   userNombre: string;
 }) {
-  const { pruebaId, archivo, archivo_data, nombre_arte, notas, userId, userNombre } = input;
+  const { pruebaId, archivo, archivo_data, enlace_externo, nombre_arte, notas, userId, userNombre } = input;
+  if ((!archivo || !archivo.trim()) && (!enlace_externo || !enlace_externo.trim())) {
+    throw new Error('Debes subir un archivo o pegar un link del arte');
+  }
 
   const prueba = await prisma.pruebas_color.findFirst({
     where: { id: pruebaId, deleted_at: null },
@@ -197,8 +210,9 @@ export async function reenviarPruebaRechazada(input: {
   const updated = await prisma.pruebas_color.update({
     where: { id: pruebaId },
     data: {
-      archivo,
+      archivo: archivo || '',
       archivo_data: archivo_data || null,
+      enlace_externo: enlace_externo || null,
       nombre_arte: nombre_arte || prueba.nombre_arte,
       notas: notas != null ? notas : prueba.notas,
       estatus: 'revision_artes',

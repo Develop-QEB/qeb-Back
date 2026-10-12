@@ -27,11 +27,12 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
       return;
     }
 
-    const { propuesta_id, sc_id, archivo, archivo_data, nombre_arte, notas } = req.body as {
+    const { propuesta_id, sc_id, archivo, archivo_data, enlace_externo, nombre_arte, notas } = req.body as {
       propuesta_id?: number | string;
       sc_id?: number | string;
       archivo?: string;
       archivo_data?: string | null;
+      enlace_externo?: string | null;
       nombre_arte?: string | null;
       notas?: string | null;
     };
@@ -40,15 +41,22 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
     const scId = Number(sc_id);
     if (!Number.isFinite(propuestaId) || propuestaId <= 0) { res.status(400).json({ success: false, error: 'propuesta_id requerido' }); return; }
     if (!Number.isFinite(scId) || scId <= 0) { res.status(400).json({ success: false, error: 'sc_id requerido' }); return; }
-    if (!archivo || typeof archivo !== 'string') { res.status(400).json({ success: false, error: 'archivo requerido' }); return; }
+    // Jos 2026-10-12: al menos uno de archivo o enlace_externo requerido.
+    const archivoLimpio = typeof archivo === 'string' ? archivo.trim() : '';
+    const enlaceLimpio = typeof enlace_externo === 'string' ? enlace_externo.trim() : '';
+    if (!archivoLimpio && !enlaceLimpio) {
+      res.status(400).json({ success: false, error: 'Debes subir un archivo o pegar un link del arte' });
+      return;
+    }
     const nombreArteLimpio = typeof nombre_arte === 'string' ? nombre_arte.trim() : '';
     if (!nombreArteLimpio) { res.status(400).json({ success: false, error: 'nombre_arte requerido' }); return; }
 
     const prueba = await crearPruebaColor({
       propuestaId,
       scId,
-      archivo,
+      archivo: archivoLimpio,
       archivo_data: archivo_data || null,
+      enlace_externo: enlaceLimpio || null,
       nombre_arte: nombreArteLimpio,
       notas: notas || null,
       createdBy: userId,
@@ -216,21 +224,25 @@ export async function reenviar(req: AuthRequest, res: Response): Promise<void> {
       res.status(400).json({ success: false, error: 'id de prueba invalido' });
       return;
     }
-    const { archivo, archivo_data, nombre_arte, notas } = req.body as {
+    const { archivo, archivo_data, enlace_externo, nombre_arte, notas } = req.body as {
       archivo?: string;
       archivo_data?: string;
+      enlace_externo?: string;
       nombre_arte?: string;
       notas?: string;
     };
-    if (!archivo || typeof archivo !== 'string' || !archivo.trim()) {
-      res.status(400).json({ success: false, error: 'archivo es requerido' });
+    const archivoLimpio = typeof archivo === 'string' ? archivo.trim() : '';
+    const enlaceLimpio = typeof enlace_externo === 'string' ? enlace_externo.trim() : '';
+    if (!archivoLimpio && !enlaceLimpio) {
+      res.status(400).json({ success: false, error: 'Debes subir un archivo o pegar un link del arte' });
       return;
     }
 
     const result = await reenviarPruebaRechazada({
       pruebaId,
-      archivo: archivo.trim(),
+      archivo: archivoLimpio,
       archivo_data: archivo_data || null,
+      enlace_externo: enlaceLimpio || null,
       nombre_arte: nombre_arte != null ? String(nombre_arte).trim() : undefined,
       notas: notas != null ? String(notas) : undefined,
       userId,

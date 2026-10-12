@@ -313,6 +313,10 @@ model imagenes_digitales {
   // los artes cargados en el mismo batch. Null cuando el modal se usa en modo
   // Versionado (comportamiento tradicional por-arte).
   nombre_generico    String?  @db.VarChar(255)
+  // Estatus del flujo de operaciones (Pendiente / Programado / Recibido /
+  // Instalado / Finalizado). Jos 2026-10-12 pidio restablecerlo al perderlo
+  // en el db push de la columna enlace_externo.
+  estatus_operaciones String?  @db.VarChar(500)
 
   @@index([id_reserva], map: "idx_id_reserva")
 }
@@ -350,6 +354,9 @@ model pruebas_color {
   reserva_id        Int?
   archivo           String    @db.VarChar(500)
   archivo_data      String?   @db.LongText // base64 opcional (Spaces si aplica)
+  // Jos 2026-10-12: link externo opcional (Drive, Dropbox, WeTransfer, etc.).
+  // El analista puede subir archivo Y pegar link; al menos uno debe existir.
+  enlace_externo    String?   @db.VarChar(1000)
   nombre_arte       String?   @db.VarChar(255)
   notas             String?   @db.Text
   // estatus: 'solicitada' | 'enviada_proveedor' | 'aprobada' | 'rechazada'
