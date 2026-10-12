@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { crear, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea } from '../controllers/pruebasColor.controller';
+import { crear, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea, reenviar } from '../controllers/pruebasColor.controller';
 
 const router = Router();
 router.use(authMiddleware);
@@ -15,5 +15,8 @@ router.delete('/:id', eliminar);
 // Feedback Jos 2026-10-02.
 router.get('/:id/tareas', listarTareas);
 router.patch('/:id/tareas/:tareaId', resolverTarea);
+
+// Jos 2026-10-12: reenviar una prueba rechazada (edita en sitio sin crear v2).
+router.post('/:id/reenviar', reenviar);
 
 export default router;

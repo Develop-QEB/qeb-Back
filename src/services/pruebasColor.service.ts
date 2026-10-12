@@ -168,6 +168,92 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   return prueba;
 }
 
+// Reenviar prueba rechazada — Jos 2026-10-12: en lugar de crear una v2
+// nueva, el analista edita la MISMA prueba rechazada subiendo nuevo arte
+// (y opcionalmente nuevo nombre/notas). La prueba vuelve a 'revision_artes'
+// y se crea una nueva tarea de Revisión para los mismos reviewers.
+// El historial del rechazo anterior queda intacto (ya quedó registrado
+// cuando se rechazó).
+export async function reenviarPruebaRechazada(input: {
+  pruebaId: number;
+  archivo: string;
+  archivo_data?: string | null;
+  nombre_arte?: string | null;
+  notas?: string | null;
+  userId: number;
+  userNombre: string;
+}) {
+  const { pruebaId, archivo, archivo_data, nombre_arte, notas, userId, userNombre } = input;
+
+  const prueba = await prisma.pruebas_color.findFirst({
+    where: { id: pruebaId, deleted_at: null },
+  });
+  if (!prueba) throw new Error('Prueba no encontrada');
+  if (prueba.estatus !== 'rechazada') {
+    throw new Error(`Solo se puede reenviar una prueba rechazada (estatus actual: ${prueba.estatus})`);
+  }
+
+  // Sobreescribe en sitio: archivo, nombre, notas, y vuelve a revision_artes.
+  const updated = await prisma.pruebas_color.update({
+    where: { id: pruebaId },
+    data: {
+      archivo,
+      archivo_data: archivo_data || null,
+      nombre_arte: nombre_arte || prueba.nombre_arte,
+      notas: notas != null ? notas : prueba.notas,
+      estatus: 'revision_artes',
+    },
+  });
+
+  // Datos del circuito para la nueva tarea de Revisión.
+  const sc = await prisma.solicitudCaras.findFirst({ where: { id: prueba.sc_id } });
+
+  try {
+    await crearTareaRevisionArte(
+      prueba.id,
+      prueba.propuesta_id,
+      prueba.sc_id,
+      sc?.articulo || null,
+      sc?.formato || null,
+      sc?.ciudad || null,
+      userNombre,
+      userId,
+      archivo,
+      updated.nombre_arte,
+    );
+  } catch (e) {
+    console.error('[pruebasColor.reenviar] crearTareaRevisionArte falló:', e);
+  }
+
+  try {
+    await logHistorial({
+      tipo: 'Propuesta',
+      refId: prueba.propuesta_id,
+      accion: `Reenvió prueba de color v${prueba.version} para re-revisión (circuito #${prueba.sc_id})`,
+      usuario: userNombre,
+      usuarioId: userId,
+      origen: 'pruebas_color',
+      cambios: [{ campo: 'estatus', label: 'Estatus prueba color', antes: 'rechazada', despues: 'revision_artes' }],
+      extras: { pruebaId: prueba.id, scId: prueba.sc_id },
+    });
+  } catch (e) {
+    console.error('[pruebasColor.reenviar] logHistorial falló:', e);
+  }
+
+  try {
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tareaId: prueba.id,
+      tipo: 'Prueba de Color',
+      propuestaId: prueba.propuesta_id,
+      scId: prueba.sc_id,
+    });
+  } catch (e) {
+    console.error('[pruebasColor.reenviar] emitToAll falló:', e);
+  }
+
+  return updated;
+}
+
 async function resolverCampaniaIdDePropuesta(propuestaId: number): Promise<number | null> {
   const cot = await prisma.cotizacion.findFirst({
     where: { id_propuesta: propuestaId },
