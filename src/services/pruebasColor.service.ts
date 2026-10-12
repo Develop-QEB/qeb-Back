@@ -278,10 +278,13 @@ interface ActualizarEstatusInput {
   nuevoEstatus: EstatusPruebaColor;
   userId: number;
   userNombre: string;
+  // Comentario opcional (ej. motivo de rechazo capturado desde el modal).
+  // Se concatena a la accion del historial para que quede trazabilidad.
+  comentario?: string;
 }
 
 export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput) {
-  const { pruebaId, nuevoEstatus, userId, userNombre } = input;
+  const { pruebaId, nuevoEstatus, userId, userNombre, comentario } = input;
   if (!ESTATUS_VALIDOS.includes(nuevoEstatus)) {
     throw new Error(`estatus invalido: ${nuevoEstatus}`);
   }
@@ -301,15 +304,20 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     data: { estatus: nuevoEstatus },
   });
 
+  const comentarioTrim = (comentario || '').trim();
+  const accionHistorial = comentarioTrim
+    ? `Prueba de color v${prueba.version} → '${nuevoEstatus}' (circuito #${prueba.sc_id}) — Motivo: ${comentarioTrim}`
+    : `Prueba de color v${prueba.version} → '${nuevoEstatus}' (circuito #${prueba.sc_id})`;
+
   await logHistorial({
     tipo: 'Propuesta',
     refId: prueba.propuesta_id,
-    accion: `Prueba de color v${prueba.version} → '${nuevoEstatus}' (circuito #${prueba.sc_id})`,
+    accion: accionHistorial,
     usuario: userNombre,
     usuarioId: userId,
     origen: 'pruebas_color',
     cambios: [{ campo: 'estatus', label: 'Estatus prueba color', antes: actual, despues: nuevoEstatus }],
-    extras: { pruebaId, scId: prueba.sc_id },
+    extras: { pruebaId, scId: prueba.sc_id, ...(comentarioTrim ? { comentario: comentarioTrim } : {}) },
   });
 
   // Hook 1: al aprobar el arte se cierra la tarea Revisión y se abre la
@@ -612,7 +620,7 @@ export async function resolverTareaAsociada(input: {
   userId: number;
   userNombre: string;
 }): Promise<{ tareaId: number; nuevoEstatus: string }> {
-  const { pruebaId, tareaId, accion, userId, userNombre } = input;
+  const { pruebaId, tareaId, accion, comentario, userId, userNombre } = input;
 
   const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
   if (!tarea) throw new Error('Tarea no encontrada');
@@ -626,32 +634,61 @@ export async function resolverTareaAsociada(input: {
 
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
 
+  // Helper: persiste el comentario de resolucion en tarea.evidencia (JSON)
+  // junto con el autor y fecha. Si ya habia evidencia JSON la respeta y
+  // solo agrega los nuevos campos; si no era JSON parseable la reemplaza.
+  const buildEvidenciaConComentario = (): string | undefined => {
+    const texto = (comentario || '').trim();
+    if (!texto) return undefined;
+    const base: Record<string, unknown> = (() => {
+      if (!tarea.evidencia) return {};
+      try { return JSON.parse(tarea.evidencia); } catch { return {}; }
+    })();
+    base[accion === 'rechazar' ? 'motivoRechazo' : 'comentarioResolucion'] = texto;
+    base.resueltaPor = userNombre;
+    base.resueltaPorId = userId;
+    base.resueltaAt = now.toISOString();
+    return JSON.stringify(base);
+  };
+
   if (accion === 'aprobar' && tarea.tipo === 'Revisión de artes') {
     // Marcar la tarea de revisión como Atendido y transicionar la prueba
     // al estado arte_aprobado (que a su vez crea tarea Seguimiento).
+    const evidenciaNueva = buildEvidenciaConComentario();
     await prisma.tareas.update({
       where: { id: tareaId },
-      data: { estatus: 'Atendido', fecha_fin: now },
+      data: {
+        estatus: 'Atendido',
+        fecha_fin: now,
+        ...(evidenciaNueva ? { evidencia: evidenciaNueva } : {}),
+      },
     });
     await actualizarEstatusPruebaColor({
       pruebaId,
       nuevoEstatus: 'arte_aprobado',
       userId,
       userNombre,
+      comentario,
     });
     return { tareaId, nuevoEstatus: 'Atendido' };
   }
 
   if (accion === 'rechazar' && tarea.tipo === 'Revisión de artes') {
+    const evidenciaNueva = buildEvidenciaConComentario();
     await prisma.tareas.update({
       where: { id: tareaId },
-      data: { estatus: 'Rechazado', fecha_fin: now },
+      data: {
+        estatus: 'Rechazado',
+        fecha_fin: now,
+        ...(evidenciaNueva ? { evidencia: evidenciaNueva } : {}),
+      },
     });
     await actualizarEstatusPruebaColor({
       pruebaId,
       nuevoEstatus: 'rechazada',
       userId,
       userNombre,
+      comentario,
     });
     return { tareaId, nuevoEstatus: 'Rechazado' };
   }
