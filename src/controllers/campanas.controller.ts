@@ -21,7 +21,7 @@ import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCirc
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
-import { bonifCaraOverride } from '../utils/bonifCara';
+import { bonifCaraOverride, rtCarasInvariante } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
@@ -11775,6 +11775,14 @@ export class CampanasController {
       const effCcCm = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCaraFull?.caras_contraflujo;
       const bonifOvCm = bonifCaraOverride(effArtCm, effCarasCm as any, effBonifCm as any, effCfCm as any, effCcCm as any);
 
+      // Invariante RT: caras == caras_flujo + caras_contraflujo (solo RT, no BF/CF/CT).
+      // Normaliza/valida ANTES de persistir; split-only que no suma el total → 400.
+      const rtInvCm = bonifOvCm ? null : rtCarasInvariante(effArtCm, data, currentCaraFull);
+      if (rtInvCm && rtInvCm.ok === false) {
+        res.status(400).json({ success: false, error: rtInvCm.error });
+        return;
+      }
+
       // En update: si el front no manda tipo, preservar el actual de BD
       // (NO defaultear a 'Tradicional' — eso era el bug del caso 70739).
       // Si manda tipo, debe ser Digital o Tradicional explicito.
@@ -11795,13 +11803,13 @@ export class CampanasController {
         tipo: tipoFinal,
         flujo: data.flujo,
         bonificacion: bonifOvCm ? bonifOvCm.bonificacion : data.bonificacion,
-        caras: bonifOvCm ? bonifOvCm.caras : data.caras,
+        caras: bonifOvCm ? bonifOvCm.caras : (rtInvCm ? rtInvCm.caras : data.caras),
         nivel_socioeconomico: data.nivel_socioeconomico,
         formato: data.formato,
         costo: data.costo,
         tarifa_publica: data.tarifa_publica,
-        caras_flujo: bonifOvCm ? bonifOvCm.caras_flujo : data.caras_flujo,
-        caras_contraflujo: bonifOvCm ? bonifOvCm.caras_contraflujo : data.caras_contraflujo,
+        caras_flujo: bonifOvCm ? bonifOvCm.caras_flujo : (rtInvCm ? rtInvCm.caras_flujo : data.caras_flujo),
+        caras_contraflujo: bonifOvCm ? bonifOvCm.caras_contraflujo : (rtInvCm ? rtInvCm.caras_contraflujo : data.caras_contraflujo),
         articulo: data.articulo,
         descuento: data.descuento,
         autorizacion_dg,
@@ -12322,12 +12330,12 @@ export class CampanasController {
       const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
       const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
 
-      // Candado Tráfico (server-side): si Tráfico intenta cambiar tarifa/costo de
-      // CUALQUIER cara del batch, se rechaza TODO (nada se muta). Espejo del front.
+      // Candado Tráfico (server-side): si Tráfico intenta cambiar tarifa/costo/caras
+      // de CUALQUIER cara del batch, se rechaza TODO (nada se muta). Espejo del front.
       if (esTrafico(userRol)) {
         const actuales = await prisma.solicitudCaras.findMany({
           where: { id: { in: allCaraIds } },
-          select: { id: true, tarifa_publica: true, costo: true },
+          select: { id: true, tarifa_publica: true, costo: true, caras: true },
         });
         const mapActuales = new Map(actuales.map((c) => [c.id, c] as const));
         for (const item of carasToUpdate) {
@@ -12338,6 +12346,29 @@ export class CampanasController {
             res.status(403).json({ success: false, error: mensajeBloqueoTrafico(bloq) });
             return;
           }
+        }
+      }
+
+      // Invariante RT (caras == flujo+contra): pre-pass ANTES de mutar nada. Un
+      // cambio de split que no suma el total → 400 limpio (el catch general es 500).
+      // El resultado normalizado se reusa en el loop (rtInvByCara).
+      const rtInvByCara = new Map<number, { caras: number; caras_flujo: number; caras_contraflujo: number }>();
+      {
+        const actualesInv = await prisma.solicitudCaras.findMany({
+          where: { id: { in: allCaraIds } },
+          select: { id: true, articulo: true, caras: true, caras_flujo: true, caras_contraflujo: true },
+        });
+        const mapInv = new Map(actualesInv.map((c) => [c.id, c] as const));
+        for (const item of carasToUpdate) {
+          const cid = parseInt(String(item.caraId));
+          const cur = mapInv.get(cid);
+          const artEffInv = item.data.articulo ?? cur?.articulo;
+          const inv = rtCarasInvariante(artEffInv, item.data, cur);
+          if (inv && inv.ok === false) {
+            res.status(400).json({ success: false, error: `Circuito ${cid}: ${inv.error}` });
+            return;
+          }
+          if (inv && inv.ok) rtInvByCara.set(cid, { caras: inv.caras, caras_flujo: inv.caras_flujo, caras_contraflujo: inv.caras_contraflujo });
         }
       }
 
@@ -12455,6 +12486,8 @@ export class CampanasController {
           const effCfCmBk = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCara?.caras_flujo;
           const effCcCmBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
           const bonifOvCmBk = bonifCaraOverride(effArtCmBk, effCarasCmBk as any, effBonifCmBk as any, effCfCmBk as any, effCcCmBk as any);
+          // Invariante RT ya validado/normalizado en el pre-pass.
+          const rtInvCmBk = bonifOvCmBk ? undefined : rtInvByCara.get(parseInt(caraId));
 
           // En bulk update: preservar tipo actual si el front no lo manda.
           // NO defaultear a 'Tradicional'. Si manda valor, validar.
@@ -12471,13 +12504,13 @@ export class CampanasController {
             tipo: tipoFinalBulk,
             flujo: data.flujo,
             bonificacion: bonifOvCmBk ? bonifOvCmBk.bonificacion : data.bonificacion,
-            caras: bonifOvCmBk ? bonifOvCmBk.caras : data.caras,
+            caras: bonifOvCmBk ? bonifOvCmBk.caras : (rtInvCmBk ? rtInvCmBk.caras : data.caras),
             nivel_socioeconomico: data.nivel_socioeconomico,
             formato: data.formato,
             costo: data.costo,
             tarifa_publica: data.tarifa_publica,
-            caras_flujo: bonifOvCmBk ? bonifOvCmBk.caras_flujo : data.caras_flujo,
-            caras_contraflujo: bonifOvCmBk ? bonifOvCmBk.caras_contraflujo : data.caras_contraflujo,
+            caras_flujo: bonifOvCmBk ? bonifOvCmBk.caras_flujo : (rtInvCmBk ? rtInvCmBk.caras_flujo : data.caras_flujo),
+            caras_contraflujo: bonifOvCmBk ? bonifOvCmBk.caras_contraflujo : (rtInvCmBk ? rtInvCmBk.caras_contraflujo : data.caras_contraflujo),
             articulo: data.articulo,
             descuento: data.descuento,
             autorizacion_dg,
