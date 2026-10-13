@@ -1575,25 +1575,34 @@ export class DashboardController {
     // MULTIRESERVAS: una pieza puede tener varias reservas de varios clientes.
     // Concatenamos TODOS los clientes distintos por pieza (en el período) para que
     // la tabla y el CSV muestren "APPLE, AEROMEXICO" y no solo la reserva ganadora.
-    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC).
+    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC), con
+    // subqueries escalares LIMIT 1: el LEFT JOIN por CUIC multiplicaba filas y,
+    // con reservas cliente_id=0 + ~100 clientes basura con CUIC=0, concatenaba
+    // decenas de nombres ajenos ("Cliente", "Dulces", ...) en una sola celda.
     const pieceIds = itemRows.map(r => r.id);
     const clientesPorPieza = new Map<number, string>();
     // En perPairMode cada fila ya es (pieza, cliente) → no se concatena.
     if (!perPairMode && pieceIds.length > 0) {
       const ph = pieceIds.map(() => '?').join(',');
       const clienteRows = await prisma.$queryRawUnsafe<{ inv_id: number; clientes: string | null }[]>(
-        `SELECT ei.inventario_id AS inv_id,
-                GROUP_CONCAT(DISTINCT COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente)
-                             ORDER BY COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente) SEPARATOR ', ') AS clientes
-         FROM reservas rsv
-         INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
-         LEFT JOIN cliente clById ON clById.id = rsv.cliente_id
-         LEFT JOIN cliente clByCuic ON clByCuic.CUIC = rsv.cliente_id
-         WHERE rsv.deleted_at IS NULL
-           AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
-           AND ei.inventario_id IN (${ph})
-           ${calendarioClause}
-         GROUP BY ei.inventario_id`,
+        `SELECT inv_id,
+                GROUP_CONCAT(DISTINCT nombre ORDER BY nombre SEPARATOR ', ') AS clientes
+         FROM (
+           SELECT ei.inventario_id AS inv_id,
+                  COALESCE(
+                    (SELECT c1.T0_U_Cliente FROM cliente c1 WHERE c1.id = rsv.cliente_id LIMIT 1),
+                    (SELECT c2.T0_U_Cliente FROM cliente c2 WHERE c2.CUIC = rsv.cliente_id LIMIT 1)
+                  ) AS nombre
+           FROM reservas rsv
+           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+           WHERE rsv.deleted_at IS NULL
+             AND rsv.cliente_id > 0
+             AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
+             AND ei.inventario_id IN (${ph})
+             ${calendarioClause}
+         ) t
+         WHERE nombre IS NOT NULL
+         GROUP BY inv_id`,
         ...pieceIds,
       );
       for (const cr of clienteRows) {
