@@ -16,7 +16,7 @@ import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
 import { isCircuitoDigital } from '../lib/circuitos';
-import { bonifCaraOverride } from '../utils/bonifCara';
+import { bonifCaraOverride, rtCarasInvariante } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -4418,11 +4418,11 @@ export class PropuestasController {
         return;
       }
 
-      // Candado Tráfico (server-side): Tráfico no puede modificar tarifa/costo.
+      // Candado Tráfico (server-side): Tráfico no puede modificar tarifa/costo/caras.
       // Espejo de la regla del front; cierra el bypass por API directa.
-      const bloqTrafUpP = cambiosTarifaCostoProhibidos(userRol, { tarifa_publica, costo }, currentCara);
+      const bloqTrafUpP = cambiosTarifaCostoProhibidos(userRol, { tarifa_publica, costo, caras }, currentCara);
       if (bloqTrafUpP.length) {
-        logIntentoTrafico({ userId, userName }, caraId, bloqTrafUpP, { tarifa_publica, costo }, currentCara);
+        logIntentoTrafico({ userId, userName }, caraId, bloqTrafUpP, { tarifa_publica, costo, caras }, currentCara);
         res.status(403).json({ success: false, error: mensajeBloqueoTrafico(bloqTrafUpP) });
         return;
       }
@@ -4500,6 +4500,19 @@ export class PropuestasController {
       const effCcUp = caras_contraflujo !== undefined && caras_contraflujo !== null ? caras_contraflujo : currentCara.caras_contraflujo;
       const bonifOvUp = bonifCaraOverride(effArtUp, effCarasUp as any, effBonifUp as any, effCfUp as any, effCcUp as any);
 
+      // Invariante RT: caras == caras_flujo + caras_contraflujo (solo RT, no BF/CF/CT).
+      // Normaliza/valida ANTES de persistir; split-only que no suma el total → 400.
+      const rtInvUp = bonifOvUp ? null : rtCarasInvariante(effArtUp, { caras, caras_flujo, caras_contraflujo }, currentCara);
+      if (rtInvUp && rtInvUp.ok === false) {
+        res.status(400).json({ success: false, error: rtInvUp.error });
+        return;
+      }
+      // Valores finales de caras/split (BF/CF/CT → bonifOv; RT → invariante; si
+      // ninguno aplica, el valor crudo del payload o undefined para no tocar).
+      const finalCarasUp = bonifOvUp ? bonifOvUp.caras : (rtInvUp ? rtInvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined));
+      const finalCfUp = bonifOvUp ? bonifOvUp.caras_flujo : (rtInvUp ? rtInvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined));
+      const finalCcUp = bonifOvUp ? bonifOvUp.caras_contraflujo : (rtInvUp ? rtInvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined));
+
       // Cambio de periodo o de ARTÍCULO con reservas: liberar el circuito completo
       // (cara + pareja RT/BF) ANTES de reubicarlo/reasignarlo, en la misma
       // transacción que el update. El inventario reservado pertenece al artículo y
@@ -4527,15 +4540,15 @@ export class PropuestasController {
               tipo,
               flujo,
               bonificacion: bonifOvUp ? bonifOvUp.bonificacion : (bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined),
-              caras: bonifOvUp ? bonifOvUp.caras : (caras !== undefined && caras !== null ? parseInt(caras) : undefined),
+              caras: finalCarasUp,
               nivel_socioeconomico,
               formato,
               costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
               tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
               inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
               fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
-              caras_flujo: bonifOvUp ? bonifOvUp.caras_flujo : (caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined),
-              caras_contraflujo: bonifOvUp ? bonifOvUp.caras_contraflujo : (caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined),
+              caras_flujo: finalCfUp,
+              caras_contraflujo: finalCcUp,
               articulo,
               descuento: descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined,
               grupo_rt_bf: grupo_rt_bf !== undefined ? (grupo_rt_bf || null) : undefined,
@@ -4646,13 +4659,13 @@ export class PropuestasController {
           addField('tipo', tipo);
           addField('flujo', flujo);
           addField('bonificacion', bonificacion !== undefined && bonificacion !== null ? parseFloat(bonificacion) : undefined);
-          addField('caras', caras !== undefined && caras !== null ? parseInt(caras) : undefined);
+          addField('caras', finalCarasUp);
           addField('nivel_socioeconomico', nivel_socioeconomico);
           addField('formato', formato);
           addField('costo', costo !== undefined && costo !== null ? parseFloat(costo) : undefined);
           addField('tarifa_publica', tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined);
-          addField('caras_flujo', caras_flujo !== undefined && caras_flujo !== null ? parseInt(caras_flujo) : undefined);
-          addField('caras_contraflujo', caras_contraflujo !== undefined && caras_contraflujo !== null ? parseInt(caras_contraflujo) : undefined);
+          addField('caras_flujo', finalCfUp);
+          addField('caras_contraflujo', finalCcUp);
           addField('articulo', articulo);
           addField('descuento', descuento !== undefined && descuento !== null ? parseFloat(descuento) : undefined);
           if (setParts.length > 0) {
@@ -5040,12 +5053,12 @@ export class PropuestasController {
       const { snapshotCaras, registrarCambiosCaras } = await import('../utils/historialCaras');
       const allCaraIds = carasToUpdate.map((item: { caraId: string | number }) => parseInt(String(item.caraId)));
 
-      // Candado Tráfico (server-side): si Tráfico intenta cambiar tarifa/costo de
-      // CUALQUIER cara del batch, se rechaza TODO (nada se muta). Espejo del front.
+      // Candado Tráfico (server-side): si Tráfico intenta cambiar tarifa/costo/caras
+      // de CUALQUIER cara del batch, se rechaza TODO (nada se muta). Espejo del front.
       if (esTrafico(userRol)) {
         const actuales = await prisma.solicitudCaras.findMany({
           where: { id: { in: allCaraIds } },
-          select: { id: true, tarifa_publica: true, costo: true },
+          select: { id: true, tarifa_publica: true, costo: true, caras: true },
         });
         const mapActuales = new Map(actuales.map((c) => [c.id, c] as const));
         for (const item of carasToUpdate) {
@@ -5056,6 +5069,29 @@ export class PropuestasController {
             res.status(403).json({ success: false, error: mensajeBloqueoTrafico(bloq) });
             return;
           }
+        }
+      }
+
+      // Invariante RT (caras == flujo+contra): pre-pass ANTES de mutar nada. Un
+      // cambio de split que no suma el total → 400 limpio (el catch general es 500).
+      // El resultado normalizado se reusa en el loop (rtInvByCara).
+      const rtInvByCara = new Map<number, { caras: number; caras_flujo: number; caras_contraflujo: number }>();
+      {
+        const actualesInv = await prisma.solicitudCaras.findMany({
+          where: { id: { in: allCaraIds } },
+          select: { id: true, articulo: true, caras: true, caras_flujo: true, caras_contraflujo: true },
+        });
+        const mapInv = new Map(actualesInv.map((c) => [c.id, c] as const));
+        for (const item of carasToUpdate) {
+          const cid = parseInt(String(item.caraId));
+          const cur = mapInv.get(cid);
+          const artEffInv = item.data.articulo ?? cur?.articulo;
+          const inv = rtCarasInvariante(artEffInv, item.data, cur);
+          if (inv && inv.ok === false) {
+            res.status(400).json({ success: false, error: `Circuito ${cid}: ${inv.error}` });
+            return;
+          }
+          if (inv && inv.ok) rtInvByCara.set(cid, { caras: inv.caras, caras_flujo: inv.caras_flujo, caras_contraflujo: inv.caras_contraflujo });
         }
       }
 
@@ -5169,6 +5205,8 @@ export class PropuestasController {
           const effCfBk = data.caras_flujo !== undefined && data.caras_flujo !== null ? data.caras_flujo : currentCara?.caras_flujo;
           const effCcBk = data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? data.caras_contraflujo : currentCara?.caras_contraflujo;
           const bonifOvBk = bonifCaraOverride(effArtBk, effCarasBk as any, effBonifBk as any, effCfBk as any, effCcBk as any);
+          // Invariante RT ya validado/normalizado en el pre-pass.
+          const rtInvBk = bonifOvBk ? undefined : rtInvByCara.get(parseInt(caraId));
 
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
@@ -5178,15 +5216,15 @@ export class PropuestasController {
               tipo: data.tipo,
               flujo: data.flujo,
               bonificacion: bonifOvBk ? bonifOvBk.bonificacion : (data.bonificacion !== undefined && data.bonificacion !== null ? parseFloat(data.bonificacion) : undefined),
-              caras: bonifOvBk ? bonifOvBk.caras : (data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined),
+              caras: bonifOvBk ? bonifOvBk.caras : (rtInvBk ? rtInvBk.caras : (data.caras !== undefined && data.caras !== null ? parseInt(data.caras) : undefined)),
               nivel_socioeconomico: data.nivel_socioeconomico,
               formato: data.formato,
               costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
               tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
               inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
               fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
-              caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined),
-              caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined),
+              caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (rtInvBk ? rtInvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined)),
+              caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (rtInvBk ? rtInvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined)),
               articulo: data.articulo,
               descuento: data.descuento !== undefined && data.descuento !== null ? parseFloat(data.descuento) : undefined,
               grupo_rt_bf: data.grupo_rt_bf !== undefined ? (data.grupo_rt_bf || null) : undefined,

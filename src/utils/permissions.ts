@@ -90,15 +90,29 @@ const dec2Tarifa = (v: unknown): string => {
   return Number.isNaN(n) ? '' : n.toFixed(2);
 };
 
+// Comparación entera para `caras` (entero puro; NaN==NaN se trata como igual
+// para no falsear un cambio cuando el payload no trae el campo).
+const intEqCaras = (a: unknown, b: unknown): boolean => {
+  const na = Number.parseInt(String(a ?? ''), 10);
+  const nb = Number.parseInt(String(b ?? ''), 10);
+  if (Number.isNaN(na) && Number.isNaN(nb)) return true;
+  return na === nb;
+};
+
 /**
- * Devuelve los campos (`tarifa_publica`/`costo`) que el request intenta CAMBIAR
- * respecto al valor actual de la cara en BD. Vacío = permitido (no es Tráfico,
- * o el valor no cambia). Solo evalúa campos presentes en el payload.
+ * Devuelve los campos (`tarifa_publica`/`costo`/`caras`) que el request intenta
+ * CAMBIAR respecto al valor actual de la cara en BD. Vacío = permitido (no es
+ * Tráfico, o el valor no cambia). Solo evalúa campos presentes en el payload.
+ *
+ * `caras` se agregó (2026-10-13, caso 81891/sc 20791): Mónica (Tráfico) guardó
+ * un cambio de NSE y el front recalculó caras 150→50 (dato chueco) disparando
+ * una re-autorización DCM indebida. Tráfico tampoco puede mover el número de
+ * caras de un circuito.
  */
 export function cambiosTarifaCostoProhibidos(
   rol: string | null | undefined,
-  data: { tarifa_publica?: unknown; costo?: unknown } | null | undefined,
-  actual: { tarifa_publica?: unknown; costo?: unknown } | null | undefined
+  data: { tarifa_publica?: unknown; costo?: unknown; caras?: unknown } | null | undefined,
+  actual: { tarifa_publica?: unknown; costo?: unknown; caras?: unknown } | null | undefined
 ): string[] {
   if (!esTrafico(rol) || !data || !actual) return [];
   const changed: string[] = [];
@@ -108,12 +122,15 @@ export function cambiosTarifaCostoProhibidos(
   if (data.costo !== undefined && dec2Tarifa(data.costo) !== dec2Tarifa(actual.costo)) {
     changed.push('costo');
   }
+  if (data.caras !== undefined && !intEqCaras(data.caras, actual.caras)) {
+    changed.push('caras');
+  }
   return changed;
 }
 
 /** Mensaje 403 legible a partir de los campos bloqueados. */
 export function mensajeBloqueoTrafico(campos: string[]): string {
-  const label = (c: string) => (c === 'tarifa_publica' ? 'tarifa' : c === 'costo' ? 'costo' : c);
+  const label = (c: string) => (c === 'tarifa_publica' ? 'tarifa' : c === 'costo' ? 'costo' : c === 'caras' ? 'número de caras' : c);
   return `Tráfico no puede modificar ${campos.map(label).join(' ni ')} de los circuitos.`;
 }
 
@@ -122,14 +139,15 @@ export function logIntentoTrafico(
   ctx: { userId?: number | string | null; userName?: string | null },
   caraId: number | string,
   campos: string[],
-  data: { tarifa_publica?: unknown; costo?: unknown },
-  actual: { tarifa_publica?: unknown; costo?: unknown } | null | undefined
+  data: { tarifa_publica?: unknown; costo?: unknown; caras?: unknown },
+  actual: { tarifa_publica?: unknown; costo?: unknown; caras?: unknown } | null | undefined
 ): void {
   console.warn(
     `[traficoGuard] BLOQUEADO: ${ctx.userName || '?'} (id ${ctx.userId ?? '?'}, Tráfico) intentó cambiar ` +
     `${campos.join('/')} de la cara ${caraId} | ` +
     `tarifa_publica ${String(actual?.tarifa_publica)}→${String(data.tarifa_publica)} · ` +
-    `costo ${String(actual?.costo)}→${String(data.costo)}`
+    `costo ${String(actual?.costo)}→${String(data.costo)} · ` +
+    `caras ${String(actual?.caras)}→${String(data.caras)}`
   );
 }
 
