@@ -2580,7 +2580,13 @@ export class CampanasController {
           cat.año as anio_catorcena,
           sc.caras AS caras_totales
         FROM solicitudCaras sc
+          -- La reserva VIRTUAL de IM (inventario_id = 0) SIN APS —posteada y luego
+          -- desposteada— se ignora para la visibilidad: si contara como "ya tiene
+          -- reserva", la IM desposteada no salía ni en Sin APS ni en Con APS y no se
+          -- le podía re-asignar APS (ticket #599 / campaña 81060). assignAPS hace
+          -- UPDATE de esa reserva virtual al re-asignar, no crea duplicado.
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+            AND NOT (rsv.inventario_id = 0 AND (rsv.APS IS NULL OR rsv.APS = 0))
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           sc.idquote = ?
@@ -3237,7 +3243,11 @@ export class CampanasController {
         FROM solicitudCaras sc
           INNER JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN campania cm ON cm.cotizacion_id = ct.id
+          -- Igual que el imQuery de getInventarioReservado: la reserva virtual de IM
+          -- (inventario_id = 0) sin APS no cuenta como "ya tiene reserva" (IM desposteada
+          -- debe volver a salir en Sin APS — ticket #599 / campaña 81060).
           LEFT JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
+            AND NOT (rsv.inventario_id = 0 AND (rsv.APS IS NULL OR rsv.APS = 0))
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id IN (${placeholders})
