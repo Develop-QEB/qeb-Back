@@ -17,7 +17,7 @@ import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
 import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
-import { bonifCaraOverride, rtCarasInvariante } from '../utils/bonifCara';
+import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -434,8 +434,9 @@ async function propuestaTieneCircuitosIncompletos(client: any, propuestaId: numb
   const esMensual = cot?.tipo_periodo === 'mensual';
   return caras.some((cara: any) => {
     const articulo = (cara.articulo || '').toUpperCase();
-    // IM (impresión) y ES/ESP (ejec. especial) no requieren inventario → nunca incompletos.
-    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
+    // IM (impresión), ES/ESP (ejec. especial) y CF-#### (servicio/mantenimiento)
+    // no requieren inventario → nunca incompletos.
+    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-') || esArticuloServicioCF(articulo)) return false;
     const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
     const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
     const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');

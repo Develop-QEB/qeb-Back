@@ -21,7 +21,7 @@ import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCirc
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
-import { bonifCaraOverride, rtCarasInvariante } from '../utils/bonifCara';
+import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF, esArticuloBfCf } from '../utils/bonifCara';
 import { emitToCampana, emitToAll, emitToCampanas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, esAsesorComercial, bloqueoAjusteComercialCampana, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
@@ -866,7 +866,7 @@ export class CampanasController {
           INNER JOIN catorcenas cat_i ON sc_i.inicio_periodo >= cat_i.fecha_inicio AND sc_i.fin_periodo <= cat_i.fecha_fin
           INNER JOIN cotizacion ct_i ON sc_i.idquote = CAST(ct_i.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           WHERE ct_i.id IN (${ctIdPh})
-            AND COALESCE(sc_i.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc_i.articulo, '') NOT LIKE '%-QR'
+            AND COALESCE(sc_i.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc_i.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc_i.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc_i.articulo, '') NOT REGEXP '^CF-[0-9]'
           GROUP BY ct_i.id
         ) inc_agg ON inc_agg.cotizacion_id = ct.id
         WHERE cm.id IN (${cmIdPh})
@@ -1110,13 +1110,13 @@ export class CampanasController {
                  INNER JOIN catorcenas cat2 ON cal2.fecha_inicio >= cat2.fecha_inicio AND cal2.fecha_fin <= cat2.fecha_fin
                  WHERE sc2.idquote = ? AND r2.deleted_at IS NULL
                    AND ? BETWEEN cat2.fecha_inicio AND cat2.fecha_fin
-                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc2.articulo, '') NOT LIKE '%-QR'
+                   AND COALESCE(sc2.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc2.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc2.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc2.articulo, '') NOT REGEXP '^CF-[0-9]'
                 ) as cnt,
                 (SELECT COALESCE(SUM(sc3.caras + sc3.bonificacion), 0)
                  FROM solicitudCaras sc3
                  INNER JOIN catorcenas cat3 ON sc3.inicio_periodo >= cat3.fecha_inicio AND sc3.fin_periodo <= cat3.fecha_fin
                  WHERE sc3.idquote = ? AND ? BETWEEN cat3.fecha_inicio AND cat3.fecha_fin
-                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc3.articulo, '') NOT LIKE '%-QR'
+                   AND COALESCE(sc3.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc3.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc3.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc3.articulo, '') NOT REGEXP '^CF-[0-9]'
                 ) as caras_esperadas`,
               solicitudId, campana.fecha_fin,
               solicitudId, campana.fecha_fin
@@ -1142,7 +1142,7 @@ export class CampanasController {
               FROM solicitudCaras sc
               INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
               WHERE sc.idquote = ?
-                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR'
+                AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
               ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
               solicitudId
             )
@@ -2511,8 +2511,8 @@ export class CampanasController {
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta
         FROM solicitudCaras sc
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL
           INNER JOIN espacio_inventario epIn ON epIn.id = rsv.inventario_id
@@ -2582,7 +2582,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           sc.idquote = ?
-          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%' OR UPPER(sc.articulo) REGEXP '^CF-[0-9]')
           AND rsv.id IS NULL
       `;
 
@@ -2850,7 +2850,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           sc.idquote = ?
-          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%' OR UPPER(sc.articulo) REGEXP '^CF-[0-9]')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY sc.id
@@ -3089,8 +3089,8 @@ export class CampanasController {
           cat.numero_catorcena,
           cat.año as anio_catorcena,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           0 as aps
         FROM inventarios i
           INNER JOIN espacio_inventario epIn ON i.id = epIn.inventario_id
@@ -3149,8 +3149,8 @@ export class CampanasController {
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
           CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+          CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+          CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
           MAX(rsv.arte_aprobado) as arte_aprobado,
           MIN(rsv.instalado) as instalado,
           MAX(sc.formato) as formato,
@@ -3243,7 +3243,7 @@ export class CampanasController {
           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
         WHERE
           cm.id IN (${placeholders})
-          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%' OR UPPER(sc.articulo) REGEXP '^CF-[0-9]')
           AND rsv.id IS NULL
       `;
 
@@ -3297,7 +3297,7 @@ export class CampanasController {
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE
           cm.id IN (${placeholders})
-          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%' OR UPPER(sc.articulo) REGEXP '^CF-[0-9]')
           AND rsv.APS IS NOT NULL
           AND rsv.APS > 0
         GROUP BY cm.id, sc.id
@@ -3695,7 +3695,7 @@ export class CampanasController {
           INNER JOIN solicitudCaras sc ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
           INNER JOIN reservas rsv ON rsv.solicitudCaras_id = sc.id AND rsv.deleted_at IS NULL AND rsv.inventario_id = 0
         WHERE cm.id IN (${cmIdPh})
-          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%')
+          AND (UPPER(sc.articulo) LIKE 'IM%' OR UPPER(sc.articulo) LIKE 'ESP%' OR UPPER(sc.articulo) LIKE 'ES-%' OR UPPER(sc.articulo) REGEXP '^CF-[0-9]')
           AND rsv.APS IS NOT NULL AND rsv.APS > 0
         GROUP BY cm.id, cm.nombre, cm.status, cm.fecha_inicio, cm.fecha_fin,
                  anunciante, cl.CUIC, pr.inversion, ct.id_propuesta,
@@ -9708,9 +9708,9 @@ export class CampanasController {
 
         const articuloUp = String(sc.articulo || '').toUpperCase();
 
-        // Para IM (Impresiones) y ES/ESP (Ejec. Especiales): no aplican reservas de
-        // inventario físico, siempre se consideran completos (delta=0 → ✓ en UI).
-        const delta_caras = (articuloUp.startsWith('IM') || articuloUp.startsWith('ESP') || articuloUp.startsWith('ES-'))
+        // Para IM (Impresiones), ES/ESP (Ejec. Especiales) y CF-#### (servicio):
+        // no aplican reservas de inventario físico, siempre completos (delta=0 → ✓).
+        const delta_caras = (articuloUp.startsWith('IM') || articuloUp.startsWith('ESP') || articuloUp.startsWith('ES-') || esArticuloServicioCF(articuloUp))
           ? 0
           : rsvCount - (scCaras + scBonif);
 
@@ -10109,7 +10109,7 @@ export class CampanasController {
 
         const articuloUp = String(r.articulo || '').toUpperCase();
         const operacion = articuloUp.startsWith('RT') ? 'RENTA'
-          : (articuloUp.startsWith('BF') || articuloUp.startsWith('CF')) ? 'BONIFICACION'
+          : esArticuloBfCf(articuloUp) ? 'BONIFICACION'
           : articuloUp.startsWith('CT') ? 'CORTESIA'
           : articuloUp.startsWith('IN') ? 'INTERCAMBIO'
           : 'RENTA';
@@ -10840,7 +10840,7 @@ export class CampanasController {
         where: { id: solicitudCaraId },
         select: { articulo: true },
       }) : null;
-      const isBfCara = !!(scData?.articulo && (scData.articulo.toUpperCase().startsWith('BF') || scData.articulo.toUpperCase().startsWith('CF')));
+      const isBfCara = !!(scData?.articulo && esArticuloBfCf(scData.articulo));
 
       let reservasOmitidas = 0;
       // grupo_completo_id: campañas usa UN solo id para todas las no-bonificación.
