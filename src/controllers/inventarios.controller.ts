@@ -11,6 +11,7 @@ import {
   TipoBloqueoInventario,
   esInventarioBloqueado,
   esInventarioNoUtilizable,
+  expandEstatusInventarioFiltro,
 } from '../services/inventario-bloqueo.service';
 import { logHistorial } from '../utils/historial';
 import {
@@ -93,7 +94,8 @@ export class InventariosController {
       }
 
       if (estatus) {
-        where.estatus = estatus;
+        // 'No Disponible'/'Bloqueado' son sinónimos (rename): el filtro trae ambos.
+        where.estatus = { in: expandEstatusInventarioFiltro(estatus) };
       }
 
       if (plaza) {
@@ -252,10 +254,10 @@ export class InventariosController {
       }
 
       if (estatus) {
-        where.estatus = estatus;
+        where.estatus = { in: expandEstatusInventarioFiltro(estatus) };
       } else {
-        // Excluir Inactivos (fantasmas) y Bloqueados/Inhabilitados del mapa por default.
-        // Si quieren verlos hay que filtrar explícitamente por ?estatus=Inactivo.
+        // Excluir Inactivos (fantasmas) y No Disponibles/Bloqueados/Inhabilitados del
+        // mapa por default. Si quieren verlos hay que filtrar explícitamente.
         where.estatus = { notIn: [...ESTATUS_INVENTARIO_NO_UTILIZABLE] };
       }
 
@@ -358,7 +360,7 @@ export class InventariosController {
         }
       }
       if (tipo) where.mueble = tipo;
-      if (estatus) where.estatus = estatus;
+      if (estatus) where.estatus = { in: expandEstatusInventarioFiltro(estatus) };
       if (plaza) where.plaza = plaza;
       if (tradicional) where.tradicional_digital = tradicional;
       if (micromacro === 'excluir') where.tipo_de_mueble = { not: { contains: 'MI MACRO' } };
@@ -2301,9 +2303,10 @@ export class InventariosController {
         res.status(404).json({ success: false, error: 'Inventario no encontrado' });
         return;
       }
-      // Clasificación del bloqueo: 'Bloqueado' (default, compat con clientes que
-      // no mandan body) o 'Inhabilitado'. Ambas se comportan IGUAL: liberan
-      // reservas y sacan la pieza de disponibles. Solo cambia la etiqueta.
+      // Clasificación del bloqueo: 'No Disponible' (default; nombre nuevo de
+      // 'Bloqueado', que sigue aceptándose por compat) o 'Inhabilitado'. Todas se
+      // comportan IGUAL: liberan reservas y sacan la pieza de disponibles. Solo
+      // cambia la etiqueta.
       const tipoRaw = req.body?.tipo;
       if (tipoRaw !== undefined && !(ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(tipoRaw)) {
         res.status(400).json({
@@ -2312,7 +2315,7 @@ export class InventariosController {
         });
         return;
       }
-      const tipoBloqueo: TipoBloqueoInventario = tipoRaw ?? 'Bloqueado';
+      const tipoBloqueo: TipoBloqueoInventario = tipoRaw ?? 'No Disponible';
 
       const wasBloqueado = esInventarioBloqueado(inventario.estatus);
       // Con `tipo` explícito la intención es BLOQUEAR con esa clasificación, nunca
@@ -2326,11 +2329,12 @@ export class InventariosController {
         ? (inventario.estatus === 'Inhabilitado' ? 'Habilitado' : 'Desbloqueado')
         : tipoBloqueo;
       const verbo = accion === 'Bloqueado' ? 'bloqueó'
+        : accion === 'No Disponible' ? 'marcó como No Disponible'
         : accion === 'Inhabilitado' ? 'inhabilitó'
         : accion === 'Habilitado' ? 'habilitó'
         : 'desbloqueó';
 
-      // Cuando se PASA a Bloqueado/Inhabilitado, soft-delete las reservas activas del
+      // Cuando se PASA a No Disponible/Bloqueado/Inhabilitado, soft-delete las reservas activas del
       // inventario (`deleted_at = NOW()`). El estatus de la reserva se
       // preserva para auditoría — solo el deleted_at las saca del flujo.
       // Esto "desocupa" el espacio: la campaña que tenía la cara la pierde
@@ -2431,7 +2435,7 @@ export class InventariosController {
           }
         }
         if (tipo) where.mueble = tipo;
-        if (estatus) where.estatus = estatus;
+        if (estatus) where.estatus = { in: expandEstatusInventarioFiltro(estatus) };
         if (plaza) where.plaza = plaza;
       }
 

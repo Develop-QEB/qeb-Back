@@ -10892,15 +10892,17 @@ export class CampanasController {
         const est = String(r.estatus_inventario || '');
         const cod = String(r.codigo_unico || '').toUpperCase();
         const bloqueado = esInventarioNoUtilizable(est);
+        // 'Bloqueado' legacy conserva su etiqueta (filas pre-rename); lo demás
+        // no-utilizable (No Disponible, Inactivo) sale como 'No Disponible'.
         const motivo_salida = bloqueado
-          ? (est === 'Inhabilitado' ? 'Inhabilitado' : 'Bloqueado')
+          ? (est === 'Inhabilitado' ? 'Inhabilitado' : est === 'Bloqueado' ? 'Bloqueado' : 'No Disponible')
           : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
         const disponible = Number(r.disponible) === 1;
         return {
           ...r,
           disponible,
           motivo_salida,
-          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario bloqueado') : 'Ocupado en el periodo'),
+          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible') : 'Ocupado en el periodo'),
         };
       });
 
@@ -11194,7 +11196,7 @@ export class CampanasController {
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
             const motivo = lockResult.reason === 'BLOCKED'
-              ? 'Inventario bloqueado/inhabilitado'
+              ? 'Inventario no disponible/inhabilitado'
               : inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)';
             omitidosDetalleCamp.push({ inventario_id: w.invId, motivo });
             reservasOmitidas++;
