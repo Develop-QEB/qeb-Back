@@ -24,6 +24,9 @@ const FULL_VISIBILITY_ROLES = [
   'Gerente Comercial Vía Pública',
   'Gerente Comercial Plazas',
   'Jefe de BI',
+  // Nuevo rol (2026-10-14): mismos permisos que Director General Adjunto —
+  // visibilidad total, sin aprobar autorizaciones. Area admin: Comercial.
+  'Director Comercial General',
   // TI y Mejora Continua: admin completo
   'Gerente de TI',
   'Especialista de TI',
