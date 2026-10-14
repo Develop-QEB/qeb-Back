@@ -12,6 +12,7 @@
 import prisma from '../utils/prisma';
 import { tablasCompletadoDisponibles } from './circuito-completado.service';
 import { getReservasDePropuesta, OrigenReserva } from './pase-ventas.service';
+import { esArticuloBfCf } from '../utils/bonifCara';
 
 export type EstadoVersion = 'vigente' | 'no_vigente' | 'sin_version';
 
@@ -78,8 +79,8 @@ const SQL_INVENTARIO_ACTUAL = `
       ELSE MIN(i.tipo_de_cara)
     END as tipo_de_cara,
     CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-    CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR sc.articulo LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-    CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND sc.articulo NOT LIKE 'CF%' THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+    CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+    CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
     MIN(i.latitud) as latitud,
     MIN(i.longitud) as longitud,
     MIN(i.plaza) as plaza,
@@ -140,8 +141,7 @@ const numOrNull = (v: unknown): number | null => (v === null || v === undefined 
 
 function esBonificada(estatus: string | null, articulo: string | null): boolean {
   if (estatus === 'Bonificado' || estatus === 'Vendido bonificado') return true;
-  const a = (articulo || '').toUpperCase();
-  return a.startsWith('BF') || a.startsWith('CF');
+  return esArticuloBfCf(articulo);
 }
 
 /** Inventario reservado HOY (sin versionado). Misma forma que siempre. */
