@@ -15,7 +15,8 @@ import {
   crearAutorizacionEliminacionCampana,
   ejecutarEliminacionCarasCampana,
   TIPO_FILTRO_ELIMINACION,
-  TIPO_AUTORIZACION_ELIMINACION
+  TIPO_AUTORIZACION_ELIMINACION,
+  getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
@@ -11762,7 +11763,8 @@ export class CampanasController {
           bonificacion: bonificacionForAuth,
           costo: data.costo ? parseFloat(data.costo) : 0,
           tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
-          articulo: data.articulo || null
+          articulo: data.articulo || null,
+          sap_database: await getSapDatabaseDePropuesta(parseInt(String(currentCara.idquote || '0'))),
         }, userId);
         // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
         const effCostoCmAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCaraFull?.costo || 0);
@@ -12183,7 +12185,8 @@ export class CampanasController {
         bonificacion: bonificacionForAuthCr,
         costo: data.costo ? parseFloat(data.costo) : 0,
         tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
-        articulo: data.articulo || null
+        articulo: data.articulo || null,
+        sap_database: await getSapDatabaseDePropuesta(cotizacion.id_propuesta),
       }, userId);
 
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
@@ -12384,6 +12387,15 @@ export class CampanasController {
 
       const beforeSnap = await snapshotCaras(allCaraIds);
 
+      // sap_database del origen (una sola vez): el tabulador UDC evalúa distinto.
+      const propIdBulkCm = await prisma.$queryRawUnsafe<{ id_propuesta: number | null }[]>(
+        `SELECT ct.id_propuesta FROM campania cm INNER JOIN cotizacion ct ON ct.id = cm.cotizacion_id WHERE cm.id = ? LIMIT 1`,
+        campanaId
+      );
+      const sapDbAuthBulkCm = propIdBulkCm[0]?.id_propuesta
+        ? await getSapDatabaseDePropuesta(Number(propIdBulkCm[0].id_propuesta))
+        : null;
+
       // Pre-compute BF bonif map from batch for RT auth evaluation
       const bfBonifByGrupoBulk: Record<number, number> = {};
       for (const item of carasToUpdate) {
@@ -12475,7 +12487,8 @@ export class CampanasController {
               bonificacion: bonificacionForAuthBulk,
               costo: data.costo ? parseFloat(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
-              articulo: data.articulo || null
+              articulo: data.articulo || null,
+              sap_database: sapDbAuthBulkCm,
             }, userId);
             // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
             const effCostoBulkAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCara?.costo || 0);

@@ -2382,7 +2382,8 @@ export class SolicitudesController {
             bonificacion: bonificacionForAuth,
             costo: cara.costo,
             tarifa_publica: cara.tarifa_publica || 0,
-            articulo: cara.articulo || null
+            articulo: cara.articulo || null,
+            sap_database: sap_database_final,
           }, userId);
 
           // BF/CF/CT: el conteo total va a bonificacion; caras/flujo/contra = 0
@@ -3669,6 +3670,7 @@ export class SolicitudesController {
                 costo: cara.costo,
                 tarifa_publica: cara.tarifa_publica || 0,
                 articulo: cara.articulo || null,
+                sap_database: sap_database_upd,
               }, userId);
               autorizacion_dg = estadoResult.autorizacion_dg;
               autorizacion_dcm = estadoResult.autorizacion_dcm;
@@ -4094,7 +4096,7 @@ export class SolicitudesController {
     try {
       console.log('[evaluarAutorizacion] Body recibido:', req.body);
       const userId = req.user?.userId;
-      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica, articulo } = req.body;
+      const { ciudad, estado, formato, tipo, caras, bonificacion, costo, tarifa_publica, articulo, sap_database } = req.body;
 
       // Validar datos requeridos
       if (!formato || caras === undefined || costo === undefined) {
@@ -4115,7 +4117,8 @@ export class SolicitudesController {
         bonificacion: Number(bonificacion) || 0,
         costo: Number(costo) || 0,
         tarifa_publica: Number(tarifa_publica) || 0,
-        articulo: articulo || null
+        articulo: articulo || null,
+        sap_database: sap_database || null,
       }, userId);
 
       res.json({

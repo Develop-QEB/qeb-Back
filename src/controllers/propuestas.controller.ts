@@ -8,7 +8,8 @@ import {
   verificarCarasRechazadas,
   crearTareasAutorizacion,
   reconciliarCierreTareasAutorizacion,
-  conservarAprobacionSiIncrementa
+  conservarAprobacionSiIncrementa,
+  getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
@@ -4600,7 +4601,8 @@ export class PropuestasController {
           bonificacion: bonificacionForAuth,
           costo: costo ? parseFloat(costo) : 0,
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
-          articulo: articulo || null
+          articulo: articulo || null,
+          sap_database: await getSapDatabaseDePropuesta(parseInt(String(currentCara.idquote || '0'))),
         }, userId);
         // Direcciones Aprobadas: si ya estaba aprobada y costo/caras NO bajan, se
         // conserva la aprobación (sin nueva autorización). Valores efectivos:
@@ -5008,7 +5010,8 @@ export class PropuestasController {
         bonificacion: bonificacionForAuthCrP,
         costo: costo ? parseFloat(costo) : 0,
         tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
-        articulo: articulo || null
+        articulo: articulo || null,
+        sap_database: await getSapDatabaseDePropuesta(parseInt(id)),
       }, userId);
 
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
@@ -5235,6 +5238,9 @@ export class PropuestasController {
 
       const beforeSnap = await snapshotCaras(allCaraIds);
 
+      // sap_database del origen (una sola vez): el tabulador UDC evalúa distinto.
+      const sapDbAuthBulkP = await getSapDatabaseDePropuesta(parseInt(id));
+
       // Pre-compute BF bonif map from batch for RT auth evaluation
       const bfBonifByGrupoP: Record<number, number> = {};
       for (const item of carasToUpdate) {
@@ -5324,7 +5330,8 @@ export class PropuestasController {
               bonificacion: bonificacionForAuthP,
               costo: data.costo ? parseFloat(data.costo) : 0,
               tarifa_publica: data.tarifa_publica ? parseFloat(data.tarifa_publica) : 0,
-              articulo: data.articulo || null
+              articulo: data.articulo || null,
+              sap_database: sapDbAuthBulkP,
             }, userId);
             // Direcciones Aprobadas: conservar aprobación si costo/caras no bajan.
             const effCostoBkAuth = data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : Number(currentCara?.costo || 0);
