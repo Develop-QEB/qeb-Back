@@ -148,14 +148,31 @@ export function articuloOcupaInventario(articulo: string | null | undefined): bo
 // ─────────────────────────────────────────────────────────────────────────────
 // BLOQUEO ADMINISTRATIVO del inventario (inventarios.estatus).
 //
-// Dos clasificaciones que se comportan IGUAL para efectos de ocupación: la pieza
+// Clasificaciones que se comportan IGUAL para efectos de ocupación: la pieza
 // NO se puede utilizar/reservar, sale de disponibles y del mapa, y al aplicarse
 // se liberan sus reservas actuales/futuras. La diferencia es solo de etiqueta.
 // Cualquier check de "¿se puede usar esta pieza?" debe pasar por estas
-// constantes — no comparar contra 'Bloqueado' suelto.
+// constantes — no comparar contra un valor suelto.
+//
+// 'No Disponible' es el nombre nuevo de 'Bloqueado' (rename oct-2026). 'Bloqueado'
+// se queda en la lista como sinónimo legacy: siguen existiendo filas con ese valor
+// hasta que corra la migración de datos (y clientes/scripts viejos que lo mandan).
+// NUNCA quitarlo de aquí — hacerlo volvería reservables las piezas legacy.
 // ─────────────────────────────────────────────────────────────────────────────
-export const ESTATUS_INVENTARIO_BLOQUEO = ['Bloqueado', 'Inhabilitado'] as const;
+export const ESTATUS_INVENTARIO_BLOQUEO = ['No Disponible', 'Bloqueado', 'Inhabilitado'] as const;
 export type TipoBloqueoInventario = (typeof ESTATUS_INVENTARIO_BLOQUEO)[number];
+
+/**
+ * Expande el valor de un filtro `?estatus=` de inventarios: 'No Disponible' y
+ * 'Bloqueado' son el MISMO concepto (rename), así que filtrar por cualquiera de
+ * los dos debe traer ambos (filas migradas + legacy). Los demás valores pasan
+ * tal cual.
+ */
+export function expandEstatusInventarioFiltro(estatus: string): string[] {
+  return estatus === 'No Disponible' || estatus === 'Bloqueado'
+    ? ['No Disponible', 'Bloqueado']
+    : [estatus];
+}
 
 // Bloqueo + 'Inactivo' (fantasmas archivados): todo lo que NO se puede ocupar.
 export const ESTATUS_INVENTARIO_NO_UTILIZABLE = [...ESTATUS_INVENTARIO_BLOQUEO, 'Inactivo'] as const;
@@ -288,7 +305,7 @@ export async function createReservaConLock(
         espacioId
       );
 
-      // CANDADO DE ESTATUS: una pieza Bloqueado/Inhabilitado/Inactivo NO se puede
+      // CANDADO DE ESTATUS: una pieza No Disponible/Bloqueado/Inhabilitado/Inactivo NO se puede
       // reservar, aunque el front la mande (p. ej. un circuito borrador que la
       // traía desde antes de inhabilitarla, o un request stale). getDisponibles ya
       // la excluye del listado; esto es el candado DURO del lado servidor que cierra

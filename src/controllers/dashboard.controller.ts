@@ -100,7 +100,9 @@ function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
     catorcena_id: catorcena_id as string | undefined,
     fecha_inicio: fecha_inicio as string | undefined,
     fecha_fin: fecha_fin as string | undefined,
-    estatusFiltro: estatusFiltro as string | undefined,
+    // 'Bloqueado' es el valor wire del estatus efectivo (agrupa No Disponible/
+    // Bloqueado/Inhabilitado). Se acepta 'No Disponible' como alias del filtro.
+    estatusFiltro: estatusFiltro === 'No Disponible' ? 'Bloqueado' : (estatusFiltro as string | undefined),
     pageNum,
     limitNum,
     skip: (pageNum - 1) * limitNum,
@@ -515,9 +517,11 @@ export class DashboardController {
         }
       });
 
-      // Estatus efectivo: Bloqueado del inventario manda sobre cualquier reserva,
-      // luego prevalece el estatus de reserva (Vendido/Reservado/etc), default Disponible.
-      // 'Inhabilitado' se agrupa como 'Bloqueado' en el dashboard (mismo KPI).
+      // Estatus efectivo: el bloqueo administrativo del inventario manda sobre
+      // cualquier reserva, luego prevalece el estatus de reserva (Vendido/Reservado/
+      // etc), default Disponible. 'No Disponible'/'Bloqueado'/'Inhabilitado' se
+      // agrupan bajo el valor wire 'Bloqueado' (mismo KPI; el front lo etiqueta
+      // "No Disponible").
       const getEstatusEfectivo = (inv: { id: number; estatus: string | null }): string => {
         if (esInventarioBloqueado(inv.estatus)) return 'Bloqueado';
         return inventarioEstatus[inv.id] || 'Disponible';
