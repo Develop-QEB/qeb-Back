@@ -3,6 +3,7 @@ import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
 import { ESTATUS_INVENTARIO_BLOQUEO_SQL, esInventarioBloqueado } from '../services/inventario-bloqueo.service';
+import { esArticuloBfCf } from '../utils/bonifCara';
 
 // Convierte un valor de query (string, string[], undefined) a array limpio
 // Soporta tanto formato CSV ("a,b,c") como repetido (?x=a&x=b)
@@ -358,7 +359,7 @@ function tipoVentaVendido(estatusEfectivo: string, articulo: string | null | und
   const a = (articulo || '').toUpperCase();
   if (a.startsWith('IN')) return 'Intercambio';
   if (a.startsWith('CT')) return 'Cortesía';
-  if (a.startsWith('BF') || a.startsWith('CF')) return 'Bonificado';
+  if (esArticuloBfCf(a)) return 'Bonificado';
   if (estatusEfectivo === 'Vendido bonificado') return 'Bonificado';
   return 'Renta';
 }
