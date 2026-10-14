@@ -349,14 +349,23 @@ async function evaluarTabuladorUDC(cara: CaraData): Promise<EstadoAutorizacionRe
       total_caras: totalCaras,
     };
   }
-  if (minDcm !== null && maxDcm !== null && tarifaEfectiva >= minDcm && tarifaEfectiva <= maxDcm) {
-    return {
-      autorizacion_dg: 'aprobado',
-      autorizacion_dcm: 'pendiente',
-      motivo_dcm: `UDC: tarifa $${tarifaEfectiva.toFixed(2)} en banda DAE ($${minDcm}-$${maxDcm}) (tabulador Dirección UDC)`,
-      tarifa_efectiva: tarifaEfectiva,
-      total_caras: totalCaras,
-    };
+  // Banda DAE contigua a la DG: piso EXCLUSIVO en tarifa_max_dg, no >= tarifa_min_dcm.
+  // La tarifa efectiva (costo/caras) puede ser fraccionaria y caía en el hueco
+  // entre max_dg y min_dcm (QA: 2 caras × $30,001 = $15,000.50 → salía aprobado).
+  // Si la fila no trae banda DG, se usa min_dcm inclusivo como antes.
+  if (maxDcm !== null && tarifaEfectiva <= maxDcm) {
+    const enBandaDae = maxDg !== null
+      ? tarifaEfectiva > maxDg
+      : (minDcm !== null && tarifaEfectiva >= minDcm);
+    if (enBandaDae) {
+      return {
+        autorizacion_dg: 'aprobado',
+        autorizacion_dcm: 'pendiente',
+        motivo_dcm: `UDC: tarifa $${tarifaEfectiva.toFixed(2)} en banda DAE (>$${maxDg ?? minDcm} a $${maxDcm}) (tabulador Dirección UDC)`,
+        tarifa_efectiva: tarifaEfectiva,
+        total_caras: totalCaras,
+      };
+    }
   }
   return aprobado;
 }
