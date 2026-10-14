@@ -136,7 +136,7 @@ Tarjetas KPI interactivas (clickeables para filtrar tabla):
 - Disponible (cyan)
 - Reservado (amarillo)
 - Vendido (verde)
-- Bloqueado (morado)
+- No Disponible (morado; antes se llamaba "Bloqueado")
 Al hacer click en una tarjeta KPI, la tabla de abajo se filtra por ese estatus. La tarjeta activa muestra un anillo visual indicador.
 
 Filtros: Plaza, Tipo, Estatus, Tradicional/Digital. Cada filtro es un dropdown con busqueda.
@@ -533,20 +533,20 @@ Tipos de tareas y permisos:
 --- 8. INVENTARIOS ---
 Catalogo completo de todos los espacios publicitarios registrados.
 
-Columnas: ID, Codigo (formato: MUPI-GDL-001_F donde F=Flujo, CF=Contraflujo), Mueble (+ badge "DIG" si digital), Formato, Ubicacion, Plaza, Cara, Dimensiones (ancho x alto en metros), Actividad (Ocupado/Disponible), Estatus (Activo/Bloqueado), Acciones.
+Columnas: ID, Codigo (formato: MUPI-GDL-001_F donde F=Flujo, CF=Contraflujo), Mueble (+ badge "DIG" si digital), Formato, Ubicacion, Plaza, Cara, Dimensiones (ancho x alto en metros), Actividad (Ocupado/Disponible), Estatus (Activo/No Disponible), Acciones.
 
 Estatus de inventario:
 - Activo/Disponible (verde esmeralda): Espacio libre para asignar.
 - Reservado (ambar): Asignado a una campaña.
 - Ocupado (cyan): En uso activo.
 - Mantenimiento (gris zinc): En reparacion o mantenimiento.
-- Bloqueado (rojo): No disponible.
+- No Disponible (rojo): bloqueado administrativamente, no se puede ocupar (antes se llamaba "Bloqueado"; tambien existe "Inhabilitado", que se comporta igual).
 
 Filtros: Barra de busqueda (codigo, ubicacion, municipio), Tipo (MUPI, COLUMNA, METROPOLITANO, PARABUS...), Estatus (dropdown), Plaza (GDL, MTY, CDMX...). Combinables. Badge muestra conteo.
 
 Vistas: Toggle entre Tabla y Mapa.
 - Tabla: Lista ordenable por ID, codigo_unico, mueble, plaza, estatus, tarifa_publica.
-- Mapa: Google Maps con pins. Verde=Disponible, Naranja=Reservado, Rojo=Bloqueado. Click en marcador para resumen.
+- Mapa: Google Maps con pins. Verde=Disponible, Naranja=Reservado, Rojo=No Disponible. Click en marcador para resumen.
 
 Carga masiva CSV:
 - Subir archivo CSV con datos de inventario.
@@ -559,7 +559,7 @@ Carga masiva CSV:
 Historial de inventario: Click en icono reloj. Modal: Campaña, Cliente, Catorcena/Año, Tipo (Flujo/CF/Bonificacion), Estatus reserva, Fecha registro.
 
 Bloquear/Desbloquear inventario (Trafico):
-- Bloquear espacio libre: Click icono bloqueo -> cambia a "Bloqueado" inmediatamente.
+- Bloquear espacio libre: Click icono bloqueo -> cambia a "No Disponible" inmediatamente.
 - Desbloquear: Click icono desbloqueo -> regresa a "Activo/Disponible".
 - Bloquear espacio en uso (Reservado/Ocupado/Vendido): Abre Modal de Bloqueo.
 
@@ -570,8 +570,8 @@ Modal de Bloqueo (espacio en uso):
 - Campo "Indicaciones/Motivo" (OBLIGATORIO): explicar causa y fecha estimada.
 - Selectores de Analistas (usuarios con "analista" en puesto) y Trafico (usuarios con "tr" en area o "trafico" en puesto). Busqueda con resultados max 6, muestra nombre + puesto. Seleccionados como chips removibles.
 - Boton "Enviar tarea": SOLO activo con indicaciones llenas Y al menos un usuario seleccionado.
-- Al enviar: espacio bloqueado, tareas "Ajuste Inventario Bloqueado" creadas en cada campaña afectada, notificaciones enviadas.
-- Espacio bloqueado NO aparece en busquedas de asignacion de propuestas.
+- Al enviar: espacio pasa a No Disponible, tareas "Ajuste Inventario Bloqueado" creadas en cada campaña afectada, notificaciones enviadas.
+- Espacio No Disponible NO aparece en busquedas de asignacion de propuestas.
 
 Exportar: Boton "Descargar CSV" exporta vista filtrada actual.
 

@@ -632,7 +632,7 @@ export const aplicarReorganizacion = async (req: AuthRequest, res: Response) => 
         res.status(409).json({
           success: false,
           error: lockResult.reason === 'BLOCKED'
-            ? `No se pudo crear reserva para inventario_id=${a.inventario_id}: el inventario está bloqueado/inhabilitado`
+            ? `No se pudo crear reserva para inventario_id=${a.inventario_id}: el inventario está No Disponible/Inhabilitado`
             : `No se pudo crear reserva para inventario_id=${a.inventario_id}: espacio ya ocupado tras el lock`,
         });
         return;
