@@ -4131,6 +4131,24 @@ export class PropuestasController {
         return;
       }
 
+      // CANDADO DE ESTATUS: necesario aquí porque la REACTIVACIÓN de una reserva
+      // soft-deleted (más abajo) NO pasa por createReservaConLock. Sin esto,
+      // bloquear una pieza (lo que libera su reserva) y volver a pedirla la
+      // reactivaba aunque estuviera No Disponible/Inhabilitada (QA dev 14-oct,
+      // reserva 678075). Para el branch de crear es redundante pero inofensivo:
+      // el check race-safe sigue viviendo dentro del lock.
+      const invEstatusToggle = await prisma.inventarios.findUnique({
+        where: { id: parseInt(inventarioId) },
+        select: { estatus: true },
+      });
+      if (esInventarioNoUtilizable(invEstatusToggle?.estatus)) {
+        res.status(409).json({
+          success: false,
+          error: 'Este inventario está marcado como No Disponible o Inhabilitado y no se puede reservar.',
+        });
+        return;
+      }
+
       // Validar que el espacio no esté ya bloqueado por OTRA propuesta en el
       // período. Antes este endpoint no validaba contra otras propuestas y por
       // ahí se colaba parte de las dupes en producción.
