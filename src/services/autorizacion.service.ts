@@ -27,6 +27,9 @@ export interface CaraData {
   costo: number;
   tarifa_publica?: number;
   articulo?: string | null;
+  // Compañía SAP del origen (solicitud.sap_database). 'UDC' activa el tabulador
+  // propio de Dirección UDC; ausente/CIMU/TRADE usa los criterios normales.
+  sap_database?: string | null;
 }
 
 export interface EstadoAutorizacionResult {
@@ -259,6 +262,121 @@ function normalizarTipo(tipo: string | null | undefined): string {
   return 'Tradicional';
 }
 
+// ── Tabulador Dirección UDC (oct-2026) ──────────────────────────────────────
+// Las ventas de la compañía UDC (solicitud.sap_database='UDC') tienen su PROPIO
+// tabulador: filas de criterios_autorizacion con sap_database='UDC' (y
+// tipo/plaza='TODAS', solo bandas de TARIFA — por eso son invisibles para el
+// lookup normal, que filtra tipo exacto). Regla:
+//   - formato CON fila UDC  → tarifa <= tarifa_max_dg → Pend. DG;
+//                             en [tarifa_min_dcm, tarifa_max_dcm] → Pend. DCM (DAE).
+//   - formato SIN fila UDC  → auto-aprobado (regla junta 2026-09-04: el resto
+//                             de UDC —pantallas del aeropuerto— no se autoriza).
+// El tabulador CIMU/TRADE (filas con sap_database NULL) NO aplica a UDC y viceversa.
+
+// La columna sap_database puede no existir aún en la BD del entorno (se agrega
+// por script). Sin columna → comportamiento previo (UDC todo auto-aprobado).
+let _criteriosUdcDisponible: boolean | null = null;
+async function criteriosUdcDisponible(): Promise<boolean> {
+  if (_criteriosUdcDisponible !== null) return _criteriosUdcDisponible;
+  try {
+    const cols = await prisma.$queryRawUnsafe<unknown[]>(
+      `SHOW COLUMNS FROM criterios_autorizacion LIKE 'sap_database'`
+    );
+    _criteriosUdcDisponible = cols.length > 0;
+  } catch {
+    _criteriosUdcDisponible = false;
+  }
+  return _criteriosUdcDisponible;
+}
+
+interface CriterioUdcRow {
+  tarifa_max_dg: unknown;
+  tarifa_min_dcm: unknown;
+  tarifa_max_dcm: unknown;
+}
+
+async function buscarCriterioUDC(formatoNorm: string): Promise<CriterioUdcRow | null> {
+  const buscar = async (f: string): Promise<CriterioUdcRow | null> => {
+    const rows = await prisma.$queryRawUnsafe<CriterioUdcRow[]>(
+      `SELECT tarifa_max_dg, tarifa_min_dcm, tarifa_max_dcm
+       FROM criterios_autorizacion
+       WHERE sap_database = 'UDC' AND activo = 1 AND formato = ?
+       LIMIT 1`,
+      f
+    );
+    return rows[0] || null;
+  };
+  let criterio = await buscar(formatoNorm);
+  if (!criterio) {
+    const generico = getFormatoGenerico(formatoNorm);
+    if (generico) criterio = await buscar(generico);
+  }
+  return criterio;
+}
+
+async function evaluarTabuladorUDC(cara: CaraData): Promise<EstadoAutorizacionResult> {
+  const totalCaras = cara.caras + (Number(cara.bonificacion) || 0);
+  const tarifaEfectiva = totalCaras > 0 ? cara.costo / totalCaras : 0;
+  const aprobado: EstadoAutorizacionResult = {
+    autorizacion_dg: 'aprobado',
+    autorizacion_dcm: 'aprobado',
+    tarifa_efectiva: tarifaEfectiva,
+    total_caras: totalCaras,
+  };
+  if (!(await criteriosUdcDisponible())) return aprobado;
+
+  // Normalizar como el motor normal; si no resuelve, usar el formato tal cual
+  // (las filas UDC usan los mismos nombres por-sitio y el collation es ci).
+  const formatoNorm = normalizarFormato(cara.formato) || (cara.formato || '').trim();
+  if (!formatoNorm) return aprobado;
+  const criterio = await buscarCriterioUDC(formatoNorm);
+  if (!criterio) {
+    console.log(`[evaluarTabuladorUDC] "${formatoNorm}" sin fila UDC → auto-aprobado (regla UDC)`);
+    return aprobado;
+  }
+
+  const maxDg = criterio.tarifa_max_dg != null ? Number(criterio.tarifa_max_dg) : null;
+  const minDcm = criterio.tarifa_min_dcm != null ? Number(criterio.tarifa_min_dcm) : null;
+  const maxDcm = criterio.tarifa_max_dcm != null ? Number(criterio.tarifa_max_dcm) : null;
+  console.log('[evaluarTabuladorUDC]', { formatoNorm, tarifaEfectiva, totalCaras, maxDg, minDcm, maxDcm });
+
+  if (maxDg !== null && tarifaEfectiva <= maxDg) {
+    return {
+      autorizacion_dg: 'pendiente',
+      autorizacion_dcm: 'aprobado',
+      motivo_dg: `UDC: tarifa $${tarifaEfectiva.toFixed(2)} <= $${maxDg} (tabulador Dirección UDC)`,
+      tarifa_efectiva: tarifaEfectiva,
+      total_caras: totalCaras,
+    };
+  }
+  if (minDcm !== null && maxDcm !== null && tarifaEfectiva >= minDcm && tarifaEfectiva <= maxDcm) {
+    return {
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'pendiente',
+      motivo_dcm: `UDC: tarifa $${tarifaEfectiva.toFixed(2)} en banda DAE ($${minDcm}-$${maxDcm}) (tabulador Dirección UDC)`,
+      tarifa_efectiva: tarifaEfectiva,
+      total_caras: totalCaras,
+    };
+  }
+  return aprobado;
+}
+
+// sap_database del ORIGEN de una propuesta (solicitud.sap_database). Para que
+// los controllers de propuestas/campañas se lo pasen a calcularEstadoAutorizacion
+// sin cargar la solicitud completa.
+export async function getSapDatabaseDePropuesta(propuestaId: number): Promise<string | null> {
+  if (!Number.isFinite(propuestaId) || propuestaId <= 0) return null;
+  try {
+    const rows = await prisma.$queryRawUnsafe<{ sap_database: string | null }[]>(
+      `SELECT s.sap_database FROM propuesta p INNER JOIN solicitud s ON s.id = p.solicitud_id WHERE p.id = ? LIMIT 1`,
+      propuestaId
+    );
+    return rows[0]?.sap_database ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Calcula el estado de autorización de una cara
  * Ahora retorna dos estados independientes: autorizacion_dg y autorizacion_dcm
@@ -281,6 +399,12 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     if (artUpperBf.startsWith('BF') || artUpperBf.startsWith('CF')) {
       return { autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado' };
     }
+  }
+
+  // UDC: tabulador propio de Dirección UDC (y NADA más aplica: ni criterios
+  // CIMU/TRADE, ni regla de impares, ni CT/IN). Ver evaluarTabuladorUDC.
+  if ((cara.sap_database || '').toUpperCase() === 'UDC') {
+    return evaluarTabuladorUDC(cara);
   }
 
   // Artículos de impresión (IM): NUNCA van a autorización (siempre auto-aprobados,
@@ -746,25 +870,44 @@ export async function crearTareasAutorizacion(
   origen: 'solicitud' | 'propuesta' | 'campana' = 'solicitud',
   campaniaId?: number
 ): Promise<void> {
-  // UDC (aeropuerto AICM): por regla de negocio NO manda NADA a autorización
-  // (el flujo de Dirección para UDC está por definir; junta 2026-09-04). Si la
-  // solicitud es UDC, se auto-aprueban las caras que habrían quedado pendientes
-  // (para que no se atoren en 'pendiente' sin tarea) y NO se crea ninguna tarea.
+  // UDC: desde oct-2026 Dirección UDC SÍ tiene tabulador (filas sap_database='UDC'
+  // en criterios_autorizacion). Las caras pendientes cuyo formato está en ese
+  // tabulador siguen el flujo normal de tareas; el RESTO de UDC (pantallas del
+  // aeropuerto, formatos sin fila) conserva la regla de la junta 2026-09-04:
+  // se auto-aprueba y no genera tarea.
   const solUDC = await prisma.solicitud.findUnique({
     where: { id: solicitudId },
     select: { sap_database: true },
   });
   if ((solUDC?.sap_database || '').toUpperCase() === 'UDC') {
-    const idsAAprobar = [...new Set([...pendientesDg, ...pendientesDcm])]
+    const idsPendUDC = [...new Set([...pendientesDg, ...pendientesDcm])]
       .filter((n) => Number.isFinite(n));
+    const conTabulador = new Set<number>();
+    if (idsPendUDC.length > 0 && (await criteriosUdcDisponible())) {
+      const carasPendUDC = await prisma.solicitudCaras.findMany({
+        where: { id: { in: idsPendUDC } },
+        select: { id: true, formato: true },
+      });
+      for (const cp of carasPendUDC) {
+        const fnorm = normalizarFormato(cp.formato) || (cp.formato || '').trim();
+        if (fnorm && (await buscarCriterioUDC(fnorm))) conTabulador.add(cp.id);
+      }
+    }
+    const idsAAprobar = idsPendUDC.filter((i) => !conTabulador.has(i));
     if (idsAAprobar.length > 0) {
       await prisma.solicitudCaras.updateMany({
         where: { id: { in: idsAAprobar } },
         data: { autorizacion_dg: 'aprobado', autorizacion_dcm: 'aprobado' },
       });
     }
-    console.log(`[crearTareasAutorizacion] UDC → sin autorización; ${idsAAprobar.length} cara(s) auto-aprobadas`);
-    return;
+    if (conTabulador.size === 0) {
+      console.log(`[crearTareasAutorizacion] UDC → sin tabulador aplicable; ${idsAAprobar.length} cara(s) auto-aprobadas`);
+      return;
+    }
+    // Continuar el flujo normal SOLO con las caras del tabulador UDC.
+    pendientesDg = pendientesDg.filter((i) => conTabulador.has(i));
+    pendientesDcm = pendientesDcm.filter((i) => conTabulador.has(i));
+    console.log(`[crearTareasAutorizacion] UDC → tabulador Dirección: ${conTabulador.size} cara(s) a tareas (DG=${pendientesDg.length}, DCM=${pendientesDcm.length}); ${idsAAprobar.length} auto-aprobadas`);
   }
 
   console.log('[crearTareasAutorizacion] Iniciando con:', {
