@@ -11376,6 +11376,25 @@ export class CampanasController {
           }
           const softId = softDeletedCaraC.get(espacioId);
           if (softId) {
+            // CANDADO DE ESTATUS en la reactivación: este atajo no pasa por
+            // createReservaConLock, así que sin el check el flujo real
+            // "bloquear libera la reserva → tráfico vuelve a agregar la pieza"
+            // re-ocupaba una pieza No Disponible/Inhabilitada (QA dev 14-oct).
+            // Resolución polimórfica del id (espacio_inventario.id o inventarios.id),
+            // mismo patrón COALESCE que toggleBlock.
+            const invEstRows = await prisma.$queryRawUnsafe<{ estatus: string | null }[]>(
+              `SELECT i.estatus
+               FROM inventarios i
+               LEFT JOIN espacio_inventario ei ON ei.id = ?
+               WHERE i.id = COALESCE(ei.inventario_id, ?)
+               LIMIT 1`,
+              espacioId, espacioId
+            );
+            if (esInventarioNoUtilizable(invEstRows[0]?.estatus)) {
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Inventario no disponible/inhabilitado' });
+              reservasOmitidas++;
+              continue;
+            }
             reactivarList.push({ reservaId: softId, estatus, espacioId });
             espaciosReservadosEnPeriodo.add(espacioId);
             continue;
