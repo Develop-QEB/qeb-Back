@@ -33,6 +33,17 @@ async function variantesAsesor(canonico: string, sql: string): Promise<string[]>
   return [...new Set(rows.map((r) => r.a).filter((a): a is string => !!a && normalizaAsesor(a) === objetivo))];
 }
 
+// Versión multi-asesor: una sola consulta, regresa los crudos que normalizan a CUALQUIERA de los canónicos.
+async function variantesAsesores(canonicos: string[], sql: string): Promise<string[]> {
+  const objetivos = new Set(canonicos.map((c) => normalizaAsesor(c)));
+  const rows = await query<{ a: string | null }>(sql);
+  return [...new Set(rows.map((r) => r.a).filter((a): a is string => !!a && objetivos.has(normalizaAsesor(a))))];
+}
+
+// Combina un array (plural) + un valor único (singular) en una lista deduplicada y limpia.
+const multi = (arr?: string[], single?: string | null): string[] =>
+  [...new Set([...(arr ?? []), ...(single ? [single] : [])].map((x) => String(x).trim()).filter(Boolean))];
+
 // ---------- Filtro para V_APS_Globales (ventas cerradas) ----------
 async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Record<string, unknown> }> {
   const cond: string[] = ['`Año` = :anio'];
@@ -51,12 +62,23 @@ async function vapsWhere(f: FiltrosReporte): Promise<{ where: string; params: Re
     cond.push(`WEEK(\`Fecha\`, 3) IN (${semanas.join(',')})`);
   }
   // V_APS no tiene plaza limpia; aproximamos por municipio dentro de `Nombre de Plaza`.
-  if (f.plaza) { cond.push('`Nombre de Plaza` LIKE :plaza'); p.plaza = `%${f.plaza}%`; }
+  // Multi-selección: plaza/cliente/asesor aceptan varios valores (plural) o uno (singular).
+  const plazas = multi(f.plazas, f.plaza);
+  if (plazas.length) {
+    const ors = plazas.map((pl, i) => { p[`plz${i}`] = `%${pl}%`; return `\`Nombre de Plaza\` LIKE :plz${i}`; });
+    cond.push(`(${ors.join(' OR ')})`);
+  }
   if (f.formato) { cond.push('`Tipo Digital` = :formato'); p.formato = f.formato; }
   if (f.mueble) { cond.push('`Dscription` LIKE :mueble'); p.mueble = `%${f.mueble}%`; }
-  if (f.cliente) { cond.push('`U_Cliente` = :cliente'); p.cliente = f.cliente; }
-  if (f.asesor) {
-    const vars = await variantesAsesor(f.asesor, 'SELECT DISTINCT `U_Asesor` a FROM V_APS_Globales WHERE `U_Asesor` IS NOT NULL');
+  const clientes = multi(f.clientes, f.cliente);
+  if (clientes.length) {
+    const keys = clientes.map((_, i) => `:cli${i}`);
+    clientes.forEach((cl, i) => { p[`cli${i}`] = cl; });
+    cond.push(`\`U_Cliente\` IN (${keys.join(',')})`);
+  }
+  const asesores = multi(f.asesores, f.asesor);
+  if (asesores.length) {
+    const vars = await variantesAsesores(asesores, 'SELECT DISTINCT `U_Asesor` a FROM V_APS_Globales WHERE `U_Asesor` IS NOT NULL');
     if (!vars.length) { cond.push('1=0'); }
     else {
       const keys = vars.map((_, i) => `:av${i}`);
@@ -106,9 +128,15 @@ async function pipelineCond(f: FiltrosReporte, quoteExpr: string): Promise<{ con
   const p: Record<string, unknown> = {};
   cond.push('YEAR(s.fecha) = :anio'); p.anio = f.anio;
   if (f.mes) { cond.push('MONTH(s.fecha) = :mes'); p.mes = f.mes; }
-  if (f.cliente) { cond.push('s.razon_social = :cliente'); p.cliente = f.cliente; }
-  if (f.asesor) {
-    const vars = await variantesAsesor(f.asesor, "SELECT DISTINCT asesor a FROM solicitud WHERE asesor IS NOT NULL AND asesor <> ''");
+  const clientes = multi(f.clientes, f.cliente);
+  if (clientes.length) {
+    const keys = clientes.map((_, i) => `:cli${i}`);
+    clientes.forEach((cl, i) => { p[`cli${i}`] = cl; });
+    cond.push(`s.razon_social IN (${keys.join(',')})`);
+  }
+  const asesores = multi(f.asesores, f.asesor);
+  if (asesores.length) {
+    const vars = await variantesAsesores(asesores, "SELECT DISTINCT asesor a FROM solicitud WHERE asesor IS NOT NULL AND asesor <> ''");
     if (!vars.length) { cond.push('1=0'); }
     else {
       const keys = vars.map((_, i) => `:sa${i}`);
@@ -117,7 +145,11 @@ async function pipelineCond(f: FiltrosReporte, quoteExpr: string): Promise<{ con
     }
   }
   const scCond: string[] = [];
-  if (f.plaza) { scCond.push('sc.estados LIKE :plazaLike'); p.plazaLike = `%${f.plaza}%`; }
+  const plazas = multi(f.plazas, f.plaza);
+  if (plazas.length) {
+    const ors = plazas.map((pl, i) => { p[`plzSc${i}`] = `%${pl}%`; return `sc.estados LIKE :plzSc${i}`; });
+    scCond.push(`(${ors.join(' OR ')})`);
+  }
   if (f.formato) { scCond.push('sc.tipo LIKE :formatoLike'); p.formatoLike = `%${f.formato}%`; }
   if (f.mueble) { scCond.push('sc.formato LIKE :muebleLike'); p.muebleLike = `%${f.mueble}%`; }
   // Formato (Parabús/Columna/Gran Formato) → sc.formato LIKE (OR entre buckets).
@@ -166,6 +198,60 @@ export async function getCiclo(f: FiltrosReporte): Promise<Ciclo> {
     conversionGlobalPct: total ? Math.round((aprobadas / total) * 1000) / 10 : 0,
     total,
   };
+}
+
+/**
+ * Tendencia del ciclo de vida por MES (para graficar cómo evoluciona). Los días se
+ * leen de los CAMBIOS DE ESTATUS del `historial` (no de fechas de creación, que son
+ * iguales porque solicitud/propuesta/campaña nacen juntas). Por cada propuesta:
+ *   creado   = s.fecha (alta)
+ *   atendido = 1er historial Propuesta "Cambio de estado" → "Atendido/a"
+ *   aprobado = 1er historial Propuesta "Cambio de estado" → "Aprobado/a"
+ * Se agrupa por el mes de creación. solProp = creación→atendido, propAprob =
+ * atendido→aprobación (días promedio). Respeta los filtros del embudo (pipelineCond).
+ */
+export async function getCicloTendencia(f: FiltrosReporte): Promise<{ mes: number; solProp: number | null; propAprob: number | null; total: number | null; n: number; nAprob: number }[]> {
+  const CO = 'COLLATE utf8mb4_unicode_ci';
+  const { cond, params } = await pipelineCond(f, 'p.id');
+  // Pre-agregamos el historial (1 pasada, GROUP BY) y la aprobación (campania.fecha_aprobacion)
+  // en subconsultas derivadas — mucho más rápido que subconsultas correlacionadas por fila.
+  // "Atendido" cubre formato JSON ("despues":"Atendido/a") y texto ('… a "Atendido"').
+  const rows = await query<{ mes: number; solProp: string | null; propAprob: string | null; total: string | null; n: number; nAprob: number }>(
+    `SELECT MONTH(s.fecha) mes,
+            ROUND(AVG(DATEDIFF(h.atendido, s.fecha)), 1) solProp,
+            ROUND(AVG(DATEDIFF(apr.aprobacion, h.atendido)), 1) propAprob,
+            ROUND(AVG(DATEDIFF(apr.aprobacion, s.fecha)), 1) total,
+            COUNT(*) n,
+            SUM(apr.aprobacion IS NOT NULL) nAprob
+       FROM solicitud s
+       JOIN propuesta p ON p.solicitud_id = s.id
+       LEFT JOIN (
+         SELECT ref_id, MIN(fecha_hora) atendido FROM historial
+          WHERE tipo ${CO} = 'Propuesta' AND accion ${CO} = 'Cambio de estado'
+            AND (detalles ${CO} LIKE '%"despues":"Atendid%' OR detalles ${CO} LIKE '% a "Atendid%')
+          GROUP BY ref_id
+       ) h ON h.ref_id = p.id
+       LEFT JOIN (
+         SELECT cotizacion_id, MIN(fecha_aprobacion) aprobacion FROM campania
+          WHERE fecha_aprobacion IS NOT NULL GROUP BY cotizacion_id
+       ) apr ON apr.cotizacion_id = p.id
+      WHERE ${cond.join(' AND ')}
+      GROUP BY MONTH(s.fecha)`,
+    params
+  );
+  const map = new Map(rows.map((r) => [Number(r.mes), r]));
+  return Array.from({ length: 12 }, (_, i) => {
+    const r = map.get(i + 1);
+    const num = (v: string | null | undefined) => (v == null ? null : Number(v));
+    return {
+      mes: i + 1,
+      solProp: r ? num(r.solProp) : null,
+      propAprob: r ? num(r.propAprob) : null,
+      total: r ? num(r.total) : null,
+      n: r ? Number(r.n) : 0,
+      nAprob: r ? Number(r.nAprob) : 0,
+    };
+  });
 }
 
 /** Detalle de campañas recientes (filtrado). */
@@ -350,13 +436,16 @@ export async function getTarifas(f: FiltrosReporte): Promise<{ efectiva: number;
   const cond: string[] = ['YEAR(s.fecha) = :anio', 'sc.caras > 0'];
   const p: Record<string, unknown> = { anio: f.anio };
   if (f.mes) { cond.push('MONTH(s.fecha) = :mes'); p.mes = f.mes; }
-  if (f.cliente) { cond.push('s.razon_social = :cliente'); p.cliente = f.cliente; }
-  if (f.asesor) {
-    const vars = await variantesAsesor(f.asesor, "SELECT DISTINCT asesor a FROM solicitud WHERE asesor IS NOT NULL AND asesor <> ''");
+  const clientesT = multi(f.clientes, f.cliente);
+  if (clientesT.length) { const keys = clientesT.map((_, i) => `:cliT${i}`); clientesT.forEach((cl, i) => { p[`cliT${i}`] = cl; }); cond.push(`s.razon_social IN (${keys.join(',')})`); }
+  const asesoresT = multi(f.asesores, f.asesor);
+  if (asesoresT.length) {
+    const vars = await variantesAsesores(asesoresT, "SELECT DISTINCT asesor a FROM solicitud WHERE asesor IS NOT NULL AND asesor <> ''");
     if (!vars.length) cond.push('1=0');
     else { const keys = vars.map((_, i) => `:ta${i}`); vars.forEach((v, i) => { p[`ta${i}`] = v; }); cond.push(`s.asesor IN (${keys.join(',')})`); }
   }
-  if (f.plaza) { cond.push('sc.estados LIKE :plaza'); p.plaza = `%${f.plaza}%`; }
+  const plazasT = multi(f.plazas, f.plaza);
+  if (plazasT.length) { const ors = plazasT.map((pl, i) => { p[`plzT${i}`] = `%${pl}%`; return `sc.estados LIKE :plzT${i}`; }); cond.push(`(${ors.join(' OR ')})`); }
   if (f.formato) { cond.push('sc.tipo LIKE :formato'); p.formato = `%${f.formato}%`; }
   if (f.mueble) { cond.push('sc.formato LIKE :mueble'); p.mueble = `%${f.mueble}%`; }
   const [r] = await query<{ costo: string | null; caras: string | null; tpub: string | null }>(
