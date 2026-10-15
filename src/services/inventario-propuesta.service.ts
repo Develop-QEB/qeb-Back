@@ -79,8 +79,8 @@ const SQL_INVENTARIO_ACTUAL = `
       ELSE MIN(i.tipo_de_cara)
     END as tipo_de_cara,
     CAST(COUNT(DISTINCT rsv.id) AS UNSIGNED) AS caras_totales,
-    CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
-    CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
+    CAST(SUM(CASE WHEN rsv.estatus IN ('Bonificado', 'Vendido bonificado') OR sc.articulo LIKE 'BF%' OR (sc.articulo LIKE 'CF%' AND sc.articulo NOT REGEXP '^CF-?[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_bonificadas,
+    CAST(SUM(CASE WHEN rsv.estatus NOT IN ('Bonificado', 'Vendido bonificado') AND sc.articulo NOT LIKE 'BF%' AND (sc.articulo NOT LIKE 'CF%' OR sc.articulo REGEXP '^CF-?[0-9]') THEN 1 ELSE 0 END) AS UNSIGNED) AS caras_renta,
     MIN(i.latitud) as latitud,
     MIN(i.longitud) as longitud,
     MIN(i.plaza) as plaza,
