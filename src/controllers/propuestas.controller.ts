@@ -459,7 +459,10 @@ export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
+      // Tope 5000: el front pide todo el universo (~1.7k propuestas) cuando hay
+      // agrupación, filtros avanzados o el filtro Incompleta/Completa, que se
+      // evalúan en cliente (mismo patrón que campañas).
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 5000);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
@@ -767,6 +770,28 @@ export class PropuestasController {
             p.inversion = fresh;
           }
         });
+
+        // Totales de completitud para el badge "Incompleta" del listado.
+        // MISMO criterio que campañas (inc_agg de campanas.controller): solo
+        // circuitos catorcenales (INNER JOIN catorcenas — mensual queda fuera)
+        // y mismas exclusiones IM/ESP/ES-/-QR/CF-#.
+        const completitudData = await prisma.$queryRawUnsafe<{ propuesta_id: string; caras_esperadas: bigint; reservas_validas: bigint }[]>(`
+          SELECT sc.idquote AS propuesta_id,
+                 COALESCE(SUM(sc.caras + sc.bonificacion), 0) AS caras_esperadas,
+                 COALESCE(SUM((SELECT COUNT(*) FROM reservas r
+                               WHERE r.solicitudCaras_id = sc.id AND r.deleted_at IS NULL)), 0) AS reservas_validas
+          FROM solicitudCaras sc
+          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+          WHERE sc.idquote IN (${placeholders})
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+          GROUP BY sc.idquote
+        `, ...propuestaIds.map(id => String(id)));
+        const completitudMap = new Map(completitudData.map(r => [Number(r.propuesta_id), r]));
+        formattedPropuestas.forEach(p => {
+          const comp = completitudMap.get(p.id);
+          (p as any).caras_esperadas_total = comp ? Number(comp.caras_esperadas) : 0;
+          (p as any).reservas_validas_total = comp ? Number(comp.reservas_validas) : 0;
+        });
       }
 
       const response = {
@@ -790,6 +815,76 @@ export class PropuestasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * Desglose de completitud por catorcena para el badge "Incompleta" del
+   * listado de propuestas. MISMA query y criterio que incompleteness_detail
+   * del getById de campañas (solo circuitos catorcenales, exclusiones
+   * IM/ESP/ES-/-QR/CF-#), anclada directo al idquote = id de la propuesta.
+   */
+  async getCompletitud(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const propuestaId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(propuestaId) || propuestaId <= 0) {
+        res.status(400).json({ success: false, error: 'Propuesta inválida' });
+        return;
+      }
+
+      const detailResult = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT
+          cat.numero_catorcena as catorcena,
+          cat.año as anio,
+          sc.articulo,
+          sc.ciudad,
+          (sc.caras + sc.bonificacion) as caras_esperadas,
+          (SELECT COUNT(*) FROM reservas r2
+           WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+          ) as reservas_count
+        FROM solicitudCaras sc
+        INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+        WHERE sc.idquote = ?
+          AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+        ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+        String(propuestaId),
+      );
+
+      // Agrupar por catorcena — mismo post-procesamiento que campañas.
+      const byCat: Record<string, any> = {};
+      for (const r of detailResult) {
+        const key = `${r.anio}-${r.catorcena}`;
+        if (!byCat[key]) {
+          byCat[key] = {
+            catorcena: Number(r.catorcena),
+            anio: Number(r.anio),
+            caras_esperadas: 0,
+            reservas_count: 0,
+            grupos: [],
+          };
+        }
+        const esperadas = Number(r.caras_esperadas);
+        const reservadas = Number(r.reservas_count);
+        byCat[key].caras_esperadas += esperadas;
+        byCat[key].reservas_count += reservadas;
+        if (reservadas < esperadas) {
+          byCat[key].grupos.push({
+            articulo: r.articulo || 'SIN-ART',
+            ciudad: r.ciudad || '',
+            caras_esperadas: esperadas,
+            reservas_count: reservadas,
+            faltantes: esperadas - reservadas,
+          });
+        }
+      }
+      const detail = Object.values(byCat)
+        .map((c: any) => ({ ...c, completa: c.reservas_count >= c.caras_esperadas }))
+        .filter((c: any) => c.caras_esperadas > 0);
+
+      res.json({ success: true, data: detail });
+    } catch (error) {
+      console.error('Error en getCompletitud propuesta:', error);
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Error al obtener completitud' });
     }
   }
 
