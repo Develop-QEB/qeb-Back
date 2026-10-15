@@ -22,6 +22,8 @@
 // contraflujo aunque compartan el prefijo CF. Se manejan como IM (impresiones):
 // sin inventario/reserva, pasan directo a campañas y se postean a SAP.
 // Las bonificaciones reales del catálogo son BF-*/CT-* (código de plaza, no numérico).
+// Espejo SQL: REGEXP '^CF-?[0-9]' (guion opcional, igual que aquí) en
+// campanas.controller e inventario-propuesta.service — mantenerlos alineados.
 export function esArticuloServicioCF(articulo?: string | null): boolean {
   return /^CF-?\d/i.test((articulo || '').trim());
 }
