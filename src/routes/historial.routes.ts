@@ -6,6 +6,10 @@ const router = Router();
 
 router.use(authMiddleware);
 
+// Tablero CRM de Actividad Comercial (ANTES de '/' por claridad; no choca).
+router.get('/actividad-comercial', historialController.getActividadComercial.bind(historialController));
+router.patch('/actividad-comercial/:id/estatus', historialController.moverActividadComercial.bind(historialController));
+
 router.get('/', historialController.getAll.bind(historialController));
 router.get('/tipos', historialController.getTipos.bind(historialController));
 router.get('/acciones', historialController.getAcciones.bind(historialController));

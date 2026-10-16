@@ -2420,7 +2420,10 @@ export class NotificacionesController {
           descripcion: descripcionTrim,
           tipo: 'Actividad Comercial',
           categoria: 'Actividad Comercial',
-          estatus: 'Activo',
+          // Tablero CRM (Historial de Acciones): Abierto -> Activo -> Finalizado.
+          // 'Abierto' NO esta en ESTATUS_RESUELTOS, asi que sigue contando como
+          // pendiente en la campanita. Ver actividad-comercial.service.ts.
+          estatus: 'Abierto',
           fecha_inicio: nowMx,
           fecha_fin: fecha_fin ? new Date(fecha_fin) : defaultFin,
           id_responsable: userId,

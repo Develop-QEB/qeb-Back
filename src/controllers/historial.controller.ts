@@ -2,7 +2,10 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { serializeBigInt } from '../utils/serialization';
-import { emitToHistorial, SOCKET_EVENTS } from '../config/socket';
+import { emitToHistorial, emitToAll, SOCKET_EVENTS } from '../config/socket';
+import {
+  listarActividadesComerciales, moverActividadComercial, esColumnaAC, COLUMNAS_AC,
+} from '../services/actividad-comercial.service';
 
 export class HistorialController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
@@ -264,6 +267,49 @@ export class HistorialController {
       console.error('Error en historial addNota:', error);
       const message = error instanceof Error ? error.message : 'Error al agregar nota';
       res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // ---------- Tablero CRM de Actividad Comercial (tab en Historial de Acciones) ----------
+  // Lista TODAS las actividades (de todos los usuarios): el tab lo ven solo los
+  // roles con acceso a Historial de Acciones. Ver actividad-comercial.service.ts.
+  async getActividadComercial(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const data = await listarActividadesComerciales();
+      res.json(serializeBigInt({ success: true, data }));
+    } catch (error) {
+      console.error('Error en historial getActividadComercial:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener actividades comerciales' });
+    }
+  }
+
+  async moverActividadComercial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { columna } = (req.body ?? {}) as { columna?: unknown };
+      if (!Number.isFinite(id) || !esColumnaAC(columna)) {
+        res.status(400).json({ success: false, error: `columna debe ser una de: ${COLUMNAS_AC.join(', ')}` });
+        return;
+      }
+      const r = await moverActividadComercial(id, columna, {
+        usuarioId: req.user?.userId,
+        usuarioNombre: req.user?.nombre,
+        usuarioRol: req.user?.rol,
+      });
+      if (!r) {
+        res.status(404).json({ success: false, error: 'Actividad comercial no encontrada' });
+        return;
+      }
+      if (r.cambio) {
+        // Refresca el tablero (room historial) y los badges/listas de
+        // Notificaciones del responsable (mismo evento que usa bulk-estatus).
+        emitToHistorial(SOCKET_EVENTS.HISTORIAL_NUEVA, { tareaId: id, estatus: r.despues });
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_LEIDA, { ids: [id], estatus: r.despues });
+      }
+      res.json(serializeBigInt({ success: true, data: r.tarea }));
+    } catch (error) {
+      console.error('Error en historial moverActividadComercial:', error);
+      res.status(500).json({ success: false, error: 'Error al mover la actividad' });
     }
   }
 }
