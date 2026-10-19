@@ -46,8 +46,31 @@ export function esColumnaAC(v: unknown): v is ColumnaAC {
 // Tope defensivo: las actividades son manuales (decenas/cientos), no miles.
 const MAX_FILAS = 2000;
 
+/** Datos de la cuenta vinculada (campaña o propuesta) para filtrar en el tablero. */
+interface CuentaVinculada {
+  cuic: string | null;
+  asesor: string | null;
+  cliente: string | null;
+}
+
+const SELECT_CUENTA = `
+  COALESCE(NULLIF(s.cuic, ''), cl.CUIC) AS cuic,
+  COALESCE(NULLIF(cl.T0_U_Asesor, ''), NULLIF(s.asesor, '')) AS asesor,
+  COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente`;
+
+const normCuenta = (r: { cuic: unknown; asesor: unknown; cliente: unknown }): CuentaVinculada => ({
+  cuic: r.cuic === null || r.cuic === undefined || r.cuic === '' ? null : String(r.cuic),
+  asesor: r.asesor ? String(r.asesor) : null,
+  cliente: r.cliente ? String(r.cliente) : null,
+});
+
+/**
+ * Todas las actividades + CUIC / asesor / cliente de la cuenta vinculada
+ * (misma derivacion que usa crearActividadComercial). Una actividad sobre un
+ * lead sin campaña ni propuesta trae esos campos en null.
+ */
 export async function listarActividadesComerciales() {
-  return prisma.tareas.findMany({
+  const filas = await prisma.tareas.findMany({
     where: { tipo: TIPO_ACTIVIDAD_COMERCIAL },
     orderBy: [{ fecha_fin: 'asc' }, { id: 'desc' }],
     take: MAX_FILAS,
@@ -56,6 +79,49 @@ export async function listarActividadesComerciales() {
       fecha_inicio: true, fecha_fin: true, responsable: true, id_responsable: true,
       asignado: true, campania_id: true, id_propuesta: true, contenido: true, created_at: true,
     },
+  });
+
+  const campIds = [...new Set(filas.map(f => f.campania_id).filter((n): n is number => !!n))];
+  const propIds = [...new Set(filas.map(f => Number(f.id_propuesta)).filter(n => Number.isFinite(n) && n > 0))];
+
+  const porCampania = new Map<number, CuentaVinculada>();
+  const porPropuesta = new Map<number, CuentaVinculada>();
+
+  if (campIds.length) {
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: number | bigint; cuic: unknown; asesor: unknown; cliente: unknown }>>(
+      `SELECT c.id, ${SELECT_CUENTA}
+         FROM campania c
+         LEFT JOIN cotizacion ct ON ct.id = c.cotizacion_id
+         LEFT JOIN propuesta p ON p.id = ct.id_propuesta
+         LEFT JOIN solicitud s ON s.id = p.solicitud_id
+         LEFT JOIN cliente cl ON cl.id = c.cliente_id
+        WHERE c.id IN (${campIds.map(() => '?').join(',')})`,
+      ...campIds,
+    );
+    rows.forEach(r => porCampania.set(Number(r.id), normCuenta(r)));
+  }
+  if (propIds.length) {
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: number | bigint; cuic: unknown; asesor: unknown; cliente: unknown }>>(
+      `SELECT p.id, ${SELECT_CUENTA}
+         FROM propuesta p
+         LEFT JOIN solicitud s ON s.id = p.solicitud_id
+         LEFT JOIN cliente cl ON cl.id = p.cliente_id
+        WHERE p.id IN (${propIds.map(() => '?').join(',')})`,
+      ...propIds,
+    );
+    rows.forEach(r => porPropuesta.set(Number(r.id), normCuenta(r)));
+  }
+
+  return filas.map(f => {
+    const cuenta = (f.campania_id && porCampania.get(f.campania_id))
+      || porPropuesta.get(Number(f.id_propuesta))
+      || null;
+    return {
+      ...f,
+      cuic: cuenta?.cuic ?? null,
+      asesor: cuenta?.asesor ?? null,
+      cliente_nombre: cuenta?.cliente ?? null,
+    };
   });
 }
 
