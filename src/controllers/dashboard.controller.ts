@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
 import { cache, CACHE_TTL, CACHE_KEYS } from '../utils/cache';
+import { esArticuloBfCf } from '../utils/bonifCara';
 
 // Convierte un valor de query (string, string[], undefined) a array limpio
 // Soporta tanto formato CSV ("a,b,c") como repetido (?x=a&x=b)
@@ -31,6 +32,8 @@ export type InventoryDetailParams = {
   nses: string[];
   tipos: string[];
   micromacro: string; // '' | 'excluir' | 'solo' (circuito Mi Macro Periférico)
+  /** Detalle de UNA pieza (tarjeta del pin en el mapa del dashboard). */
+  inventarioId: number | null;
   catorcena_id: string | undefined;
   fecha_inicio: string | undefined;
   fecha_fin: string | undefined;
@@ -92,6 +95,7 @@ function parseInventoryDetailParams(req: AuthRequest): InventoryDetailParams {
     nses: toMultiValue(req.query.nse),
     tipos: toMultiValue(req.query.tipo),
     micromacro: (req.query.micromacro as string) || '',
+    inventarioId: req.query.inventario_id ? parseInt(req.query.inventario_id as string) || null : null,
     catorcena_id: catorcena_id as string | undefined,
     fecha_inicio: fecha_inicio as string | undefined,
     fecha_fin: fecha_fin as string | undefined,
@@ -170,6 +174,8 @@ type SolicitudSharedInfo = {
   marca: string | null;
   cliente: string | null;
   agencia: string | null;
+  /** Articulo del circuito (RT/BF/CF/CT/IN...), para el desglose de vendidos. */
+  articulo: string | null;
 };
 type EnrichmentContext = {
   // Info compartida por solicitudCaras_id (marca, cuic, cliente, etc — mismos
@@ -198,7 +204,7 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
   const solicitudCarasIds = [...new Set(sources.map(s => s.top_solicitudCaras_id).filter((id): id is number => !!id))];
   const solicitudCarasList = solicitudCarasIds.length > 0 ? await prisma.solicitudCaras.findMany({
     where: { id: { in: solicitudCarasIds } },
-    select: { id: true, idquote: true },
+    select: { id: true, idquote: true, articulo: true },
   }) : [];
   const idquoteValues = solicitudCarasList
     .map(sc => parseInt(sc.idquote || ''))
@@ -274,6 +280,7 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
         marca: solInfo?.marca || null,
         cliente: solInfo?.cliente || null,
         agencia: solInfo?.agencia || null,
+        articulo: sc.articulo || null,
       }];
     })
   );
@@ -288,13 +295,72 @@ async function buildEnrichmentContext(sources: EnrichmentSource[]): Promise<Enri
 }
 
 // Traduce ?estatus=X al set de valores efectivos que deben matchear en la
-// respuesta. Mismo mapeo que tiene el .filter() del codigo legacy — cambiarlo
-// aca rompe el deep-diff.
+// respuesta. 'Sin Arte' se agrego al set de Vendido para cuadrar con el KPI
+// de getStats (que siempre conto Sin Arte como vendido); el legacy de
+// validacion no lo tiene, asi que el deep-diff diferira en ese caso.
 function expandEstatusFilter(estatusFiltro: string | undefined): string[] | null {
   if (!estatusFiltro) return null;
   if (estatusFiltro === 'Reservado') return ['Reservado', 'Bonificado'];
-  if (estatusFiltro === 'Vendido') return ['Vendido', 'Vendido bonificado', 'Con Arte'];
+  if (estatusFiltro === 'Vendido') return ['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'];
   return [estatusFiltro];
+}
+
+// ---------- Formato efectivo ----------
+// Hay piezas cuyo tipo_de_mueble es OTRO formato del catalogo (p.ej. mueble
+// 'PARABUS' con tipo_de_mueble 'BOLERO' o 'MULTISERVICIO'). Para el usuario
+// esas piezas SON boleros/multiservicios: desmarcar BOLERO en el filtro de
+// Formato debe sacarlas aunque su mueble diga PARABUS. El "formato efectivo"
+// es tipo_de_mueble cuando este es un formato del catalogo, y mueble si no
+// (los sub-tipos tipo 'DANUBIO' o 'MI MACRO PERIFERICO' no cambian nada).
+async function getCatalogoFormatos(): Promise<string[]> {
+  return cache.getOrSet('dashboard:catalogo-formatos', async () => {
+    const rows = await prisma.inventarios.findMany({
+      select: { mueble: true },
+      distinct: ['mueble'],
+      where: { mueble: { not: null } },
+    });
+    return rows.map((r) => r.mueble!).filter(Boolean);
+  }, CACHE_TTL.FILTER_OPTIONS);
+}
+
+function formatoEfectivo(
+  mueble: string | null,
+  tipoDeMueble: string | null,
+  catalogo: Set<string>,
+): string | null {
+  return tipoDeMueble && catalogo.has(tipoDeMueble) ? tipoDeMueble : mueble;
+}
+
+/** Clausula Prisma equivalente a `formatoEfectivo IN (formatos)`. */
+function formatoEfectivoWhere(formatos: string[], catalogo: string[]): Record<string, unknown> {
+  return {
+    OR: [
+      { tipo_de_mueble: { in: formatos } },
+      {
+        AND: [
+          { mueble: { in: formatos } },
+          // tipo null o fuera del catalogo -> el formato lo decide el mueble.
+          { OR: [{ tipo_de_mueble: null }, { NOT: { tipo_de_mueble: { in: catalogo } } }] },
+        ],
+      },
+    ],
+  };
+}
+
+// ---------- Desglose de vendidos ----------
+// En la tabla del dashboard una pieza vendida no se muestra como
+// 'Vendido'/'Vendido bonificado' sino por su TIPO DE VENTA, derivado del
+// prefijo del articulo del circuito (misma convencion que propuestas y
+// campañas): IN=Intercambio, CT=Cortesia, BF/CF=Bonificado, resto Renta.
+const ESTATUS_VENDIDO_SET = new Set(['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte']);
+
+function tipoVentaVendido(estatusEfectivo: string, articulo: string | null | undefined): string {
+  const a = (articulo || '').toUpperCase();
+  if (a.startsWith('IN')) return 'Intercambio';
+  if (a.startsWith('CT')) return 'Cortesía';
+  if (esArticuloBfCf(a)) return 'Bonificado';
+  if (estatusEfectivo === 'Vendido bonificado') return 'Bonificado';
+  return 'Renta';
 }
 
 export class DashboardController {
@@ -320,6 +386,11 @@ export class DashboardController {
       );
 
       const data = await cache.getOrSet(cacheKey, async () => {
+      // Catalogo de formatos (muebles distinct) para resolver formato efectivo
+      // tanto en el filtro como en la grafica "Por Mueble".
+      const catalogoFormatos = await getCatalogoFormatos();
+      const catalogoSet = new Set(catalogoFormatos);
+
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
@@ -329,8 +400,9 @@ export class DashboardController {
       const ciudadClause = multiClause(ciudades);
       if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
 
-      const formatoClause = multiClause(formatos);
-      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
+      // Formato: por formato EFECTIVO (tipo_de_mueble si es un formato del
+      // catalogo, mueble si no) — ver formatoEfectivoWhere.
+      if (formatos.length > 0) Object.assign(inventarioWhere, formatoEfectivoWhere(formatos, catalogoFormatos));
 
       const nseClause = multiClause(nses);
       if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
@@ -351,6 +423,7 @@ export class DashboardController {
         select: {
           id: true,
           mueble: true,
+          tipo_de_mueble: true,
           municipio: true,
           plaza: true,
           estado: true,
@@ -493,6 +566,19 @@ export class DashboardController {
           .sort((a, b) => b.cantidad - a.cantidad);
       };
 
+      // "Por Mueble" agrupa por formato EFECTIVO para cuadrar con el filtro de
+      // Formato (una pieza PARABUS/BOLERO cuenta como BOLERO).
+      const calcularDistribucionFormato = (): Array<{ nombre: string; cantidad: number }> => {
+        const conteo: Record<string, number> = {};
+        inventariosBase.forEach((inv) => {
+          const valor = formatoEfectivo(inv.mueble, inv.tipo_de_mueble, catalogoSet);
+          if (valor) conteo[valor] = (conteo[valor] || 0) + 1;
+        });
+        return Object.entries(conteo)
+          .map(([nombre, cantidad]) => ({ nombre, cantidad }))
+          .sort((a, b) => b.cantidad - a.cantidad);
+      };
+
       const calcularDistribucionTipo = (estatusFiltro?: string): Array<{ nombre: string; cantidad: number }> => {
         const conteo: Record<string, number> = {};
 
@@ -523,7 +609,7 @@ export class DashboardController {
             bloqueados,
           },
           graficas: {
-            porMueble: calcularDistribucion('mueble'),
+            porMueble: calcularDistribucionFormato(),
             porTipo: calcularDistribucionTipo(),
             porMunicipio: calcularDistribucion('municipio'),
             porPlaza: calcularDistribucion('plaza'),
@@ -563,6 +649,10 @@ export class DashboardController {
       const cacheKey = `dashboard:stats-estatus:${JSON.stringify({ estatus_filtro, estados, ciudades, formatos, nses, tipos, micromacro, catorcena_id, fecha_inicio, fecha_fin })}`;
 
       const data = await cache.getOrSet(cacheKey, async () => {
+      // Catalogo para formato efectivo (mismo criterio que getStats).
+      const catalogoFormatos = await getCatalogoFormatos();
+      const catalogoSet = new Set(catalogoFormatos);
+
       // Construir filtro base para inventarios
       const inventarioWhere: Record<string, unknown> = {};
 
@@ -572,8 +662,7 @@ export class DashboardController {
       const ciudadClause = multiClause(ciudades);
       if (ciudadClause !== undefined) inventarioWhere.plaza = ciudadClause;
 
-      const formatoClause = multiClause(formatos);
-      if (formatoClause !== undefined) inventarioWhere.mueble = formatoClause;
+      if (formatos.length > 0) Object.assign(inventarioWhere, formatoEfectivoWhere(formatos, catalogoFormatos));
 
       const nseClause = multiClause(nses);
       if (nseClause !== undefined) inventarioWhere.nivel_socioeconomico = nseClause;
@@ -589,6 +678,7 @@ export class DashboardController {
         select: {
           id: true,
           mueble: true,
+          tipo_de_mueble: true,
           municipio: true,
           plaza: true,
           estado: true,
@@ -708,11 +798,23 @@ export class DashboardController {
           .sort((a, b) => b.cantidad - a.cantidad);
       };
 
+      // "Por Mueble" por formato efectivo, igual que getStats.
+      const porMuebleEfectivo = (): Array<{ nombre: string; cantidad: number }> => {
+        const conteo: Record<string, number> = {};
+        inventariosFiltrados.forEach((inv) => {
+          const valor = formatoEfectivo(inv.mueble, inv.tipo_de_mueble, catalogoSet);
+          if (valor) conteo[valor] = (conteo[valor] || 0) + 1;
+        });
+        return Object.entries(conteo)
+          .map(([nombre, cantidad]) => ({ nombre, cantidad }))
+          .sort((a, b) => b.cantidad - a.cantidad);
+      };
+
       return {
           total: inventariosFiltrados.length,
           estatus: estatus_filtro,
           graficas: {
-            porMueble: calcularDistribucion('mueble'),
+            porMueble: porMuebleEfectivo(),
             porTipo: calcularDistribucion('tradicional_digital'),
             porMunicipio: calcularDistribucion('municipio'),
             porPlaza: calcularDistribucion('plaza'),
@@ -1270,9 +1372,27 @@ export class DashboardController {
     };
     addIn('i.estado', params.estados);
     addIn('i.plaza', params.ciudades);
-    addIn('i.mueble', params.formatos);
+    // Formato por formato EFECTIVO: tipo_de_mueble gana cuando es un formato
+    // del catalogo (PARABUS/BOLERO cuenta como BOLERO) — ver getCatalogoFormatos.
+    if (params.formatos.length > 0) {
+      const catalogo = await getCatalogoFormatos();
+      if (catalogo.length > 0) {
+        const catPh = catalogo.map(() => '?').join(',');
+        const selPh = params.formatos.map(() => '?').join(',');
+        colFilterParts.push(
+          `(CASE WHEN i.tipo_de_mueble IN (${catPh}) THEN i.tipo_de_mueble ELSE i.mueble END) IN (${selPh})`
+        );
+        colFilterVals.push(...catalogo, ...params.formatos);
+      } else {
+        addIn('i.mueble', params.formatos);
+      }
+    }
     addIn('i.nivel_socioeconomico', params.nses);
     addIn('i.tradicional_digital', params.tipos);
+    if (params.inventarioId) {
+      colFilterParts.push('i.id = ?');
+      colFilterVals.push(String(params.inventarioId));
+    }
     // Circuito Mi Macro Periférico: se distingue por tipo_de_mueble (comparte mueble con la calle).
     if (params.micromacro === 'excluir') {
       colFilterParts.push('i.tipo_de_mueble NOT LIKE ?');
@@ -1449,25 +1569,34 @@ export class DashboardController {
     // MULTIRESERVAS: una pieza puede tener varias reservas de varios clientes.
     // Concatenamos TODOS los clientes distintos por pieza (en el período) para que
     // la tabla y el CSV muestren "APPLE, AEROMEXICO" y no solo la reserva ganadora.
-    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC).
+    // reservas.cliente_id resuelve por cliente.id (fallback por CUIC), con
+    // subqueries escalares LIMIT 1: el LEFT JOIN por CUIC multiplicaba filas y,
+    // con reservas cliente_id=0 + ~100 clientes basura con CUIC=0, concatenaba
+    // decenas de nombres ajenos ("Cliente", "Dulces", ...) en una sola celda.
     const pieceIds = itemRows.map(r => r.id);
     const clientesPorPieza = new Map<number, string>();
     // En perPairMode cada fila ya es (pieza, cliente) → no se concatena.
     if (!perPairMode && pieceIds.length > 0) {
       const ph = pieceIds.map(() => '?').join(',');
       const clienteRows = await prisma.$queryRawUnsafe<{ inv_id: number; clientes: string | null }[]>(
-        `SELECT ei.inventario_id AS inv_id,
-                GROUP_CONCAT(DISTINCT COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente)
-                             ORDER BY COALESCE(clById.T0_U_Cliente, clByCuic.T0_U_Cliente) SEPARATOR ', ') AS clientes
-         FROM reservas rsv
-         INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
-         LEFT JOIN cliente clById ON clById.id = rsv.cliente_id
-         LEFT JOIN cliente clByCuic ON clByCuic.CUIC = rsv.cliente_id
-         WHERE rsv.deleted_at IS NULL
-           AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
-           AND ei.inventario_id IN (${ph})
-           ${calendarioClause}
-         GROUP BY ei.inventario_id`,
+        `SELECT inv_id,
+                GROUP_CONCAT(DISTINCT nombre ORDER BY nombre SEPARATOR ', ') AS clientes
+         FROM (
+           SELECT ei.inventario_id AS inv_id,
+                  COALESCE(
+                    (SELECT c1.T0_U_Cliente FROM cliente c1 WHERE c1.id = rsv.cliente_id LIMIT 1),
+                    (SELECT c2.T0_U_Cliente FROM cliente c2 WHERE c2.CUIC = rsv.cliente_id LIMIT 1)
+                  ) AS nombre
+           FROM reservas rsv
+           INNER JOIN espacio_inventario ei ON ei.id = rsv.inventario_id
+           WHERE rsv.deleted_at IS NULL
+             AND rsv.cliente_id > 0
+             AND rsv.estatus IN ('Vendido','Vendido bonificado','Con Arte','Sin Arte','Reservado','Bonificado','Bloqueado')
+             AND ei.inventario_id IN (${ph})
+             ${calendarioClause}
+         ) t
+         WHERE nombre IS NOT NULL
+         GROUP BY inv_id`,
         ...pieceIds,
       );
       for (const cr of clienteRows) {
@@ -1496,7 +1625,11 @@ export class DashboardController {
         estado: r.estado,
         latitud: r.latitud,
         longitud: r.longitud,
-        estatus: r.estatus_efectivo,
+        // Vendidos desglosados por tipo de venta (Renta/Bonificado/Cortesía/
+        // Intercambio) via prefijo del articulo. El resto queda tal cual.
+        estatus: ESTATUS_VENDIDO_SET.has(r.estatus_efectivo)
+          ? tipoVentaVendido(r.estatus_efectivo, solInfo?.articulo)
+          : r.estatus_efectivo,
         cliente_nombre: clienteNombre,
         cuic: solInfo?.cuic || null,
         marca: solInfo?.marca || null,

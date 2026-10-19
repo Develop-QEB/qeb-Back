@@ -550,3 +550,53 @@ export async function resolverCalendarioReserva(
   if (existing) return { id: existing.id };
   return client.calendario.create({ data: { fecha_inicio: ini, fecha_fin: fin } });
 }
+
+/**
+ * Ancla el PERIODO de una cara (`solicitudCaras.inicio_periodo`/`fin_periodo`) a su
+ * catorcena real. Hermano de `resolverCalendarioReserva`, pero para el `sc` — que es
+ * lo que usa el candado `getEspaciosBloqueados` (NO el `calendario_id`). Sin esto una
+ * cara CATORCENA nacía con `fin` inflado (fin de campaña en vez de fin de su
+ * catorcena) y el candado la veía OCUPADA en varias catorcenas aunque el calendario
+ * estuviera bien — el "sangrado" que `resolverCalendarioReserva` NO cubría (bug
+ * ORAL B / SABA / KIT KAT / COMEX, sep-2026).
+ *
+ * - CATORCENA: [inicio, fin] se recortan a la catorcena que contiene `inicio`.
+ * - MENSUAL: se respeta el rango (abarca varias catorcenas POR DISEÑO, Gran Formato).
+ *
+ * `esMensual` es opcional; si viene `undefined` se resuelve desde la cotización de
+ * `idquote` (una consulta extra). Ante cualquier duda (catorcena no encontrada) cae
+ * al rango original — nunca peor que antes.
+ */
+export async function anclarPeriodoCatorcena(
+  client: Prisma.TransactionClient | PrismaClient,
+  idquote: number | string | null | undefined,
+  fechaInicio: Date | string,
+  fechaFin: Date | string,
+  esMensual?: boolean,
+): Promise<{ inicio: Date; fin: Date }> {
+  const inicio = new Date(fechaInicio);
+  const fin = new Date(fechaFin);
+
+  let mensual = esMensual;
+  if (mensual === undefined) {
+    const propId = Number(idquote);
+    const cot = Number.isFinite(propId) && propId > 0
+      ? await client.cotizacion.findFirst({
+          where: { id_propuesta: propId },
+          select: { tipo_periodo: true },
+        })
+      : null;
+    mensual = cot?.tipo_periodo === 'mensual';
+  }
+  if (mensual) return { inicio, fin };
+
+  const cat = await client.catorcenas.findFirst({
+    where: { fecha_inicio: { lte: inicio }, fecha_fin: { gte: inicio } },
+    select: { fecha_inicio: true, fecha_fin: true },
+    orderBy: { fecha_inicio: 'desc' },
+  });
+  if (cat?.fecha_inicio && cat?.fecha_fin) {
+    return { inicio: new Date(cat.fecha_inicio), fin: new Date(cat.fecha_fin) };
+  }
+  return { inicio, fin };
+}

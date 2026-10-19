@@ -17,8 +17,26 @@
 // de chiripa (renta=0). El normalizador asegura caras=0, bonificacion=total
 // y un split persistido en todos los paths de creación/edición.
 
+// CF-#### (CF + dígitos, ej. CF-0017 / CF-0203 "Mantenimiento Extraordinario"):
+// artículos de SERVICIO cobrado (caras>0, tarifa>0, costo>0) — NO son bonificación
+// contraflujo aunque compartan el prefijo CF. Se manejan como IM (impresiones):
+// sin inventario/reserva, pasan directo a campañas y se postean a SAP.
+// Las bonificaciones reales del catálogo son BF-*/CT-* (código de plaza, no numérico).
+// Espejo SQL: REGEXP '^CF-?[0-9]' (guion opcional, igual que aquí) en
+// campanas.controller e inventario-propuesta.service — mantenerlos alineados.
+export function esArticuloServicioCF(articulo?: string | null): boolean {
+  return /^CF-?\d/i.test((articulo || '').trim());
+}
+
+// Artículo de bonificación BF/CF "real" (excluye los CF-#### de servicio).
+export function esArticuloBfCf(articulo?: string | null): boolean {
+  const a = (articulo || '').toUpperCase();
+  return (a.startsWith('BF') || a.startsWith('CF')) && !esArticuloServicioCF(a);
+}
+
 export function isBonifSplitArticulo(articulo?: string | null): boolean {
   const a = (articulo || '').toUpperCase();
+  if (esArticuloServicioCF(a)) return false;
   return a.startsWith('BF') || a.startsWith('CF') || a.startsWith('CT');
 }
 

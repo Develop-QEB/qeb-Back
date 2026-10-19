@@ -1155,24 +1155,319 @@ export class InventariosController {
     }
   }
 
+  /**
+   * Timeline de acciones de UN inventario: qué le pasó a esta cara y cuándo.
+   *
+   * Se COMPONE de varias fuentes, porque los eventos que le pasan a una cara no
+   * viven en un solo lugar (antes esto leia SOLO `historial` tipo='Inventario',
+   * y como a esa tabla solo escriben el alta, la edicion y el bloqueo, la
+   * pestaña salia vacia en practicamente todos los inventarios):
+   *
+   *   · `historial` tipo='Inventario'  → alta, edicion, bloqueo/desbloqueo y
+   *     limpieza de conflictos: los unicos flujos que registran contra el
+   *     inventario.
+   *   · `reservas` del inventario      → reservada / liberada, con su propuesta
+   *     o campaña, articulo y catorcena. Los desplazamientos y las liberaciones
+   *     por choque son soft-delete, asi que entran aqui como "Liberada".
+   *   · `pase_ventas_reserva`          → la fecha en que la pieza CRUZO a campaña
+   *     (= se vendio). Tabla opcional (se crea con script): si no existe, se
+   *     omite ese tipo de evento en vez de tumbar el endpoint.
+   *   · `conflictos_ocupacion`         → conflicto detectado / limpiado / resuelto.
+   *
+   * Lo que todavia NO se puede fechar: el paso a Vendido de las reservas que
+   * nacieron firmes dentro de la campaña (no hay fila en pase_ventas_reserva ni
+   * columna de auditoria en `reservas`); para esas, el evento de alta reporta el
+   * estatus actual. Para tener el "quien y cuando" exacto de cada cambio hay que
+   * instrumentar los flujos de reserva/venta/desplazamiento con
+   * logHistorial({ tipo: 'Inventario', refId: <inventario> }).
+   */
   async getAcciones(req: AuthRequest, res: Response): Promise<void> {
     try {
       const id = parseInt(req.params.id);
-      const acciones = await prisma.historial.findMany({
+      if (!Number.isInteger(id)) {
+        res.status(400).json({ success: false, error: 'id de inventario invalido' });
+        return;
+      }
+      const limitRaw = Number(req.query?.limit);
+      const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 500 ? limitRaw : 200;
+
+      type AccionEvento = {
+        id: string;
+        inventario_id: number;
+        /** Para que la UI pueda agrupar/colorear sin parsear el texto. */
+        tipo_evento: 'inventario' | 'reserva' | 'venta' | 'liberacion' | 'conflicto';
+        accion: string;
+        detalles: string | null;
+        usuario_nombre: string | null;
+        fecha: Date;
+        reserva_id?: number | null;
+        propuesta_id?: number | null;
+        campana_id?: number | null;
+        campana_nombre?: string | null;
+        catorcena?: string | null;
+        articulo?: string | null;
+        estatus?: string | null;
+      };
+
+      const ESTATUS_FIRME_ACC = ['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'];
+      const eventos: AccionEvento[] = [];
+
+      // `reservas.inventario_id` es polimorfico: normalmente apunta a
+      // espacio_inventario.id, en datos viejos a inventarios.id. Se buscan los dos
+      // por IN para poder usar el indice idx_inventario_id.
+      const espacios = await prisma.espacio_inventario.findMany({
+        where: { inventario_id: id },
+        select: { id: true },
+      });
+      const espacioIds = [...new Set([...espacios.map(e => Number(e.id)), id])];
+
+      // ── 1) historial propio del inventario ────────────────────────────────
+      const usuarioDeDetalles = (detalles: string | null): string | null => {
+        if (!detalles) return null;
+        const t = detalles.trim();
+        if (t.startsWith('{')) {
+          try {
+            const j = JSON.parse(t) as { usuario?: string };
+            return j.usuario || null;
+          } catch { /* no era JSON: cae al regex de texto plano */ }
+        }
+        return t.match(/^(.+?) (?:creó|actualizó|bloqueó|desbloqueó|reservó|quitó)/)?.[1] || null;
+      };
+      // Los registros nuevos usan logHistorial (JSON); los viejos son texto
+      // plano. Se normaliza a una linea legible para la UI.
+      const detallesLegibles = (detalles: string | null): string | null => {
+        if (!detalles) return null;
+        const t = detalles.trim();
+        if (!t.startsWith('{')) return t;
+        try {
+          const j = JSON.parse(t) as Record<string, unknown>;
+          const partes: string[] = [];
+          if (j.origen) partes.push(`Origen: ${String(j.origen)}`);
+          if (j.catorcena) partes.push(String(j.catorcena));
+          if (j.tipo_conflicto) partes.push(`Tipo: ${String(j.tipo_conflicto)}`);
+          if (j.reserva_conservada) partes.push(`Conservada #${String(j.reserva_conservada)}`);
+          if (Array.isArray(j.reservas_liberadas) && j.reservas_liberadas.length > 0) {
+            partes.push(`Liberadas: #${(j.reservas_liberadas as unknown[]).join(', #')}`);
+          }
+          if (Array.isArray(j.campanas) && j.campanas.length > 0) {
+            partes.push((j.campanas as unknown[]).map(c => String(c).split(':').slice(1).join(':') || String(c)).join(' vs '));
+          }
+          return partes.length > 0 ? partes.join(' · ') : t;
+        } catch {
+          return t;
+        }
+      };
+
+      const histRows = await prisma.historial.findMany({
         where: { tipo: 'Inventario', ref_id: id },
         orderBy: { fecha_hora: 'desc' },
+        take: limit,
       });
-      res.json({
-        success: true,
-        data: acciones.map(a => ({
-          id: serializeBigInt(a.id),
-          inventario_id: a.ref_id,
-          accion: a.accion,
-          detalles: a.detalles,
-          usuario_nombre: a.detalles?.match(/^(.+?) (?:creó|actualizó|bloqueó|desbloqueó|reservó|quitó)/)?.[1] || null,
-          fecha: a.fecha_hora,
-        })),
+      for (const h of histRows) {
+        eventos.push({
+          id: `hist-${String(serializeBigInt(h.id))}`,
+          inventario_id: id,
+          tipo_evento: 'inventario',
+          accion: h.accion,
+          detalles: detallesLegibles(h.detalles),
+          usuario_nombre: usuarioDeDetalles(h.detalles),
+          fecha: h.fecha_hora,
+        });
+      }
+
+      // ── 2) reservas: alta y liberacion ────────────────────────────────────
+      const phEsp = espacioIds.map(() => '?').join(',');
+      const reservaRows = await prisma.$queryRawUnsafe<Array<{
+        reserva_id: number;
+        estatus: string | null;
+        aps: number | null;
+        fecha_reserva: string | null;
+        deleted_at: Date | null;
+        articulo: string | null;
+        propuesta_id: number | null;
+        campana_id: number | null;
+        campana_nombre: string | null;
+        numero_catorcena: number | null;
+        anio: number | null;
+      }>>(
+        `SELECT rsv.id AS reserva_id, rsv.estatus, rsv.APS AS aps,
+                DATE_FORMAT(rsv.fecha_reserva, '%Y-%m-%d') AS fecha_reserva,
+                rsv.deleted_at,
+                sc.articulo,
+                CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
+                cm.id AS campana_id, cm.nombre AS campana_nombre,
+                cat.numero_catorcena, cat.año AS anio
+           FROM reservas rsv
+           INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+           LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
+           LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
+           LEFT JOIN catorcenas cat ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
+          WHERE rsv.inventario_id IN (${phEsp})
+          ORDER BY rsv.id DESC
+          LIMIT ${limit}`,
+        ...espacioIds
+      );
+
+      const donde = (r: { campana_id: number | null; campana_nombre: string | null; propuesta_id: number | null }): string =>
+        r.campana_id
+          ? (r.campana_nombre || `Campaña #${r.campana_id}`)
+          : (r.propuesta_id ? `Propuesta #${r.propuesta_id}` : 'Sin campaña ni propuesta');
+
+      for (const r of reservaRows) {
+        const cat = r.numero_catorcena != null && r.anio != null ? `C${r.numero_catorcena}-${r.anio}` : null;
+        const firme = !!r.estatus && ESTATUS_FIRME_ACC.includes(r.estatus);
+        const comun = {
+          inventario_id: id,
+          reserva_id: Number(r.reserva_id),
+          propuesta_id: r.propuesta_id != null ? Number(r.propuesta_id) : null,
+          campana_id: r.campana_id != null ? Number(r.campana_id) : null,
+          campana_nombre: r.campana_nombre ?? null,
+          catorcena: cat,
+          articulo: r.articulo ?? null,
+          estatus: r.estatus ?? null,
+        };
+
+        if (r.fecha_reserva) {
+          eventos.push({
+            ...comun,
+            id: `rsv-${r.reserva_id}-alta`,
+            tipo_evento: 'reserva',
+            accion: firme ? 'Vendida' : 'Reservada',
+            detalles: [
+              donde(r),
+              cat,
+              r.articulo,
+              `Reserva #${r.reserva_id}`,
+              `Estatus actual: ${r.estatus || '(sin estatus)'}`,
+              r.aps && r.aps > 0 ? `APS #${r.aps}` : null,
+            ].filter(Boolean).join(' · '),
+            usuario_nombre: null,
+            fecha: new Date(`${r.fecha_reserva}T12:00:00`),
+          });
+        }
+
+        if (r.deleted_at) {
+          eventos.push({
+            ...comun,
+            id: `rsv-${r.reserva_id}-liberada`,
+            tipo_evento: 'liberacion',
+            accion: 'Liberada',
+            detalles: [
+              donde(r),
+              cat,
+              `Reserva #${r.reserva_id}`,
+              'Puede ser borrado manual, desplazamiento por venta ajena o limpieza de conflictos',
+            ].filter(Boolean).join(' · '),
+            usuario_nombre: null,
+            fecha: r.deleted_at,
+          });
+        }
+      }
+
+      // ── 3) pase a ventas (tabla opcional) ─────────────────────────────────
+      const reservaIds = reservaRows.map(r => Number(r.reserva_id));
+      if (reservaIds.length > 0) {
+        try {
+          const phRsv = reservaIds.map(() => '?').join(',');
+          const paseRows = await prisma.$queryRawUnsafe<Array<{
+            reserva_id: number;
+            propuesta_id: number | null;
+            campania_id: number | null;
+            fecha_pase: Date;
+            origen: string | null;
+          }>>(
+            `SELECT reserva_id, propuesta_id, campania_id, fecha_pase, origen
+               FROM pase_ventas_reserva
+              WHERE reserva_id IN (${phRsv})`,
+            ...reservaIds
+          );
+          const porReserva = new Map(reservaRows.map(r => [Number(r.reserva_id), r]));
+          for (const pv of paseRows) {
+            const r = porReserva.get(Number(pv.reserva_id));
+            const cat = r && r.numero_catorcena != null && r.anio != null ? `C${r.numero_catorcena}-${r.anio}` : null;
+            eventos.push({
+              id: `pase-${pv.reserva_id}`,
+              inventario_id: id,
+              tipo_evento: 'venta',
+              accion: 'Pasó a ventas',
+              detalles: [
+                pv.campania_id ? (r?.campana_nombre || `Campaña #${pv.campania_id}`) : null,
+                pv.propuesta_id ? `desde propuesta #${pv.propuesta_id}` : null,
+                cat,
+                `Reserva #${pv.reserva_id}`,
+                pv.origen === 'backfill' ? 'fecha aproximada (backfill)' : null,
+              ].filter(Boolean).join(' · '),
+              usuario_nombre: null,
+              fecha: pv.fecha_pase,
+              reserva_id: Number(pv.reserva_id),
+              propuesta_id: pv.propuesta_id != null ? Number(pv.propuesta_id) : null,
+              campana_id: pv.campania_id != null ? Number(pv.campania_id) : null,
+              campana_nombre: r?.campana_nombre ?? null,
+              catorcena: cat,
+              articulo: r?.articulo ?? null,
+              estatus: r?.estatus ?? null,
+            });
+          }
+        } catch (err) {
+          // La tabla se crea con script y puede no existir en este ambiente.
+          console.warn('[getAcciones] pase_ventas_reserva no disponible:', err instanceof Error ? err.message : err);
+        }
+      }
+
+      // ── 4) conflictos de ocupacion de esta cara ───────────────────────────
+      const conflictos = await prisma.conflictos_ocupacion.findMany({
+        where: { inventario_id: id },
+        orderBy: { detectado_at: 'desc' },
+        take: limit,
       });
+      for (const c of conflictos) {
+        const cat = `C${c.numero_catorcena}-${c.anio}`;
+        eventos.push({
+          id: `conf-${c.id}-det`,
+          inventario_id: id,
+          tipo_evento: 'conflicto',
+          accion: c.tipo === 'choque' ? 'Conflicto detectado (choque)' : 'Conflicto detectado (duplicado)',
+          detalles: `${cat} · ${c.reservas} reservas firmes · ${c.origenes} ${c.origenes === 1 ? 'campaña' : 'campañas'}`,
+          usuario_nombre: null,
+          fecha: c.detectado_at,
+          catorcena: cat,
+        });
+        if (c.limpiado_at) {
+          eventos.push({
+            id: `conf-${c.id}-limp`,
+            inventario_id: id,
+            tipo_evento: 'conflicto',
+            accion: 'Conflicto limpiado',
+            detalles: [
+              cat,
+              c.reserva_conservada ? `Conservada #${c.reserva_conservada}` : null,
+              c.reservas_liberadas ? `Liberadas: #${c.reservas_liberadas.split(',').join(', #')}` : null,
+            ].filter(Boolean).join(' · '),
+            usuario_nombre: c.limpiado_por || null,
+            fecha: c.limpiado_at,
+            catorcena: cat,
+          });
+        }
+        if (c.resuelto_at) {
+          eventos.push({
+            id: `conf-${c.id}-res`,
+            inventario_id: id,
+            tipo_evento: 'conflicto',
+            accion: 'Conflicto resuelto',
+            detalles: `${cat} · ya no aparece en el monitor`,
+            usuario_nombre: null,
+            fecha: c.resuelto_at,
+            catorcena: cat,
+          });
+        }
+      }
+
+      const ordenados = eventos
+        .filter(e => e.fecha instanceof Date ? !Number.isNaN(e.fecha.getTime()) : !!e.fecha)
+        .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
+        .slice(0, limit);
+
+      res.json({ success: true, data: serializeBigInt(ordenados) });
     } catch (error) {
       console.error('Error fetching acciones:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener acciones';

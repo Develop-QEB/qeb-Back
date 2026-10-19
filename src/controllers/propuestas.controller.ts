@@ -10,13 +10,14 @@ import {
   reconciliarCierreTareasAutorizacion,
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
-import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva } from '../services/circuitos.service';
+import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
+import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
-import { bonifCaraOverride, rtCarasInvariante } from '../utils/bonifCara';
+import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -433,8 +434,9 @@ async function propuestaTieneCircuitosIncompletos(client: any, propuestaId: numb
   const esMensual = cot?.tipo_periodo === 'mensual';
   return caras.some((cara: any) => {
     const articulo = (cara.articulo || '').toUpperCase();
-    // IM (impresión) y ES/ESP (ejec. especial) no requieren inventario → nunca incompletos.
-    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-')) return false;
+    // IM (impresión), ES/ESP (ejec. especial) y CF-#### (servicio/mantenimiento)
+    // no requieren inventario → nunca incompletos.
+    if (articulo.startsWith('IM') || articulo.startsWith('ESP') || articulo.startsWith('ES-') || esArticuloServicioCF(articulo)) return false;
     const caraReservas = reservas.filter(r => r.solicitud_cara_id === cara.id);
     const bonificacionReservado = caraReservas.filter(r => r.estatus === 'Bonificado' || r.estatus === 'Vendido bonificado').length;
     const isBonifSplit = articulo.startsWith('BF') || articulo.startsWith('CF') || articulo.startsWith('CT');
@@ -457,7 +459,10 @@ export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
+      // Tope 5000: el front pide todo el universo (~1.7k propuestas) cuando hay
+      // agrupación, filtros avanzados o el filtro Incompleta/Completa, que se
+      // evalúan en cliente (mismo patrón que campañas).
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 5000);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
@@ -765,6 +770,28 @@ export class PropuestasController {
             p.inversion = fresh;
           }
         });
+
+        // Totales de completitud para el badge "Incompleta" del listado.
+        // MISMO criterio que campañas (inc_agg de campanas.controller): solo
+        // circuitos catorcenales (INNER JOIN catorcenas — mensual queda fuera)
+        // y mismas exclusiones IM/ESP/ES-/-QR/CF-#.
+        const completitudData = await prisma.$queryRawUnsafe<{ propuesta_id: string; caras_esperadas: bigint; reservas_validas: bigint }[]>(`
+          SELECT sc.idquote AS propuesta_id,
+                 COALESCE(SUM(sc.caras + sc.bonificacion), 0) AS caras_esperadas,
+                 COALESCE(SUM((SELECT COUNT(*) FROM reservas r
+                               WHERE r.solicitudCaras_id = sc.id AND r.deleted_at IS NULL)), 0) AS reservas_validas
+          FROM solicitudCaras sc
+          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+          WHERE sc.idquote IN (${placeholders})
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+          GROUP BY sc.idquote
+        `, ...propuestaIds.map(id => String(id)));
+        const completitudMap = new Map(completitudData.map(r => [Number(r.propuesta_id), r]));
+        formattedPropuestas.forEach(p => {
+          const comp = completitudMap.get(p.id);
+          (p as any).caras_esperadas_total = comp ? Number(comp.caras_esperadas) : 0;
+          (p as any).reservas_validas_total = comp ? Number(comp.reservas_validas) : 0;
+        });
       }
 
       const response = {
@@ -788,6 +815,76 @@ export class PropuestasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * Desglose de completitud por catorcena para el badge "Incompleta" del
+   * listado de propuestas. MISMA query y criterio que incompleteness_detail
+   * del getById de campañas (solo circuitos catorcenales, exclusiones
+   * IM/ESP/ES-/-QR/CF-#), anclada directo al idquote = id de la propuesta.
+   */
+  async getCompletitud(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const propuestaId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(propuestaId) || propuestaId <= 0) {
+        res.status(400).json({ success: false, error: 'Propuesta inválida' });
+        return;
+      }
+
+      const detailResult = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT
+          cat.numero_catorcena as catorcena,
+          cat.año as anio,
+          sc.articulo,
+          sc.ciudad,
+          (sc.caras + sc.bonificacion) as caras_esperadas,
+          (SELECT COUNT(*) FROM reservas r2
+           WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+          ) as reservas_count
+        FROM solicitudCaras sc
+        INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+        WHERE sc.idquote = ?
+          AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+        ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+        String(propuestaId),
+      );
+
+      // Agrupar por catorcena — mismo post-procesamiento que campañas.
+      const byCat: Record<string, any> = {};
+      for (const r of detailResult) {
+        const key = `${r.anio}-${r.catorcena}`;
+        if (!byCat[key]) {
+          byCat[key] = {
+            catorcena: Number(r.catorcena),
+            anio: Number(r.anio),
+            caras_esperadas: 0,
+            reservas_count: 0,
+            grupos: [],
+          };
+        }
+        const esperadas = Number(r.caras_esperadas);
+        const reservadas = Number(r.reservas_count);
+        byCat[key].caras_esperadas += esperadas;
+        byCat[key].reservas_count += reservadas;
+        if (reservadas < esperadas) {
+          byCat[key].grupos.push({
+            articulo: r.articulo || 'SIN-ART',
+            ciudad: r.ciudad || '',
+            caras_esperadas: esperadas,
+            reservas_count: reservadas,
+            faltantes: esperadas - reservadas,
+          });
+        }
+      }
+      const detail = Object.values(byCat)
+        .map((c: any) => ({ ...c, completa: c.reservas_count >= c.caras_esperadas }))
+        .filter((c: any) => c.caras_esperadas > 0);
+
+      res.json({ success: true, data: detail });
+    } catch (error) {
+      console.error('Error en getCompletitud propuesta:', error);
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Error al obtener completitud' });
     }
   }
 
@@ -3110,6 +3207,11 @@ export class PropuestasController {
       const serializedInventario = (await getInventarioPropuestaConVersion(propuestaId))
         .map(({ motivo_no_vigente: _motivo, ...fila }) => fila);
 
+      // Capas de POI / poligonos con las que Trafico armo cada circuito. Al
+      // cliente solo le llegan las marcadas visible_cliente (lo decide Trafico
+      // por capa). Ver capas-mapa.service.ts.
+      const capas = await listarCapasPropuesta(propuestaId, { soloVisibles: true });
+
       res.json({
         success: true,
         data: {
@@ -3151,6 +3253,7 @@ export class PropuestasController {
           } : null,
           caras,
           inventario: serializedInventario,
+          capas,
         },
       });
     } catch (error) {
@@ -4436,13 +4539,20 @@ export class PropuestasController {
       // recalc cuando el usuario solo cambiaba NSE.
       const decimalEq = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
+      const periodoCambioAuth = (
+        (inicio_periodo !== undefined && (!currentCara.inicio_periodo || new Date(inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
+        (fin_periodo !== undefined && (!currentCara.fin_periodo || new Date(fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
+      );
       const authFieldsChanged = (
         (caras !== undefined && parseInt(caras) !== currentCara.caras) ||
         (bonificacion !== undefined && !decimalEq(bonificacion, currentCara.bonificacion)) ||
         (tarifa_publica !== undefined && !decimalEq(tarifa_publica, currentCara.tarifa_publica)) ||
         (formato !== undefined && formato !== currentCara.formato) ||
         (tipo !== undefined && tipo !== currentCara.tipo) ||
-        (articulo !== undefined && articulo !== currentCara.articulo)
+        (articulo !== undefined && articulo !== currentCara.articulo) ||
+        // Cambio de periodo tambien debe recalcular autorizacion (ver fix equivalente
+        // en campanas.controller.ts). Feedback Jos 2026-10-06 campania 81633.
+        periodoCambioAuth
       );
 
       let autorizacion_dg = currentCara.autorizacion_dg || 'aprobado';
@@ -4524,6 +4634,11 @@ export class PropuestasController {
       const articuloCambioUp = !!articulo && articulo !== currentCara.articulo;
       const motivoLiberacionUp = periodoCambioUp ? 'periodo' : 'artículo';
 
+      // Anclar periodo del sc a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
+      const _scPerUp = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, currentCara.idquote, inicio_periodo, fin_periodo || inicio_periodo)
+        : null;
+
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
@@ -4545,8 +4660,8 @@ export class PropuestasController {
               formato,
               costo: costo !== undefined && costo !== null ? parseFloat(costo) : undefined,
               tarifa_publica: tarifa_publica !== undefined && tarifa_publica !== null ? parseFloat(tarifa_publica) : undefined,
-              inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : undefined,
-              fin_periodo: fin_periodo ? new Date(fin_periodo) : undefined,
+              inicio_periodo: _scPerUp ? _scPerUp.inicio : (inicio_periodo ? new Date(inicio_periodo) : undefined),
+              fin_periodo: _scPerUp ? _scPerUp.fin : (fin_periodo ? new Date(fin_periodo) : undefined),
               caras_flujo: finalCfUp,
               caras_contraflujo: finalCcUp,
               articulo,
@@ -4883,6 +4998,13 @@ export class PropuestasController {
       // BF/CF/CT: conteo total a bonificacion; caras/flujo/contra = 0
       // (split de bonificadas es front-only — corrige CT-DIG).
       const bonifOvCrP = bonifCaraOverride(articulo, caras, bonificacion, caras_flujo, caras_contraflujo);
+      // Anclar el periodo del sc a su catorcena real: sin esto una cara CATORCENA
+      // nace con `fin` inflado (fin de campaña) y el candado (getEspaciosBloqueados,
+      // por sc.inicio_periodo/fin_periodo) la ve ocupada en varias catorcenas.
+      // Mensual respeta el rango. Ver anclarPeriodoCatorcena.
+      const _scPer = inicio_periodo
+        ? await anclarPeriodoCatorcena(prisma, id, inicio_periodo, fin_periodo || inicio_periodo)
+        : { inicio: new Date(), fin: new Date() };
       const newCara = await prisma.solicitudCaras.create({
         data: {
           idquote: id, // Link to propuesta
@@ -4896,8 +5018,8 @@ export class PropuestasController {
           formato: formato || '',
           costo: costo ? parseFloat(costo) : 0,
           tarifa_publica: tarifa_publica ? parseFloat(tarifa_publica) : 0,
-          inicio_periodo: inicio_periodo ? new Date(inicio_periodo) : new Date(),
-          fin_periodo: fin_periodo ? new Date(fin_periodo) : new Date(),
+          inicio_periodo: _scPer.inicio,
+          fin_periodo: _scPer.fin,
           caras_flujo: bonifOvCrP ? bonifOvCrP.caras_flujo : (caras_flujo ? parseInt(caras_flujo) : 0),
           caras_contraflujo: bonifOvCrP ? bonifOvCrP.caras_contraflujo : (caras_contraflujo ? parseInt(caras_contraflujo) : 0),
           articulo,
@@ -5148,7 +5270,9 @@ export class PropuestasController {
             (data.tarifa_publica !== undefined && !decimalEqP(data.tarifa_publica, currentCara.tarifa_publica)) ||
             (data.formato !== undefined && data.formato !== currentCara.formato) ||
             (data.tipo !== undefined && data.tipo !== currentCara.tipo) ||
-            (data.articulo !== undefined && data.articulo !== currentCara.articulo)
+            (data.articulo !== undefined && data.articulo !== currentCara.articulo) ||
+            // Cambio de periodo tambien recalcula autorizacion. Feedback Jos 2026-10-06 campania 81633.
+            periodoCambioP
           );
 
           let autorizacion_dg = currentCara?.autorizacion_dg || 'aprobado';
@@ -5208,6 +5332,11 @@ export class PropuestasController {
           // Invariante RT ya validado/normalizado en el pre-pass.
           const rtInvBk = bonifOvBk ? undefined : rtInvByCara.get(parseInt(caraId));
 
+          // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
+          const _scPerBk = data.inicio_periodo
+            ? await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo)
+            : null;
+
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
             data: {
@@ -5221,8 +5350,8 @@ export class PropuestasController {
               formato: data.formato,
               costo: data.costo !== undefined && data.costo !== null ? parseFloat(data.costo) : undefined,
               tarifa_publica: data.tarifa_publica !== undefined && data.tarifa_publica !== null ? parseFloat(data.tarifa_publica) : undefined,
-              inicio_periodo: data.inicio_periodo ? new Date(data.inicio_periodo) : undefined,
-              fin_periodo: data.fin_periodo ? new Date(data.fin_periodo) : undefined,
+              inicio_periodo: _scPerBk ? _scPerBk.inicio : (data.inicio_periodo ? new Date(data.inicio_periodo) : undefined),
+              fin_periodo: _scPerBk ? _scPerBk.fin : (data.fin_periodo ? new Date(data.fin_periodo) : undefined),
               caras_flujo: bonifOvBk ? bonifOvBk.caras_flujo : (rtInvBk ? rtInvBk.caras_flujo : (data.caras_flujo !== undefined && data.caras_flujo !== null ? parseInt(data.caras_flujo) : undefined)),
               caras_contraflujo: bonifOvBk ? bonifOvBk.caras_contraflujo : (rtInvBk ? rtInvBk.caras_contraflujo : (data.caras_contraflujo !== undefined && data.caras_contraflujo !== null ? parseInt(data.caras_contraflujo) : undefined)),
               articulo: data.articulo,
