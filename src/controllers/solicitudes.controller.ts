@@ -3066,6 +3066,73 @@ export class SolicitudesController {
               },
             });
           }
+
+          // Seguimiento Propuesta para Analistas de Servicio al Cliente.
+          // Antes solo el creador y Trafico recibian tarea al atender la solicitud;
+          // los Analistas quedaban fuera del flujo hasta que la propuesta pasaba a
+          // Ventas y se convertia en campania (ahi recien les llegaba Seguimiento
+          // Campania). Ahora se les asigna desde este pase para que participen y
+          // reciban la notificacion de propuesta nueva.
+          const analistas = await tx.usuario.findMany({
+            where: {
+              puesto: 'Analista de Servicio al Cliente',
+              deleted_at: null,
+              ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
+            },
+            select: { id: true, nombre: true },
+          });
+          for (const analista of analistas) {
+            await tx.tareas.create({
+              data: {
+                fecha_inicio: ahoraMx,
+                fecha_fin: fechaFinMx,
+                tipo: 'Seguimiento Propuesta',
+                responsable: analista.nombre,
+                id_responsable: analista.id,
+                asignado: analista.nombre,
+                id_asignado: analista.id.toString(),
+                estatus: 'Pendiente',
+                descripcion: `Dar seguimiento a la propuesta: ${cotizacionData?.nombre_campania || ''}`,
+                titulo: `Seguimiento Propuesta`,
+                id_propuesta: propuesta.id.toString(),
+                id_solicitud: solicitud.id.toString(),
+                campania_id: campaniaData?.id || null,
+              },
+            });
+          }
+
+          // Agregar Analistas al id_asignado de la propuesta sin duplicar lo que ya
+          // tiene (puede traer Trafico + creador segun seleccion del modal). Asi el
+          // pase a Ventas los conserva (el front filtra Trafico y mantiene los que
+          // tengan puesto permitido, incluido Analista de Servicio al Cliente).
+          if (analistas.length > 0) {
+            const current = propuesta.id_asignado || '';
+            const currentIds = new Set(
+              current.split(',').map(s => s.trim()).filter(Boolean)
+            );
+            const currentNombres = (propuesta.asignado || '')
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean);
+            const nuevosIds: string[] = [];
+            const nuevosNombres: string[] = [];
+            for (const a of analistas) {
+              const idStr = a.id.toString();
+              if (!currentIds.has(idStr)) {
+                nuevosIds.push(idStr);
+                nuevosNombres.push(a.nombre);
+                currentIds.add(idStr);
+              }
+            }
+            if (nuevosIds.length > 0) {
+              const mergedIds = [...current.split(',').map(s => s.trim()).filter(Boolean), ...nuevosIds].join(',');
+              const mergedNombres = [...currentNombres, ...nuevosNombres].join(', ');
+              await tx.propuesta.update({
+                where: { id: propuesta.id },
+                data: { id_asignado: mergedIds, asignado: mergedNombres },
+              });
+            }
+          }
         }
 
         // Create historial for solicitud
