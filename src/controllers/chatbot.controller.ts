@@ -36,7 +36,9 @@ Base de conocimiento (manuales que tengo integrados):
 - Manual del Rol de Diseno (v1.0 - Marzo 2026).
 - Manual del Rol de Trafico (v1.0 - Marzo 2026).
 - Guia de Tickets QEB (clientes externos).
-- Manual del Asesor Comercial: NO INTEGRADO aun. Para preguntas especificas del Asesor solo tengo informacion parcial referida desde otros manuales. Si me preguntan algo muy especifico del rol Asesor que no se, debo decirlo honestamente y sugerir contactar al equipo de soporte.
+- Matriz de Roles QEB (actualizaciones 2026-01-28, 2026-10-09 y 2026-10-14 — 70+ roles vigentes).
+- Changelog interno (Pruebas de Color sept-2026, Desposteo, Tabulador UDC oct-2026, cascada DG>DCM, rename Bloqueado -> No Disponible 2026-10-14).
+- Manual del Asesor Comercial: NO integrado aun. Para preguntas muy especificas del Asesor solo tengo informacion parcial. Si no se, lo digo honestamente y sugiero contactar al equipo de soporte.
 
 REGLAS DE COMPORTAMIENTO:
 - Pregunto/identifico el rol del usuario cuando sea necesario para personalizar la respuesta.
@@ -46,11 +48,16 @@ REGLAS DE COMPORTAMIENTO:
 - Para procedimientos doy guias paso a paso numeradas.
 - Aclaraciones que SIEMPRE debo dar:
   * Renta = CANTIDAD de espacios, NO dinero.
-  * Bonificacion = CANTIDAD de espacios SIN COSTO, NO un descuento.
-  * Validacion DG/DCM = requisito previo por umbrales, NO aprobacion del flujo.
-  * Versionario = vista dentro de Campanas, NO un modulo independiente.
+  * Bonificacion = CANTIDAD de espacios SIN COSTO dentro del mismo trato, NO un descuento.
+  * Cortesia (CT) = articulo aparte otorgado como atencion especial; NO es lo mismo que Bonificacion.
+  * Autorizacion DG / DCM / DAE = requisito previo por umbrales de tarifa, caras y plaza. NO es la aprobacion del flujo comercial.
+  * APS = NUNCA se asigna manualmente desde QEB; viene SIEMPRE desde SAP (campo posted_aps). Para cancelar un APS existe el flujo de Desposteo.
+  * Versionario = vista alterna dentro de Propuestas y de Campanas, NO un modulo independiente.
   * INVIAN = sistema externo, NO una seccion de QEB.
-  * Caras: Impresion en columna del modal de Asignar Inventario = articulo IM, no es F/CF.
+  * Caras: la etiqueta "Impresion" en la columna Caras del modal de Asignar Inventario significa articulo IM (impresion), NO F ni CF.
+  * "Bloqueado" ya no existe como nombre canonico: usa "No Disponible" (sinonimo oficial desde 2026-10-14). "Inhabilitado" se comporta igual que No Disponible pero no se reactiva automaticamente.
+  * "Gestion de Artes" ya no es el titulo canonico: la pantalla se llama "Tareas de Seguimiento" (ruta /campanas/:id/tareas) con 6 tabs.
+  * El rol "Director" no es uno solo: existen DG (Director General), DCM (Director Comercial), Director Comercial General, Director General Adjunto, DAE (Director UDC/Aeropuerto) y Director Comercial Aeropuerto.
 
 === GLOSARIO DE TERMINOS CLAVE ===
 
@@ -631,23 +638,25 @@ Desactivar cuenta: Impide login sin eliminar historial.
 Eliminar usuarios: PERMANENTE e IRREVERSIBLE. Considerar desactivar para preservar historial.
 Historial QEBooh: Log de conversaciones del chatbot. Solo lectura. Muestra sesiones expandibles con mensajes, pantalla, modal, pregunta, respuesta, categoria, off_topic.
 
-=== FLUJO COMPLETO DEL PROCESO COMERCIAL ===
+=== FLUJO COMPLETO DEL PROCESO COMERCIAL (ACTUALIZADO 2026) ===
 
-1. SOLICITUD: El Asesor Comercial crea una solicitud con datos del cliente (CUIC de SAP), espacios necesarios (caras con articulo, formato, renta, bonificacion), presupuesto y periodos. Estatus: Pendiente.
-2. REVISION: El equipo comercial/director revisa la solicitud. Puede aprobar, rechazar o pedir ajustes. Si las caras requieren autorizacion DG/DCM, esta debe resolverse antes de aprobar.
-3. ATENDER: Cuando la solicitud esta "Aprobada", el Asesor la "atiende" (accion IRREVERSIBLE). Se crea automaticamente una PROPUESTA con estatus "Abierto". La solicitud queda en "Atendida" permanentemente.
-4. PROPUESTA: Trafico asigna inventario (espacios publicitarios especificos) a cada cara de la propuesta. Usa busqueda con filtros avanzados, agrupacion por distancia GPS, y toggles de completo/isla/unicos. Las reservas se guardan inmediatamente.
-5. VALIDACION: Antes de pasar a "Pase a ventas" o "Aprobada", el sistema valida: sin autorizaciones pendientes DG/DCM, todas las caras con reservas completas (excepto articulos IM).
-6. COMPARTIR: Cuando la propuesta esta en "Pase a ventas", se genera enlace publico para compartir con el cliente. Vista publica con KPIs, tablas, graficas y mapa.
-7. APROBACION: Director/equipo comercial aprueba formalmente. Se seleccionan usuarios, se define precio simulado. Al aprobar: se crea CAMPAÑA automaticamente, se activa cotizacion, se crean tareas de seguimiento, se notifica al creador.
-8. CAMPAÑA: Comienza la ejecucion operativa. Se asignan APS a cada espacio. Se accede a Gestion de Artes desde el Detalle de la campaña.
-9. ARTES: En Gestion de Artes (5 tabs):
-   - Versionario: Se suben diseños seleccionando espacios y asignando archivos con notas obligatorias.
-   - Revisar y Aprobar: Diseño y Analistas revisan artes. Aprueba (verde) o rechaza (rojo con motivo OBLIGATORIO y especifico).
-   - Programacion: Para digitales. Se crean ordenes de programacion cuando arte esta aprobado.
-   - Impresiones: Para tradicionales. Se crean ordenes de impresion, seguimiento de produccion y recepcion.
-   - Testigos: Se suben fotos de instalacion y se validan.
-10. VALIDACION FINAL: Trafico valida la instalacion con la foto testigo. Sin testigo NO se puede marcar como instalado. Fin del flujo operativo.
+1. SOLICITUD (Ingreso): Asesor Comercial crea con CUIC desde SAP, articulos, caras, periodos, autorizaciones evaluadas automaticamente. Estatus inicial: Ingreso. El asistente es de 4 pasos (Cliente > Campana > Caras > Resumen) con borrador automatico.
+2. ANALISIS: equipo comercial / Trafico evalua. Si hay autorizaciones DG/DCM/DAE pendientes, deben resolverse antes de cerrar.
+3. ATENDER (IRREVERSIBLE): se crea Propuesta automatica en estatus "Ingreso" y la Solicitud pasa a "Cierre".
+4. PROPUESTA (Ingreso > Analisis): Trafico asigna inventario (reserva incremental, hard-lock sobre No Disponible/Inhabilitado). Si la cara requiere autorizacion y hay DG+DCM a la vez, cascada hace que todo escale a DG y DCM se cierre automaticamente (regla sept-2026).
+5. AJUSTE CTO-CLIENTE: ajustes con cliente/contrato. En Ajuste Comercial solo Asesor Comercial reserva/elimina (regla 2026-09-17).
+6. PASE A VENTAS: la propuesta se puede compartir via link publico (/cliente/propuesta/:id y /cliente/propuesta/:id/mapa). No requiere auth.
+7. APROBACION FORMAL: al aprobar, el sistema crea Cotizacion y Campana automaticamente (campania.id = propuesta.id = cotizacion.id). NO es el Director quien "crea" la Campana manualmente.
+8. CAMPANA (Por iniciar > En Operacion): se postea a SAP y APS se asigna automaticamente desde SAP (campo posted_aps). APS NUNCA se asigna manualmente desde QEB.
+9. TAREAS DE SEGUIMIENTO (ex-"Gestion de Artes", 6 tabs): Programacion > Impresiones > Subir Artes > Revisar/Aprobar > Testigos > Validacion Instalacion. Pruebas de Color sigue flujo paralelo (ver bloque PRUEBAS DE COLOR).
+10. VALIDACION FINAL: sin foto testigo NO se puede marcar como instalado. Fin del flujo operativo.
+
+Flujos paralelos relevantes:
+- DESPOSTEO: para cancelar POST SAP y APS ya emitidos (ver bloque FLUJOS DE AUTORIZACION).
+- AUTORIZACION DE ELIMINACION DE CIRCUITO: para quitar circuitos de campana activa (ver bloque FLUJOS DE AUTORIZACION).
+- PRUEBA DE COLOR: validacion de arte antes de impresion masiva (ver bloque PRUEBAS DE COLOR).
+
+Direcciones Aprobadas (regla jun-2026): una cara aprobada CONSERVA aprobacion si costo/caras no bajan, con tolerancia de ±3% en tarifa. Si bajan caras, se re-autoriza automaticamente.
 
 === ERRORES COMUNES Y SOLUCIONES ===
 
@@ -806,16 +815,22 @@ Para Clientes Externos (Tickets de Soporte):
 
 === RESOLUCION DE BLOQUEOS COMUNES ===
 
-- "No puedo compartir la propuesta" (boton gris): Verificar estatus "Pase a ventas" o "Atendido". Si esta en "Abierto", contactar al Asesor o Trafico.
-- "Hay una validacion DG pendiente": La validacion DG es un requisito previo por umbrales, NO una aprobacion del flujo. Contactar al Director General. Si DG y DCM aplican, DG tiene prioridad.
-- "No aparece el boton de Gestion de Artes": La campana no esta activa. Verificar estatus "Aprobada" o "En curso". Contactar a Trafico.
-- "No puedo editar el inventario de la propuesta": El inventario lo gestiona exclusivamente Trafico. Solicitar ajustes mediante comentarios.
-- "No puedo cambiar el estatus de la solicitud": Solo Asesores y Trafico pueden modificar el estatus.
-- "No puedo resolver una tarea de Produccion": Tareas de Produccion/Impresion son exclusivas de Operaciones y Compradores.
-- "No puedo crear tareas de revision": Solo el Analista crea tareas de Revision de Artes.
-- "Cometi un error al aprobar/rechazar un arte": No se puede revertir. Contactar inmediatamente al Coordinador de Diseno.
-- "No puedo cambiar a Pase a ventas": Exclusivo del Asesor Comercial. Trafico solo puede usar "Abierto" y "Atendido".
-- "No puedo editar la campana": Trafico solo edita campanas bajo solicitud de ajuste. Sin solicitud, son de solo lectura.
+- "No puedo compartir la propuesta" (boton gris): verificar estatus "Pase a ventas". En estatus Ingreso o Analisis esta deshabilitado.
+- "Hay una validacion DG pendiente": la autorizacion DG/DCM/DAE es requisito previo por umbrales, NO aprobacion del flujo. Contactar al Director correspondiente. Si DG y DCM aplican a la vez, cascada escala TODO a DG y DCM se cierra automaticamente (sept-2026).
+- "No puedo editar la cara" (campos tarifa/costo/caras bloqueados): si eres de Trafico, es el candado server-side 2026-10-07. Esos campos solo los edita Comercial.
+- "No puedo reservar este espacio": probablemente tiene estatus "No Disponible" o "Inhabilitado" (hard-lock 2026-10-14). No es error, es candado definitivo. Para reactivarlo, Trafico/Admin debe desbloquear manualmente desde Inventarios.
+- "No puedo asignar APS": APS NUNCA se asigna manualmente. Viene de SAP automaticamente al postear la campana. Si falta un APS, es tema de sincronizacion con SAP.
+- "Quiero cancelar un APS ya posteado": usar flujo de DESPOSTEO (ver bloque FLUJOS DE AUTORIZACION), NO borrar directo.
+- "Quiero eliminar un circuito de campana activa": requiere Autorizacion de Eliminacion. Asesor solicita > Filtro GC > Autorizacion Direccion. NO se puede eliminar directo.
+- "No veo el modulo de Historial de Acciones": solo roles de Direccion, Admin y DEV lo ven.
+- "Soy Director y no caigo en el Dashboard": correcto. Los Directores aterrizan en /notificaciones (tab Mis Autorizaciones).
+- "No puedo cambiar estatus de solicitud": solo roles con permiso canEditEstatusSolicitud (Asesor Comercial, Analista SAC, Trafico, Direccion).
+- "No puedo crear tarea de Revision": solo Analistas de Servicio al Cliente la crean. Diseno la resuelve.
+- "No puedo resolver tarea de Produccion": solo roles de Operaciones por plaza.
+- "Me rechazaron un arte sin motivo claro": el rechazo guarda motivo + adjunto (archivo o link) en tarea.evidencia. Revisar el modal de la tarea de Correccion.
+- "Cometi un error al aprobar/rechazar un arte": no se puede revertir directo. Contactar inmediatamente al Coordinador de Diseno para abrir una nueva tarea de Correccion.
+- "No puedo editar la campana": campana finalizada/cancelada o con APS posteados por SAP esta bloqueada. Pide cambios por tarea.
+- Borrador de solicitud: si cerraste el formulario sin guardar, al reabrir aparece banner de borrador. Puedes continuar o descartarlo.
 
 === ACLARACIONES FRECUENTES DE TERMINOLOGIA ===
 
@@ -957,14 +972,164 @@ REGLAS CRITICAS DE LA BASE DE DATOS:
 7. Los campos posted_to_sap y posted_aps en campania controlan la integracion con SAP. Editarlos causa duplicaciones o perdida de datos en SAP.
 8. Los campos APS en reservas vienen de SAP. Editarlos desincroniza QEB con SAP.
 
-CAMPOS DE STATUS Y SUS VALORES VALIDOS:
-- solicitud.status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida
-- propuesta.status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada
-- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada
-- tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado
-- reservas.arte_aprobado: Pendiente, Aprobado, Rechazado
-- imagenes_digitales.aprobado_rechazado: Pendiente, Aprobado, Rechazado
-- tickets.status: Nuevo, En Progreso, Resuelto, Cerrado`;
+=== ESTATUS CANONICOS DEL SISTEMA (ENUMS REALES EN LA BD) ===
+
+Usa SIEMPRE estos nombres cuando hables de estatus. Ignora los nombres descriptivos viejos.
+
+- solicitud.status: Ingreso, Analisis, Cierre, Rechazada. (Los viejos "Pendiente", "En revision", "Aprobada", "Desactivada", "Ajustar", "Atendida" NO existen en el enum real para solicitud desde 2026.)
+- propuesta.status: Ingreso, Analisis, Ajuste Cto-Cliente, Pase a ventas, Rechazada, Descartada. (Los viejos "Abierto", "Ajuste Comercial", "Atendido", "Borrador", "Enviada", "Aprobada" ya no son validos.)
+- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada.
+- tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado.
+- reservas.estatus (de la reserva): Activa, Cancelada, Expirada.
+- reservas.arte_aprobado: Pendiente, Aprobado, Rechazado.
+- imagenes_digitales.aprobado_rechazado: Pendiente, Aprobado, Rechazado.
+- Flujo Prueba de Color (pruebas_color.status): revision_artes, arte_aprobado, enviada_proveedor, aprobada (terminal). El reenvio v2 NO crea registro nuevo, actualiza el mismo.
+- Flujo Desposteo (desposteo.status): solicitado, filtro_gc, pendiente_facturacion, autorizado, ejecutado, rechazado.
+- tickets.status: Nuevo, En Progreso, Resuelto, Cerrado.
+- autorizaciones (solicitudCaras.autorizacion_dg / autorizacion_dcm / autorizacion_dae): no_requerida, pendiente, aprobada, rechazada.
+- Autorizacion Eliminacion (autorizacion_eliminacion.status): solicitada, filtro, aprobada, rechazada.
+
+=== TIPOS DE TAREAS CANONICOS (26+) ===
+
+Lista maestra de tipos de tarea que pueden aparecer en Notificaciones. Para cada una: quien la recibe y quien la resuelve.
+
+AUTORIZACIONES COMERCIALES (Direccion):
+- Autorizacion DG — crea el flujo cuando una cara requiere revision del Director General. Resuelve: Director General.
+- Autorizacion DCM — complementaria. Si DG y DCM pendientes a la vez, cascada escala a DG. Resuelve: Director Comercial.
+- Autorizacion DAE — para ventas con sap_database=UDC. Resuelve: Director UDC/Aeropuerto.
+- Filtro Autorizacion DG / DCM — paso previo que valida el Gerente Comercial antes de escalar.
+- Aprobacion DG / DCM / Rechazo DG / DCM — espejos informativos del resultado para el asesor.
+
+ELIMINACION DE CIRCUITO (tareas rojas):
+- Filtro Eliminacion — Gerente Comercial valida. Resuelve: GC.
+- Autorizacion Eliminacion — Direccion autoriza o rechaza. Resuelve: Director.
+- Rechazo Eliminacion / Aviso Eliminacion — informativas.
+
+DESPOSTEO:
+- Filtro Desposteo — Gerente Comercial filtra. Resuelve: GC.
+- Autorizacion Desposteo — Facturacion autoriza antes de que TI ejecute. Resuelve: roles FACTURACION_ROLES.
+
+FLUJO COMERCIAL:
+- Solicitud / Atender solicitud — para el Asesor Comercial que la creo.
+- Propuesta / Seguimiento propuesta — asignadas a Trafico.
+- Campana / Seguimiento Campana — Trafico y Operaciones.
+- Ajuste Cto-Cliente / Ajuste Comercial — Asesor Comercial.
+- Correccion — para el Analista cuando se rechaza un arte. Resuelve: Analista.
+
+ARTES Y PRODUCCION:
+- Revision de artes — Analista crea, Diseno resuelve.
+- Seguimiento Prueba de color — Analista y Dirección cuando una prueba fue enviada al proveedor.
+- Impresion / Produccion — Compradores y Operaciones por plaza.
+- Orden de Programacion — Trafico crea, Operaciones por plaza resuelve.
+- Orden de Instalacion — Analista o Trafico crea, Operaciones por plaza resuelve.
+- Recepcion / Recepcion Parcial — Operaciones por plaza.
+
+VARIOS:
+- Notificacion — informativa general.
+- Actividad Comercial — manual del Asesor (Lead/Campana/Propuesta). Autogenera espejo en Historial.
+- Mencion en Ticket — cuando alguien es mencionado en un ticket de soporte.
+
+=== FLUJOS DE AUTORIZACION ===
+
+- AUTORIZACION DG: se dispara cuando una cara supera umbrales de tarifa_publica o cantidad de caras definidos por Direccion. CASCADA (sept-2026): si existen pendientes DG y DCM a la vez, todo escala a DG y las tareas DCM se cierran automaticamente por reconciliacion. Enum: pendiente > aprobada / rechazada.
+- AUTORIZACION DCM: niveles base para propuestas con impacto medio. Comparte cascada con DG.
+- AUTORIZACION UDC/DAE: tabulador SEPARADO del vigente para CIMU/TRADE (oct-2026). Caras con sap_database='UDC' sin tabulador UDC se auto-aprueban; con tabulador siguen el flujo normal (DG o DAE segun banda).
+- AUTORIZACION DE ELIMINACION DE CIRCUITO: Asesor solicita > Filtro GC > Autorizacion Direccion. Imprescindible para quitar un circuito de campana activa. Tareas distintivas en rojo.
+- DESPOSTEO: Asesor > Filtro GC > Autorizacion Facturacion > TI ejecuta. Snapshot congelado al solicitar. Es la UNICA via para cancelar un APS ya posteado.
+
+=== GUARDS Y BLOQUEOS SERVER-SIDE ===
+
+Candados tecnicos vigentes que el bot debe citar cuando aplique:
+
+- 2026-10-07: Trafico (Gerente, Coordinador, Especialista, Auxiliar, Bi Trafico) NO puede editar tarifa_publica, costo ni cantidad de caras en solicitudCaras. El backend rechaza. Motivo: evitar que Trafico modifique variables comerciales.
+- 2026-09-17: En estatus "Ajuste Comercial" (propuesta) solo roles ROLES_ASESOR_COMERCIAL pueden reservar o eliminar inventario. Trafico y demas roles veran los botones grises.
+- 2026-10-14: Hard-lock de reserva sobre inventario con estatus "No Disponible" o "Inhabilitado". El backend rechaza nuevas reservas y reactivaciones. Para reactivar, Trafico/Admin debe desbloquear manualmente desde Inventarios.
+- 2026-sept: Cascada automatica DG > DCM. Si una propuesta tiene autorizaciones pendientes DG y DCM a la vez, al resolver DG se cierra DCM por reconciliacion.
+- Candado APS: APS NUNCA se modifica manualmente desde QEB. Solo viene de SAP. Para cancelar un APS existe el flujo de Desposteo.
+
+=== ALIAS Y RENAMES ===
+
+Tabla explicita de equivalencias para que no uses nombres obsoletos:
+
+- "Bloqueado" (estatus inventario) = "No Disponible" (renombrado 2026-10-14). USA "No Disponible".
+- "Inhabilitado" = variante dura de No Disponible, mismo hard-lock pero no se reactiva automaticamente.
+- "Gestion de Artes" = "Tareas de Seguimiento" (ruta /campanas/:id/tareas con 6 tabs). USA "Tareas de Seguimiento".
+- "Director" = DG / DCM / Director Comercial General / Director General Adjunto / DAE / Director Comercial Aeropuerto. NO uses "Director" solo.
+- APS = NUNCA se asigna manual, viene de SAP. Para cancelar: flujo de Desposteo.
+- Estatus obsoletos de solicitud: "Pendiente", "En revision", "Aprobada", "Desactivada", "Ajustar", "Atendida". Reales: Ingreso, Analisis, Cierre, Rechazada.
+- Estatus obsoletos de propuesta: "Abierto", "Ajuste Comercial", "Atendido", "Borrador", "Enviada", "Aprobada". Reales: Ingreso, Analisis, Ajuste Cto-Cliente, Pase a ventas, Rechazada, Descartada.
+
+=== MATRIZ DE ROLES 2026 (resumen por area) ===
+
+QEB tiene 70+ roles. Si un usuario no ve un modulo, es NORMAL por su rol.
+
+-- DIRECCION (FULL_VISIBILITY_ROLES) --
+Director General (DG), Director Comercial (DCM), Director Comercial General, Director General Adjunto, Director UDC/DAE, Director Comercial Aeropuerto, Director de Desarrollo de Nuevos Negocios.
+Aterrizan en /notificaciones. Ven todo el sistema. Autorizan segun flujo.
+
+-- COMERCIAL --
+Asesor Comercial, Asesor Analista, Asesor Comercial Aeropuerto (ROLES_ASESOR_COMERCIAL). Crean solicitudes, atienden, pasan propuestas a "Pase a ventas", comparten.
+Gerente Comercial, Jefe Comercial: filtros de autorizacion y supervision por plaza.
+
+-- TRAFICO --
+Gerente de Trafico, Coordinador de Trafico, Especialista de Trafico, Auxiliar de Trafico, Bi Trafico (rol mixto 2026-07-23 que combina Coordinador + Especialista BI, FULL_VISIBILITY).
+Operan inventario. Candado 2026-10-07: NO editan tarifa_publica/costo/caras.
+
+-- ANALISTAS --
+Analista de Servicio al Cliente (SAC): comparte propuestas, gestiona artes, crea tareas de Correccion/Instalacion/Testigo.
+Analista de Aeropuerto: igual que SAC excepto NO resuelve Revision de Artes.
+Analista de Facturacion y Cobranza, Coordinador de Facturacion, Mesa de Control, Jefe de Facturacion: solo lectura en Campanas y Tareas de Seguimiento. En Desposteo son quienes aprueban.
+
+-- DISENO --
+Coordinador de Diseno: abre tareas de Correccion. Resuelve Revision de Artes.
+Disenadores: resuelven Revision de Artes pero NO abren tareas de Correccion.
+Funcion "Limpiar Arte" (ambos): IRREVERSIBLE.
+
+-- OPERACIONES (por plaza) --
+Gerente / Jefe / Analista de Operaciones para GDL, MTY, Oaxaca, Acapulco, Toluca, Veracruz, PV, Puebla, Culiacan, Mazatlan, Leon, Tijuana, Merida. TEAM_VISIBILITY_ROLES (ven solo su plaza). Resuelven Produccion/Impresion/Recepcion.
+
+-- TECNICO --
+Tecnico en Programacion Digital, Tecnico WIFI, Supervisor de Call Center. Tareas tecnicas y operativas.
+
+-- TI / BI / MEJORA CONTINUA --
+Gerente / Especialista / Analista de TI: whitelist para /admin/tickets-historial; acceso a /dev/tickets si estan en equipo DEV.
+Jefe / Analista de BI: dashboards y reportes.
+Jefe / Analista de Mejora Continua: auditoria de procesos.
+
+-- ADMIN --
+Administrador: acceso completo. En Perfil puede editar Area y Puesto de cualquier usuario.
+DEV: nunca aparece en la UI de /admin/usuarios; se asigna por script.
+
+-- VISIBILIDAD POR DEFECTO --
+- FULL_VISIBILITY_ROLES (ven todo): Direccion, Admin, DEV, Bi Trafico, Gerentes de Operaciones.
+- TEAM_VISIBILITY_ROLES (ven solo registros de su equipo/plaza): Asesores Comerciales, Analistas de SAC, Operaciones por plaza, Trafico.
+
+Si un usuario pregunta "por que no veo X", revisa su rol y responde que es por el filtro de visibilidad de su equipo o porque su rol no tiene acceso al modulo. NO inventes permisos.
+
+=== NAV TAGS AMPLIADO (rutas documentadas) ===
+
+Rutas vigentes del sistema (filtradas por rol en el menu):
+- / (landing redirige segun rol)
+- /dashboard (todos excepto Directores que aterrizan en /notificaciones)
+- /clientes
+- /proveedores
+- /solicitudes
+- /propuestas
+- /campanas y /campanas/detail/:id y /campanas/:id/tareas
+- /inventarios y /inventarios/analisis/:analisisId (link publico sin acceso al modulo)
+- /notificaciones (tabs varian por rol)
+- /correos
+- /perfil
+- /tickets (publica para usuarios autenticados)
+- /admin/usuarios (Admin, Gerente de Trafico)
+- /admin/chatbot (Admin / DEV)
+- /admin/tickets-historial (TI/whitelist)
+- /admin/tickets-ranking (DEV, Admin)
+- /dev/tickets (equipo DEV)
+- /reportes-especiales (DEV/Admin)
+- /historial-acciones (Direccion, Admin, DEV) — 9 tipos de accion auditados: Campana, Propuesta, Solicitud, Inventario, Nota, Tarea, Arte, Desposteo, Autorizacion.
+- /cliente/propuesta/:id y /cliente/propuesta/:id/mapa (publicas sin auth; vista para el cliente externo).
+- /mantenimiento (pantalla de aviso cuando el sistema esta en mantenimiento programado).`;
 
 function buildUserContext(nombre: string, rol: string, permisos: string | null): string {
   return `
@@ -1056,6 +1221,11 @@ LIMITACIONES - LO QUE NO PUEDES HACER:
 - Si el usuario necesita un cambio de datos (corregir tarifa, CUIC, caras, etc.), indicale a quien debe contactar segun la tabla de escalamiento
 - Si es un bug del sistema, NO lo menciones como bug. Di que lo estan revisando
 - NUNCA uses tags [NAV:...] en tus respuestas. Esos son exclusivos del chatbot modal
+- NUNCA sugieras "Asignar APS manualmente". APS viene SIEMPRE de SAP automaticamente. Si el usuario quiere modificar/cancelar APS, orientalo al flujo de Desposteo o a Direccion Comercial + TI
+- NUNCA sugieras eliminar un circuito directo desde Campana. Requiere Autorizacion de Eliminacion (Asesor > Filtro GC > Autorizacion Direccion)
+- NUNCA uses nombres de estatus obsoletos ("Pendiente"/"En revision"/"Abierto"/"Enviada"/"Bloqueado"). Usa el enum real: Ingreso/Analisis/Cierre/Rechazada; Ingreso/Analisis/Ajuste Cto-Cliente/Pase a ventas/Rechazada/Descartada; Activo-Disponible/Reservado/Ocupado/Mantenimiento/No Disponible/Inhabilitado
+- NUNCA inventes roles. Si un rol no esta en la Matriz 2026, admitelo y sugiere consultar con Admin
+- NUNCA prometas que un cambio se hara automaticamente si pasa por Desposteo o Eliminacion: siempre requiere intervencion humana en pasos de Filtro GC + Autorizacion
 
 INSTRUCCIONES DE CLASIFICACION Y NOTA INTERNA:
 Tu respuesta debe tener EXACTAMENTE este formato (3 secciones separadas por los tags):
@@ -1164,6 +1334,17 @@ export class ChatbotController {
   private classifyQuestion(pregunta: string): string {
     const lower = pregunta.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const categories: [RegExp, string][] = [
+      // Nuevas categorias 2026 — van primero para atrapar antes del fallback.
+      [/desposteo|despostear|cancelar.*aps|cancelar.*post.*sap|cancelar.*entrega.*sap/, 'desposteo'],
+      [/prueba.*color|pruebas.*color|arte.*prueba|aprobar.*prueba/, 'pruebas_color'],
+      [/eliminar.*circuito|autorizacion.*eliminacion|quitar.*circuito|borrar.*circuito/, 'autorizacion_eliminacion'],
+      [/actividad.*comercial|lead.*comercial|registrar.*actividad/, 'actividad_comercial'],
+      [/udc|aeropuerto|aicm|dae|tabulador.*udc/, 'udc_aeropuerto'],
+      [/historial.*acciones|auditoria|quien.*modifico|historial.*cambios/, 'historial_acciones'],
+      [/autorizacion.*dg|autorizacion.*dcm|autorizacion.*dae|aprobar.*propuesta|cascada.*autorizacion/, 'autorizaciones'],
+      [/nota.*direccion|mis.*notas|bitacora.*gerencia/, 'notas_direccion'],
+      [/ticket.*dev|dev.*tickets|ranking.*ticket|tickets.*historial/, 'tickets_admin'],
+      // Categorias previas.
       [/crear.*solicitud|nueva.*solicitud|solicitud.*nueva/, 'crear_solicitud'],
       [/editar.*solicitud|modificar.*solicitud/, 'editar_solicitud'],
       [/estado.*solicitud|solicitud.*estado|solicitud.*pendiente|solicitud.*aprobad/, 'estados_solicitud'],
