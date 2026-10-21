@@ -1127,7 +1127,7 @@ Rutas vigentes del sistema (filtradas por rol en el menu):
 - /admin/tickets-ranking (DEV, Admin)
 - /dev/tickets (equipo DEV)
 - /reportes-especiales (DEV/Admin)
-- /historial-acciones (Direccion, Admin, DEV) — 9 tipos de accion auditados: Campana, Propuesta, Solicitud, Inventario, Nota, Tarea, Arte, Desposteo, Autorizacion.
+- /historial-acciones (todos los roles; direcciones, gerentes comerciales, Admin y TI ven todo, el resto solo lo que hizo o donde participa). Filtros por Etapa (Solicitud/Propuesta/Campana), Modulo (Circuito, Reserva, Arte, APS, Usuario, Ticket...) y Tipo de accion (Creacion, Edicion, Eliminacion, Autorizacion, Rechazo...).
 - /cliente/propuesta/:id y /cliente/propuesta/:id/mapa (publicas sin auth; vista para el cliente externo).
 - /mantenimiento (pantalla de aviso cuando el sistema esta en mantenimiento programado).`;
 

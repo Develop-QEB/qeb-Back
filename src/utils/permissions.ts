@@ -48,6 +48,49 @@ export function hasFullVisibility(rol: string): boolean {
 }
 
 /**
+ * Roles que ven el Historial de Acciones COMPLETO (todas las entradas de
+ * todos los usuarios). El resto de los roles entra al modulo pero solo ve lo
+ * que hizo o aquello en lo que participa.
+ *
+ * Es una lista propia y NO FULL_VISIBILITY_ROLES, aunque se parezcan: aquella
+ * gobierna Solicitudes/Propuestas/Campañas en todo el sistema y meter ahi a
+ * los Gerentes Comerciales les cambiaria la visibilidad de esos tres modulos,
+ * que no es lo que se pidio. Definicion (2026-10-21): direcciones, gerencias
+ * comerciales, administracion y TI.
+ */
+const HISTORIAL_FULL_ROLES = [
+  // Direcciones
+  'Director General',
+  'Director General Adjunto',
+  'Director Comercial',
+  'Director Comercial General',
+  'Director Comercial Aeropuerto',
+  'Director Desarrollo de Nuevos Negocios',
+  'Director de Operaciones',
+  'Director de Desarrollo Digital',
+  // Gerencias comerciales
+  'Gerente Comercial',
+  'Gerente Comercial Aeropuerto',
+  'Gerente Comercial Vía Pública',
+  'Gerente Comercial Plazas',
+  // Administracion y TI
+  'Administrador',
+  'DEV',
+  'Gerente de TI',
+  'Especialista de TI',
+  'Analista de TI',
+];
+
+export function tieneHistorialCompleto(rol?: string | null): boolean {
+  // rolEnLista normaliza acentos/espacios/mayusculas: 'Gerente Comercial Vía
+  // Pública' debe coincidir aunque el token lo traiga sin acentos.
+  return rolEnLista(rol, HISTORIAL_FULL_ROLES);
+}
+
+/** Para exponer la lista al front sin duplicarla. */
+export const rolesHistorialCompleto = (): string[] => [...HISTORIAL_FULL_ROLES];
+
+/**
  * Roles con visibilidad expandida por equipo: ven sus registros + los de miembros de su red de trabajo.
  */
 const TEAM_VISIBILITY_ROLES = [
@@ -358,6 +401,36 @@ export async function getVisibleCampanaIds(
 
   const ids = rows.map(r => Number(r.id));
   cache.set(cacheKey, ids, 2 * 60 * 1000); // 2 min
+  return ids;
+}
+
+/**
+ * Pre-computa los IDs de SOLICITUDES visibles para un usuario (cacheado 2 min).
+ * Mismo criterio que las otras dos: creador o asignado. Hacia falta para que
+ * el Historial pueda acotar la etapa Solicitud por participacion — las otras
+ * dos funciones devuelven ids de campaña y de propuesta, que viven en otro
+ * espacio de numeracion.
+ */
+export async function getVisibleSolicitudIds(
+  prisma: PrismaClient,
+  userId: number,
+  teamIds?: number[]
+): Promise<number[]> {
+  const cacheKey = `visible_solicitudes:${userId}`;
+  const cached = cache.get<number[]>(cacheKey);
+  if (cached) return cached;
+
+  const allUserIds = teamIds || [userId];
+  const placeholders = allUserIds.map(() => '?').join(',');
+
+  const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(`
+    SELECT id FROM solicitud
+    WHERE usuario_id IN (${placeholders})
+       OR FIND_IN_SET(?, REPLACE(IFNULL(id_asignado, ''), ' ', '')) > 0
+  `, ...allUserIds, String(userId));
+
+  const ids = rows.map(r => Number(r.id));
+  cache.set(cacheKey, ids, 2 * 60 * 1000);
   return ids;
 }
 

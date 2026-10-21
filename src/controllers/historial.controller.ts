@@ -6,50 +6,165 @@ import { emitToHistorial, emitToAll, SOCKET_EVENTS } from '../config/socket';
 import {
   listarActividadesComerciales, moverActividadComercial, esColumnaAC, COLUMNAS_AC,
 } from '../services/actividad-comercial.service';
+import {
+  clasificar, whereModulos, whereCategorias, whereEtapas,
+  opcionesModulos, opcionesCategorias, opcionesEtapas,
+} from '../utils/historialTaxonomia';
+import {
+  tieneHistorialCompleto, getTeamMemberIds, hasTeamVisibility,
+  getVisibleCampanaIds, getVisiblePropuestaIds, getVisibleSolicitudIds,
+} from '../utils/permissions';
+
+/**
+ * Normaliza un query param que puede venir ausente, suelto o repetido
+ * (?tipo=a&tipo=b) a una lista de strings no vacios.
+ */
+function asList(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  return arr
+    .map(v => (typeof v === 'string' ? v.trim() : ''))
+    .filter(v => v.length > 0);
+}
+
+/**
+ * Condicion para los roles que NO ven el historial completo: solo lo que
+ * hicieron o aquello en lo que participan.
+ *
+ * Son dos cosas distintas unidas por OR:
+ *
+ *   a) LO QUE HIZO — por `usuario_id` cuando existe, y si no por el nombre
+ *      dentro de `accion` / `detalles`. Lo segundo es un LIKE sobre texto y
+ *      es fragil (colisiona entre nombres que se contienen), pero es lo unico
+ *      disponible: la tabla casi nunca puebla `usuario_id`, la autoria vive
+ *      redactada dentro del texto.
+ *
+ *   b) EN LO QUE PARTICIPA — las campañas / propuestas / solicitudes donde es
+ *      creador o asignado, reutilizando los helpers ya cacheados (2 min) que
+ *      usan Solicitudes, Propuestas y Campañas. Cada conjunto se cruza con su
+ *      etapa para no mezclar espacios de numeracion: la campaña 42 y la
+ *      propuesta 42 son registros distintos.
+ *
+ * Precision conocida y limitada a proposito: dentro de la etapa Campaña el
+ * `ref_id` es inconsistente en el dato crudo (unas filas guardan campania_id
+ * y otras id_propuesta — ver historialTaxonomia.ts), asi que esa etapa se
+ * compara contra la union de ambos conjuntos. Puede colarse alguna fila de
+ * una propuesta ajena cuyo id coincida con el de una campaña propia. Se
+ * prefiere eso a esconderle al usuario la mitad de su propio trabajo;
+ * arreglarlo de raiz pide normalizar `ref_id` en los ~60 puntos que escriben
+ * historial.
+ */
+async function condicionVisibilidad(
+  userId: number | undefined,
+  userName: string | undefined,
+  userRole: string | undefined,
+): Promise<Record<string, unknown>> {
+  const ors: Record<string, unknown>[] = [];
+
+  // (a) lo que hizo
+  if (userId) ors.push({ usuario_id: userId });
+  if (userName) {
+    ors.push({ accion: { contains: userName } });
+    ors.push({ detalles: { contains: userName } });
+  }
+
+  // (b) en lo que participa
+  if (userId) {
+    try {
+      // Los roles con visibilidad por equipo ven tambien lo de su red de
+      // trabajo, igual que en el resto del sistema.
+      const teamIds = hasTeamVisibility(String(userRole ?? ''))
+        ? await getTeamMemberIds(prisma, userId)
+        : undefined;
+
+      const [campanaIds, propuestaIds, solicitudIds] = await Promise.all([
+        getVisibleCampanaIds(prisma, userId, teamIds),
+        getVisiblePropuestaIds(prisma, userId, teamIds),
+        getVisibleSolicitudIds(prisma, userId, teamIds),
+      ]);
+
+      const porEtapa = (etapa: string, ids: number[]) => {
+        if (ids.length === 0) return;
+        const cond = whereEtapas([etapa]);
+        if (cond) ors.push({ AND: [cond, { ref_id: { in: ids } }] });
+      };
+
+      // La etapa Campaña abarca artes, APS, posteo, instalacion y desposteo,
+      // cuyo ref_id apunta unas veces a la campaña y otras a la propuesta.
+      porEtapa('campana', [...new Set([...campanaIds, ...propuestaIds])]);
+      porEtapa('propuesta', propuestaIds);
+      porEtapa('solicitud', solicitudIds);
+    } catch (err) {
+      // Si falla el calculo de participacion no se abre el historial: se cae
+      // a "solo lo que hizo", que es el criterio mas restrictivo.
+      console.error('historial: no se pudo resolver la visibilidad por participacion:', err);
+    }
+  }
+
+  // Sin nada que mostrar, no devolver un OR vacio (Prisma lo ignoraria y
+  // dejaria ver TODO). Una condicion imposible es lo correcto aqui.
+  if (ors.length === 0) return { id: { in: [] } };
+  return { OR: ors };
+}
 
 export class HistorialController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 50;
-      const tipo = req.query.tipo as string;
+      // Todos los filtros son multiselect: llegan como parametro repetido
+      // (?modulo=a&modulo=b). Tambien se acepta el string suelto.
+      const usuarios = asList(req.query.usuario);
+      // Los dos ejes de la taxonomia (ver utils/historialTaxonomia.ts); son
+      // los que usa el screen hoy.
+      const etapas = asList(req.query.etapa);
+      const modulos = asList(req.query.modulo);
+      const categorias = asList(req.query.categoria);
+      // LEGACY: filtrado crudo por `tipo` y texto de `accion`. El screen ya
+      // no los manda (los reemplazo la taxonomia), pero se mantienen para no
+      // romper enlaces guardados ni integraciones externas.
+      const tipos = asList(req.query.tipo);
+      const acciones = asList(req.query.accion);
       const search = req.query.search as string;
       const fechaDesde = req.query.fechaDesde as string;
       const fechaHasta = req.query.fechaHasta as string;
-      const accion = req.query.accion as string;
-      const usuario = req.query.usuario as string;
       const auditAdmin = req.query.audit_admin === 'true' || req.query.audit_admin === '1';
 
       const userRole = req.user?.rol;
       const userName = req.user?.nombre;
-      const isAdmin = userRole === 'Administrador' || userRole === 'DEV';
+      const userId = req.user?.userId;
       const isDev = userRole === 'DEV';
+      // Quien ve el historial completo lo define la lista de roles en
+      // utils/permissions.ts. Antes esto era `rol === 'Administrador' || 'DEV'`
+      // y por eso las direcciones veian solo lo suyo pese a que el front les
+      // marcaba canSeeAllHistorial.
+      const verTodo = tieneHistorialCompleto(userRole);
 
       const where: Record<string, unknown> = {};
       const andConditions: Record<string, unknown>[] = [];
 
-      if (tipo) {
-        if (tipo.endsWith('*')) {
-          where.tipo = { startsWith: tipo.slice(0, -1) };
-        } else if (tipo.endsWith('_')) {
-          where.tipo = { startsWith: tipo };
-        } else {
-          where.tipo = tipo;
-        }
+      if (tipos.length > 0) {
+        // '*' y '_' finales marcan prefijo, para agrupar familias enteras
+        // ('autorizacion_*', 'Arte*') en un solo valor.
+        const porTipo = tipos.map(t => (
+          t.endsWith('*') ? { tipo: { startsWith: t.slice(0, -1) } }
+            : t.endsWith('_') ? { tipo: { startsWith: t } }
+              : { tipo: t }
+        ));
+        andConditions.push({ OR: porTipo });
       }
 
-      if (accion) {
+      if (acciones.length > 0) {
         const accionPatterns: Record<string, unknown> = {
           '~aprobacion_dcm_dg': { OR: [{ accion: { startsWith: 'Aprobación DCM por' } }, { accion: { startsWith: 'Aprobación DG por' } }] },
           '~rechazo_dcm_dg': { OR: [{ accion: { startsWith: 'Rechazo DCM por' } }, { accion: { startsWith: 'Rechazo DG por' } }] },
           '~cambio_autorizacion': { OR: [{ accion: { contains: 'cambió Autorización DCM' } }, { accion: { contains: 'cambió Autorización DG' } }] },
           '~cambio_valor': { accion: { contains: '→' } },
         };
-        if (accionPatterns[accion]) {
-          andConditions.push(accionPatterns[accion] as Record<string, unknown>);
-        } else {
-          where.accion = { contains: accion };
-        }
+        const porAccion = acciones.map(a => (
+          (accionPatterns[a] as Record<string, unknown>) ?? { accion: { contains: a } }
+        ));
+        andConditions.push({ OR: porAccion });
       }
 
       if (fechaDesde || fechaHasta) {
@@ -73,23 +188,30 @@ export class HistorialController {
         });
       }
 
-      if (usuario) {
+      if (usuarios.length > 0) {
+        // No hay FK de autor: la autoria vive dentro del texto de `detalles`
+        // (JSON) o del propio `accion`, asi que se busca por nombre.
         andConditions.push({
-          OR: [
-            { detalles: { contains: usuario } },
-            { accion: { contains: usuario } },
-          ],
+          OR: usuarios.flatMap(u => [
+            { detalles: { contains: u } },
+            { accion: { contains: u } },
+          ]),
         });
       }
 
-      if (!isAdmin && userName) {
-        andConditions.push({
-          OR: [
-            { accion: { contains: userName } },
-            { detalles: { contains: userName } },
-          ],
-        });
+      if (!verTodo) {
+        andConditions.push(await condicionVisibilidad(userId, userName, userRole));
       }
+
+      // Taxonomia: modulo (sobre que) y categoria (que se hizo). Ambos se
+      // traducen desde la MISMA declaracion de patrones que etiqueta las
+      // filas mas abajo, asi que filtro y etiqueta no pueden divergir.
+      const condModulo = whereModulos(modulos);
+      if (condModulo) andConditions.push(condModulo);
+      const condCategoria = whereCategorias(categorias);
+      if (condCategoria) andConditions.push(condCategoria);
+      const condEtapa = whereEtapas(etapas);
+      if (condEtapa) andConditions.push(condEtapa);
 
       // Filtro "Auditoria Admin" — solo visible para DEV. Filtra entradas
       // donde el actor es Administrador o DEV (segun usuarioRol en detalles).
@@ -119,9 +241,19 @@ export class HistorialController {
         prisma.historial.count({ where }),
       ]);
 
+      // Etiqueta cada fila con sus dos ejes para que el front solo pinte
+      // (no duplica la taxonomia del back).
+      const dataClasificada = data.map(row => ({
+        ...row,
+        ...clasificar(row.tipo, row.accion),
+      }));
+
       res.json(serializeBigInt({
         success: true,
-        data,
+        data: dataClasificada,
+        // El front avisa al usuario cuando esta viendo una vista recortada.
+        // Se manda desde aqui para no duplicar la lista de roles en el front.
+        visibilidad: { verTodo },
         pagination: {
           total,
           page,
@@ -136,60 +268,22 @@ export class HistorialController {
     }
   }
 
-  async getTipos(_req: AuthRequest, res: Response): Promise<void> {
-    try {
-      const tipos = await prisma.historial.findMany({
-        select: { tipo: true },
-        distinct: ['tipo'],
-        orderBy: { tipo: 'asc' },
-      });
-      res.json({ success: true, data: tipos.map(t => t.tipo) });
-    } catch (error) {
-      console.error('Error en historial getTipos:', error);
-      res.status(500).json({ success: false, error: 'Error al obtener tipos' });
-    }
+  // Listas de los dos dropdowns de clasificacion. Son ESTATICAS: salen de la
+  // taxonomia en codigo, no de la base. Los endpoints que reemplazan
+  // (getTipos / getAcciones) hacian un `distinct` sobre la tabla entera en
+  // cada carga de la pagina — uno de los full scans mas caros del modulo — y
+  // ademas getAcciones devolvia cientos de frases con IDs interpolados
+  // ("135 circuito(s) DCM escalado(s) a DG...") en vez de categorias.
+  async getEtapas(_req: AuthRequest, res: Response): Promise<void> {
+    res.json({ success: true, data: opcionesEtapas() });
   }
 
-  async getAcciones(_req: AuthRequest, res: Response): Promise<void> {
-    try {
-      const acciones = await prisma.historial.findMany({
-        select: { accion: true },
-        distinct: ['accion'],
-      });
+  async getModulos(_req: AuthRequest, res: Response): Promise<void> {
+    res.json({ success: true, data: opcionesModulos() });
+  }
 
-      const patterns: [RegExp, string, string][] = [
-        [/solicit[oó] autorizaci[oó]n/i, 'Solicitud de autorización', 'solicitó autorización'],
-        [/agreg[oó] circuito/i, 'Agregó circuito', 'agregó circuito'],
-        [/modific[oó].*campo/i, 'Modificación de campos', 'modificó'],
-        [/actualiz[oó]/i, 'Actualización (usuario)', 'actualizó'],
-        [/edit[oó]/i, 'Edición (usuario)', 'editó'],
-        [/^Aprobaci[oó]n D(CM|G) por/i, 'Aprobación (DCM/DG)', '~aprobacion_dcm_dg'],
-        [/^Rechazo D(CM|G) por/i, 'Rechazo (DCM/DG)', '~rechazo_dcm_dg'],
-        [/cambi[oó] Autorizaci[oó]n D(CM|G)/i, 'Cambio de autorización', '~cambio_autorizacion'],
-        [/^Creaci[oó]n$/i, 'Creación', 'Creación'],
-        [/\| Origen:.*→/, 'Cambio de valor', '~cambio_valor'],
-        [/cambi[oó].+→/, 'Cambio de valor', '~cambio_valor'],
-      ];
-
-      const categories = new Map<string, string>();
-      for (const { accion } of acciones) {
-        const match = patterns.find(([re]) => re.test(accion));
-        if (match) {
-          if (!categories.has(match[2])) categories.set(match[2], match[1]);
-        } else {
-          if (!categories.has(accion)) categories.set(accion, accion);
-        }
-      }
-
-      const result = Array.from(categories.entries())
-        .map(([value, label]) => ({ label, value }))
-        .sort((a, b) => a.label.localeCompare(b.label, 'es'));
-
-      res.json({ success: true, data: result });
-    } catch (error) {
-      console.error('Error en historial getAcciones:', error);
-      res.status(500).json({ success: false, error: 'Error al obtener acciones' });
-    }
+  async getCategorias(_req: AuthRequest, res: Response): Promise<void> {
+    res.json({ success: true, data: opcionesCategorias() });
   }
 
   async getUsuarios(_req: AuthRequest, res: Response): Promise<void> {
@@ -260,8 +354,12 @@ export class HistorialController {
         },
       });
 
-      const serialized = serializeBigInt(entry);
-      emitToHistorial(SOCKET_EVENTS.HISTORIAL_NUEVA, serialized);
+      const serialized = serializeBigInt(entry) as { id: unknown };
+      // Solo el id: la room `historial` la escucha cualquier rol desde que el
+      // modulo se abrio a todos, y el front unicamente invalida la query (la
+      // lista que reciba ya viene recortada por visibilidad). Mandar la nota
+      // completa seria filtrar su texto a quien no deberia verla.
+      emitToHistorial(SOCKET_EVENTS.HISTORIAL_NUEVA, { id: serialized.id });
       res.json({ success: true, data: serialized });
     } catch (error) {
       console.error('Error en historial addNota:', error);
@@ -271,11 +369,14 @@ export class HistorialController {
   }
 
   // ---------- Tablero CRM de Actividad Comercial (tab en Historial de Acciones) ----------
-  // Lista TODAS las actividades (de todos los usuarios): el tab lo ven solo los
-  // roles con acceso a Historial de Acciones. Ver actividad-comercial.service.ts.
-  async getActividadComercial(_req: AuthRequest, res: Response): Promise<void> {
+  // Misma regla de visibilidad que el historial: los roles de la lista ven
+  // todas las actividades; el resto solo las suyas. Antes listaba siempre
+  // todas, lo cual era seguro mientras el modulo estaba limitado a direccion,
+  // pero ya no: ahora entra cualquier rol.
+  async getActividadComercial(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const data = await listarActividadesComerciales();
+      const verTodo = tieneHistorialCompleto(req.user?.rol);
+      const data = await listarActividadesComerciales(verTodo ? undefined : req.user?.userId);
       res.json(serializeBigInt({ success: true, data }));
     } catch (error) {
       console.error('Error en historial getActividadComercial:', error);
@@ -295,7 +396,12 @@ export class HistorialController {
         usuarioId: req.user?.userId,
         usuarioNombre: req.user?.nombre,
         usuarioRol: req.user?.rol,
+        soloPropias: !tieneHistorialCompleto(req.user?.rol),
       });
+      if (r === 'prohibido') {
+        res.status(403).json({ success: false, error: 'Solo puedes mover tus propias actividades' });
+        return;
+      }
       if (!r) {
         res.status(404).json({ success: false, error: 'Actividad comercial no encontrada' });
         return;

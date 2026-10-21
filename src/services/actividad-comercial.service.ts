@@ -69,17 +69,43 @@ const normCuenta = (r: { cuic: unknown; asesor: unknown; cliente: unknown }): Cu
  * (misma derivacion que usa crearActividadComercial). Una actividad sobre un
  * lead sin campaña ni propuesta trae esos campos en null.
  */
-export async function listarActividadesComerciales() {
-  const filas = await prisma.tareas.findMany({
-    where: { tipo: TIPO_ACTIVIDAD_COMERCIAL },
+/**
+ * Lista las actividades comerciales del tablero.
+ *
+ * `soloDelUsuario` acota a las del propio usuario (responsable o dentro del
+ * CSV `id_asignado`). Hace falta desde que el Historial de Acciones lo abre
+ * cualquier rol (2026-10-21): antes el tab quedaba protegido de hecho porque
+ * solo entraban ~10 roles de direccion, y sin este filtro pasaria a exponer
+ * la cartera comercial completa a toda la empresa. Los roles con visibilidad
+ * total la siguen viendo entera.
+ */
+export async function listarActividadesComerciales(soloDelUsuario?: number) {
+  // `id_asignado` es un CSV ("12, 7,33"). El `contains` en SQL es solo un
+  // prefiltro barato (superconjunto: "7" tambien pega en "17"); el corte
+  // exacto por token se hace abajo en JS con esUsuarioDeLaTarea.
+  const filtroUsuario = soloDelUsuario
+    ? {
+      OR: [
+        { id_responsable: soloDelUsuario },
+        { id_asignado: { contains: String(soloDelUsuario) } },
+      ],
+    }
+    : {};
+
+  const filasCrudas = await prisma.tareas.findMany({
+    where: { tipo: TIPO_ACTIVIDAD_COMERCIAL, ...filtroUsuario },
     orderBy: [{ fecha_fin: 'asc' }, { id: 'desc' }],
     take: MAX_FILAS,
     select: {
       id: true, titulo: true, descripcion: true, tipo: true, estatus: true,
       fecha_inicio: true, fecha_fin: true, responsable: true, id_responsable: true,
       asignado: true, campania_id: true, id_propuesta: true, contenido: true, created_at: true,
+      id_asignado: true,
     },
   });
+  const filas = soloDelUsuario
+    ? filasCrudas.filter(f => esUsuarioDeLaTarea(f, soloDelUsuario))
+    : filasCrudas;
 
   const campIds = [...new Set(filas.map(f => f.campania_id).filter((n): n is number => !!n))];
   const propIds = [...new Set(filas.map(f => Number(f.id_propuesta)).filter(n => Number.isFinite(n) && n > 0))];
@@ -129,6 +155,8 @@ export interface CambioEstatusCtx {
   usuarioId?: number;
   usuarioNombre?: string;
   usuarioRol?: string;
+  /** true -> solo puede mover las actividades donde es responsable o asignado. */
+  soloPropias?: boolean;
 }
 
 /**
@@ -137,12 +165,34 @@ export interface CambioEstatusCtx {
  * registro en historial (tipo 'Tarea') + espejo en la campaña/propuesta
  * vinculada, igual que el hook de updateTarea en campanas.controller.
  */
+/** true si el usuario es responsable o aparece como token exacto en el CSV id_asignado. */
+export function esUsuarioDeLaTarea(
+  t: { id_responsable: number | null; id_asignado: string | null },
+  userId: number,
+): boolean {
+  if (t.id_responsable === userId) return true;
+  return String(t.id_asignado ?? '')
+    .split(',')
+    .map(x => parseInt(x.trim(), 10))
+    .includes(userId);
+}
+
 export async function moverActividadComercial(id: number, columna: ColumnaAC, ctx: CambioEstatusCtx) {
   const previa = await prisma.tareas.findUnique({
     where: { id },
-    select: { id: true, tipo: true, estatus: true, contenido: true, campania_id: true, id_propuesta: true },
+    select: {
+      id: true, tipo: true, estatus: true, contenido: true,
+      campania_id: true, id_propuesta: true, id_responsable: true, id_asignado: true,
+    },
   });
   if (!previa || previa.tipo !== TIPO_ACTIVIDAD_COMERCIAL) return null;
+
+  // Quien no ve el tablero completo solo puede mover SUS tarjetas. Sin esto,
+  // bastaria con mandar un PATCH con cualquier id para mover la actividad de
+  // otro asesor — antes no aplicaba porque el modulo era de direccion.
+  if (ctx.soloPropias && ctx.usuarioId && !esUsuarioDeLaTarea(previa, ctx.usuarioId)) {
+    return 'prohibido' as const;
+  }
 
   const despues = ESTATUS_DE_COLUMNA[columna];
   const antes = previa.estatus ?? null;

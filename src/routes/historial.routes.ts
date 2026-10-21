@@ -11,8 +11,11 @@ router.get('/actividad-comercial', historialController.getActividadComercial.bin
 router.patch('/actividad-comercial/:id/estatus', historialController.moverActividadComercial.bind(historialController));
 
 router.get('/', historialController.getAll.bind(historialController));
-router.get('/tipos', historialController.getTipos.bind(historialController));
-router.get('/acciones', historialController.getAcciones.bind(historialController));
+// Listas de clasificacion (estaticas, no tocan la BD). Reemplazan a
+// '/tipos' y '/acciones', que hacian un distinct sobre la tabla completa.
+router.get('/etapas', historialController.getEtapas.bind(historialController));
+router.get('/modulos', historialController.getModulos.bind(historialController));
+router.get('/categorias', historialController.getCategorias.bind(historialController));
 router.get('/usuarios', historialController.getUsuarios.bind(historialController));
 router.post('/notas', historialController.addNota.bind(historialController));
 
