@@ -1953,7 +1953,57 @@ export class CampanasController {
         // invertidas (caso BIG MIX cam 80060: SC quedó con ini=2026-09-01,
         // fin=2026-05-11). Ahora si no hay overlap, REEMPLAZAMOS completo con el
         // nuevo rango.
+        //
+        // Calendarios COMPARTIDOS: desde sep-2026 resolverCalendarioReserva reusa UNA fila
+        // de `calendario` por catorcena para TODAS las propuestas. Editar esa fila al recorrer
+        // una campaña movía las reservas de todas las demás: el buscador (lee el calendario)
+        // las veía libres y el candado (lee el sc) ocupadas — cal 1150/1151/1171, ~13.5K
+        // reservas fantasma (campaña 81908, 20-oct-2026). Por eso solo se ajusta un calendario
+        // PRIVADO de esta propuesta (legacy); las reservas en calendarios compartidos que
+        // quedan fuera del nuevo periodo las libera el candado anti-desfase de abajo.
         if (fechaInicio && fechaFin && cotizacion?.id_propuesta) {
+          const calsCompartidos = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT DISTINCT rs.calendario_id AS id
+            FROM reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            WHERE ct.id = ${cotizacionId}
+              AND rs.calendario_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM reservas ro
+                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                WHERE ro.calendario_id = rs.calendario_id
+                  AND sco.idquote <> slc.idquote
+              )
+          `;
+          const idsCompartidos = calsCompartidos.map((c) => Number(c.id));
+
+          // 4a. Calendarios PRIVADOS de esta campaña. Va antes que 4b porque el WHERE
+          // lee el periodo del sc ANTES de moverlo.
+          await prisma.$executeRaw`
+            UPDATE calendario cl
+            INNER JOIN reservas rs ON rs.calendario_id = cl.id
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            INNER JOIN propuesta pr ON pr.id = slc.idquote
+            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
+            SET
+              cl.fecha_inicio = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaInicio}
+                ELSE GREATEST(cl.fecha_inicio, ${fechaInicio})
+              END,
+              cl.fecha_fin = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaFin}
+                ELSE LEAST(cl.fecha_fin, ${fechaFin})
+              END
+            WHERE ct.id = ${cotizacionId}
+              AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
+              ${idsCompartidos.length > 0 ? Prisma.sql`AND cl.id NOT IN (${Prisma.join(idsCompartidos)})` : Prisma.empty}
+          `;
+
+          // 4b. Periodo de los circuitos.
           await prisma.$executeRaw`
             UPDATE solicitudCaras slc
             INNER JOIN propuesta pr ON pr.id = slc.idquote
@@ -1970,16 +2020,6 @@ export class CampanasController {
                 WHEN slc.fin_periodo < ${fechaInicio} OR slc.inicio_periodo > ${fechaFin}
                   THEN ${fechaFin}
                 ELSE LEAST(slc.fin_periodo, ${fechaFin})
-              END,
-              cl.fecha_inicio = CASE
-                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
-                  THEN ${fechaInicio}
-                ELSE GREATEST(cl.fecha_inicio, ${fechaInicio})
-              END,
-              cl.fecha_fin = CASE
-                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
-                  THEN ${fechaFin}
-                ELSE LEAST(cl.fecha_fin, ${fechaFin})
               END
             WHERE ct.id = ${cotizacionId}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
