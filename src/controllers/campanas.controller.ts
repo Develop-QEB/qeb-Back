@@ -38,6 +38,7 @@ import {
   puedeBypassearDesposteo,
 } from '../services/desposteo.service';
 import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
+import { computePosteoStats } from '../services/posteo-stats.service';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -2248,17 +2249,52 @@ export class CampanasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Universo explícito de campañas (ids). Lo manda el front cuando aplica
+      // filtros en cliente (avanzados, catorcena de inicio, incompletas) para
+      // que inversión y posteo cuadren con lo que lista. Llega por body (POST)
+      // para no reventar el límite de URL con cientos de ids, o por query CSV.
+      const idsRaw = (req.body && Array.isArray(req.body.ids)) ? req.body.ids : (req.query.ids as string | undefined);
+      const ids: number[] | null = idsRaw === undefined || idsRaw === null
+        ? null
+        : (Array.isArray(idsRaw) ? idsRaw : String(idsRaw).split(','))
+            .map((v: unknown) => parseInt(String(v), 10))
+            .filter((n: number) => Number.isInteger(n) && n > 0);
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
         u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        ids: ids ? [...ids].sort((a, b) => a - b) : undefined,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
         res.json(cached);
+        return;
+      }
+
+      // Rango de fechas del filtro de catorcena — para prorratear la inversión
+      // y el posteo por días de solape, EXACTAMENTE como getAll (`inversion_filtrada`).
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const [catIniData, catFinData] = await Promise.all([
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearInicio), numero_catorcena: Number(catorcenaInicio) } }),
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearFin), numero_catorcena: Number(catorcenaFin) } }),
+        ]);
+        if (catIniData && catFinData) {
+          filterFechaInicio = catIniData.fecha_inicio;
+          filterFechaFin = catFinData.fecha_fin;
+        }
+      }
+      const emptyStats = {
+        total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0,
+        montoTotal: 0,
+        posteo: { pendientes: { count: 0, monto: 0 }, posteadas: { count: 0, monto: 0 }, total: { count: 0, monto: 0 } },
+      };
+      if (ids && ids.length === 0) {
+        res.json({ success: true, data: emptyStats });
         return;
       }
 
@@ -2325,13 +2361,17 @@ export class CampanasController {
         const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
         const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
         if (visibleIds.length === 0) {
-          const emptyResponse = { success: true, data: { total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0 } };
-          res.json(emptyResponse);
+          res.json({ success: true, data: emptyStats });
           return;
         }
         const visiblePh = visibleIds.map(() => '?').join(',');
         conditions.push(`cm.id IN (${visiblePh})`);
         params.push(...visibleIds);
+      }
+
+      if (ids) {
+        conditions.push(`cm.id IN (${ids.map(() => '?').join(',')})`);
+        params.push(...ids);
       }
 
       const whereClause = conditions.join(' AND ');
@@ -2376,6 +2416,66 @@ export class CampanasController {
         conAps += Number(row.con_aps);
       }
 
+      // Inversión total y estado de POST a SAP sobre el MISMO universo de
+      // campañas (mismo whereClause). La inversión por campaña se calcula con
+      // la misma query que getAll (SUM(sc.costo) por propuesta, prorrateada
+      // por días de solape si hay filtro de catorcena), así el KPI cuadra con
+      // la sumatoria de la columna Inversión del listado, con o sin filtro.
+      // Dos campañas que comparten propuesta suman cada una (igual que en la
+      // tabla, donde cada fila muestra su inversión).
+      const idRows = await prisma.$queryRawUnsafe<Array<{ id: number; propuesta_id: number | null }>>(`
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ cm.id, ct.id_propuesta AS propuesta_id
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+      `, ...params);
+      const campaniaIds = idRows.map((r) => Number(r.id));
+      const propuestaIds = Array.from(new Set(
+        idRows.map((r) => Number(r.propuesta_id)).filter((n) => Number.isInteger(n) && n > 0)
+      ));
+
+      const usarFiltroC = !!(filterFechaInicio && filterFechaFin);
+      const inversionQuery = propuestaIds.length === 0
+        ? null
+        : (usarFiltroC
+          ? `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(
+                      sc.costo
+                      * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                      / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                    ), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+               AND sc.inicio_periodo <= ?
+               AND sc.fin_periodo >= ?
+             WHERE pr.id IN (${propuestaIds.map(() => '?').join(',')})
+             GROUP BY pr.id`
+          : `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+             WHERE pr.id IN (${propuestaIds.map(() => '?').join(',')})
+             GROUP BY pr.id`);
+      const inversionParams = usarFiltroC
+        ? [filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds]
+        : [...propuestaIds];
+
+      const [inversionData, posteo] = await Promise.all([
+        inversionQuery
+          ? prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(inversionQuery, ...inversionParams)
+          : Promise.resolve([] as { propuesta_id: number; inversion_filtrada: number }[]),
+        computePosteoStats({ fi: filterFechaInicio, ff: filterFechaFin, campaniaIds }),
+      ]);
+      const inversionMap = new Map(inversionData.map((p) => [Number(p.propuesta_id), Number(p.inversion_filtrada) || 0]));
+      let montoTotal = 0;
+      for (const r of idRows) {
+        montoTotal += inversionMap.get(Number(r.propuesta_id)) ?? 0;
+      }
+      montoTotal = Math.round(montoTotal * 100) / 100;
+
       const response = {
         success: true,
         data: {
@@ -2385,6 +2485,8 @@ export class CampanasController {
           byStatus,
           conAps,
           sinAps: total - conAps,
+          montoTotal,
+          posteo,
         },
       };
 
