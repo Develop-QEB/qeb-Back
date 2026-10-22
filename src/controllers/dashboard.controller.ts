@@ -492,6 +492,7 @@ export class DashboardController {
         select: {
           inventario_id: true,
           estatus: true,
+          solicitudCaras_id: true,
         },
       });
 
@@ -747,6 +748,7 @@ export class DashboardController {
         select: {
           inventario_id: true,
           estatus: true,
+          solicitudCaras_id: true,
         },
       });
 
@@ -787,39 +789,101 @@ export class DashboardController {
         return est === estatus_filtro;
       });
 
+      // ---------- Monto vendido (solo con filtro 'Vendido') ----------
+      // Monto de una pieza vendida = costo de su circuito (solicitudCaras.costo,
+      // prorrateado por los días que el circuito solapa con el periodo — misma
+      // fórmula que la inversión del listado de campañas y que el posteo)
+      // repartido en partes iguales entre las caras vivas del circuito. Así la
+      // suma por plaza/mueble/tipo cuadra con el total, y con el monto del
+      // posteo cuando el circuito está vendido completo. Si una pieza tiene
+      // varias reservas vendidas en el periodo (rango manual de varias
+      // catorcenas), suma la parte de cada una.
+      const conMonto = estatus_filtro === 'Vendido';
+      const montoByInventario = new Map<number, number>();
+      let montoVendidoTotal = 0;
+      if (conMonto) {
+        const filtradosIds = new Set(inventariosFiltrados.map((i) => i.id));
+        const vendidas = reservas.filter((r) => {
+          if (!ESTATUS_VENDIDO_SET.has(r.estatus)) return false;
+          const invId = espacioToInventario.get(r.inventario_id);
+          return invId !== undefined && filtradosIds.has(invId);
+        });
+        const scIds = Array.from(new Set(vendidas.map((r) => r.solicitudCaras_id)));
+        if (scIds.length > 0) {
+          const [scRows, carasRows] = await Promise.all([
+            prisma.solicitudCaras.findMany({
+              where: { id: { in: scIds } },
+              select: { id: true, costo: true, inicio_periodo: true, fin_periodo: true },
+            }),
+            prisma.reservas.groupBy({
+              by: ['solicitudCaras_id'],
+              where: { solicitudCaras_id: { in: scIds }, deleted_at: null },
+              _count: { _all: true },
+            }),
+          ]);
+          const carasBySc = new Map(carasRows.map((r) => [r.solicitudCaras_id, r._count._all]));
+          const DAY_MS = 86_400_000;
+          // Equivalente a DATEDIFF(b, a) + 1 (fechas a medianoche UTC).
+          const dias = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / DAY_MS) + 1;
+          const montoPorCara = new Map<number, number>();
+          for (const sc of scRows) {
+            const costo = Number(sc.costo) || 0;
+            let factor = 1;
+            if (fechaInicio && fechaFin) {
+              const ini = sc.inicio_periodo > fechaInicio ? sc.inicio_periodo : fechaInicio;
+              const fin = sc.fin_periodo < fechaFin ? sc.fin_periodo : fechaFin;
+              const totalDias = dias(sc.inicio_periodo, sc.fin_periodo);
+              factor = totalDias > 0 ? Math.max(0, dias(ini, fin)) / totalDias : 0;
+            }
+            const caras = carasBySc.get(sc.id) || 0;
+            montoPorCara.set(sc.id, caras > 0 ? (costo * factor) / caras : 0);
+          }
+          for (const r of vendidas) {
+            const invId = espacioToInventario.get(r.inventario_id) as number;
+            const m = montoPorCara.get(r.solicitudCaras_id) || 0;
+            montoByInventario.set(invId, (montoByInventario.get(invId) || 0) + m);
+            montoVendidoTotal += m;
+          }
+        }
+      }
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+
+      type Bucket = { nombre: string; cantidad: number; monto?: number };
+      const toBuckets = (conteo: Record<string, { cantidad: number; monto: number }>): Bucket[] =>
+        Object.entries(conteo)
+          .map(([nombre, v]) => (conMonto
+            ? { nombre, cantidad: v.cantidad, monto: round2(v.monto) }
+            : { nombre, cantidad: v.cantidad }))
+          .sort((a, b) => b.cantidad - a.cantidad);
+      const acumular = (conteo: Record<string, { cantidad: number; monto: number }>, valor: string | null, invId: number) => {
+        if (!valor) return;
+        const b = conteo[valor] || (conteo[valor] = { cantidad: 0, monto: 0 });
+        b.cantidad += 1;
+        b.monto += montoByInventario.get(invId) || 0;
+      };
+
       // Calcular distribuciones solo para el estatus filtrado
       const calcularDistribucion = (
         campo: keyof (typeof inventariosFiltrados)[0]
-      ): Array<{ nombre: string; cantidad: number }> => {
-        const conteo: Record<string, number> = {};
-
-        inventariosFiltrados.forEach((inv) => {
-          const valor = inv[campo] as string;
-          if (valor) {
-            conteo[valor] = (conteo[valor] || 0) + 1;
-          }
-        });
-
-        return Object.entries(conteo)
-          .map(([nombre, cantidad]) => ({ nombre, cantidad }))
-          .sort((a, b) => b.cantidad - a.cantidad);
+      ): Bucket[] => {
+        const conteo: Record<string, { cantidad: number; monto: number }> = {};
+        inventariosFiltrados.forEach((inv) => acumular(conteo, inv[campo] as string, inv.id));
+        return toBuckets(conteo);
       };
 
       // "Por Mueble" por formato efectivo, igual que getStats.
-      const porMuebleEfectivo = (): Array<{ nombre: string; cantidad: number }> => {
-        const conteo: Record<string, number> = {};
-        inventariosFiltrados.forEach((inv) => {
-          const valor = formatoEfectivo(inv.mueble, inv.tipo_de_mueble, catalogoSet);
-          if (valor) conteo[valor] = (conteo[valor] || 0) + 1;
-        });
-        return Object.entries(conteo)
-          .map(([nombre, cantidad]) => ({ nombre, cantidad }))
-          .sort((a, b) => b.cantidad - a.cantidad);
+      const porMuebleEfectivo = (): Bucket[] => {
+        const conteo: Record<string, { cantidad: number; monto: number }> = {};
+        inventariosFiltrados.forEach((inv) =>
+          acumular(conteo, formatoEfectivo(inv.mueble, inv.tipo_de_mueble, catalogoSet), inv.id));
+        return toBuckets(conteo);
       };
 
       return {
           total: inventariosFiltrados.length,
           estatus: estatus_filtro,
+          // Solo con filtro 'Vendido': $ de lo vendido en el periodo mostrado.
+          ...(conMonto ? { montoVendido: round2(montoVendidoTotal) } : {}),
           graficas: {
             porMueble: porMuebleEfectivo(),
             porTipo: calcularDistribucion('tradicional_digital'),
