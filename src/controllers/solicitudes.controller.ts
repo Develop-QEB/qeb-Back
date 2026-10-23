@@ -23,6 +23,19 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { serializeBigInt } from '../utils/serialization';
+import {
+  parseAutorizacionFiltro,
+  parseStatusLista,
+  parseEstatusValorAutorizacion,
+  periodoDesdeFiltro,
+  sqlExisteCaraConAutorizacion,
+  sqlPropuestasConCambioAutorizacion,
+  resumenAutorizacionPorPropuesta,
+  cambiosAutorizacionPorPropuesta,
+  cambiosEstatusPorRef,
+  unirCambios,
+  type CambiosFechas,
+} from '../utils/autorizacionFiltro';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -430,6 +443,13 @@ export class SolicitudesController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos (`autorizacion=pend_dg,...`) y
+      // estatus de autorización en el filtro de historial (`estatusValor=auth:x`).
+      // `includeCambios` agrega por fila las fechas de último cambio por estatus
+      // (para el orden "Último cambio"). Ver utils/autorizacionFiltro.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const includeCambios = req.query.includeCambios === 'true';
 
       const where: Record<string, unknown> = {
         deleted_at: null,
@@ -438,14 +458,14 @@ export class SolicitudesController {
       // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
       // específico (Aprobada, Pendiente, etc.) se respeta. Si pide Rechazada
       // con excludeRechazadas=true, gana excludeRechazadas (siempre se ocultan).
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
-          where.status = status;
-        } else {
-          where.status = { not: 'Rechazada' };
-        }
-      } else if (status) {
-        where.status = status;
+      // `status` es multiselect (CSV). Si además viene `autorizacion`, el IN se
+      // combina en OR con el EXISTS de circuitos más abajo (misma lista en la UI).
+      const statusLista = parseStatusLista(status).filter(s => !excludeRechazadas || s !== 'Rechazada');
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        where.status = { in: statusLista };
+      } else if (excludeRechazadas) {
+        where.status = { not: 'Rechazada' };
       }
 
       // Search filter — semántica OR entre tags y OR entre campos. Permite
@@ -587,7 +607,16 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        // "Cambió a <autorización>" en el rango: solicitudes cuya propuesta
+        // tiene historial de autorización con esa clave (ver utils/autorizacionFiltro).
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+        addHistorialIdFilter(rows.map(r => Number(r.id)));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
         const qp: any[] = [];
         if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
@@ -610,6 +639,29 @@ export class SolicitudesController {
         const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
           `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
         addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
+      }
+
+      // Filtro por autorización de circuitos: la solicitud entra si AL MENOS
+      // UN circuito de su propuesta está en alguno de los estatus pedidos. Con
+      // filtro de Periodo solo cuentan los circuitos que solapan ese rango.
+      const periodoAut = periodoDesdeFiltro(
+        filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null,
+        yearInicio, yearFin,
+      );
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlExisteCaraConAutorizacion(autorizacionKeys, 'pr.id', periodoAut);
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           WHERE s.deleted_at IS NULL AND ${ex.sql}`, ...ex.params);
+        const idsAut = rows.map(r => Number(r.id));
+        if (statusLista.length > 0) {
+          // Estatus de entidad OR autorización de circuitos (una sola lista en la UI).
+          if (!Array.isArray(where.AND)) where.AND = where.AND ? [where.AND] : [];
+          (where.AND as any[]).push({ OR: [{ status: { in: statusLista } }, { id: { in: idsAut } }] });
+        } else {
+          addHistorialIdFilter(idsAut);
+        }
       }
 
       // Visibility filter: non-leadership roles only see their own records
@@ -678,6 +730,7 @@ export class SolicitudesController {
             cat_fin.numero_catorcena as catorcena_fin,
             cat_fin.año as anio_fin,
             cm.id as campania_id,
+            pr.id as propuesta_id,
             GROUP_CONCAT(DISTINCT NULLIF(sc.formato, '') ORDER BY sc.formato SEPARATOR ', ') as formatos
           FROM solicitud s
           LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
@@ -692,10 +745,30 @@ export class SolicitudesController {
 
         const enrichMap = new Map(enrichmentData.map((e: any) => [Number(e.solicitud_id), e]));
 
+        // Resumen de autorización por fila (conteo de circuitos por estatus,
+        // acotado al periodo filtrado) y, si se pide, fechas de último cambio
+        // por estatus de entidad y de autorización para el orden "Último cambio".
+        const propuestaIdPorSolicitud = new Map<number, number>();
+        enrichmentData.forEach((e: any) => {
+          const pid = e.propuesta_id ? Number(e.propuesta_id) : 0;
+          if (pid > 0) propuestaIdPorSolicitud.set(Number(e.solicitud_id), pid);
+        });
+        const propuestaIdsPagina = Array.from(new Set(propuestaIdPorSolicitud.values()));
+        const [resumenAutMap, cambiosAutMap, cambiosEstatusMap] = await Promise.all([
+          resumenAutorizacionPorPropuesta(propuestaIdsPagina, periodoAut),
+          includeCambios ? cambiosAutorizacionPorPropuesta(propuestaIdsPagina) : Promise.resolve(new Map<number, CambiosFechas>()),
+          includeCambios ? cambiosEstatusPorRef('Solicitud', solicitudIds) : Promise.resolve(new Map<number, CambiosFechas>()),
+        ]);
+
         enrichedSolicitudes = solicitudes.map(s => {
           const extra = enrichMap.get(s.id);
+          const propuestaIdFila = propuestaIdPorSolicitud.get(s.id);
           return {
             ...s,
+            autorizacion_resumen: (propuestaIdFila && resumenAutMap.get(propuestaIdFila)) || null,
+            ...(includeCambios ? {
+              cambios: unirCambios(cambiosEstatusMap.get(s.id), propuestaIdFila ? cambiosAutMap.get(propuestaIdFila) : null),
+            } : {}),
             tipo_periodo: extra?.tipo_periodo || null,
             nombre_campania: extra?.nombre_campania || null,
             periodo_fecha_inicio: extra?.periodo_fecha_inicio || null,
@@ -1368,17 +1441,20 @@ export class SolicitudesController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos — mismo contrato que getAll.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
 
       const where: Record<string, unknown> = { deleted_at: null };
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
-          where.status = status;
-        } else {
-          where.status = { not: 'Rechazada' };
-        }
-      } else if (status) {
-        where.status = status;
+      // Multiselect (CSV); con `autorizacion` el IN va en OR más abajo. Mismo
+      // criterio que getAll.
+      const statusLista = parseStatusLista(status).filter(s => !excludeRechazadas || s !== 'Rechazada');
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        where.status = { in: statusLista };
+      } else if (excludeRechazadas) {
+        where.status = { not: 'Rechazada' };
       }
 
       // Search filter — mismo formato que getAll: OR entre tags, OR entre
@@ -1430,7 +1506,14 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+        addIdFilter(rows.map(r => Number(r.id)));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
         const qp: any[] = [];
         if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
@@ -1544,6 +1627,31 @@ export class SolicitudesController {
           where.id = { in: periodIds.map(r => r.id) };
         } else {
           where.id = { in: [] };
+        }
+      }
+
+      // Filtro por autorización de circuitos (mismo EXISTS que getAll, con el
+      // mismo recorte por periodo) para que los KPIs cuadren con el listado.
+      if (autorizacionKeys.length > 0) {
+        let catRango: { inicio: Date; fin: Date } | null = null;
+        if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+          const [ci, cf] = await Promise.all([
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
+          ]);
+          if (ci && cf) catRango = { inicio: ci.fecha_inicio, fin: cf.fecha_fin };
+        }
+        const ex = sqlExisteCaraConAutorizacion(autorizacionKeys, 'pr.id', periodoDesdeFiltro(catRango, yearInicio, yearFin));
+        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+          `SELECT DISTINCT s.id FROM solicitud s
+           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+           WHERE s.deleted_at IS NULL AND ${ex.sql}`, ...ex.params);
+        const idsAut = rows.map(r => Number(r.id));
+        if (statusLista.length > 0) {
+          if (!Array.isArray(where.AND)) where.AND = where.AND ? [where.AND] : [];
+          (where.AND as any[]).push({ OR: [{ status: { in: statusLista } }, { id: { in: idsAut } }] });
+        } else {
+          addIdFilter(idsAut);
         }
       }
 
