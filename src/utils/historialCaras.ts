@@ -1,4 +1,5 @@
 import prisma from './prisma';
+import { catorcenaLabel } from './catorcena';
 
 interface CaraSnapshot {
   id: number;
@@ -12,6 +13,7 @@ interface CaraSnapshot {
   ciudad: string | null;
   tipo: string | null;
   formato: string | null;
+  inicio_periodo: Date | null;
 }
 
 const TRACKED_FIELDS: Record<string, string> = {
@@ -49,6 +51,7 @@ export async function snapshotCaras(caraIds: number[]): Promise<Map<number, Cara
       ciudad: true,
       tipo: true,
       formato: true,
+      inicio_periodo: true,
     },
   });
   const map = new Map<number, CaraSnapshot>();
@@ -65,6 +68,7 @@ export async function snapshotCaras(caraIds: number[]): Promise<Map<number, Cara
       ciudad: c.ciudad,
       tipo: c.tipo,
       formato: c.formato,
+      inicio_periodo: c.inicio_periodo ?? null,
     });
   }
   return map;
@@ -137,15 +141,18 @@ export async function registrarCaraNueva(
   const cara = snap.get(caraId);
   if (!cara) return;
 
+  const catorcena = await catorcenaLabel(cara.inicio_periodo);
+  const catTxt = catorcena ? `${catorcena}, ` : '';
+
   await prisma.historial.create({
     data: {
       tipo: `autorizacion_nueva_cara_${origen}`,
       ref_id: refId,
-      accion: `${usuarioNombre} agregó circuito ${cara.articulo || `#${caraId}`} (${cara.caras} caras, ${formatValue('costo', cara.costo)})`,
+      accion: `${usuarioNombre} agregó circuito ${cara.articulo || `#${caraId}`} (${catTxt}${cara.caras} caras, ${formatValue('costo', cara.costo)})`,
       detalles: JSON.stringify({
         usuario: usuarioNombre,
         origen,
-        cara: { id: caraId, articulo: cara.articulo, caras: cara.caras, costo: cara.costo, tarifa_publica: cara.tarifa_publica },
+        cara: { id: caraId, articulo: cara.articulo, formato: cara.formato, catorcena, caras: cara.caras, costo: cara.costo, tarifa_publica: cara.tarifa_publica },
       }),
     },
   });
