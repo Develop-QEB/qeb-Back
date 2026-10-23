@@ -2053,13 +2053,17 @@ export class CampanasController {
         // PRIVADO de esta propuesta (legacy); las reservas en calendarios compartidos que
         // quedan fuera del nuevo periodo las libera el candado anti-desfase de abajo.
         if (fechaInicio && fechaFin && cotizacion?.id_propuesta) {
+          // Las caras se filtran por slc.idquote = '<id_propuesta>' (texto, igual que la
+          // columna) para que use solicitudCaras_idquote_idx. Antes el join
+          // pr.id = slc.idquote comparaba INT con VARCHAR: MySQL no usaba el índice y
+          // recorría solicitudCaras/reservas completas → 504 en campañas grandes
+          // (81569 PROFUTURO, 80617 TELCEL 4,973 reservas, oct-2026).
+          const idquoteRecorrer = String(cotizacion.id_propuesta);
           const calsCompartidos = await prisma.$queryRaw<{ id: number }[]>`
             SELECT DISTINCT rs.calendario_id AS id
             FROM reservas rs
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND rs.calendario_id IS NOT NULL
               AND EXISTS (
                 SELECT 1 FROM reservas ro
@@ -2076,8 +2080,6 @@ export class CampanasController {
             UPDATE calendario cl
             INNER JOIN reservas rs ON rs.calendario_id = cl.id
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             SET
               cl.fecha_inicio = CASE
                 WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
@@ -2089,7 +2091,7 @@ export class CampanasController {
                   THEN ${fechaFin}
                 ELSE LEAST(cl.fecha_fin, ${fechaFin})
               END
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
               ${idsCompartidos.length > 0 ? Prisma.sql`AND cl.id NOT IN (${Prisma.join(idsCompartidos)})` : Prisma.empty}
           `;
@@ -2097,8 +2099,6 @@ export class CampanasController {
           // 4b. Periodo de los circuitos.
           await prisma.$executeRaw`
             UPDATE solicitudCaras slc
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             INNER JOIN reservas rs ON rs.solicitudCaras_id = slc.id
             INNER JOIN calendario cl ON cl.id = rs.calendario_id
             SET
@@ -2112,7 +2112,7 @@ export class CampanasController {
                   THEN ${fechaFin}
                 ELSE LEAST(slc.fin_periodo, ${fechaFin})
               END
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
           `;
 
@@ -2127,11 +2127,9 @@ export class CampanasController {
           await prisma.$executeRaw`
             UPDATE reservas rs
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             INNER JOIN calendario cl ON cl.id = rs.calendario_id
             SET rs.deleted_at = NOW()
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND rs.deleted_at IS NULL
               AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
           `;
@@ -2150,25 +2148,40 @@ export class CampanasController {
             SELECT rs.id AS id, i.codigo_unico AS codigo
             FROM reservas rs
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             LEFT JOIN espacio_inventario ei ON ei.id = rs.inventario_id
             INNER JOIN inventarios i ON i.id = COALESCE(ei.inventario_id, rs.inventario_id)
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND rs.deleted_at IS NULL
               AND rs.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
               AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
-              AND EXISTS (
-                SELECT 1 FROM reservas ro
-                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
-                LEFT JOIN espacio_inventario eio ON eio.id = ro.inventario_id
-                WHERE ro.deleted_at IS NULL
-                  AND ro.id <> rs.id
-                  AND sco.idquote <> slc.idquote
-                  AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
-                  AND COALESCE(eio.inventario_id, ro.inventario_id) = COALESCE(ei.inventario_id, rs.inventario_id)
-                  AND sco.inicio_periodo <= slc.fin_periodo
-                  AND sco.fin_periodo >= slc.inicio_periodo
+              -- Mismo match que COALESCE(eio.inventario_id, ro.inventario_id) = i.id, partido
+              -- en dos ramas para que usen idx_rsv_conflict / espacio_inventario.idx_inventario_id
+              -- (con el COALESCE MySQL recorría solicitudCaras por cada reserva).
+              AND (
+                EXISTS (
+                  SELECT 1 FROM reservas ro
+                  INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                  WHERE ro.inventario_id = i.id
+                    AND NOT EXISTS (SELECT 1 FROM espacio_inventario e2 WHERE e2.id = ro.inventario_id AND e2.inventario_id IS NOT NULL)
+                    AND ro.deleted_at IS NULL
+                    AND ro.id <> rs.id
+                    AND sco.idquote <> slc.idquote
+                    AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                    AND sco.inicio_periodo <= slc.fin_periodo
+                    AND sco.fin_periodo >= slc.inicio_periodo
+                )
+                OR EXISTS (
+                  SELECT 1 FROM espacio_inventario eio
+                  INNER JOIN reservas ro ON ro.inventario_id = eio.id
+                  INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                  WHERE eio.inventario_id = i.id
+                    AND ro.deleted_at IS NULL
+                    AND ro.id <> rs.id
+                    AND sco.idquote <> slc.idquote
+                    AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                    AND sco.inicio_periodo <= slc.fin_periodo
+                    AND sco.fin_periodo >= slc.inicio_periodo
+                )
               )
           `;
           if (colisionesRecorrer.length > 0) {
