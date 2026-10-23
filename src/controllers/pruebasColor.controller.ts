@@ -11,7 +11,9 @@ import {
   listarTareasAsociadas,
   resolverTareaAsociada,
   reenviarPruebaRechazada,
+  esTipoPruebaValido,
   EstatusPruebaColor,
+  TipoPrueba,
 } from '../services/pruebasColor.service';
 
 // Endpoints del modulo Prueba de Color. Feedback 2026-08-15.
@@ -30,7 +32,7 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
       return;
     }
 
-    const { propuesta_id, sc_id, archivo, archivo_data, enlace_externo, nombre_arte, notas } = req.body as {
+    const { propuesta_id, sc_id, archivo, archivo_data, enlace_externo, nombre_arte, notas, tipo } = req.body as {
       propuesta_id?: number | string;
       sc_id?: number | string;
       archivo?: string;
@@ -38,6 +40,7 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
       enlace_externo?: string | null;
       nombre_arte?: string | null;
       notas?: string | null;
+      tipo?: string;
     };
 
     const propuestaId = Number(propuesta_id);
@@ -53,6 +56,8 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
     }
     const nombreArteLimpio = typeof nombre_arte === 'string' ? nombre_arte.trim() : '';
     if (!nombreArteLimpio) { res.status(400).json({ success: false, error: 'nombre_arte requerido' }); return; }
+    // Jos 2026-10-23: tipo opcional, default prueba_color. Whitelist estricta.
+    const tipoFinal: TipoPrueba = tipo && esTipoPruebaValido(tipo) ? tipo : 'prueba_color';
 
     const prueba = await crearPruebaColor({
       propuestaId,
@@ -62,6 +67,7 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
       enlace_externo: enlaceLimpio || null,
       nombre_arte: nombreArteLimpio,
       notas: notas || null,
+      tipo: tipoFinal,
       createdBy: userId,
       createdByNombre: userNombre,
     });
@@ -78,6 +84,8 @@ export async function listar(req: AuthRequest, res: Response): Promise<void> {
     const propuestaId = req.query.propuesta_id ? Number(req.query.propuesta_id) : undefined;
     const campaniaId = req.query.campania_id ? Number(req.query.campania_id) : undefined;
     const scId = req.query.sc_id ? Number(req.query.sc_id) : undefined;
+    const tipoRaw = typeof req.query.tipo === 'string' ? req.query.tipo : undefined;
+    const tipo: TipoPrueba | undefined = tipoRaw && esTipoPruebaValido(tipoRaw) ? tipoRaw : undefined;
     if (!propuestaId && !campaniaId && !scId) {
       res.status(400).json({ success: false, error: 'Filtro requerido (propuesta_id, campania_id o sc_id)' });
       return;
@@ -86,6 +94,7 @@ export async function listar(req: AuthRequest, res: Response): Promise<void> {
       propuesta_id: propuestaId,
       campania_id: campaniaId,
       sc_id: scId,
+      tipo,
     });
     res.json({ success: true, data });
   } catch (error) {

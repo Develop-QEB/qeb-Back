@@ -9370,7 +9370,8 @@ export class CampanasController {
           MAX(tiene_instalado) as tiene_instalado,
           MAX(origen_prueba_color) as origen_prueba_color,
           MAX(prueba_color_version) as prueba_color_version,
-          MAX(prueba_color_enlace_externo) as prueba_color_enlace_externo
+          MAX(prueba_color_enlace_externo) as prueba_color_enlace_externo,
+          MAX(prueba_color_tipo) as prueba_color_tipo
         FROM (
           SELECT
             r.archivo COLLATE utf8mb4_unicode_ci as url,
@@ -9388,7 +9389,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -9418,7 +9420,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
@@ -9446,7 +9449,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM imagenes_digitales imd
           JOIN reservas r3 ON r3.id = imd.id_reserva
           JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
@@ -9476,7 +9480,8 @@ export class CampanasController {
             0 as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM biblioteca_artes ba
           WHERE ba.campania_id = ?
           GROUP BY ba.archivo
@@ -9501,13 +9506,16 @@ export class CampanasController {
             0 as tiene_instalado,
             1 as origen_prueba_color,
             MAX(pc.version) as prueba_color_version,
-            MAX(pc.enlace_externo) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            MAX(pc.enlace_externo) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            -- Jos 2026-10-23: tipo del flujo origen (prueba_color | revision_anticipada).
+            -- COALESCE para registros viejos pre-migracion que podrian traer NULL.
+            MAX(COALESCE(pc.tipo, 'prueba_color')) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM pruebas_color pc
           WHERE pc.campania_id = ?
             AND pc.estatus = 'aprobada'
             AND pc.deleted_at IS NULL
             AND (NULLIF(pc.archivo, '') IS NOT NULL OR pc.enlace_externo IS NOT NULL)
-          GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte
+          GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte, pc.tipo
         ) combined
         GROUP BY url
         ORDER BY uso_count DESC
@@ -9526,6 +9534,7 @@ export class CampanasController {
         origen_prueba_color: number | bigint | null;
         prueba_color_version: number | bigint | null;
         prueba_color_enlace_externo: string | null;
+        prueba_color_tipo: string | null;
       }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
@@ -9543,6 +9552,9 @@ export class CampanasController {
         origen_prueba_color: Number(arte.origen_prueba_color || 0) === 1,
         prueba_color_version: arte.prueba_color_version != null ? Number(arte.prueba_color_version) : null,
         prueba_color_enlace_externo: arte.prueba_color_enlace_externo || null,
+        // Jos 2026-10-23: 'prueba_color' | 'revision_anticipada'. El front pinta
+        // el badge "PC vN" o "RA vN" segun este valor.
+        prueba_color_tipo: arte.prueba_color_tipo || null,
       }));
 
       res.json({

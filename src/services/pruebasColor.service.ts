@@ -100,6 +100,19 @@ export function puedeRevisarPruebaColor(rol: string | null | undefined): boolean
   return !!rol && ROLES_REVISAR_PRUEBA_COLOR.has(rol);
 }
 
+// Jos 2026-10-23: expansion del modulo "Prueba de Color" a "Revision de Artes
+// Anticipada". Dos flujos conviven en la misma tabla, se distinguen por `tipo`.
+//   'prueba_color'       -> flujo original (default)
+//   'revision_anticipada'-> arte revisado antes de pisada; al aprobar se vincula
+//                           a la biblioteca de artes con badge "RA vN".
+export type TipoPrueba = 'prueba_color' | 'revision_anticipada';
+
+const TIPOS_VALIDOS: TipoPrueba[] = ['prueba_color', 'revision_anticipada'];
+
+export function esTipoPruebaValido(v: unknown): v is TipoPrueba {
+  return typeof v === 'string' && (TIPOS_VALIDOS as string[]).includes(v);
+}
+
 interface CrearPruebaInput {
   propuestaId: number;
   scId: number;
@@ -111,6 +124,7 @@ interface CrearPruebaInput {
   enlace_externo?: string | null;
   nombre_arte?: string | null;
   notas?: string | null;
+  tipo?: TipoPrueba;
   createdBy: number;
   createdByNombre: string;
 }
@@ -122,6 +136,7 @@ interface CrearPruebaInput {
  */
 export async function crearPruebaColor(input: CrearPruebaInput) {
   const { propuestaId, scId, archivo, archivo_data, enlace_externo, nombre_arte, notas, createdBy, createdByNombre } = input;
+  const tipo: TipoPrueba = input.tipo || 'prueba_color';
   // Al menos uno de archivo o enlace_externo debe existir.
   if ((!archivo || !archivo.trim()) && (!enlace_externo || !enlace_externo.trim())) {
     throw new Error('Debes subir un archivo o pegar un link del arte');
@@ -134,9 +149,11 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   });
   if (!sc) throw new Error('Circuito no encontrado en la propuesta');
 
-  // Ultima version del circuito
+  // Ultima version del circuito dentro del MISMO tipo. Jos 2026-10-23: PC y RA
+  // llevan numeracion independiente para que las etiquetas "PC v1/v2" y
+  // "RA v1/v2" no se mezclen en biblioteca ni en tareas.
   const ultima = await prisma.pruebas_color.findFirst({
-    where: { propuesta_id: propuestaId, sc_id: scId, deleted_at: null },
+    where: { propuesta_id: propuestaId, sc_id: scId, tipo, deleted_at: null },
     orderBy: { version: 'desc' },
     select: { version: true },
   });
@@ -157,6 +174,7 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
       nombre_arte: nombre_arte || null,
       notas: notas || null,
       estatus: 'revision_artes',
+      tipo,
       version: nextVersion,
       created_by: createdBy,
       created_by_nombre: createdByNombre,
@@ -580,6 +598,10 @@ export interface ListarFiltro {
   propuesta_id?: number;
   campania_id?: number;
   sc_id?: number;
+  // Jos 2026-10-23: opcional. Si no viene, devuelve ambos tipos; el modal
+  // filtra en front por pestana activa. Mantener opcional evita tener que
+  // tocar los callers que ya consumen /pruebas-color.
+  tipo?: TipoPrueba;
 }
 
 export async function listarPruebasColor(filtro: ListarFiltro) {
@@ -589,6 +611,7 @@ export async function listarPruebasColor(filtro: ListarFiltro) {
       ...(filtro.propuesta_id ? { propuesta_id: filtro.propuesta_id } : {}),
       ...(filtro.campania_id ? { campania_id: filtro.campania_id } : {}),
       ...(filtro.sc_id ? { sc_id: filtro.sc_id } : {}),
+      ...(filtro.tipo ? { tipo: filtro.tipo } : {}),
     },
     orderBy: [{ sc_id: 'asc' }, { version: 'desc' }],
   });
