@@ -40,6 +40,27 @@ import {
 import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
 import { computePosteoStats } from '../services/posteo-stats.service';
 
+// Candado APS ↔ autorización de Direcciones. Devuelve null si la cara está
+// aprobada por DG y DCM (null/undefined cuenta como 'aprobado', igual que el
+// default de la columna). Si no, devuelve un texto legible con la dimensión y
+// el estado que la bloquea (pendiente / rechazado / correccion).
+const ESTADO_AUTORIZACION_LABEL: Record<string, string> = {
+  pendiente: 'pendiente de autorización',
+  rechazado: 'rechazada',
+  correccion: 'devuelta a corrección',
+};
+export function describirBloqueoAutorizacionCara(
+  autorizacionDg: string | null | undefined,
+  autorizacionDcm: string | null | undefined,
+): string | null {
+  const motivos: string[] = [];
+  const dg = (autorizacionDg || 'aprobado').toLowerCase();
+  const dcm = (autorizacionDcm || 'aprobado').toLowerCase();
+  if (dg !== 'aprobado') motivos.push(`Dirección General ${ESTADO_AUTORIZACION_LABEL[dg] || dg}`);
+  if (dcm !== 'aprobado') motivos.push(`Dirección Comercial ${ESTADO_AUTORIZACION_LABEL[dcm] || dcm}`);
+  return motivos.length > 0 ? motivos.join(' y ') : null;
+}
+
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
   id: true,
@@ -9077,6 +9098,83 @@ export class CampanasController {
         return;
       }
       const scPlaceholders = scIdsForCampaign.map(() => '?').join(',');
+
+      // Paso 0: Candado de autorización de Direcciones. Solo se puede asignar
+      // APS a circuitos con autorizacion_dg Y autorizacion_dcm = 'aprobado'.
+      // Un circuito pendiente, rechazado o en corrección bloquea TODA la
+      // asignación (no se asigna parcialmente) y se explica el motivo.
+      const scIdsObjetivo = new Set<number>();
+      if (hasIM) {
+        for (const scId of solicitudCarasIds) {
+          const n = parseInt(String(scId));
+          if (!isNaN(n)) scIdsObjetivo.add(n);
+        }
+      }
+      if (hasInventario) {
+        if (hasRsvIds) {
+          // Mismo alcance que el UPDATE de abajo: las reservas seleccionadas Y
+          // las de su mismo grupo_completo, acotadas a la campaña.
+          const rsvPlaceholders = rsvIds.map(() => '?').join(',');
+          const scRows = await prisma.$queryRawUnsafe<{ solicitudCaras_id: number | null }[]>(
+            `SELECT DISTINCT r2.solicitudCaras_id
+             FROM reservas r1
+             JOIN reservas r2
+               ON (r2.id = r1.id OR (r1.grupo_completo_id IS NOT NULL AND r2.grupo_completo_id = r1.grupo_completo_id))
+             WHERE r1.id IN (${rsvPlaceholders})
+               AND r2.solicitudCaras_id IN (${scPlaceholders})
+               AND r2.deleted_at IS NULL
+               AND (r2.APS IS NULL OR r2.APS = 0)`,
+            ...rsvIds, ...scIdsForCampaign
+          );
+          scRows.forEach(r => { if (r.solicitudCaras_id) scIdsObjetivo.add(Number(r.solicitudCaras_id)); });
+        } else {
+          const invPlaceholders = inventarioIds.map(() => '?').join(',');
+          const scRows = await prisma.$queryRawUnsafe<{ solicitudCaras_id: number | null }[]>(
+            `SELECT DISTINCT r.solicitudCaras_id
+             FROM reservas r
+             JOIN espacio_inventario ei ON r.inventario_id = ei.id
+             WHERE ei.inventario_id IN (${invPlaceholders})
+               AND r.solicitudCaras_id IN (${scPlaceholders})
+               AND r.deleted_at IS NULL`,
+            ...inventarioIds, ...scIdsForCampaign
+          );
+          scRows.forEach(r => { if (r.solicitudCaras_id) scIdsObjetivo.add(Number(r.solicitudCaras_id)); });
+        }
+      }
+      if (scIdsObjetivo.size > 0) {
+        const carasObjetivo = await prisma.solicitudCaras.findMany({
+          where: { id: { in: Array.from(scIdsObjetivo) } },
+          select: { id: true, articulo: true, ciudad: true, formato: true, autorizacion_dg: true, autorizacion_dcm: true },
+        });
+        const bloqueadas = carasObjetivo
+          .map(c => ({ cara: c, motivo: describirBloqueoAutorizacionCara(c.autorizacion_dg, c.autorizacion_dcm) }))
+          .filter((x): x is { cara: typeof carasObjetivo[number]; motivo: string } => x.motivo !== null);
+        if (bloqueadas.length > 0) {
+          const detalle = bloqueadas
+            .map(({ cara, motivo }) => `• ${[cara.articulo, cara.formato, cara.ciudad].filter(Boolean).join(' · ') || `Circuito #${cara.id}`}: ${motivo}`)
+            .join('\n');
+          res.status(400).json({
+            success: false,
+            error:
+              `No se puede asignar ${prefactura ? 'APS Pre Factura' : 'APS'}: ${bloqueadas.length} circuito(s) seleccionado(s) ` +
+              `no tienen la autorización de Dirección aprobada.\n${detalle}\n\n` +
+              `Solo se puede asignar APS a circuitos con autorización DG y DCM aprobadas. ` +
+              `Deselecciona estos circuitos o espera a que Dirección los apruebe.`,
+            autorizacion: {
+              bloqueadas: bloqueadas.map(({ cara, motivo }) => ({
+                solicitud_caras_id: cara.id,
+                articulo: cara.articulo,
+                ciudad: cara.ciudad,
+                formato: cara.formato,
+                autorizacion_dg: cara.autorizacion_dg,
+                autorizacion_dcm: cara.autorizacion_dcm,
+                motivo,
+              })),
+            },
+          });
+          return;
+        }
+      }
 
       // Paso 1: Obtener el siguiente número APS
       const maxAPSResult = await prisma.$queryRaw<{ maxAPS: bigint | null }[]>`
