@@ -7,7 +7,7 @@ import { withBi, attachBiRealtime } from './bi';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
-import { finalizarCampanasPorIniciarVencidas } from './services/campania-status.service';
+import { finalizarCampanasPorIniciarVencidas, inicializarCampanasPorIniciarActivas } from './services/campania-status.service';
 import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
 import { ejecutarMonitorConflictos } from './services/conflictos-ocupacion.service';
 import { chatbotController } from './controllers/chatbot.controller';
@@ -129,14 +129,21 @@ async function main() {
         console.error('[Recordatorios] Error en ejecucion inicial:', err);
       });
 
-      // A medianoche CDMX: las campañas pegadas en "Por iniciar" cuya fecha_fin ya
-      // pasó (dinámicamente "Pasada") se cambian a "finalizada". No toca los demás
-      // estados (Cancelada/Rechazada/Pausada/inactiva/En Operacion, etc.).
-      programarDiario(0, 'FinalizarCampanasVencidas 00:00', async () => { await finalizarCampanasPorIniciarVencidas(); });
-      // Tambien corre al arrancar para alinear las que ya estaban vencidas (idempotente).
-      finalizarCampanasPorIniciarVencidas().catch((err: unknown) => {
-        console.error('[FinalizarCampanas] Error en ejecucion inicial:', err);
+      // A medianoche CDMX: ciclo de vida automatico del status de campaña alineado
+      // a sus fechas: "Por iniciar" (futura) -> "Inicializada" (activa) ->
+      // "finalizada" (pasada). Solo toca esos estatus automaticos; nunca los
+      // manuales (Cancelada/Rechazada/Pausada/inactiva/En Operacion, etc.).
+      // Se corre finalizar y luego inicializar (rangos de fecha disjuntos).
+      programarDiario(0, 'CicloStatusCampanas 00:00', async () => {
+        await finalizarCampanasPorIniciarVencidas();
+        await inicializarCampanasPorIniciarActivas();
       });
+      // Tambien corre al arrancar para alinear las ya vencidas/activas (idempotente).
+      finalizarCampanasPorIniciarVencidas()
+        .then(() => inicializarCampanasPorIniciarActivas())
+        .catch((err: unknown) => {
+          console.error('[CicloStatusCampanas] Error en ejecucion inicial:', err);
+        });
 
       // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.
       // Corre CADA HORA: la deteccion es una query agregada (~2s sobre el

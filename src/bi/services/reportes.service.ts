@@ -395,7 +395,7 @@ export async function getEmbudo(f: FiltrosReporte): Promise<Embudo> {
     etapa('Solicitudes', totalSol),
     etapa('Atendidas', de(sol, 'Atendida', 'Aprobada')),
     etapa('Propuestas aprobadas', de(prop, 'Aprobada', 'Liberada', 'Pase a ventas')),
-    etapa('Campañas activas', de(camp, 'Aprobada', 'Por iniciar', 'finalizada')),
+    etapa('Campañas activas', de(camp, 'Aprobada', 'Por iniciar', 'Inicializada', 'finalizada')),
     etapa('Finalizadas', de(camp, 'finalizada')),
   ];
 

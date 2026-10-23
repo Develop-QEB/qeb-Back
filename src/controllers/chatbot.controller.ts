@@ -923,7 +923,7 @@ TABLAS Y SUS PANTALLAS:
 - solicitud: Pantalla Solicitudes. Primera etapa del flujo. Status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida. Soft delete (deleted_at).
 - propuesta: Pantalla Propuestas. Propuesta comercial para un cliente. Status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada. Soft delete (deleted_at).
 - cotizacion: Sin pantalla propia. Tabla puente entre propuesta y campania. Se crea automaticamente al aprobar propuesta.
-- campania: Pantalla Campanas. Propuesta aprobada en ejecucion. Status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada. NUNCA eliminar (rompe autoincrement de IDs).
+- campania: Pantalla Campanas. Propuesta aprobada en ejecucion. Status: inactiva, Por iniciar, Inicializada, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada. NUNCA eliminar (rompe autoincrement de IDs).
 - solicitudCaras: Modal de asignar inventario en Propuestas/Campanas. Cada registro es un grupo de caras/circuitos. Ligada a propuesta via idquote (propuesta.id como string). Tiene campos de autorizacion DG/DCM.
 - reservas: Modal de reservar inventario. Cada registro reserva un mueble (inventario) para un periodo y cliente. Ligada a solicitudCaras via solicitudCaras_id y a inventarios via inventario_id. Soft delete (deleted_at). Tiene campo APS (numero de entrega SAP).
 - inventarios: Pantalla Inventarios y Mapa. Catalogo de muebles publicitarios con ubicacion, coordenadas, tarifas, tipo (Tradicional/Digital).
@@ -978,7 +978,7 @@ Usa SIEMPRE estos nombres cuando hables de estatus. Ignora los nombres descripti
 
 - solicitud.status: Ingreso, Analisis, Cierre, Rechazada. (Los viejos "Pendiente", "En revision", "Aprobada", "Desactivada", "Ajustar", "Atendida" NO existen en el enum real para solicitud desde 2026.)
 - propuesta.status: Ingreso, Analisis, Ajuste Cto-Cliente, Pase a ventas, Rechazada, Descartada. (Los viejos "Abierto", "Ajuste Comercial", "Atendido", "Borrador", "Enviada", "Aprobada" ya no son validos.)
-- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada.
+- campania.status: inactiva, Por iniciar, Inicializada, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada.
 - tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado.
 - reservas.estatus (de la reserva): Activa, Cancelada, Expirada.
 - reservas.arte_aprobado: Pendiente, Aprobado, Rechazado.
@@ -1270,7 +1270,7 @@ TABLAS CRITICAS Y SUS RELACIONES:
 STATUS VALIDOS:
 - solicitud.status: Pendiente, En revision, Aprobada, Rechazada, Desactivada, Ajustar, Atendida
 - propuesta.status: Abierto, Ajuste Comercial, Ajuste Cto-Cliente, Atendido, Pase a ventas, Aprobada, Rechazada
-- campania.status: inactiva, Por iniciar, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada
+- campania.status: inactiva, Por iniciar, Inicializada, Aprobada, En Operacion, Rechazada, Cancelada, Finalizada
 - tareas.estatus: Pendiente, En proceso, Atendido, Cancelado, Rechazado
 
 PROBLEMAS COMUNES EN BD:
