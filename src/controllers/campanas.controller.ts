@@ -31,6 +31,20 @@ import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import {
+  parseAutorizacionFiltro,
+  parseStatusLista,
+  sqlStatusOAutorizacion,
+  parseEstatusValorAutorizacion,
+  periodoDesdeFiltro,
+  sqlExisteCaraConAutorizacion,
+  sqlPropuestasConCambioAutorizacion,
+  resumenAutorizacionPorPropuesta,
+  cambiosAutorizacionPorPropuesta,
+  cambiosEstatusPorRef,
+  unirCambios,
+  type CambiosFechas,
+} from '../utils/autorizacionFiltro';
+import {
   verificarAutorizacionEjecucion,
   cerrarPorEjecucion,
   registrarBypass,
@@ -628,11 +642,19 @@ export class CampanasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos (`autorizacion=pend_dg,...`),
+      // estatus de autorización en el filtro de historial (`estatusValor=auth:x`)
+      // y fechas de último cambio por fila (`includeCambios=true`, para el orden
+      // "Último cambio"). Ver utils/autorizacionFiltro.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        autorizacion: autorizacionKeys, includeCambios,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -650,19 +672,19 @@ export class CampanasController {
       // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
       // gana excludeRechazadas (siempre se ocultan). Inactivas se siguen ocultando
       // cuando no hay status explícito.
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      // `status` es multiselect (CSV). Si además viene `autorizacion`, el IN se
+      // combina en OR con el EXISTS de circuitos más abajo (misma lista en la UI).
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -676,7 +698,13 @@ export class CampanasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        // "Cambió a <autorización>" en el rango: historial de autorización de
+        // la propuesta de la campaña (ver utils/autorizacionFiltro).
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
+        params.push(...(sub.params as (string | number)[]));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -730,6 +758,19 @@ export class CampanasController {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
         }
+      }
+
+      // Filtro por autorización de circuitos: entra la campaña con AL MENOS UN
+      // circuito en alguno de los estatus pedidos; con filtro de Periodo solo
+      // cuentan los circuitos que solapan ese rango.
+      const periodoAut = periodoDesdeFiltro(
+        filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null,
+        yearInicio, yearFin,
+      );
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(autorizacionKeys, 'ct.id_propuesta', periodoAut));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
@@ -965,6 +1006,34 @@ export class CampanasController {
         ).catch(() => [] as { id: number }[]);
         const postedSet = new Set(postedIds.map(r => Number(r.id)));
         campanas.forEach((c: any) => { c.has_post = postedSet.has(Number(c.id)) ? 1 : 0; });
+      }
+
+      // Resumen de autorización por fila (circuitos por estatus, acotado al
+      // periodo filtrado) y, si se pide, fechas de último cambio por estatus de
+      // campaña y de autorización para el orden "Último cambio". El historial
+      // de 'Cambio de estado' de campaña se escribió con ref_id = id de
+      // propuesta (back actual) o id de campaña (versiones previas): se
+      // consultan ambos y se unen.
+      if (campanas.length > 0) {
+        const propIdsPagina = Array.from(new Set(
+          campanas.map((c: any) => Number(c.propuesta_id)).filter((n: number) => Number.isInteger(n) && n > 0)
+        ));
+        const [resumenAutMap, cambiosAutMap, cambiosEstatusMap] = await Promise.all([
+          resumenAutorizacionPorPropuesta(propIdsPagina, periodoAut),
+          includeCambios ? cambiosAutorizacionPorPropuesta(propIdsPagina) : Promise.resolve(new Map<number, CambiosFechas>()),
+          includeCambios ? cambiosEstatusPorRef('Campaña', [...propIdsPagina, ...campaignIds]) : Promise.resolve(new Map<number, CambiosFechas>()),
+        ]);
+        campanas.forEach((c: any) => {
+          const pid = Number(c.propuesta_id) || 0;
+          c.autorizacion_resumen = (pid > 0 && resumenAutMap.get(pid)) || null;
+          if (includeCambios) {
+            c.cambios = unirCambios(
+              cambiosEstatusMap.get(Number(c.id)),
+              pid > 0 ? cambiosEstatusMap.get(pid) : null,
+              pid > 0 ? cambiosAutMap.get(pid) : null,
+            );
+          }
+        });
       }
 
       // Convert BigInt to Number for JSON serialization
@@ -2264,10 +2333,14 @@ export class CampanasController {
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
+      // Filtro por autorización de circuitos — mismo contrato que getAll.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
         u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        autorizacion: autorizacionKeys,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -2275,22 +2348,36 @@ export class CampanasController {
         return;
       }
 
+      // Rango de fechas del filtro de catorcena (mismo recorte por periodo que getAll)
+      // para el filtro de autorizaci�n de circuitos.
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const [catIniData, catFinData] = await Promise.all([
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearInicio), numero_catorcena: Number(catorcenaInicio) } }),
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearFin), numero_catorcena: Number(catorcenaFin) } }),
+        ]);
+        if (catIniData && catFinData) {
+          filterFechaInicio = catIniData.fecha_inicio;
+          filterFechaFin = catFinData.fecha_fin;
+        }
+      }
+
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      // Multiselect (CSV); con `autorizacion` el IN va en OR más abajo (igual que getAll).
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -2305,7 +2392,11 @@ export class CampanasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
+        params.push(...(sub.params as (string | number)[]));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -2319,6 +2410,18 @@ export class CampanasController {
         if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
         sub += `)`;
         conditions.push(sub);
+      }
+
+      // Filtro por autorización de circuitos (mismo EXISTS y recorte por
+      // periodo que getAll) para que los KPIs cuadren con el listado.
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(
+          autorizacionKeys,
+          'ct.id_propuesta',
+          periodoDesdeFiltro(filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null, yearInicio, yearFin),
+        ));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       if (yearInicio && yearFin) {
@@ -3570,6 +3673,9 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Mismo filtro de Status (multiselect) + autorización de circuitos que getAll,
+      // para que el export salga con lo que lista la vista.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
 
       // Build WHERE conditions (same as getAll)
       const conditions: string[] = ['cm.id IS NOT NULL'];
@@ -3577,19 +3683,17 @@ export class CampanasController {
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -3619,6 +3723,18 @@ export class CampanasController {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
         }
+      }
+
+      // Estatus OR autorización de circuitos (misma lista en la UI), con el
+      // mismo recorte por periodo que getAll.
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(
+          autorizacionKeys,
+          'ct.id_propuesta',
+          periodoDesdeFiltro(filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null, yearInicio, yearFin),
+        ));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       // Visibility filter
