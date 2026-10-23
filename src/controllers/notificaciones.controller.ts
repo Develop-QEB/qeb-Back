@@ -2538,7 +2538,11 @@ export class NotificacionesController {
           descripcion: descripcionTrim,
           tipo: 'Actividad Comercial',
           categoria: 'Actividad Comercial',
-          estatus: 'Activo',
+          // Tablero CRM + listado comparten `tareas.estatus`. Sincronizamos con
+          // lo que el usuario eligio en el modal (estatus_actividad). Default
+          // 'Abierto'. Antes estaba hard-coded a 'Abierto' lo que hacia que el
+          // listado mostrara otro valor que el modal (feedback Jos 2026-10-20).
+          estatus: estatusActividadValido || 'Abierto',
           fecha_inicio: nowMx,
           fecha_fin: fecha_fin ? new Date(fecha_fin) : defaultFin,
           id_responsable: userId,
@@ -2820,6 +2824,8 @@ export class NotificacionesController {
           id_propuesta: idPropuestaStr,
           campania_id: campaniaId,
           contenido: contenidoNuevo,
+          // Sincroniza tareas.estatus con lo que el usuario eligio en el modal.
+          // Si no manda nada mantiene el estatus previo (feedback Jos 2026-10-20).
           ...(estatusActividadValido ? { estatus: estatusActividadValido } : {}),
         },
       });
