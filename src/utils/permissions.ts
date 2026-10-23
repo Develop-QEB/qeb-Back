@@ -27,6 +27,11 @@ const FULL_VISIBILITY_ROLES = [
   // Nuevo rol (2026-10-14): mismos permisos que Director General Adjunto —
   // visibilidad total, sin aprobar autorizaciones. Area admin: Comercial.
   'Director Comercial General',
+  // Nuevo rol (2026-10-23, Matriz Roles QEB): Director de Mercadotecnia.
+  // Perfil mixto — visibilidad total (como un director) + actividades de
+  // trafico (asignacion de inventario, descargas ODM/versionario). Area
+  // admin: Direccion de Mercadotecnia.
+  'Director de Mercadotecnia',
   // TI y Mejora Continua: admin completo
   'Gerente de TI',
   'Especialista de TI',
