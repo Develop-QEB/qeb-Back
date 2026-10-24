@@ -6796,6 +6796,39 @@ export class CampanasController {
               console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
             }
           }
+          // Enriquecer faltantesPorArte con nombre_arte desde biblioteca_artes.
+          // Feedback Jos 2026-10-06: el drawer ASC mostraba el nombre del archivo
+          // (ej. 1790963-xyz-Captura.png) en vez del nombre legible del arte.
+          // Al guardar aqui el nombre_arte, el drawer y las tareas ASC derivadas
+          // tienen el display correcto sin necesidad de un extra fetch desde el front.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            Array.isArray(evidenciaObj.faltantesPorArte) &&
+            evidenciaObj.faltantesPorArte.length > 0
+          ) {
+            try {
+              const urls: string[] = evidenciaObj.faltantesPorArte
+                .map((f: any) => f?.arte)
+                .filter((a: unknown): a is string => typeof a === 'string' && !!a);
+              if (urls.length > 0) {
+                const biblio = await prisma.biblioteca_artes.findMany({
+                  where: { campania_id: campanaId, archivo: { in: urls } },
+                  select: { archivo: true, nombre_arte: true, nombre_generico: true },
+                });
+                const nombrePorUrl = new Map<string, string | null>(
+                  biblio.map(b => [b.archivo, b.nombre_arte || b.nombre_generico || null])
+                );
+                evidenciaObj.faltantesPorArte = evidenciaObj.faltantesPorArte.map((f: any) => ({
+                  ...f,
+                  nombre_arte: f?.nombre_arte || nombrePorUrl.get(f?.arte) || null,
+                }));
+              }
+            } catch (nombErr) {
+              console.warn('createTarea - no se pudo enriquecer faltantesPorArte con nombre_arte:', nombErr);
+            }
+          }
+
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
@@ -6806,7 +6839,7 @@ export class CampanasController {
             }));
             evidenciaData = JSON.stringify(evidenciaObj);
           } else {
-            evidenciaData = evidencia;
+            evidenciaData = JSON.stringify(evidenciaObj);
           }
         } catch (parseError) {
           // Si no es JSON válido, usar como está
@@ -6897,7 +6930,12 @@ export class CampanasController {
             campania_nombre: campanaNombre,
           });
 
-          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => {
+            // Preferimos nombre_arte legible; fallback al nombre del archivo.
+            // Feedback Jos 2026-10-06.
+            const nombre = f?.nombre_arte || (f?.arte ? (String(f.arte).split('/').pop() || 'Sin arte') : 'Sin arte');
+            return `- ${nombre}: ${f?.cantidad ?? 0} faltante(s)`;
+          }).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
 
           for (const asc of ascs) {
             try {
