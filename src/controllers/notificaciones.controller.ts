@@ -2063,6 +2063,18 @@ export class NotificacionesController {
         }
       }
 
+      // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970
+      // y campanas.controller getCaras). idquote aqui es el id_propuesta como
+      // string, igual que lo guarda solicitudCaras y tareas.id_propuesta.
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          id_propuesta: idquote,
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+
       const carasConTarifa = caras.map(cara => {
         const totalCarasLocal = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
         const totalCarasGrupo = cara.grupo_rt_bf ? (grupoCarasMap.get(cara.grupo_rt_bf) || totalCarasLocal) : totalCarasLocal;
@@ -2077,6 +2089,7 @@ export class NotificacionesController {
           catorcena: catorcenaInfo,
           cliente: clienteNombre,
           campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
+          en_filtro_dg: enFiltroDg,
         };
       });
 

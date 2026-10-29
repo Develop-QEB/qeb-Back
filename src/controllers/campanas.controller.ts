@@ -2704,6 +2704,20 @@ export class CampanasController {
         carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
       }
 
+      // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970).
+      // Si la campaña tiene una tarea 'Filtro Autorización DG' abierta (gerente
+      // comercial aun revisando), el front pinta un embudo ambar junto al "Pend. DG"
+      // para distinguirlo del rojo normal (que corresponde al director general).
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          campania_id: campanaId,
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+      carasEnriched = carasEnriched.map((c: any) => ({ ...c, en_filtro_dg: enFiltroDg }));
+
       const carasSerializable = serializeBigInt(carasEnriched);
 
       res.json({
