@@ -888,7 +888,8 @@ export async function crearTareasAutorizacion(
     where: { id: solicitudId },
     select: { sap_database: true },
   });
-  if ((solUDC?.sap_database || '').toUpperCase() === 'UDC') {
+  const esVentaUDC = (solUDC?.sap_database || '').toUpperCase() === 'UDC';
+  if (esVentaUDC) {
     const idsPendUDC = [...new Set([...pendientesDg, ...pendientesDcm])]
       .filter((n) => Number.isFinite(n));
     const conTabulador = new Set<number>();
@@ -995,6 +996,23 @@ export async function crearTareasAutorizacion(
     },
     select: { id: true, nombre: true, correo_electronico: true }
   });
+
+  // DCM de UDC (aeropuerto): la "Dirección Comercial de Aeropuerto" (Marcos
+  // Barba, puesto/user_role 'Director Comercial Aeropuerto') ocupa el slot DCM
+  // SOLO para ventas UDC. El 'Director Comercial' normal (Rodrigo Margain) NO
+  // matchea ese puesto, así que se busca aparte y se usa solo si esVentaUDC.
+  const usuariosDcmUDC = esVentaUDC
+    ? await prisma.usuario.findMany({
+        where: {
+          deleted_at: null,
+          OR: [
+            { puesto: 'Director Comercial Aeropuerto' },
+            { user_role: 'Director Comercial Aeropuerto' },
+          ],
+        },
+        select: { id: true, nombre: true, correo_electronico: true },
+      })
+    : [];
 
   // Gerente Comercial del asesor de la solicitud — filtro previo a DG.
   // Feedback 2026-07-17: cada asesor está en un equipo cuyo líder es su
@@ -1177,7 +1195,12 @@ export async function crearTareasAutorizacion(
     let tareaDcmTipo: 'Filtro Autorización DCM' | 'Autorización DCM' = 'Autorización DCM';
     if (pendientesDcm.length > 0 && !existeTareaDcm) {
       const usarFiltroDcm = FILTRO_DCM_HABILITADO && gerenteComercialDcm !== null;
-      const asignadosDcm = usarFiltroDcm ? [gerenteComercialDcm!] : usuariosDcm;
+      // UDC: la autorización DCM va a la Dirección Comercial de Aeropuerto (Marcos).
+      // Si no hay ese usuario en el entorno, fallback al DCM normal (Rodrigo) para
+      // no perder la tarea.
+      const asignadosDcm = usarFiltroDcm
+        ? [gerenteComercialDcm!]
+        : (esVentaUDC && usuariosDcmUDC.length > 0 ? usuariosDcmUDC : usuariosDcm);
       if (asignadosDcm.length > 0) {
         tareaDcmTipo = usarFiltroDcm ? 'Filtro Autorización DCM' : 'Autorización DCM';
         const descDcm = usarFiltroDcm

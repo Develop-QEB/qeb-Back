@@ -1692,7 +1692,8 @@ export class NotificacionesController {
 
       // Validar permiso: DG puede aprobar DG, DCM puede aprobar DCM
       const esDG = puestoUpper === 'DG' || puestoUpper === 'DIRECTOR GENERAL' || puestoUpper === 'DIRECCIÓN GENERAL' || puestoUpper === 'DIRECCION GENERAL';
-      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL';
+      // 'Director Comercial Aeropuerto' (Marcos) aprueba el slot DCM de UDC.
+      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL' || puestoUpper === 'DIRECTOR COMERCIAL AEROPUERTO';
       const tienePermiso = (tipoUpper === 'DG' && esDG) || (tipoUpper === 'DCM' && esDCM);
 
       if (!tienePermiso) {
@@ -1869,7 +1870,8 @@ export class NotificacionesController {
 
       // Determinar el tipo de autorización según el puesto del usuario
       const esDG = puestoUpper === 'DG' || puestoUpper === 'DIRECTOR GENERAL' || puestoUpper === 'DIRECCIÓN GENERAL' || puestoUpper === 'DIRECCION GENERAL';
-      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL';
+      // 'Director Comercial Aeropuerto' (Marcos) aprueba el slot DCM de UDC.
+      const esDCM = puestoUpper === 'DCM' || puestoUpper === 'DIRECTOR COMERCIAL' || puestoUpper === 'DIRECCIÓN COMERCIAL' || puestoUpper === 'DIRECCION COMERCIAL' || puestoUpper === 'DIRECTOR COMERCIAL AEROPUERTO';
 
       let tipoAutorizacion: 'dg' | 'dcm';
       if (esDG) {
