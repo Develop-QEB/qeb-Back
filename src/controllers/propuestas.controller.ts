@@ -2528,6 +2528,68 @@ export class PropuestasController {
         });
       }
 
+      // #9 (UDC): al crear una campaña de UDC (aeropuerto), mandarle a Tráfico
+      // una tarea de "Seguimiento Campaña UDC". Solo UDC. Post-commit y en
+      // try/catch: un fallo aquí no debe tumbar el pase a ventas (ya commiteado).
+      if (campania) {
+        try {
+          const sapDbVenta = await getSapDatabaseDePropuesta(propuestaId);
+          if ((sapDbVenta || '').toUpperCase() === 'UDC') {
+            const yaExiste = await prisma.tareas.findFirst({
+              where: { campania_id: campania.id, tipo: 'Seguimiento Campaña UDC' },
+              select: { id: true },
+            });
+            if (!yaExiste) {
+              // "Tráfico normal" = cualquier rol de tráfico (mismo criterio que
+              // esTrafico = /trafico/i). No existe un rol "Tráfico Aeropuerto".
+              const ROLES_TRAFICO = [
+                'Gerente de Trafico', 'Coordinador de trafico',
+                'Especialista de trafico', 'Auxiliar de trafico', 'Bi Trafico',
+              ];
+              const trafico = await prisma.usuario.findMany({
+                where: { user_role: { in: ROLES_TRAFICO }, deleted_at: null },
+                select: { id: true, nombre: true, correo_electronico: true },
+              });
+              if (trafico.length > 0) {
+                await prisma.tareas.create({
+                  data: {
+                    tipo: 'Seguimiento Campaña UDC',
+                    titulo: `Seguimiento campaña UDC - ${campania.nombre}`,
+                    descripcion: `Nueva campaña de UDC (aeropuerto AICM): ${campania.nombre}. Cliente: ${solicitud?.razon_social || 'Sin nombre'}. Dar seguimiento.`,
+                    estatus: 'Pendiente',
+                    id_responsable: Number(req.user?.userId) || 0,
+                    responsable: req.user?.nombre ?? 'Sistema',
+                    id_solicitud: String(propuesta.solicitud_id ?? ''),
+                    id_propuesta: String(propuestaId),
+                    campania_id: campania.id,
+                    contenido: 'campana',
+                    id_asignado: trafico.map(u => u.id).join(','),
+                    asignado: trafico.map(u => u.nombre).join(', '),
+                    fecha_fin: cotizacion?.fecha_fin || new Date(),
+                  },
+                });
+                for (const t of trafico) {
+                  if (t.correo_electronico && await correoPermitido(t.id, 'tarea', 'Seguimiento')) {
+                    enviarCorreoTarea(
+                      propuesta.solicitud_id || 0,
+                      campania.nombre,
+                      `Seguimiento de campaña UDC: ${campania.nombre}`,
+                      cotizacion?.fecha_fin || new Date(),
+                      t.correo_electronico,
+                      t.nombre,
+                      { cliente: solicitud?.razon_social || undefined, creador: req.user?.nombre || 'Usuario', idCampania: campania.id },
+                      `https://app.qeb.mx/campanas/${campania.id}`
+                    ).catch(err => console.error('Error correo Tráfico UDC:', err));
+                  }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Error creando tarea Seguimiento Campaña UDC para Tráfico:', err);
+        }
+      }
+
       // Enviar correos a Analistas asignados (Seguimiento Campaña)
       if (campania) {
         const idsAsignadosCorreo = (id_asignados || propuesta.id_asignado || '')
