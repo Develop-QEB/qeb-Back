@@ -4,7 +4,7 @@ import { AuthRequest } from '../types';
 import { emitToClientes, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { logHistorial } from '../utils/historial';
 
-const SAP_API_URL = process.env.SAP_API_URL || 'https://binding-convinced-ride-foto.trycloudflare.com';
+const SAP_API_URL = process.env.SAP_API_URL || 'https://sap.qeb.mx';
 
 // SAP endpoints por base de datos
 const SAP_ENDPOINTS: Record<string, string> = {
