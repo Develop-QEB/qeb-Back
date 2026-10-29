@@ -2717,14 +2717,40 @@ export async function crearAutorizacionEliminacionCampana(params: {
     + (motivoTxt ? `\n\nMotivo de eliminación: ${motivoTxt}` : '')
     + (detalleCircuitos ? `\n\nCircuitos a eliminar:\n${detalleCircuitos}` : (resumen ? `\n${resumen}` : ''));
 
-  // [Solo Gerencia] La eliminación NUNCA va a DG: debe llegar al GERENTE de
-  // autorización del asesor (miembro del equipo con proposito 'filtro_autorizacion').
-  // Si el asesor no tiene gerente configurado, se BLOQUEA (no se escala a Dirección).
-  if (!gc) {
-    throw new Error('No se encontró Gerente de autorización para el asesor de esta campaña. Revisa su equipo de filtro de autorización.');
+  // [Normal: solo Gerencia] La eliminación va al GERENTE de autorización del asesor
+  // (miembro del equipo con proposito 'filtro_autorizacion'). Si no tiene gerente,
+  // se BLOQUEA (no se escala a Dirección) — comportamiento CIMU/TRADE intacto.
+  // [UDC] El asesor de aeropuerto NO está en un equipo de filtro → no hay gerente.
+  // Decisión de Mario (2026-10-28): en ventas UDC la autorización de eliminación va
+  // DIRECTO a Dirección General (tarea 'Autorización Eliminación', el fallback que
+  // aprueba DG y borra). Así no truena con 500.
+  const solElim = await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { sap_database: true } });
+  const esVentaUDCElim = (solElim?.sap_database || '').toUpperCase() === 'UDC';
+  let responsables: { id: number; nombre: string }[];
+  let tipoTarea: string;
+  if (esVentaUDCElim) {
+    const dgUsers = await prisma.usuario.findMany({
+      where: {
+        deleted_at: null,
+        OR: [
+          { puesto: 'DG' }, { puesto: 'Director General' }, { puesto: 'Dirección General' },
+          { puesto: 'Direccion General' }, { user_role: 'Director General' },
+        ],
+      },
+      select: { id: true, nombre: true },
+    });
+    if (dgUsers.length === 0) {
+      throw new Error('No hay usuarios Director General para autorizar la eliminación de la venta UDC.');
+    }
+    responsables = dgUsers.map((u) => ({ id: u.id, nombre: u.nombre }));
+    tipoTarea = TIPO_AUTORIZACION_ELIMINACION;
+  } else {
+    if (!gc) {
+      throw new Error('No se encontró Gerente de autorización para el asesor de esta campaña. Revisa su equipo de filtro de autorización.');
+    }
+    responsables = [{ id: gc.id, nombre: gc.nombre }];
+    tipoTarea = TIPO_FILTRO_ELIMINACION;
   }
-  const responsables: { id: number; nombre: string }[] = [{ id: gc.id, nombre: gc.nombre }];
-  const tipoTarea: string = TIPO_FILTRO_ELIMINACION;
 
   const tarea = await prisma.tareas.create({
     data: {
