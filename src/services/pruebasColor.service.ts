@@ -490,8 +490,9 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     // Jos 2026-10-29: cuando una Revision Anticipada se aprueba y la prueba
     // ya esta ligada a una campania, el arte se vincula a biblioteca_artes
     // de la campania (tab Aprobados). Las pruebas de color NO vinculan —
-    // solo RA, como pidio Jos.
-    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && prueba.archivo) {
+    // solo RA, como pidio Jos. Si solo hay enlace_externo (sin archivo
+    // subido) tambien se vincula usando el link como "archivo".
+    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && (prueba.archivo || prueba.enlace_externo)) {
       try {
         await vincularArteAprobadoABibliotecaCampania(prueba);
       } catch (e) {
@@ -1018,16 +1019,23 @@ export async function vincularPruebasConReservas(reservaIds: number[]): Promise<
  * por revision de artes. Mismo patron INSERT ... ON DUPLICATE KEY UPDATE
  * que usa campanas.controller.handleUploadArt. Las Pruebas de Color NO
  * vinculan — solo RA.
+ *
+ * biblioteca_artes.archivo es NOT NULL + UNIQUE(campania_id, archivo), asi
+ * que si la prueba solo tiene link (enlace_externo) sin archivo subido,
+ * usamos el link como "archivo" para preservar el flujo. El tab Aprobados
+ * del front ya maneja URLs externas.
  */
 async function vincularArteAprobadoABibliotecaCampania(prueba: {
   id: number;
   campania_id: number | null;
   archivo: string;
+  enlace_externo: string | null;
   nombre_arte: string | null;
   created_by: number | null;
 }) {
-  if (!prueba.campania_id || !prueba.archivo) return;
-  const archivo = prueba.archivo;
+  if (!prueba.campania_id) return;
+  const archivo = (prueba.archivo && prueba.archivo.trim()) || (prueba.enlace_externo && prueba.enlace_externo.trim()) || null;
+  if (!archivo) return;
   // tipo 'tradicional' por default; si el archivo trae indicio digital
   // (JPG/PNG/MP4 marcados por path), el back ya los diferencia. Para RA
   // asumimos tradicional porque es el flujo documentado de la brochita.
@@ -1039,5 +1047,5 @@ async function vincularArteAprobadoABibliotecaCampania(prueba: {
       nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
       nota = COALESCE(VALUES(nota), nota)
   `, prueba.campania_id, archivo, nombreArte, `Aprobado desde Revisión Anticipada #${prueba.id}`, null, null, prueba.created_by || null);
-  console.log(`[pruebasColor.vincularArteAprobadoABibliotecaCampania] RA #${prueba.id} -> biblioteca_artes campania=${prueba.campania_id}`);
+  console.log(`[pruebasColor.vincularArteAprobadoABibliotecaCampania] RA #${prueba.id} -> biblioteca_artes campania=${prueba.campania_id} archivo=${archivo}`);
 }
