@@ -960,9 +960,24 @@ export class PropuestasController {
         },
       });
 
+      // Jos 2026-10-26: etapa visual del filtro DG. Si la propuesta tiene
+      // una tarea 'Filtro Autorización DG' abierta (gerente comercial aun
+      // revisando), el front pinta un embudo ambar junto al "Pend. DG" para
+      // distinguirlo del rojo normal (que corresponde al director general).
+      // Al aprobar el filtro, la tarea pasa a 'Autorización DG' y el flag se
+      // apaga -> embudo desaparece.
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          id_propuesta: String(id),
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+
       res.json({
         success: true,
-        data: caras,
+        data: caras.map(c => ({ ...c, en_filtro_dg: enFiltroDg })),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener caras de propuesta';
