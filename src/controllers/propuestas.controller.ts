@@ -26,6 +26,20 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
+import {
+  parseAutorizacionFiltro,
+  parseStatusLista,
+  sqlStatusOAutorizacion,
+  parseEstatusValorAutorizacion,
+  periodoDesdeFiltro,
+  sqlExisteCaraConAutorizacion,
+  sqlPropuestasConCambioAutorizacion,
+  resumenAutorizacionPorPropuesta,
+  cambiosAutorizacionPorPropuesta,
+  cambiosEstatusPorRef,
+  unirCambios,
+  type CambiosFechas,
+} from '../utils/autorizacionFiltro';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -460,7 +474,10 @@ export class PropuestasController {
   async getAll(req: AuthRequest, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 200);
+      // Tope 5000: el front pide todo el universo (~1.7k propuestas) cuando hay
+      // agrupación, filtros avanzados o el filtro Incompleta/Completa, que se
+      // evalúan en cliente (mismo patrón que campañas).
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 5000);
       const status = req.query.status as string;
       const search = req.query.search as string;
       const soloAtendidas = req.query.soloAtendidas === 'true';
@@ -479,11 +496,19 @@ export class PropuestasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos (`autorizacion=pend_dg,...`),
+      // estatus de autorización en el filtro de historial (`estatusValor=auth:x`)
+      // y fechas de último cambio por fila (`includeCambios=true`, para el orden
+      // "Último cambio"). Ver utils/autorizacionFiltro.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.PROPUESTAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, soloAtendidas, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        autorizacion: autorizacionKeys, includeCambios,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -504,15 +529,16 @@ export class PropuestasController {
       // Filtro por default: ocultar 'Rechazada'. Si el usuario pide otro status
       // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
       // gana excludeRechazadas (siempre se ocultan).
+      // `status` es multiselect (CSV). Si además viene `autorizacion`, el IN se
+      // combina en OR con el EXISTS de circuitos más abajo (misma lista en la UI).
+      const statusLista = parseStatusLista(status).filter(s => !excludeRechazadas || s !== 'Rechazada');
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        whereConditions += ` AND pr.status IN (${statusLista.map(() => '?').join(',')})`;
+        params.push(...statusLista);
+      }
       if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
-          whereConditions += ` AND pr.status = ?`;
-          params.push(status);
-        }
         whereConditions += ` AND pr.status <> 'Rechazada'`;
-      } else if (status) {
-        whereConditions += ` AND pr.status = ?`;
-        params.push(status);
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -561,7 +587,13 @@ export class PropuestasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Propuesta'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        // "Cambió a <autorización>" en el rango: historial de autorización de
+        // la propuesta (ver utils/autorizacionFiltro).
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        whereConditions += ` AND pr.id IN (${sub.sql})`;
+        params.push(...sub.params);
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -624,6 +656,19 @@ export class PropuestasController {
       } else if (yearInicio) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
         params.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
+      // Filtro por autorización de circuitos: entra la propuesta con AL MENOS
+      // UN circuito en alguno de los estatus pedidos; con filtro de Periodo
+      // solo cuentan los circuitos que solapan ese rango.
+      const periodoAut = periodoDesdeFiltro(
+        filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null,
+        yearInicio, yearFin,
+      );
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('pr.status', statusLista, sqlExisteCaraConAutorizacion(autorizacionKeys, 'pr.id', periodoAut));
+        whereConditions += ` AND ${ex.sql}`;
+        params.push(...ex.params);
       }
 
       // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
@@ -768,6 +813,43 @@ export class PropuestasController {
             p.inversion = fresh;
           }
         });
+
+        // Totales de completitud para el badge "Incompleta" del listado.
+        // MISMO criterio que campañas (inc_agg de campanas.controller): solo
+        // circuitos catorcenales (INNER JOIN catorcenas — mensual queda fuera)
+        // y mismas exclusiones IM/ESP/ES-/-QR/CF-#.
+        const completitudData = await prisma.$queryRawUnsafe<{ propuesta_id: string; caras_esperadas: bigint; reservas_validas: bigint }[]>(`
+          SELECT sc.idquote AS propuesta_id,
+                 COALESCE(SUM(sc.caras + sc.bonificacion), 0) AS caras_esperadas,
+                 COALESCE(SUM((SELECT COUNT(*) FROM reservas r
+                               WHERE r.solicitudCaras_id = sc.id AND r.deleted_at IS NULL)), 0) AS reservas_validas
+          FROM solicitudCaras sc
+          INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+          WHERE sc.idquote IN (${placeholders})
+            AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+          GROUP BY sc.idquote
+        `, ...propuestaIds.map(id => String(id)));
+        const completitudMap = new Map(completitudData.map(r => [Number(r.propuesta_id), r]));
+        formattedPropuestas.forEach(p => {
+          const comp = completitudMap.get(p.id);
+          (p as any).caras_esperadas_total = comp ? Number(comp.caras_esperadas) : 0;
+          (p as any).reservas_validas_total = comp ? Number(comp.reservas_validas) : 0;
+        });
+
+        // Resumen de autorización por fila (circuitos por estatus, acotado al
+        // periodo filtrado) y, si se pide, fechas de último cambio por estatus
+        // de propuesta y de autorización para el orden "Último cambio".
+        const [resumenAutMap, cambiosAutMap, cambiosEstatusMap] = await Promise.all([
+          resumenAutorizacionPorPropuesta(propuestaIds, periodoAut),
+          includeCambios ? cambiosAutorizacionPorPropuesta(propuestaIds) : Promise.resolve(new Map<number, CambiosFechas>()),
+          includeCambios ? cambiosEstatusPorRef('Propuesta', propuestaIds) : Promise.resolve(new Map<number, CambiosFechas>()),
+        ]);
+        formattedPropuestas.forEach(p => {
+          (p as any).autorizacion_resumen = resumenAutMap.get(p.id) || null;
+          if (includeCambios) {
+            (p as any).cambios = unirCambios(cambiosEstatusMap.get(p.id), cambiosAutMap.get(p.id));
+          }
+        });
       }
 
       const response = {
@@ -791,6 +873,76 @@ export class PropuestasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  /**
+   * Desglose de completitud por catorcena para el badge "Incompleta" del
+   * listado de propuestas. MISMA query y criterio que incompleteness_detail
+   * del getById de campañas (solo circuitos catorcenales, exclusiones
+   * IM/ESP/ES-/-QR/CF-#), anclada directo al idquote = id de la propuesta.
+   */
+  async getCompletitud(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const propuestaId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(propuestaId) || propuestaId <= 0) {
+        res.status(400).json({ success: false, error: 'Propuesta inválida' });
+        return;
+      }
+
+      const detailResult = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT
+          cat.numero_catorcena as catorcena,
+          cat.año as anio,
+          sc.articulo,
+          sc.ciudad,
+          (sc.caras + sc.bonificacion) as caras_esperadas,
+          (SELECT COUNT(*) FROM reservas r2
+           WHERE r2.solicitudCaras_id = sc.id AND r2.deleted_at IS NULL
+          ) as reservas_count
+        FROM solicitudCaras sc
+        INNER JOIN catorcenas cat ON sc.inicio_periodo >= cat.fecha_inicio AND sc.fin_periodo <= cat.fecha_fin
+        WHERE sc.idquote = ?
+          AND COALESCE(sc.articulo, '') NOT LIKE 'IM-%' AND COALESCE(sc.articulo, '') NOT LIKE 'ESP%' AND COALESCE(sc.articulo, '') NOT LIKE 'ES-%' AND COALESCE(sc.articulo, '') NOT LIKE '%-QR' AND COALESCE(sc.articulo, '') NOT REGEXP '^CF-[0-9]'
+        ORDER BY cat.año, cat.numero_catorcena, sc.articulo`,
+        String(propuestaId),
+      );
+
+      // Agrupar por catorcena — mismo post-procesamiento que campañas.
+      const byCat: Record<string, any> = {};
+      for (const r of detailResult) {
+        const key = `${r.anio}-${r.catorcena}`;
+        if (!byCat[key]) {
+          byCat[key] = {
+            catorcena: Number(r.catorcena),
+            anio: Number(r.anio),
+            caras_esperadas: 0,
+            reservas_count: 0,
+            grupos: [],
+          };
+        }
+        const esperadas = Number(r.caras_esperadas);
+        const reservadas = Number(r.reservas_count);
+        byCat[key].caras_esperadas += esperadas;
+        byCat[key].reservas_count += reservadas;
+        if (reservadas < esperadas) {
+          byCat[key].grupos.push({
+            articulo: r.articulo || 'SIN-ART',
+            ciudad: r.ciudad || '',
+            caras_esperadas: esperadas,
+            reservas_count: reservadas,
+            faltantes: esperadas - reservadas,
+          });
+        }
+      }
+      const detail = Object.values(byCat)
+        .map((c: any) => ({ ...c, completa: c.reservas_count >= c.caras_esperadas }))
+        .filter((c: any) => c.caras_esperadas > 0);
+
+      res.json({ success: true, data: detail });
+    } catch (error) {
+      console.error('Error en getCompletitud propuesta:', error);
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Error al obtener completitud' });
     }
   }
 
@@ -866,9 +1018,24 @@ export class PropuestasController {
         },
       });
 
+      // Jos 2026-10-26: etapa visual del filtro DG. Si la propuesta tiene
+      // una tarea 'Filtro Autorización DG' abierta (gerente comercial aun
+      // revisando), el front pinta un embudo ambar junto al "Pend. DG" para
+      // distinguirlo del rojo normal (que corresponde al director general).
+      // Al aprobar el filtro, la tarea pasa a 'Autorización DG' y el flag se
+      // apaga -> embudo desaparece.
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          id_propuesta: String(id),
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+
       res.json({
         success: true,
-        data: caras,
+        data: caras.map(c => ({ ...c, en_filtro_dg: enFiltroDg })),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener caras de propuesta';
@@ -1586,13 +1753,17 @@ export class PropuestasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos — mismo contrato que getAll.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
 
       const cacheKey = CACHE_KEYS.PROPUESTAS_STATS(JSON.stringify({
         u: userId, status, search, tipoPeriodo, yearInicio, yearFin, catorcenaInicio, catorcenaFin,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        autorizacion: autorizacionKeys,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -1603,15 +1774,15 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const statsParams: any[] = [];
 
+      // Multiselect (CSV); con `autorizacion` el IN va en OR más abajo (igual que getAll).
+      const statusLista = parseStatusLista(status).filter(s => !excludeRechazadas || s !== 'Rechazada');
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        whereConditions += ` AND pr.status IN (${statusLista.map(() => '?').join(',')})`;
+        statsParams.push(...statusLista);
+      }
       if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') {
-          whereConditions += ` AND pr.status = ?`;
-          statsParams.push(status);
-        }
         whereConditions += ` AND pr.status <> 'Rechazada'`;
-      } else if (status) {
-        whereConditions += ` AND pr.status = ?`;
-        statsParams.push(status);
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -1656,7 +1827,11 @@ export class PropuestasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        whereConditions += ` AND pr.id IN (${sub.sql})`;
+        statsParams.push(...sub.params);
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; statsParams.push(new Date(cambioEstatusDesde)); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; statsParams.push(endOfDayStr(cambioEstatusHasta)); }
@@ -1718,6 +1893,22 @@ export class PropuestasController {
       } else if (yearInicio) {
         whereConditions += ` AND cm.fecha_inicio <= ? AND cm.fecha_fin >= ?`;
         statsParams.push(new Date(`${yearInicio}-12-31`), new Date(`${yearInicio}-01-01`));
+      }
+
+      // Filtro por autorización de circuitos (mismo EXISTS y recorte por
+      // periodo que getAll) para que los KPIs cuadren con el listado.
+      if (autorizacionKeys.length > 0) {
+        let catRango: { inicio: Date; fin: Date } | null = null;
+        if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+          const [ci, cf] = await Promise.all([
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
+          ]);
+          if (ci && cf) catRango = { inicio: ci.fecha_inicio, fin: cf.fecha_fin };
+        }
+        const ex = sqlStatusOAutorizacion('pr.status', statusLista, sqlExisteCaraConAutorizacion(autorizacionKeys, 'pr.id', periodoDesdeFiltro(catRango, yearInicio, yearFin)));
+        whereConditions += ` AND ${ex.sql}`;
+        statsParams.push(...ex.params);
       }
 
       if (userId && !hasFullVisibility(userRol)) {
@@ -2646,6 +2837,9 @@ export class PropuestasController {
       const cambioEstatusHasta = (modoHistorial === 'cambio_estatus' ? fechaHasta : '') || (req.query.cambioEstatusHasta as string);
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
+      // Filtro por autorización de circuitos — mismo contrato que getAll/getStats.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2667,12 +2861,14 @@ export class PropuestasController {
       let whereConditions = `pr.deleted_at IS NULL AND pr.status NOT IN ('pendiente', 'Pendiente', 'Sin solicitud activa') AND sl.status = 'Atendida'`;
       const params: any[] = [];
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada') { whereConditions += ` AND pr.status = ?`; params.push(status); }
-        whereConditions += ` AND pr.status <> 'Rechazada'`;
-      } else if (status) {
-        whereConditions += ` AND pr.status = ?`; params.push(status);
+      // Multiselect (CSV); con `autorizacion` el IN va en OR más abajo (igual que getAll).
+      const statusLista = parseStatusLista(status).filter(s => !excludeRechazadas || s !== 'Rechazada');
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        whereConditions += ` AND pr.status IN (${statusLista.map(() => '?').join(',')})`;
+        params.push(...statusLista);
       }
+      if (excludeRechazadas) whereConditions += ` AND pr.status <> 'Rechazada'`;
       if (tipoPeriodo && tipoPeriodo !== 'todas') { whereConditions += ` AND COALESCE(ct.tipo_periodo, 'catorcena') = ?`; params.push(tipoPeriodo); }
       if (search) {
         // OR entre tags, OR entre campos por tag (alineado con getAll/getStats).
@@ -2718,7 +2914,11 @@ export class PropuestasController {
       // Mismo EXISTS que getAll/getStats: si el desglose no lo aplica, muestra
       // el universo completo mientras el listado y los KPIs si estan acotados.
       const endOfDayStr = (d: string): string => `${d} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        whereConditions += ` AND pr.id IN (${sub.sql})`;
+        params.push(...sub.params);
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -2732,6 +2932,22 @@ export class PropuestasController {
         if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
         sub += `)`;
         whereConditions += ` AND ${sub}`;
+      }
+
+      // Filtro por autorización de circuitos (mismo criterio que getAll/getStats;
+      // con filtro de catorcena solo cuentan los circuitos que la solapan).
+      if (autorizacionKeys.length > 0) {
+        let catRango: { inicio: Date; fin: Date } | null = null;
+        if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+          const [ci, cf] = await Promise.all([
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearInicio), numero_catorcena: parseInt(catorcenaInicio) } }),
+            prisma.catorcenas.findFirst({ where: { a_o: parseInt(yearFin), numero_catorcena: parseInt(catorcenaFin) } }),
+          ]);
+          if (ci && cf) catRango = { inicio: ci.fecha_inicio, fin: cf.fecha_fin };
+        }
+        const ex = sqlStatusOAutorizacion('pr.status', statusLista, sqlExisteCaraConAutorizacion(autorizacionKeys, 'pr.id', periodoDesdeFiltro(catRango, yearInicio, yearFin)));
+        whereConditions += ` AND ${ex.sql}`;
+        params.push(...ex.params);
       }
 
       // Visibility

@@ -2063,6 +2063,18 @@ export class NotificacionesController {
         }
       }
 
+      // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970
+      // y campanas.controller getCaras). idquote aqui es el id_propuesta como
+      // string, igual que lo guarda solicitudCaras y tareas.id_propuesta.
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          id_propuesta: idquote,
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+
       const carasConTarifa = caras.map(cara => {
         const totalCarasLocal = (cara.caras || 0) + (Number(cara.bonificacion) || 0);
         const totalCarasGrupo = cara.grupo_rt_bf ? (grupoCarasMap.get(cara.grupo_rt_bf) || totalCarasLocal) : totalCarasLocal;
@@ -2077,6 +2089,7 @@ export class NotificacionesController {
           catorcena: catorcenaInfo,
           cliente: clienteNombre,
           campana: solicitud?.producto_nombre || solicitud?.descripcion || null,
+          en_filtro_dg: enFiltroDg,
         };
       });
 
@@ -2275,6 +2288,7 @@ export class NotificacionesController {
         recordar_dias_antes,
         anio,
         catorcena,
+        catorcenas: catorcenasInput,
         estatus_actividad,
         base,
       } = req.body as {
@@ -2288,6 +2302,7 @@ export class NotificacionesController {
         recordar_dias_antes?: number;
         anio?: number | string;
         catorcena?: number | string;
+        catorcenas?: Array<number | string>;
         estatus_actividad?: string;
         base?: string;
       };
@@ -2386,12 +2401,30 @@ export class NotificacionesController {
       const anioValido = Number.isFinite(anioNum as number) && (anioNum as number) >= 2020 && (anioNum as number) <= 2035
         ? (anioNum as number)
         : null;
-      const catorcenaNum = catorcena != null && catorcena !== '' ? Number(catorcena) : null;
-      const catorcenaValida = Number.isFinite(catorcenaNum as number) && (catorcenaNum as number) >= 1 && (catorcenaNum as number) <= 26
-        ? Math.trunc(catorcenaNum as number)
-        : null;
-      const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
-        estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
+      // Catorcenas: aceptamos array nuevo (preferido) + fallback al singular.
+      // Normalizamos a lista unica y ordenada (1..26). Guardamos ambos: el
+      // array `catorcenas` + el primer valor como `catorcena` singular para
+      // que la UI vieja que lee `.catorcena` siga mostrando algo.
+      let catorcenasValidas: number[] = [];
+      if (Array.isArray(catorcenasInput)) {
+        const set = new Set<number>();
+        for (const raw of catorcenasInput) {
+          const n = Number(raw);
+          if (Number.isFinite(n) && n >= 1 && n <= 26) set.add(Math.trunc(n));
+        }
+        catorcenasValidas = [...set].sort((a, b) => a - b);
+      } else {
+        const n = catorcena != null && catorcena !== '' ? Number(catorcena) : NaN;
+        if (Number.isFinite(n) && n >= 1 && n <= 26) catorcenasValidas = [Math.trunc(n)];
+      }
+      const catorcenaValida = catorcenasValidas[0] ?? null;
+      // Estatus: 3 opciones (feedback Jos 2026-10-19). 'Cerrado' legacy se
+      // normaliza a 'Finalizado' al escribir, para que todas las nuevas
+      // actividades usen el vocabulario nuevo.
+      const estatusActividadValido: 'Abierto' | 'Activo' | 'Finalizado' | null =
+        estatus_actividad === 'Abierto' || estatus_actividad === 'Activo' || estatus_actividad === 'Finalizado'
+          ? estatus_actividad
+          : estatus_actividad === 'Cerrado' ? 'Finalizado' : null;
       const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
@@ -2406,6 +2439,7 @@ export class NotificacionesController {
           : null,
         anio: anioValido,
         catorcena: catorcenaValida,
+        catorcenas: catorcenasValidas,
         estatus_actividad: estatusActividadValido,
         base: baseValida,
       });
@@ -2422,7 +2456,11 @@ export class NotificacionesController {
           descripcion: descripcionTrim,
           tipo: 'Actividad Comercial',
           categoria: 'Actividad Comercial',
-          estatus: 'Activo',
+          // Tablero CRM + listado comparten `tareas.estatus`. Sincronizamos con
+          // lo que el usuario eligio en el modal (estatus_actividad). Default
+          // 'Abierto'. Antes estaba hard-coded a 'Abierto' lo que hacia que el
+          // listado mostrara otro valor que el modal (feedback Jos 2026-10-20).
+          estatus: estatusActividadValido || 'Abierto',
           fecha_inicio: nowMx,
           fecha_fin: fecha_fin ? new Date(fecha_fin) : defaultFin,
           id_responsable: userId,
@@ -2448,7 +2486,9 @@ export class NotificacionesController {
         origen: 'notificaciones_actividad_comercial',
         extras: {
           cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
-          anio: anioValido, catorcena: catorcenaValida,
+          anio: anioValido,
+          catorcena: catorcenaValida,
+          catorcenas: catorcenasValidas,
           estatus_actividad: estatusActividadValido, base: baseValida,
         },
       });
@@ -2549,6 +2589,7 @@ export class NotificacionesController {
         recordar_dias_antes,
         anio,
         catorcena,
+        catorcenas: catorcenasInput,
         estatus_actividad,
         base,
       } = req.body as {
@@ -2562,6 +2603,7 @@ export class NotificacionesController {
         recordar_dias_antes?: number;
         anio?: number | string;
         catorcena?: number | string;
+        catorcenas?: Array<number | string>;
         estatus_actividad?: string;
         base?: string;
       };
@@ -2637,11 +2679,26 @@ export class NotificacionesController {
       const anioNum = anio != null && anio !== '' ? Number(anio) : null;
       const anioValido = Number.isFinite(anioNum as number) && (anioNum as number) >= 2020 && (anioNum as number) <= 2035
         ? (anioNum as number) : null;
-      const catorcenaNum = catorcena != null && catorcena !== '' ? Number(catorcena) : null;
-      const catorcenaValida = Number.isFinite(catorcenaNum as number) && (catorcenaNum as number) >= 1 && (catorcenaNum as number) <= 26
-        ? Math.trunc(catorcenaNum as number) : null;
-      const estatusActividadValido: 'Abierto' | 'Cerrado' | null =
-        estatus_actividad === 'Abierto' || estatus_actividad === 'Cerrado' ? estatus_actividad : null;
+      // Catorcenas multi (feedback Jos 2026-10-19): preferimos array;
+      // fallback a singular legacy.
+      let catorcenasValidas: number[] = [];
+      if (Array.isArray(catorcenasInput)) {
+        const set = new Set<number>();
+        for (const raw of catorcenasInput) {
+          const n = Number(raw);
+          if (Number.isFinite(n) && n >= 1 && n <= 26) set.add(Math.trunc(n));
+        }
+        catorcenasValidas = [...set].sort((a, b) => a - b);
+      } else {
+        const n = catorcena != null && catorcena !== '' ? Number(catorcena) : NaN;
+        if (Number.isFinite(n) && n >= 1 && n <= 26) catorcenasValidas = [Math.trunc(n)];
+      }
+      const catorcenaValida = catorcenasValidas[0] ?? null;
+      // Estatus: 3 opciones + alias 'Cerrado' → 'Finalizado' (feedback Jos 2026-10-19).
+      const estatusActividadValido: 'Abierto' | 'Activo' | 'Finalizado' | null =
+        estatus_actividad === 'Abierto' || estatus_actividad === 'Activo' || estatus_actividad === 'Finalizado'
+          ? estatus_actividad
+          : estatus_actividad === 'Cerrado' ? 'Finalizado' : null;
       const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
@@ -2651,7 +2708,9 @@ export class NotificacionesController {
         activar_recordatorio: !!activar_recordatorio,
         recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
           ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0)) : null,
-        anio: anioValido, catorcena: catorcenaValida,
+        anio: anioValido,
+        catorcena: catorcenaValida,
+        catorcenas: catorcenasValidas,
         estatus_actividad: estatusActividadValido, base: baseValida,
       });
 
@@ -2675,6 +2734,9 @@ export class NotificacionesController {
           id_propuesta: idPropuestaStr,
           campania_id: campaniaId,
           contenido: contenidoNuevo,
+          // Sincroniza tareas.estatus con lo que el usuario eligio en el modal.
+          // Si no manda nada mantiene el estatus previo (feedback Jos 2026-10-20).
+          ...(estatusActividadValido ? { estatus: estatusActividadValido } : {}),
         },
       });
 
@@ -2692,7 +2754,11 @@ export class NotificacionesController {
       cmp('cliente', 'Cliente', prevContenido.cliente, cliente);
       cmp('marca', 'Marca', prevContenido.marca, marca);
       cmp('anio', 'Año', prevContenido.anio, anioValido);
-      cmp('catorcena', 'Catorcena', prevContenido.catorcena, catorcenaValida);
+      // Catorcenas: comparamos el array completo. Si solo cambia el array
+      // pero no el singular, debe quedar registrado como un solo cambio.
+      cmp('catorcenas', 'Periodo (catorcenas)',
+        Array.isArray(prevContenido.catorcenas) ? prevContenido.catorcenas : (prevContenido.catorcena ? [prevContenido.catorcena] : []),
+        catorcenasValidas);
       cmp('estatus_actividad', 'Estatus', prevContenido.estatus_actividad, estatusActividadValido);
       cmp('base', 'Base', prevContenido.base, baseValida);
       cmp('activar_recordatorio', 'Recordatorio', !!prevContenido.activar_recordatorio, !!activar_recordatorio);
@@ -2708,7 +2774,9 @@ export class NotificacionesController {
         cambios: cambios.length > 0 ? cambios : undefined,
         extras: {
           cliente, marca, subtipo: subtipoOut, ref_id: refIdOut,
-          anio: anioValido, catorcena: catorcenaValida,
+          anio: anioValido,
+          catorcena: catorcenaValida,
+          catorcenas: catorcenasValidas,
           estatus_actividad: estatusActividadValido, base: baseValida,
         },
       });

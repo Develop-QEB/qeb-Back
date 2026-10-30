@@ -31,6 +31,20 @@ import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import {
+  parseAutorizacionFiltro,
+  parseStatusLista,
+  sqlStatusOAutorizacion,
+  parseEstatusValorAutorizacion,
+  periodoDesdeFiltro,
+  sqlExisteCaraConAutorizacion,
+  sqlPropuestasConCambioAutorizacion,
+  resumenAutorizacionPorPropuesta,
+  cambiosAutorizacionPorPropuesta,
+  cambiosEstatusPorRef,
+  unirCambios,
+  type CambiosFechas,
+} from '../utils/autorizacionFiltro';
+import {
   verificarAutorizacionEjecucion,
   cerrarPorEjecucion,
   registrarBypass,
@@ -38,6 +52,28 @@ import {
   puedeBypassearDesposteo,
 } from '../services/desposteo.service';
 import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
+import { computePosteoStats } from '../services/posteo-stats.service';
+
+// Candado APS ↔ autorización de Direcciones. Devuelve null si la cara está
+// aprobada por DG y DCM (null/undefined cuenta como 'aprobado', igual que el
+// default de la columna). Si no, devuelve un texto legible con la dimensión y
+// el estado que la bloquea (pendiente / rechazado / correccion).
+const ESTADO_AUTORIZACION_LABEL: Record<string, string> = {
+  pendiente: 'pendiente de autorización',
+  rechazado: 'rechazada',
+  correccion: 'devuelta a corrección',
+};
+export function describirBloqueoAutorizacionCara(
+  autorizacionDg: string | null | undefined,
+  autorizacionDcm: string | null | undefined,
+): string | null {
+  const motivos: string[] = [];
+  const dg = (autorizacionDg || 'aprobado').toLowerCase();
+  const dcm = (autorizacionDcm || 'aprobado').toLowerCase();
+  if (dg !== 'aprobado') motivos.push(`Dirección General ${ESTADO_AUTORIZACION_LABEL[dg] || dg}`);
+  if (dcm !== 'aprobado') motivos.push(`Dirección Comercial ${ESTADO_AUTORIZACION_LABEL[dcm] || dcm}`);
+  return motivos.length > 0 ? motivos.join(' y ') : null;
+}
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -628,11 +664,19 @@ export class CampanasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Filtro por autorización de circuitos (`autorizacion=pend_dg,...`),
+      // estatus de autorización en el filtro de historial (`estatusValor=auth:x`)
+      // y fechas de último cambio por fila (`includeCambios=true`, para el orden
+      // "Último cambio"). Ver utils/autorizacionFiltro.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
       const cacheKey = CACHE_KEYS.CAMPANAS_LIST(JSON.stringify({
         u: req.user?.userId, page, limit, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        autorizacion: autorizacionKeys, includeCambios,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -650,19 +694,19 @@ export class CampanasController {
       // específico se respeta. Si pide Rechazada con excludeRechazadas=true,
       // gana excludeRechazadas (siempre se ocultan). Inactivas se siguen ocultando
       // cuando no hay status explícito.
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      // `status` es multiselect (CSV). Si además viene `autorizacion`, el IN se
+      // combina en OR con el EXISTS de circuitos más abajo (misma lista en la UI).
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -676,7 +720,13 @@ export class CampanasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        // "Cambió a <autorización>" en el rango: historial de autorización de
+        // la propuesta de la campaña (ver utils/autorizacionFiltro).
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
+        params.push(...(sub.params as (string | number)[]));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -730,6 +780,19 @@ export class CampanasController {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
         }
+      }
+
+      // Filtro por autorización de circuitos: entra la campaña con AL MENOS UN
+      // circuito en alguno de los estatus pedidos; con filtro de Periodo solo
+      // cuentan los circuitos que solapan ese rango.
+      const periodoAut = periodoDesdeFiltro(
+        filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null,
+        yearInicio, yearFin,
+      );
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(autorizacionKeys, 'ct.id_propuesta', periodoAut));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       // Visibility filter: pre-computar IDs visibles (cacheado) en vez de FIND_IN_SET por fila
@@ -965,6 +1028,34 @@ export class CampanasController {
         ).catch(() => [] as { id: number }[]);
         const postedSet = new Set(postedIds.map(r => Number(r.id)));
         campanas.forEach((c: any) => { c.has_post = postedSet.has(Number(c.id)) ? 1 : 0; });
+      }
+
+      // Resumen de autorización por fila (circuitos por estatus, acotado al
+      // periodo filtrado) y, si se pide, fechas de último cambio por estatus de
+      // campaña y de autorización para el orden "Último cambio". El historial
+      // de 'Cambio de estado' de campaña se escribió con ref_id = id de
+      // propuesta (back actual) o id de campaña (versiones previas): se
+      // consultan ambos y se unen.
+      if (campanas.length > 0) {
+        const propIdsPagina = Array.from(new Set(
+          campanas.map((c: any) => Number(c.propuesta_id)).filter((n: number) => Number.isInteger(n) && n > 0)
+        ));
+        const [resumenAutMap, cambiosAutMap, cambiosEstatusMap] = await Promise.all([
+          resumenAutorizacionPorPropuesta(propIdsPagina, periodoAut),
+          includeCambios ? cambiosAutorizacionPorPropuesta(propIdsPagina) : Promise.resolve(new Map<number, CambiosFechas>()),
+          includeCambios ? cambiosEstatusPorRef('Campaña', [...propIdsPagina, ...campaignIds]) : Promise.resolve(new Map<number, CambiosFechas>()),
+        ]);
+        campanas.forEach((c: any) => {
+          const pid = Number(c.propuesta_id) || 0;
+          c.autorizacion_resumen = (pid > 0 && resumenAutMap.get(pid)) || null;
+          if (includeCambios) {
+            c.cambios = unirCambios(
+              cambiosEstatusMap.get(Number(c.id)),
+              pid > 0 ? cambiosEstatusMap.get(pid) : null,
+              pid > 0 ? cambiosAutMap.get(pid) : null,
+            );
+          }
+        });
       }
 
       // Convert BigInt to Number for JSON serialization
@@ -1953,11 +2044,61 @@ export class CampanasController {
         // invertidas (caso BIG MIX cam 80060: SC quedó con ini=2026-09-01,
         // fin=2026-05-11). Ahora si no hay overlap, REEMPLAZAMOS completo con el
         // nuevo rango.
+        //
+        // Calendarios COMPARTIDOS: desde sep-2026 resolverCalendarioReserva reusa UNA fila
+        // de `calendario` por catorcena para TODAS las propuestas. Editar esa fila al recorrer
+        // una campaña movía las reservas de todas las demás: el buscador (lee el calendario)
+        // las veía libres y el candado (lee el sc) ocupadas — cal 1150/1151/1171, ~13.5K
+        // reservas fantasma (campaña 81908, 20-oct-2026). Por eso solo se ajusta un calendario
+        // PRIVADO de esta propuesta (legacy); las reservas en calendarios compartidos que
+        // quedan fuera del nuevo periodo las libera el candado anti-desfase de abajo.
         if (fechaInicio && fechaFin && cotizacion?.id_propuesta) {
+          // Las caras se filtran por slc.idquote = '<id_propuesta>' (texto, igual que la
+          // columna) para que use solicitudCaras_idquote_idx. Antes el join
+          // pr.id = slc.idquote comparaba INT con VARCHAR: MySQL no usaba el índice y
+          // recorría solicitudCaras/reservas completas → 504 en campañas grandes
+          // (81569 PROFUTURO, 80617 TELCEL 4,973 reservas, oct-2026).
+          const idquoteRecorrer = String(cotizacion.id_propuesta);
+          const calsCompartidos = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT DISTINCT rs.calendario_id AS id
+            FROM reservas rs
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            WHERE slc.idquote = ${idquoteRecorrer}
+              AND rs.calendario_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM reservas ro
+                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                WHERE ro.calendario_id = rs.calendario_id
+                  AND sco.idquote <> slc.idquote
+              )
+          `;
+          const idsCompartidos = calsCompartidos.map((c) => Number(c.id));
+
+          // 4a. Calendarios PRIVADOS de esta campaña. Va antes que 4b porque el WHERE
+          // lee el periodo del sc ANTES de moverlo.
+          await prisma.$executeRaw`
+            UPDATE calendario cl
+            INNER JOIN reservas rs ON rs.calendario_id = cl.id
+            INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
+            SET
+              cl.fecha_inicio = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaInicio}
+                ELSE GREATEST(cl.fecha_inicio, ${fechaInicio})
+              END,
+              cl.fecha_fin = CASE
+                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
+                  THEN ${fechaFin}
+                ELSE LEAST(cl.fecha_fin, ${fechaFin})
+              END
+            WHERE slc.idquote = ${idquoteRecorrer}
+              AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
+              ${idsCompartidos.length > 0 ? Prisma.sql`AND cl.id NOT IN (${Prisma.join(idsCompartidos)})` : Prisma.empty}
+          `;
+
+          // 4b. Periodo de los circuitos.
           await prisma.$executeRaw`
             UPDATE solicitudCaras slc
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             INNER JOIN reservas rs ON rs.solicitudCaras_id = slc.id
             INNER JOIN calendario cl ON cl.id = rs.calendario_id
             SET
@@ -1970,18 +2111,8 @@ export class CampanasController {
                 WHEN slc.fin_periodo < ${fechaInicio} OR slc.inicio_periodo > ${fechaFin}
                   THEN ${fechaFin}
                 ELSE LEAST(slc.fin_periodo, ${fechaFin})
-              END,
-              cl.fecha_inicio = CASE
-                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
-                  THEN ${fechaInicio}
-                ELSE GREATEST(cl.fecha_inicio, ${fechaInicio})
-              END,
-              cl.fecha_fin = CASE
-                WHEN cl.fecha_fin < ${fechaInicio} OR cl.fecha_inicio > ${fechaFin}
-                  THEN ${fechaFin}
-                ELSE LEAST(cl.fecha_fin, ${fechaFin})
               END
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND (slc.inicio_periodo < ${fechaInicio} OR slc.fin_periodo > ${fechaFin})
           `;
 
@@ -1996,11 +2127,9 @@ export class CampanasController {
           await prisma.$executeRaw`
             UPDATE reservas rs
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             INNER JOIN calendario cl ON cl.id = rs.calendario_id
             SET rs.deleted_at = NOW()
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND rs.deleted_at IS NULL
               AND (cl.fecha_inicio < slc.inicio_periodo OR cl.fecha_inicio > slc.fin_periodo)
           `;
@@ -2019,25 +2148,40 @@ export class CampanasController {
             SELECT rs.id AS id, i.codigo_unico AS codigo
             FROM reservas rs
             INNER JOIN solicitudCaras slc ON slc.id = rs.solicitudCaras_id
-            INNER JOIN propuesta pr ON pr.id = slc.idquote
-            INNER JOIN cotizacion ct ON ct.id_propuesta = pr.id
             LEFT JOIN espacio_inventario ei ON ei.id = rs.inventario_id
             INNER JOIN inventarios i ON i.id = COALESCE(ei.inventario_id, rs.inventario_id)
-            WHERE ct.id = ${cotizacionId}
+            WHERE slc.idquote = ${idquoteRecorrer}
               AND rs.deleted_at IS NULL
               AND rs.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
               AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
-              AND EXISTS (
-                SELECT 1 FROM reservas ro
-                INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
-                LEFT JOIN espacio_inventario eio ON eio.id = ro.inventario_id
-                WHERE ro.deleted_at IS NULL
-                  AND ro.id <> rs.id
-                  AND sco.idquote <> slc.idquote
-                  AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
-                  AND COALESCE(eio.inventario_id, ro.inventario_id) = COALESCE(ei.inventario_id, rs.inventario_id)
-                  AND sco.inicio_periodo <= slc.fin_periodo
-                  AND sco.fin_periodo >= slc.inicio_periodo
+              -- Mismo match que COALESCE(eio.inventario_id, ro.inventario_id) = i.id, partido
+              -- en dos ramas para que usen idx_rsv_conflict / espacio_inventario.idx_inventario_id
+              -- (con el COALESCE MySQL recorría solicitudCaras por cada reserva).
+              AND (
+                EXISTS (
+                  SELECT 1 FROM reservas ro
+                  INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                  WHERE ro.inventario_id = i.id
+                    AND NOT EXISTS (SELECT 1 FROM espacio_inventario e2 WHERE e2.id = ro.inventario_id AND e2.inventario_id IS NOT NULL)
+                    AND ro.deleted_at IS NULL
+                    AND ro.id <> rs.id
+                    AND sco.idquote <> slc.idquote
+                    AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                    AND sco.inicio_periodo <= slc.fin_periodo
+                    AND sco.fin_periodo >= slc.inicio_periodo
+                )
+                OR EXISTS (
+                  SELECT 1 FROM espacio_inventario eio
+                  INNER JOIN reservas ro ON ro.inventario_id = eio.id
+                  INNER JOIN solicitudCaras sco ON sco.id = ro.solicitudCaras_id
+                  WHERE eio.inventario_id = i.id
+                    AND ro.deleted_at IS NULL
+                    AND ro.id <> rs.id
+                    AND sco.idquote <> slc.idquote
+                    AND ro.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
+                    AND sco.inicio_periodo <= slc.fin_periodo
+                    AND sco.fin_periodo >= slc.inicio_periodo
+                )
               )
           `;
           if (colisionesRecorrer.length > 0) {
@@ -2208,13 +2352,28 @@ export class CampanasController {
       const creacionDesde = (modoHistorial === 'creacion' ? fechaDesde : '') || (req.query.creacionDesde as string);
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Universo explícito de campañas (ids). Lo manda el front cuando aplica
+      // filtros en cliente (avanzados, catorcena de inicio, incompletas) para
+      // que inversión y posteo cuadren con lo que lista. Llega por body (POST)
+      // para no reventar el límite de URL con cientos de ids, o por query CSV.
+      const idsRaw = (req.body && Array.isArray(req.body.ids)) ? req.body.ids : (req.query.ids as string | undefined);
+      const ids: number[] | null = idsRaw === undefined || idsRaw === null
+        ? null
+        : (Array.isArray(idsRaw) ? idsRaw : String(idsRaw).split(','))
+            .map((v: unknown) => parseInt(String(v), 10))
+            .filter((n: number) => Number.isInteger(n) && n > 0);
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
+      // Filtro por autorización de circuitos — mismo contrato que getAll.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
+      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
         u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
-        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas
+        cambioEstatusDesde, cambioEstatusHasta, creacionDesde, creacionHasta, estatusValor, excludeRechazadas,
+        ids: ids ? [...ids].sort((a, b) => a - b) : undefined,
+        autorizacion: autorizacionKeys,
       }));
       const cached = cache.get<any>(cacheKey);
       if (cached) {
@@ -2222,22 +2381,45 @@ export class CampanasController {
         return;
       }
 
+      // Rango de fechas del filtro de catorcena — para prorratear la inversión
+      // y el posteo por días de solape, EXACTAMENTE como getAll (`inversion_filtrada`).
+      let filterFechaInicio: Date | null = null;
+      let filterFechaFin: Date | null = null;
+      if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
+        const [catIniData, catFinData] = await Promise.all([
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearInicio), numero_catorcena: Number(catorcenaInicio) } }),
+          prisma.catorcenas.findFirst({ where: { a_o: Number(yearFin), numero_catorcena: Number(catorcenaFin) } }),
+        ]);
+        if (catIniData && catFinData) {
+          filterFechaInicio = catIniData.fecha_inicio;
+          filterFechaFin = catFinData.fecha_fin;
+        }
+      }
+      const emptyStats = {
+        total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0,
+        montoTotal: 0,
+        posteo: { pendientes: { count: 0, monto: 0 }, posteadas: { count: 0, monto: 0 }, total: { count: 0, monto: 0 } },
+      };
+      if (ids && ids.length === 0) {
+        res.json({ success: true, data: emptyStats });
+        return;
+      }
+
       const conditions: string[] = ['cm.id IS NOT NULL'];
       const params: (string | number)[] = [];
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      // Multiselect (CSV); con `autorizacion` el IN va en OR más abajo (igual que getAll).
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -2252,7 +2434,11 @@ export class CampanasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if (cambioEstatusDesde || cambioEstatusHasta) {
+      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
+        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
+        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
+        params.push(...(sub.params as (string | number)[]));
+      } else if (cambioEstatusDesde || cambioEstatusHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
         if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
         if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
@@ -2266,6 +2452,18 @@ export class CampanasController {
         if (creacionHasta) { sub += ` AND h_cr.fecha_hora <= ?`; params.push(endOfDayStr(creacionHasta)); }
         sub += `)`;
         conditions.push(sub);
+      }
+
+      // Filtro por autorización de circuitos (mismo EXISTS y recorte por
+      // periodo que getAll) para que los KPIs cuadren con el listado.
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(
+          autorizacionKeys,
+          'ct.id_propuesta',
+          periodoDesdeFiltro(filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null, yearInicio, yearFin),
+        ));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       if (yearInicio && yearFin) {
@@ -2285,13 +2483,17 @@ export class CampanasController {
         const teamIds = hasTeamVisibility(userRol) ? await getTeamMemberIds(prisma, userId) : undefined;
         const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
         if (visibleIds.length === 0) {
-          const emptyResponse = { success: true, data: { total: 0, activas: 0, inactivas: 0, byStatus: {}, conAps: 0, sinAps: 0 } };
-          res.json(emptyResponse);
+          res.json({ success: true, data: emptyStats });
           return;
         }
         const visiblePh = visibleIds.map(() => '?').join(',');
         conditions.push(`cm.id IN (${visiblePh})`);
         params.push(...visibleIds);
+      }
+
+      if (ids) {
+        conditions.push(`cm.id IN (${ids.map(() => '?').join(',')})`);
+        params.push(...ids);
       }
 
       const whereClause = conditions.join(' AND ');
@@ -2336,6 +2538,66 @@ export class CampanasController {
         conAps += Number(row.con_aps);
       }
 
+      // Inversión total y estado de POST a SAP sobre el MISMO universo de
+      // campañas (mismo whereClause). La inversión por campaña se calcula con
+      // la misma query que getAll (SUM(sc.costo) por propuesta, prorrateada
+      // por días de solape si hay filtro de catorcena), así el KPI cuadra con
+      // la sumatoria de la columna Inversión del listado, con o sin filtro.
+      // Dos campañas que comparten propuesta suman cada una (igual que en la
+      // tabla, donde cada fila muestra su inversión).
+      const idRows = await prisma.$queryRawUnsafe<Array<{ id: number; propuesta_id: number | null }>>(`
+        SELECT /*+ MAX_EXECUTION_TIME(30000) */ cm.id, ct.id_propuesta AS propuesta_id
+        FROM campania cm
+        LEFT JOIN cliente cl ON cm.cliente_id = cl.id
+        LEFT JOIN cotizacion ct ON ct.id = cm.cotizacion_id
+        LEFT JOIN propuesta pr ON pr.id = ct.id_propuesta
+        LEFT JOIN solicitud s ON s.id = pr.solicitud_id
+        WHERE ${whereClause}
+      `, ...params);
+      const campaniaIds = idRows.map((r) => Number(r.id));
+      const propuestaIds = Array.from(new Set(
+        idRows.map((r) => Number(r.propuesta_id)).filter((n) => Number.isInteger(n) && n > 0)
+      ));
+
+      const usarFiltroC = !!(filterFechaInicio && filterFechaFin);
+      const inversionQuery = propuestaIds.length === 0
+        ? null
+        : (usarFiltroC
+          ? `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(
+                      sc.costo
+                      * (DATEDIFF(LEAST(sc.fin_periodo, ?), GREATEST(sc.inicio_periodo, ?)) + 1)
+                      / (DATEDIFF(sc.fin_periodo, sc.inicio_periodo) + 1)
+                    ), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+               AND sc.inicio_periodo <= ?
+               AND sc.fin_periodo >= ?
+             WHERE pr.id IN (${propuestaIds.map(() => '?').join(',')})
+             GROUP BY pr.id`
+          : `SELECT pr.id as propuesta_id,
+                    COALESCE(SUM(sc.costo), 0) as inversion_filtrada
+             FROM propuesta pr
+             LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+             WHERE pr.id IN (${propuestaIds.map(() => '?').join(',')})
+             GROUP BY pr.id`);
+      const inversionParams = usarFiltroC
+        ? [filterFechaFin, filterFechaInicio, filterFechaFin, filterFechaInicio, ...propuestaIds]
+        : [...propuestaIds];
+
+      const [inversionData, posteo] = await Promise.all([
+        inversionQuery
+          ? prisma.$queryRawUnsafe<{ propuesta_id: number; inversion_filtrada: number }[]>(inversionQuery, ...inversionParams)
+          : Promise.resolve([] as { propuesta_id: number; inversion_filtrada: number }[]),
+        computePosteoStats({ fi: filterFechaInicio, ff: filterFechaFin, campaniaIds }),
+      ]);
+      const inversionMap = new Map(inversionData.map((p) => [Number(p.propuesta_id), Number(p.inversion_filtrada) || 0]));
+      let montoTotal = 0;
+      for (const r of idRows) {
+        montoTotal += inversionMap.get(Number(r.propuesta_id)) ?? 0;
+      }
+      montoTotal = Math.round(montoTotal * 100) / 100;
+
       const response = {
         success: true,
         data: {
@@ -2345,6 +2607,8 @@ export class CampanasController {
           byStatus,
           conAps,
           sinAps: total - conAps,
+          montoTotal,
+          posteo,
         },
       };
 
@@ -2439,6 +2703,20 @@ export class CampanasController {
         }
         carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
       }
+
+      // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970).
+      // Si la campaña tiene una tarea 'Filtro Autorización DG' abierta (gerente
+      // comercial aun revisando), el front pinta un embudo ambar junto al "Pend. DG"
+      // para distinguirlo del rojo normal (que corresponde al director general).
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          campania_id: campanaId,
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+      carasEnriched = carasEnriched.map((c: any) => ({ ...c, en_filtro_dg: enFiltroDg }));
 
       const carasSerializable = serializeBigInt(carasEnriched);
 
@@ -3503,6 +3781,9 @@ export class CampanasController {
       const catorcenaFin = req.query.catorcenaFin ? parseInt(req.query.catorcenaFin as string) : undefined;
       const tipoPeriodo = req.query.tipoPeriodo as string;
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
+      // Mismo filtro de Status (multiselect) + autorización de circuitos que getAll,
+      // para que el export salga con lo que lista la vista.
+      const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
 
       // Build WHERE conditions (same as getAll)
       const conditions: string[] = ['cm.id IS NOT NULL'];
@@ -3510,19 +3791,17 @@ export class CampanasController {
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
 
-      if (excludeRechazadas) {
-        if (status && status !== 'Rechazada' && status !== 'Cancelada') {
-          conditions.push('cm.status = ?');
-          params.push(status);
-        } else {
-          conditions.push("cm.status != 'inactiva'");
-        }
-        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
-      } else if (status) {
-        conditions.push('cm.status = ?');
-        params.push(status);
-      } else {
+      const statusLista = parseStatusLista(status)
+        .filter(s => !excludeRechazadas || (s !== 'Rechazada' && s !== 'Cancelada'));
+      const statusEnOr = autorizacionKeys.length > 0;
+      if (statusLista.length > 0 && !statusEnOr) {
+        conditions.push(`cm.status IN (${statusLista.map(() => '?').join(',')})`);
+        params.push(...statusLista);
+      } else if (!statusLista.includes('inactiva')) {
         conditions.push("cm.status != 'inactiva'");
+      }
+      if (excludeRechazadas) {
+        conditions.push("cm.status NOT IN ('Rechazada', 'Cancelada')");
       }
 
       if (tipoPeriodo && tipoPeriodo !== 'todas') {
@@ -3552,6 +3831,18 @@ export class CampanasController {
           conditions.push('YEAR(cm.fecha_inicio) <= ? AND YEAR(cm.fecha_fin) >= ?');
           params.push(yearFin, yearInicio);
         }
+      }
+
+      // Estatus OR autorización de circuitos (misma lista en la UI), con el
+      // mismo recorte por periodo que getAll.
+      if (autorizacionKeys.length > 0) {
+        const ex = sqlStatusOAutorizacion('cm.status', statusLista, sqlExisteCaraConAutorizacion(
+          autorizacionKeys,
+          'ct.id_propuesta',
+          periodoDesdeFiltro(filterFechaInicio && filterFechaFin ? { inicio: filterFechaInicio, fin: filterFechaFin } : null, yearInicio, yearFin),
+        ));
+        conditions.push(ex.sql);
+        params.push(...(ex.params as (string | number)[]));
       }
 
       // Visibility filter
@@ -8936,6 +9227,83 @@ export class CampanasController {
       }
       const scPlaceholders = scIdsForCampaign.map(() => '?').join(',');
 
+      // Paso 0: Candado de autorización de Direcciones. Solo se puede asignar
+      // APS a circuitos con autorizacion_dg Y autorizacion_dcm = 'aprobado'.
+      // Un circuito pendiente, rechazado o en corrección bloquea TODA la
+      // asignación (no se asigna parcialmente) y se explica el motivo.
+      const scIdsObjetivo = new Set<number>();
+      if (hasIM) {
+        for (const scId of solicitudCarasIds) {
+          const n = parseInt(String(scId));
+          if (!isNaN(n)) scIdsObjetivo.add(n);
+        }
+      }
+      if (hasInventario) {
+        if (hasRsvIds) {
+          // Mismo alcance que el UPDATE de abajo: las reservas seleccionadas Y
+          // las de su mismo grupo_completo, acotadas a la campaña.
+          const rsvPlaceholders = rsvIds.map(() => '?').join(',');
+          const scRows = await prisma.$queryRawUnsafe<{ solicitudCaras_id: number | null }[]>(
+            `SELECT DISTINCT r2.solicitudCaras_id
+             FROM reservas r1
+             JOIN reservas r2
+               ON (r2.id = r1.id OR (r1.grupo_completo_id IS NOT NULL AND r2.grupo_completo_id = r1.grupo_completo_id))
+             WHERE r1.id IN (${rsvPlaceholders})
+               AND r2.solicitudCaras_id IN (${scPlaceholders})
+               AND r2.deleted_at IS NULL
+               AND (r2.APS IS NULL OR r2.APS = 0)`,
+            ...rsvIds, ...scIdsForCampaign
+          );
+          scRows.forEach(r => { if (r.solicitudCaras_id) scIdsObjetivo.add(Number(r.solicitudCaras_id)); });
+        } else {
+          const invPlaceholders = inventarioIds.map(() => '?').join(',');
+          const scRows = await prisma.$queryRawUnsafe<{ solicitudCaras_id: number | null }[]>(
+            `SELECT DISTINCT r.solicitudCaras_id
+             FROM reservas r
+             JOIN espacio_inventario ei ON r.inventario_id = ei.id
+             WHERE ei.inventario_id IN (${invPlaceholders})
+               AND r.solicitudCaras_id IN (${scPlaceholders})
+               AND r.deleted_at IS NULL`,
+            ...inventarioIds, ...scIdsForCampaign
+          );
+          scRows.forEach(r => { if (r.solicitudCaras_id) scIdsObjetivo.add(Number(r.solicitudCaras_id)); });
+        }
+      }
+      if (scIdsObjetivo.size > 0) {
+        const carasObjetivo = await prisma.solicitudCaras.findMany({
+          where: { id: { in: Array.from(scIdsObjetivo) } },
+          select: { id: true, articulo: true, ciudad: true, formato: true, autorizacion_dg: true, autorizacion_dcm: true },
+        });
+        const bloqueadas = carasObjetivo
+          .map(c => ({ cara: c, motivo: describirBloqueoAutorizacionCara(c.autorizacion_dg, c.autorizacion_dcm) }))
+          .filter((x): x is { cara: typeof carasObjetivo[number]; motivo: string } => x.motivo !== null);
+        if (bloqueadas.length > 0) {
+          const detalle = bloqueadas
+            .map(({ cara, motivo }) => `• ${[cara.articulo, cara.formato, cara.ciudad].filter(Boolean).join(' · ') || `Circuito #${cara.id}`}: ${motivo}`)
+            .join('\n');
+          res.status(400).json({
+            success: false,
+            error:
+              `No se puede asignar ${prefactura ? 'APS Pre Factura' : 'APS'}: ${bloqueadas.length} circuito(s) seleccionado(s) ` +
+              `no tienen la autorización de Dirección aprobada.\n${detalle}\n\n` +
+              `Solo se puede asignar APS a circuitos con autorización DG y DCM aprobadas. ` +
+              `Deselecciona estos circuitos o espera a que Dirección los apruebe.`,
+            autorizacion: {
+              bloqueadas: bloqueadas.map(({ cara, motivo }) => ({
+                solicitud_caras_id: cara.id,
+                articulo: cara.articulo,
+                ciudad: cara.ciudad,
+                formato: cara.formato,
+                autorizacion_dg: cara.autorizacion_dg,
+                autorizacion_dcm: cara.autorizacion_dcm,
+                motivo,
+              })),
+            },
+          });
+          return;
+        }
+      }
+
       // Paso 1: Obtener el siguiente número APS
       const maxAPSResult = await prisma.$queryRaw<{ maxAPS: bigint | null }[]>`
         SELECT IFNULL(MAX(CAST(APS AS UNSIGNED)), 0) as maxAPS FROM reservas
@@ -9330,7 +9698,8 @@ export class CampanasController {
           MAX(tiene_instalado) as tiene_instalado,
           MAX(origen_prueba_color) as origen_prueba_color,
           MAX(prueba_color_version) as prueba_color_version,
-          MAX(prueba_color_enlace_externo) as prueba_color_enlace_externo
+          MAX(prueba_color_enlace_externo) as prueba_color_enlace_externo,
+          MAX(prueba_color_tipo) as prueba_color_tipo
         FROM (
           SELECT
             r.archivo COLLATE utf8mb4_unicode_ci as url,
@@ -9348,7 +9717,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM reservas r
           JOIN solicitudCaras sc ON r.solicitudCaras_id = sc.id
           JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
@@ -9378,7 +9748,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM artes_tradicionales at2
           JOIN reservas r2 ON r2.id = at2.id_reserva
           JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
@@ -9406,7 +9777,8 @@ export class CampanasController {
             END) as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM imagenes_digitales imd
           JOIN reservas r3 ON r3.id = imd.id_reserva
           JOIN solicitudCaras sc3 ON sc3.id = r3.solicitudCaras_id
@@ -9436,7 +9808,8 @@ export class CampanasController {
             0 as tiene_instalado,
             0 as origen_prueba_color,
             CAST(NULL AS SIGNED) as prueba_color_version,
-            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            CAST(NULL AS CHAR) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM biblioteca_artes ba
           WHERE ba.campania_id = ?
           GROUP BY ba.archivo
@@ -9461,13 +9834,16 @@ export class CampanasController {
             0 as tiene_instalado,
             1 as origen_prueba_color,
             MAX(pc.version) as prueba_color_version,
-            MAX(pc.enlace_externo) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo
+            MAX(pc.enlace_externo) COLLATE utf8mb4_unicode_ci as prueba_color_enlace_externo,
+            -- Jos 2026-10-23: tipo del flujo origen (prueba_color | revision_anticipada).
+            -- COALESCE para registros viejos pre-migracion que podrian traer NULL.
+            MAX(COALESCE(pc.tipo, 'prueba_color')) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM pruebas_color pc
           WHERE pc.campania_id = ?
             AND pc.estatus = 'aprobada'
             AND pc.deleted_at IS NULL
             AND (NULLIF(pc.archivo, '') IS NOT NULL OR pc.enlace_externo IS NOT NULL)
-          GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte
+          GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte, pc.tipo
         ) combined
         GROUP BY url
         ORDER BY uso_count DESC
@@ -9486,6 +9862,7 @@ export class CampanasController {
         origen_prueba_color: number | bigint | null;
         prueba_color_version: number | bigint | null;
         prueba_color_enlace_externo: string | null;
+        prueba_color_tipo: string | null;
       }[]>(query, parseInt(id), parseInt(id), parseInt(id), parseInt(id), parseInt(id));
 
       const result = artes.map((arte, index) => ({
@@ -9503,6 +9880,9 @@ export class CampanasController {
         origen_prueba_color: Number(arte.origen_prueba_color || 0) === 1,
         prueba_color_version: arte.prueba_color_version != null ? Number(arte.prueba_color_version) : null,
         prueba_color_enlace_externo: arte.prueba_color_enlace_externo || null,
+        // Jos 2026-10-23: 'prueba_color' | 'revision_anticipada'. El front pinta
+        // el badge "PC vN" o "RA vN" segun este valor.
+        prueba_color_tipo: arte.prueba_color_tipo || null,
       }));
 
       res.json({

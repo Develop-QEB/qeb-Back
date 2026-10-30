@@ -100,6 +100,19 @@ export function puedeRevisarPruebaColor(rol: string | null | undefined): boolean
   return !!rol && ROLES_REVISAR_PRUEBA_COLOR.has(rol);
 }
 
+// Jos 2026-10-23: expansion del modulo "Prueba de Color" a "Revision de Artes
+// Anticipada". Dos flujos conviven en la misma tabla, se distinguen por `tipo`.
+//   'prueba_color'       -> flujo original (default)
+//   'revision_anticipada'-> arte revisado antes de pisada; al aprobar se vincula
+//                           a la biblioteca de artes con badge "RA vN".
+export type TipoPrueba = 'prueba_color' | 'revision_anticipada';
+
+const TIPOS_VALIDOS: TipoPrueba[] = ['prueba_color', 'revision_anticipada'];
+
+export function esTipoPruebaValido(v: unknown): v is TipoPrueba {
+  return typeof v === 'string' && (TIPOS_VALIDOS as string[]).includes(v);
+}
+
 interface CrearPruebaInput {
   propuestaId: number;
   scId: number;
@@ -111,6 +124,7 @@ interface CrearPruebaInput {
   enlace_externo?: string | null;
   nombre_arte?: string | null;
   notas?: string | null;
+  tipo?: TipoPrueba;
   createdBy: number;
   createdByNombre: string;
 }
@@ -122,6 +136,7 @@ interface CrearPruebaInput {
  */
 export async function crearPruebaColor(input: CrearPruebaInput) {
   const { propuestaId, scId, archivo, archivo_data, enlace_externo, nombre_arte, notas, createdBy, createdByNombre } = input;
+  const tipo: TipoPrueba = input.tipo || 'prueba_color';
   // Al menos uno de archivo o enlace_externo debe existir.
   if ((!archivo || !archivo.trim()) && (!enlace_externo || !enlace_externo.trim())) {
     throw new Error('Debes subir un archivo o pegar un link del arte');
@@ -134,9 +149,11 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   });
   if (!sc) throw new Error('Circuito no encontrado en la propuesta');
 
-  // Ultima version del circuito
+  // Ultima version del circuito dentro del MISMO tipo. Jos 2026-10-23: PC y RA
+  // llevan numeracion independiente para que las etiquetas "PC v1/v2" y
+  // "RA v1/v2" no se mezclen en biblioteca ni en tareas.
   const ultima = await prisma.pruebas_color.findFirst({
-    where: { propuesta_id: propuestaId, sc_id: scId, deleted_at: null },
+    where: { propuesta_id: propuestaId, sc_id: scId, tipo, deleted_at: null },
     orderBy: { version: 'desc' },
     select: { version: true },
   });
@@ -157,6 +174,7 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
       nombre_arte: nombre_arte || null,
       notas: notas || null,
       estatus: 'revision_artes',
+      tipo,
       version: nextVersion,
       created_by: createdBy,
       created_by_nombre: createdByNombre,
@@ -452,7 +470,11 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
   if (nuevoEstatus === 'arte_aprobado') {
     try {
       await cerrarTareaAsociada(pruebaId, 'Revisión de artes', userNombre);
-      await crearTareaSeguimiento(prueba, userNombre);
+      await crearTareaSeguimiento(prueba, userNombre, {
+        comentario: comentarioTrim,
+        archivo_adjunto,
+        enlace_adjunto,
+      });
     } catch (e) {
       console.error('[pruebasColor.actualizar] hook arte_aprobado falló:', e);
     }
@@ -464,6 +486,18 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
       await cerrarTareaAsociada(pruebaId, 'Seguimiento Prueba de color', userNombre);
     } catch (e) {
       console.error('[pruebasColor.actualizar] hook aprobada falló:', e);
+    }
+    // Jos 2026-10-29: cuando una Revision Anticipada se aprueba y la prueba
+    // ya esta ligada a una campania, el arte se vincula a biblioteca_artes
+    // de la campania (tab Aprobados). Las pruebas de color NO vinculan —
+    // solo RA, como pidio Jos. Si solo hay enlace_externo (sin archivo
+    // subido) tambien se vincula usando el link como "archivo".
+    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && (prueba.archivo || prueba.enlace_externo)) {
+      try {
+        await vincularArteAprobadoABibliotecaCampania(prueba);
+      } catch (e) {
+        console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca falló:', e);
+      }
     }
   }
 
@@ -580,6 +614,10 @@ export interface ListarFiltro {
   propuesta_id?: number;
   campania_id?: number;
   sc_id?: number;
+  // Jos 2026-10-23: opcional. Si no viene, devuelve ambos tipos; el modal
+  // filtra en front por pestana activa. Mantener opcional evita tener que
+  // tocar los callers que ya consumen /pruebas-color.
+  tipo?: TipoPrueba;
 }
 
 export async function listarPruebasColor(filtro: ListarFiltro) {
@@ -589,6 +627,7 @@ export async function listarPruebasColor(filtro: ListarFiltro) {
       ...(filtro.propuesta_id ? { propuesta_id: filtro.propuesta_id } : {}),
       ...(filtro.campania_id ? { campania_id: filtro.campania_id } : {}),
       ...(filtro.sc_id ? { sc_id: filtro.sc_id } : {}),
+      ...(filtro.tipo ? { tipo: filtro.tipo } : {}),
     },
     orderBy: [{ sc_id: 'asc' }, { version: 'desc' }],
   });
@@ -660,8 +699,11 @@ export async function vincularPruebasConCampania(propuestaId: number, campaniaId
 // la prueba una vez que Diseño aprobó el arte. Incluye arte aprobado,
 // nombre, circuito, formato y detalles como pidió Jos 2026-09-25.
 async function crearTareaSeguimiento(
-  prueba: { id: number; propuesta_id: number; sc_id: number; version: number; created_by: number; created_by_nombre: string; archivo: string; nombre_arte: string | null },
+  prueba: { id: number; propuesta_id: number; sc_id: number; version: number; created_by: number; created_by_nombre: string; archivo: string; nombre_arte: string | null; tipo?: string | null },
   actorNombre: string,
+  // Jos 2026-10-29: motivo + archivo + enlace de la aprobacion RA (si vienen)
+  // para que el analista los vea en la tarea Seguimiento.
+  aprobacion?: { comentario?: string; archivo_adjunto?: string | null; enlace_adjunto?: string | null },
 ) {
   const sc = await prisma.solicitudCaras.findFirst({
     where: { id: prueba.sc_id },
@@ -674,12 +716,14 @@ async function crearTareaSeguimiento(
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
   const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 5);
 
+  const motivoAprobacion = (aprobacion?.comentario || '').trim();
   const descripcion = [
     `${actorNombre} aprobó el arte de la prueba de color v${prueba.version}.`,
     `Arte: ${prueba.nombre_arte || 'sin nombre'} (${prueba.archivo}).`,
     `Circuito #${prueba.sc_id} — ${detalleCircuito}.`,
+    motivoAprobacion ? `Motivo de aprobación: ${motivoAprobacion}.` : null,
     'Gestiona el envío al proveedor y finaliza esta tarea cuando la prueba esté aprobada.',
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 
   // Feedback Jos 2026-10-02: la tarea queda sin campania_id al crear;
   // se sincroniza vía hook (sincronizarTareasConCampania) cuando la
@@ -706,6 +750,10 @@ async function crearTareaSeguimiento(
         arte: prueba.archivo,
         nombreArte: prueba.nombre_arte,
         origen: 'prueba_color_seguimiento',
+        // Jos 2026-10-29: motivo de aprobacion + adjuntos (solo en RA)
+        ...(motivoAprobacion ? { motivoAprobacion } : {}),
+        ...(aprobacion?.archivo_adjunto ? { aprobacionArchivo: aprobacion.archivo_adjunto } : {}),
+        ...(aprobacion?.enlace_adjunto ? { aprobacionEnlace: aprobacion.enlace_adjunto } : {}),
       }),
       fecha_inicio: now,
       fecha_fin: fechaFin,
@@ -838,6 +886,11 @@ export async function resolverTareaAsociada(input: {
       userId,
       userNombre,
       comentario,
+      // Jos 2026-10-29: en Revision Anticipada la aprobacion tambien lleva
+      // motivo + archivo + enlace (modal igual al rechazo). Se propagan al
+      // historial y a la tarea Seguimiento para que el analista los vea.
+      archivo_adjunto,
+      enlace_adjunto,
     });
     return { tareaId, nuevoEstatus: 'Atendido' };
   }
@@ -957,4 +1010,42 @@ export async function vincularPruebasConReservas(reservaIds: number[]): Promise<
     console.log(`[pruebasColor.vincularConReservas] Vinculadas ${vinculadas} prueba(s) a ${reservas.length} reserva(s)`);
   }
   return vinculadas;
+}
+
+/**
+ * Jos 2026-10-29: cuando se aprueba una Revision Anticipada, el arte entra
+ * a la biblioteca_artes de la campania (tab Aprobados en el Gestor de Artes
+ * de Campaña) para que el analista pueda seleccionarlo sin volver a pasar
+ * por revision de artes. Mismo patron INSERT ... ON DUPLICATE KEY UPDATE
+ * que usa campanas.controller.handleUploadArt. Las Pruebas de Color NO
+ * vinculan — solo RA.
+ *
+ * biblioteca_artes.archivo es NOT NULL + UNIQUE(campania_id, archivo), asi
+ * que si la prueba solo tiene link (enlace_externo) sin archivo subido,
+ * usamos el link como "archivo" para preservar el flujo. El tab Aprobados
+ * del front ya maneja URLs externas.
+ */
+async function vincularArteAprobadoABibliotecaCampania(prueba: {
+  id: number;
+  campania_id: number | null;
+  archivo: string;
+  enlace_externo: string | null;
+  nombre_arte: string | null;
+  created_by: number | null;
+}) {
+  if (!prueba.campania_id) return;
+  const archivo = (prueba.archivo && prueba.archivo.trim()) || (prueba.enlace_externo && prueba.enlace_externo.trim()) || null;
+  if (!archivo) return;
+  // tipo 'tradicional' por default; si el archivo trae indicio digital
+  // (JPG/PNG/MP4 marcados por path), el back ya los diferencia. Para RA
+  // asumimos tradicional porque es el flujo documentado de la brochita.
+  const nombreArte = (prueba.nombre_arte && prueba.nombre_arte.trim()) || null;
+  await prisma.$executeRawUnsafe(`
+    INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+    VALUES (?, ?, 'tradicional', ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+      nota = COALESCE(VALUES(nota), nota)
+  `, prueba.campania_id, archivo, nombreArte, `Aprobado desde Revisión Anticipada #${prueba.id}`, null, null, prueba.created_by || null);
+  console.log(`[pruebasColor.vincularArteAprobadoABibliotecaCampania] RA #${prueba.id} -> biblioteca_artes campania=${prueba.campania_id} archivo=${archivo}`);
 }

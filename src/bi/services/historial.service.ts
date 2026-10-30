@@ -630,6 +630,7 @@ export async function getImpacto(
                  OR h.detalles LIKE '%"campo":"Per%odo"%' OR h.detalles LIKE '%"campo":"catorcena"%'))
           OR h.detalles LIKE '%caras_eliminadas%'
           OR h.accion LIKE '%liminaci%circuito%'
+          OR h.tipo LIKE '%autorizacion_rechazo%'
         )
       ORDER BY h.id DESC
       LIMIT 6000`,
@@ -642,7 +643,7 @@ export async function getImpacto(
     // Ocultar eliminaciones ejecutadas VÍA AUTORIZACIÓN: el detalle las atribuye al gerente
     // que autorizó (no a quien la solicitó/hizo) y no traen $ → sólo generan ruido en el impacto.
     .filter((e) => !(e.tipoEdicion === 'Eliminar circuito' && e.viaAutorizacion))
-    .filter((e) => (e.monto != null && e.monto !== 0) || e.tipoEdicion === 'Eliminar circuito' || e.tipoEdicion === 'Cambio de periodo');
+    .filter((e) => (e.monto != null && e.monto !== 0) || e.tipoEdicion === 'Eliminar circuito' || e.tipoEdicion === 'Cambio de periodo' || e.tipoEdicion === 'Rechazo');
   await enriquecerCampanias(eventos);
 
   const total = eventos.reduce((a, e) => a + (e.monto ?? 0), 0);

@@ -263,6 +263,9 @@ export interface FiltrosReporte {
   tipos?: string[];        // Tipo de artículo RT/BF/IN/IM. Vacío = todos (excluir IM = sin impresiones).
   muebles?: string[];      // Formato: PARABUS/COLUMNA/MACRO (LIKE sobre Dscription/sc.formato). Vacío = todos.
   digital?: string[];      // Tradicional/Digital (Tipo Digital / sc.tipo). Vacío = todos.
+  plazas?: string[];       // multi-selección de plaza (municipio). Vacío = todas. Sustituye a `plaza`.
+  clientes?: string[];     // multi-selección de cliente. Vacío = todos. Sustituye a `cliente`.
+  asesores?: string[];     // multi-selección de asesor. Vacío = todos. Sustituye a `asesor`.
 }
 
 /** Opciones para los dropdowns de la barra de filtros. */

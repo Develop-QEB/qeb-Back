@@ -364,6 +364,12 @@ model pruebas_color {
   notas             String?   @db.Text
   // estatus: 'solicitada' | 'enviada_proveedor' | 'aprobada' | 'rechazada'
   estatus           String    @default("solicitada") @db.VarChar(50)
+  // Jos 2026-10-23: expansion a dos flujos. 'prueba_color' (default) mantiene
+  // comportamiento original. 'revision_anticipada' es el flujo nuevo de arte
+  // revisado antes de impresion. Columna aplicada via ALTER TABLE en dev
+  // (scripts/alter_pruebas_color_add_tipo.cjs) con DEFAULT 'prueba_color'
+  // para registros existentes.
+  tipo              String    @default("prueba_color") @db.VarChar(25)
   version           Int       @default(1)
   created_by        Int
   created_by_nombre String    @db.VarChar(255)
@@ -376,6 +382,7 @@ model pruebas_color {
   @@index([sc_id])
   @@index([reserva_id])
   @@index([estatus])
+  @@index([tipo, propuesta_id], map: "idx_tipo_propuesta")
 }
 
 // Filtro Autorizacion "Quitar Posteo" — comercial pide desposteo de un APS
