@@ -196,6 +196,35 @@ export function rolEnLista(rol: string | null | undefined, lista: readonly strin
   return lista.some(r => normalizarRol(r) === objetivo);
 }
 
+// Roles que ven el Historial de Acciones / tablero "Actividad Comercial"
+// COMPLETO (todas las actividades, no solo las propias).
+const HISTORIAL_FULL_ROLES = [
+  // Direcciones
+  'Director General',
+  'Director General Adjunto',
+  'Director Comercial',
+  'Director Comercial General',
+  'Director Comercial Aeropuerto',
+  'Director Desarrollo de Nuevos Negocios',
+  'Director de Operaciones',
+  'Director de Desarrollo Digital',
+  // Gerencias comerciales
+  'Gerente Comercial',
+  'Gerente Comercial Aeropuerto',
+  'Gerente Comercial Vía Pública',
+  'Gerente Comercial Plazas',
+  // Administracion y TI
+  'Administrador',
+  'DEV',
+  'Gerente de TI',
+  'Especialista de TI',
+  'Analista de TI',
+];
+
+export function tieneHistorialCompleto(rol?: string | null): boolean {
+  return rolEnLista(rol, HISTORIAL_FULL_ROLES);
+}
+
 /**
  * Bloqueo "Ajuste Comercial" — espejo del bloqueo de Ajuste CTO.
  *

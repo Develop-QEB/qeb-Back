@@ -23,6 +23,7 @@ router.post('/autorizacion/depurar', notificacionesController.depurarAutorizacio
 router.get('/actividad-comercial/campanas', notificacionesController.getCampanasParaActividad.bind(notificacionesController));
 router.get('/actividad-comercial/propuestas', notificacionesController.getPropuestasParaActividad.bind(notificacionesController));
 router.post('/actividad-comercial', notificacionesController.crearActividadComercial.bind(notificacionesController));
+router.patch('/actividad-comercial/:id', notificacionesController.editarActividadComercial.bind(notificacionesController));
 
 // Autorización (ANTES de rutas con :id para evitar conflictos)
 router.get('/autorizacion/:idquote/resumen', notificacionesController.getResumenAutorizacion.bind(notificacionesController));
