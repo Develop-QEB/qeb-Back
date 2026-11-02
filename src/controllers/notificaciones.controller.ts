@@ -22,6 +22,15 @@ import { logHistorial } from '../utils/historial';
 // para que el conteo del header y el de la página no se descuadren.
 const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
 
+// Tipos cuya referencia (solicitud / propuesta / campaña) viaja en `contenido` y no
+// se infiere por prioridad de ids. Antes solo Autorización/Rechazo/Aprobación:
+// "Aviso Eliminación" (contenido=campana) caía al fallback por id_solicitud y el
+// front pintaba "Ver Propuesta" y abría la propuesta editable aunque ya era campaña.
+function usaContenidoComoReferencia(tipo: string | null | undefined): boolean {
+  if (!tipo) return false;
+  return tipo.includes('Autorización') || tipo.includes('Rechazo') || tipo.includes('Aprobación') || tipo === 'Aviso Eliminación';
+}
+
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {
   const id = String(userId);
@@ -467,11 +476,11 @@ export class NotificacionesController {
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
         leida: tarea.estatus === 'Atendido',
-        referencia_tipo: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+        referencia_tipo: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
           ? tarea.contenido
           : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'campana' ? tarea.campania_id
-          : (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+        referencia_id: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'campana' ? tarea.campania_id
+          : usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
           : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.created_at || tarea.fecha_inicio,
         created_at: tarea.created_at,
@@ -604,11 +613,11 @@ export class NotificacionesController {
         mensaje: tarea.descripcion || tarea.contenido || '',
         tipo: tarea.tipo || 'info',
         leida: tarea.estatus === 'Atendido',
-        referencia_tipo: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+        referencia_tipo: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
           ? tarea.contenido
           : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'campana' ? tarea.campania_id
-          : (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+        referencia_id: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'campana' ? tarea.campania_id
+          : usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
           : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.fecha_inicio,
         fecha_inicio: tarea.fecha_inicio,
@@ -1053,11 +1062,11 @@ export class NotificacionesController {
         tipo: tarea.tipo || 'info',
         leida: !esAutorizacion,
         requiere_accion: esAutorizacion,
-        referencia_tipo: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
+        referencia_tipo: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido && ['solicitud', 'propuesta', 'campana'].includes(tarea.contenido)
           ? tarea.contenido
           : tarea.id_solicitud ? 'solicitud' : tarea.id_propuesta ? 'propuesta' : tarea.campania_id ? 'campana' : null,
-        referencia_id: (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'campana' ? tarea.campania_id
-          : (tarea.tipo?.includes('Autorización') || tarea.tipo?.includes('Rechazo') || tarea.tipo?.includes('Aprobación')) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
+        referencia_id: usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'campana' ? tarea.campania_id
+          : usaContenidoComoReferencia(tarea.tipo) && tarea.contenido === 'propuesta' ? (tarea.id_propuesta ? parseInt(tarea.id_propuesta) : null)
           : tarea.id_solicitud ? parseInt(tarea.id_solicitud) : tarea.id_propuesta ? parseInt(tarea.id_propuesta) : tarea.campania_id,
         fecha_creacion: tarea.fecha_inicio,
         estatus: tarea.estatus,
