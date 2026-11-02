@@ -11,7 +11,7 @@ import {
   conservarAprobacionSiIncrementa
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
@@ -960,9 +960,24 @@ export class PropuestasController {
         },
       });
 
+      // Jos 2026-10-26: etapa visual del filtro DG. Si la propuesta tiene
+      // una tarea 'Filtro Autorización DG' abierta (gerente comercial aun
+      // revisando), el front pinta un embudo ambar junto al "Pend. DG" para
+      // distinguirlo del rojo normal (que corresponde al director general).
+      // Al aprobar el filtro, la tarea pasa a 'Autorización DG' y el flag se
+      // apaga -> embudo desaparece.
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          id_propuesta: String(id),
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+
       res.json({
         success: true,
-        data: caras,
+        data: caras.map(c => ({ ...c, en_filtro_dg: enFiltroDg })),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener caras de propuesta';
@@ -3552,10 +3567,10 @@ export class PropuestasController {
             createdReservas.push(lockResult.reserva);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
-            omitidosDetalle.push({
-              inventario_id: w.invId,
-              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
-            });
+            const motivo = lockResult.reason === 'BLOCKED'
+              ? 'Inventario no disponible/inhabilitado'
+              : inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)';
+            omitidosDetalle.push({ inventario_id: w.invId, motivo });
           }
         }
         // Progreso por lote
@@ -3721,6 +3736,117 @@ export class PropuestasController {
     } catch (error) {
       console.error('Error en getReservasForModal:', error);
       const message = error instanceof Error ? error.message : 'Error al obtener reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Historial de inventario del circuito: reservas que salieron (quitadas /
+  // desplazadas / por bloqueo) — reservas SOFT-eliminadas (deleted_at != null).
+  // Devuelve además `disponible` (si se puede volver a reservar hoy en el
+  // periodo de la cara) y `motivo_salida` (Bloqueado / Desplazado / Quitado).
+  // El tab "Historial" del buscador filtra por cara en el front.
+  async getReservasHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const propuestaId = parseInt(id);
+
+      // Reservas soft-eliminadas del circuito + estado actual del inventario +
+      // ¿el espacio está ocupado FIRME por alguien más en el periodo de la cara?
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.mueble as formato,
+          i.ubicacion,
+          i.isla,
+          i.plaza,
+          i.municipio,
+          i.ancho,
+          i.alto,
+          i.tradicional_digital,
+          i.estatus as estatus_inventario,
+          rsv.estatus,
+          rsv.estatus_original,
+          rsv.deleted_at,
+          sc.id as solicitud_cara_id,
+          sc.articulo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          CASE
+            WHEN i.estatus IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}) THEN 0
+            WHEN i.tradicional_digital = 'Digital' THEN 1
+            WHEN EXISTS (
+              SELECT 1 FROM reservas r2
+                INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+              WHERE r2.inventario_id = rsv.inventario_id
+                AND r2.deleted_at IS NULL
+                AND r2.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
+                AND sc2.inicio_periodo <= sc.fin_periodo
+                AND sc2.fin_periodo >= sc.inicio_periodo
+            ) THEN 0
+            ELSE 1
+          END as disponible
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NOT NULL
+          -- R5 (Jos): si el espacio ya se REGRESÓ (existe reserva ACTIVA de la
+          -- MISMA cara), sale del historial. Solo quedan los que se quitaron y
+          -- siguen fuera; al regresar uno, desaparece del historial.
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas ract
+            WHERE ract.inventario_id = rsv.inventario_id
+              AND ract.solicitudCaras_id = rsv.solicitudCaras_id
+              AND ract.deleted_at IS NULL
+          )
+        ORDER BY rsv.deleted_at DESC, rsv.id DESC
+      `;
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
+
+      // Motivo de salida: cruzar con historial 'Reservas desplazadas' (guarda los
+      // codigo_unico desplazados). Bloqueado manda; si no, desplazado vs quitado.
+      const desplazados = new Set<string>();
+      try {
+        const hist = await prisma.historial.findMany({
+          where: { ref_id: propuestaId, accion: 'Reservas desplazadas' },
+          select: { detalles: true },
+        });
+        for (const h of hist) {
+          try {
+            const d = JSON.parse(h.detalles || '{}');
+            const cods: string[] = Array.isArray(d?.codigos) ? d.codigos : [];
+            cods.forEach(c => desplazados.add(String(c).toUpperCase()));
+          } catch { /* detalles no-JSON: ignorar */ }
+        }
+      } catch { /* sin historial: ignorar */ }
+
+      const data = rows.map(r => {
+        const est = String(r.estatus_inventario || '');
+        const cod = String(r.codigo_unico || '').toUpperCase();
+        const bloqueado = esInventarioNoUtilizable(est);
+        // 'Bloqueado' legacy conserva su etiqueta (filas pre-rename); lo demás
+        // no-utilizable (No Disponible, Inactivo) sale como 'No Disponible'.
+        const motivo_salida = bloqueado
+          ? (est === 'Inhabilitado' ? 'Inhabilitado' : est === 'Bloqueado' ? 'Bloqueado' : 'No Disponible')
+          : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const disponible = Number(r.disponible) === 1;
+        return {
+          ...r,
+          disponible,
+          motivo_salida,
+          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible') : 'Ocupado en el periodo'),
+        };
+      });
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getReservasHistorial:', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
       res.status(500).json({ success: false, error: message });
     }
   }
@@ -4029,6 +4155,24 @@ export class PropuestasController {
         return;
       }
 
+      // CANDADO DE ESTATUS: necesario aquí porque la REACTIVACIÓN de una reserva
+      // soft-deleted (más abajo) NO pasa por createReservaConLock. Sin esto,
+      // bloquear una pieza (lo que libera su reserva) y volver a pedirla la
+      // reactivaba aunque estuviera No Disponible/Inhabilitada (QA dev 14-oct,
+      // reserva 678075). Para el branch de crear es redundante pero inofensivo:
+      // el check race-safe sigue viviendo dentro del lock.
+      const invEstatusToggle = await prisma.inventarios.findUnique({
+        where: { id: parseInt(inventarioId) },
+        select: { estatus: true },
+      });
+      if (esInventarioNoUtilizable(invEstatusToggle?.estatus)) {
+        res.status(409).json({
+          success: false,
+          error: 'Este inventario está marcado como No Disponible o Inhabilitado y no se puede reservar.',
+        });
+        return;
+      }
+
       // Validar que el espacio no esté ya bloqueado por OTRA propuesta en el
       // período. Antes este endpoint no validaba contra otras propuestas y por
       // ahí se colaba parte de las dupes en producción.
@@ -4108,7 +4252,9 @@ export class PropuestasController {
         if (!lockResult.ok) {
           res.status(409).json({
             success: false,
-            error: 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
+            error: lockResult.reason === 'BLOCKED'
+              ? 'Este inventario está marcado como No Disponible o Inhabilitado y no se puede reservar.'
+              : 'Conflicto de reserva: el inventario ya está ocupado en este período. Refresca y vuelve a intentar.',
           });
           return;
         }

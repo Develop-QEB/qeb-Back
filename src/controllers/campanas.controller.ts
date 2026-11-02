@@ -18,7 +18,7 @@ import {
   TIPO_AUTORIZACION_ELIMINACION
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF, esArticuloBfCf } from '../utils/bonifCara';
@@ -349,7 +349,7 @@ async function buildInventarioOcupacionRows(
     occByInv.set(Number(o.inventario_id), { firme: Number(o.has_firme) === 1, tent: Number(o.has_tent) === 1 });
   }
 
-  // 2) Catálogo de inventario (excluye Bloqueado/Inactivo, igual que getDisponibles).
+  // 2) Catálogo de inventario (excluye Bloqueado/Inhabilitado/Inactivo, igual que getDisponibles).
   const inv = await prisma.$queryRawUnsafe<{
     id: number; codigo_unico: string | null; tipo_de_cara: string | null;
     tipo_de_mueble: string | null; mueble: string | null; plaza: string | null;
@@ -358,7 +358,7 @@ async function buildInventarioOcupacionRows(
     `SELECT id, codigo_unico, tipo_de_cara, tipo_de_mueble, mueble, plaza, municipio,
             tradicional_digital, cto
        FROM inventarios
-      WHERE (estatus IS NULL OR estatus NOT IN ('Bloqueado', 'Inactivo'))`
+      WHERE (estatus IS NULL OR estatus NOT IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}))`
   );
 
   const dateOnly = (d: Date): string => {
@@ -2483,6 +2483,20 @@ export class CampanasController {
         }
         carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
       }
+
+      // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970).
+      // Si la campaña tiene una tarea 'Filtro Autorización DG' abierta (gerente
+      // comercial aun revisando), el front pinta un embudo ambar junto al "Pend. DG"
+      // para distinguirlo del rojo normal (que corresponde al director general).
+      const filtroDgAbierto = await prisma.tareas.count({
+        where: {
+          campania_id: campanaId,
+          tipo: 'Filtro Autorización DG',
+          estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+        },
+      });
+      const enFiltroDg = filtroDgAbierto > 0;
+      carasEnriched = carasEnriched.map((c: any) => ({ ...c, en_filtro_dg: enFiltroDg }));
 
       const carasSerializable = serializeBigInt(carasEnriched);
 
@@ -6809,6 +6823,39 @@ export class CampanasController {
               console.warn('createTarea - no se pudo heredar guia_pdf para recepcion_faltantes:', inheritErr);
             }
           }
+          // Enriquecer faltantesPorArte con nombre_arte desde biblioteca_artes.
+          // Feedback Jos 2026-10-06: el drawer ASC mostraba el nombre del archivo
+          // (ej. 1790963-xyz-Captura.png) en vez del nombre legible del arte.
+          // Al guardar aqui el nombre_arte, el drawer y las tareas ASC derivadas
+          // tienen el display correcto sin necesidad de un extra fetch desde el front.
+          if (
+            tipo === 'Recepción' &&
+            evidenciaObj?.tipo === 'recepcion_faltantes' &&
+            Array.isArray(evidenciaObj.faltantesPorArte) &&
+            evidenciaObj.faltantesPorArte.length > 0
+          ) {
+            try {
+              const urls: string[] = evidenciaObj.faltantesPorArte
+                .map((f: any) => f?.arte)
+                .filter((a: unknown): a is string => typeof a === 'string' && !!a);
+              if (urls.length > 0) {
+                const biblio = await prisma.biblioteca_artes.findMany({
+                  where: { campania_id: campanaId, archivo: { in: urls } },
+                  select: { archivo: true, nombre_arte: true, nombre_generico: true },
+                });
+                const nombrePorUrl = new Map<string, string | null>(
+                  biblio.map(b => [b.archivo, b.nombre_arte || b.nombre_generico || null])
+                );
+                evidenciaObj.faltantesPorArte = evidenciaObj.faltantesPorArte.map((f: any) => ({
+                  ...f,
+                  nombre_arte: f?.nombre_arte || nombrePorUrl.get(f?.arte) || null,
+                }));
+              }
+            } catch (nombErr) {
+              console.warn('createTarea - no se pudo enriquecer faltantesPorArte con nombre_arte:', nombErr);
+            }
+          }
+
           if (evidenciaObj.archivos && Array.isArray(evidenciaObj.archivos)) {
             // Eliminar archivoData de cada archivo para reducir el tamaño
             evidenciaObj.archivos = evidenciaObj.archivos.map((a: any) => ({
@@ -6819,7 +6866,7 @@ export class CampanasController {
             }));
             evidenciaData = JSON.stringify(evidenciaObj);
           } else {
-            evidenciaData = evidencia;
+            evidenciaData = JSON.stringify(evidenciaObj);
           }
         } catch (parseError) {
           // Si no es JSON válido, usar como está
@@ -6910,7 +6957,12 @@ export class CampanasController {
             campania_nombre: campanaNombre,
           });
 
-          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => `- ${(f.arte || 'Sin arte').split('/').pop()}: ${f.cantidad} faltante(s)`).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
+          const descripcionAsc = `Tarea informativa: la recepción "${tarea.titulo}" se atendió de forma parcial.\n\nTotal faltantes: ${totalFaltantes}\n\nDetalle por arte:\n${detallePorArte.map((f: any) => {
+            // Preferimos nombre_arte legible; fallback al nombre del archivo.
+            // Feedback Jos 2026-10-06.
+            const nombre = f?.nombre_arte || (f?.arte ? (String(f.arte).split('/').pop() || 'Sin arte') : 'Sin arte');
+            return `- ${nombre}: ${f?.cantidad ?? 0} faltante(s)`;
+          }).join('\n')}\n\nRevisa el detalle y marca como atendida cuando hayas dado seguimiento.`;
 
           for (const asc of ascs) {
             try {
@@ -10805,6 +10857,124 @@ export class CampanasController {
     }
   }
 
+  // Historial de inventario del circuito (campaña): reservas soft-eliminadas
+  // (quitadas / desplazadas / por bloqueo) con `disponible` y `motivo_salida`.
+  // Espeja getReservasHistorial de propuestas (resuelve campaña→cotización→propuesta).
+  async getReservasHistorial(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campanaId = parseInt(id);
+
+      const campana = await prisma.campania.findFirst({
+        where: { id: campanaId },
+        select: { cotizacion_id: true },
+      });
+      if (!campana || !campana.cotizacion_id) { res.json({ success: true, data: [] }); return; }
+      const cotizacion = await prisma.cotizacion.findFirst({
+        where: { id: campana.cotizacion_id },
+        select: { id_propuesta: true },
+      });
+      if (!cotizacion || !cotizacion.id_propuesta) { res.json({ success: true, data: [] }); return; }
+      const propuestaId = cotizacion.id_propuesta;
+
+      const query = `
+        SELECT
+          rsv.id as reserva_id,
+          rsv.inventario_id as espacio_id,
+          i.id as inventario_id,
+          i.codigo_unico,
+          i.tipo_de_cara,
+          i.mueble as formato,
+          i.ubicacion,
+          i.isla,
+          i.plaza,
+          i.municipio,
+          i.ancho,
+          i.alto,
+          i.tradicional_digital,
+          i.estatus as estatus_inventario,
+          rsv.estatus,
+          rsv.estatus_original,
+          rsv.deleted_at,
+          rsv.APS as aps,
+          sc.id as solicitud_cara_id,
+          sc.articulo,
+          sc.inicio_periodo,
+          sc.fin_periodo,
+          CASE
+            WHEN i.estatus IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}) THEN 0
+            WHEN i.tradicional_digital = 'Digital' THEN 1
+            WHEN EXISTS (
+              SELECT 1 FROM reservas r2
+                INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
+              WHERE r2.inventario_id = rsv.inventario_id
+                AND r2.deleted_at IS NULL
+                AND r2.estatus IN ('Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')
+                AND sc2.inicio_periodo <= sc.fin_periodo
+                AND sc2.fin_periodo >= sc.inicio_periodo
+            ) THEN 0
+            ELSE 1
+          END as disponible
+        FROM reservas rsv
+          INNER JOIN espacio_inventario epIn ON rsv.inventario_id = epIn.id
+          INNER JOIN inventarios i ON epIn.inventario_id = i.id
+          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
+        WHERE sc.idquote = ?
+          AND rsv.deleted_at IS NOT NULL
+          -- R5 (Jos): si el espacio ya se REGRESÓ (existe reserva ACTIVA de la
+          -- MISMA cara), sale del historial. Solo quedan los que se quitaron y
+          -- siguen fuera; al regresar uno, desaparece del historial.
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas ract
+            WHERE ract.inventario_id = rsv.inventario_id
+              AND ract.solicitudCaras_id = rsv.solicitudCaras_id
+              AND ract.deleted_at IS NULL
+          )
+        ORDER BY rsv.deleted_at DESC, rsv.id DESC
+      `;
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(query, String(propuestaId));
+
+      const desplazados = new Set<string>();
+      try {
+        const hist = await prisma.historial.findMany({
+          where: { ref_id: propuestaId, accion: 'Reservas desplazadas' },
+          select: { detalles: true },
+        });
+        for (const h of hist) {
+          try {
+            const d = JSON.parse(h.detalles || '{}');
+            const cods: string[] = Array.isArray(d?.codigos) ? d.codigos : [];
+            cods.forEach(c => desplazados.add(String(c).toUpperCase()));
+          } catch { /* detalles no-JSON */ }
+        }
+      } catch { /* sin historial */ }
+
+      const data = rows.map(r => {
+        const est = String(r.estatus_inventario || '');
+        const cod = String(r.codigo_unico || '').toUpperCase();
+        const bloqueado = esInventarioNoUtilizable(est);
+        // 'Bloqueado' legacy conserva su etiqueta (filas pre-rename); lo demás
+        // no-utilizable (No Disponible, Inactivo) sale como 'No Disponible'.
+        const motivo_salida = bloqueado
+          ? (est === 'Inhabilitado' ? 'Inhabilitado' : est === 'Bloqueado' ? 'Bloqueado' : 'No Disponible')
+          : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
+        const disponible = Number(r.disponible) === 1;
+        return {
+          ...r,
+          disponible,
+          motivo_salida,
+          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible') : 'Ocupado en el periodo'),
+        };
+      });
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error en getReservasHistorial (campaña):', error);
+      const message = error instanceof Error ? error.message : 'Error al obtener historial';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async createReservas(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;
@@ -11007,6 +11177,25 @@ export class CampanasController {
           }
           const softId = softDeletedCaraC.get(espacioId);
           if (softId) {
+            // CANDADO DE ESTATUS en la reactivación: este atajo no pasa por
+            // createReservaConLock, así que sin el check el flujo real
+            // "bloquear libera la reserva → tráfico vuelve a agregar la pieza"
+            // re-ocupaba una pieza No Disponible/Inhabilitada (QA dev 14-oct).
+            // Resolución polimórfica del id (espacio_inventario.id o inventarios.id),
+            // mismo patrón COALESCE que toggleBlock.
+            const invEstRows = await prisma.$queryRawUnsafe<{ estatus: string | null }[]>(
+              `SELECT i.estatus
+               FROM inventarios i
+               LEFT JOIN espacio_inventario ei ON ei.id = ?
+               WHERE i.id = COALESCE(ei.inventario_id, ?)
+               LIMIT 1`,
+              espacioId, espacioId
+            );
+            if (esInventarioNoUtilizable(invEstRows[0]?.estatus)) {
+              omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Inventario no disponible/inhabilitado' });
+              reservasOmitidas++;
+              continue;
+            }
             reactivarList.push({ reservaId: softId, estatus, espacioId });
             espaciosReservadosEnPeriodo.add(espacioId);
             continue;
@@ -11086,10 +11275,10 @@ export class CampanasController {
             espaciosFirmados.push(w.espacioId);
           } else {
             console.warn(`[Race] espacio ${w.espacioId} conflicto de reserva en período`);
-            omitidosDetalleCamp.push({
-              inventario_id: w.invId,
-              motivo: inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)',
-            });
+            const motivo = lockResult.reason === 'BLOCKED'
+              ? 'Inventario no disponible/inhabilitado'
+              : inesperado ? 'Error inesperado al reservar — reintenta' : 'Ocupado en el periodo (lo ganó otra reserva)';
+            omitidosDetalleCamp.push({ inventario_id: w.invId, motivo });
             reservasOmitidas++;
           }
         }

@@ -145,6 +145,51 @@ export function articuloOcupaInventario(articulo: string | null | undefined): bo
   return !/^\s*IM-/i.test(articulo);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BLOQUEO ADMINISTRATIVO del inventario (inventarios.estatus).
+//
+// Clasificaciones que se comportan IGUAL para efectos de ocupación: la pieza
+// NO se puede utilizar/reservar, sale de disponibles y del mapa, y al aplicarse
+// se liberan sus reservas actuales/futuras. La diferencia es solo de etiqueta.
+// Cualquier check de "¿se puede usar esta pieza?" debe pasar por estas
+// constantes — no comparar contra un valor suelto.
+//
+// 'No Disponible' es el nombre nuevo de 'Bloqueado' (rename oct-2026). 'Bloqueado'
+// se queda en la lista como sinónimo legacy: siguen existiendo filas con ese valor
+// hasta que corra la migración de datos (y clientes/scripts viejos que lo mandan).
+// NUNCA quitarlo de aquí — hacerlo volvería reservables las piezas legacy.
+// ─────────────────────────────────────────────────────────────────────────────
+export const ESTATUS_INVENTARIO_BLOQUEO = ['No Disponible', 'Bloqueado', 'Inhabilitado'] as const;
+export type TipoBloqueoInventario = (typeof ESTATUS_INVENTARIO_BLOQUEO)[number];
+
+/**
+ * Expande el valor de un filtro `?estatus=` de inventarios: 'No Disponible' y
+ * 'Bloqueado' son el MISMO concepto (rename), así que filtrar por cualquiera de
+ * los dos debe traer ambos (filas migradas + legacy). Los demás valores pasan
+ * tal cual.
+ */
+export function expandEstatusInventarioFiltro(estatus: string): string[] {
+  return estatus === 'No Disponible' || estatus === 'Bloqueado'
+    ? ['No Disponible', 'Bloqueado']
+    : [estatus];
+}
+
+// Bloqueo + 'Inactivo' (fantasmas archivados): todo lo que NO se puede ocupar.
+export const ESTATUS_INVENTARIO_NO_UTILIZABLE = [...ESTATUS_INVENTARIO_BLOQUEO, 'Inactivo'] as const;
+
+export const ESTATUS_INVENTARIO_BLOQUEO_SQL = ESTATUS_INVENTARIO_BLOQUEO.map((e) => `'${e}'`).join(',');
+export const ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL = ESTATUS_INVENTARIO_NO_UTILIZABLE.map((e) => `'${e}'`).join(',');
+
+/** ¿El inventario está bloqueado administrativamente (Bloqueado o Inhabilitado)? */
+export function esInventarioBloqueado(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(estatus);
+}
+
+/** ¿El inventario NO se puede utilizar/ocupar (Bloqueado, Inhabilitado o Inactivo)? */
+export function esInventarioNoUtilizable(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_INVENTARIO_NO_UTILIZABLE as readonly string[]).includes(estatus);
+}
+
 type TxClient = PrismaClient | Prisma.TransactionClient;
 
 interface GetEspaciosBloqueadosArgs {
@@ -243,21 +288,32 @@ export async function createReservaConLock(
   // para el payload del emit, no afecta la correctitud de la reserva). Si no
   // viene (undefined), se consulta como antes — los callers viejos no cambian.
   cachedInvId?: number | null,
-): Promise<{ ok: true; reserva: { id: number } } | { ok: false; reason: 'OCCUPIED' }> {
+): Promise<{ ok: true; reserva: { id: number } } | { ok: false; reason: 'OCCUPIED' | 'BLOCKED' }> {
   const espacioId = Number(data.inventario_id);
   try {
     const reserva = await defaultPrisma.$transaction(async (tx) => {
       // Lock de fila sobre el espacio. Concurrentes en mismo espacio esperan.
       await tx.$executeRawUnsafe('SELECT id FROM espacio_inventario WHERE id = ? FOR UPDATE', espacioId);
 
-      // Si el inventario es Digital, no aplica conflicto (es infinito).
-      const invRow = await tx.$queryRawUnsafe<{ td: string | null }[]>(
-        `SELECT i.tradicional_digital AS td
+      // Estatus + tipo del inventario padre (mismo SELECT, con el espacio ya
+      // bloqueado por el FOR UPDATE de arriba → lectura consistente).
+      const invRow = await tx.$queryRawUnsafe<{ td: string | null; estatus: string | null }[]>(
+        `SELECT i.tradicional_digital AS td, i.estatus AS estatus
          FROM espacio_inventario ei
          INNER JOIN inventarios i ON i.id = ei.inventario_id
          WHERE ei.id = ? LIMIT 1`,
         espacioId
       );
+
+      // CANDADO DE ESTATUS: una pieza No Disponible/Bloqueado/Inhabilitado/Inactivo NO se puede
+      // reservar, aunque el front la mande (p. ej. un circuito borrador que la
+      // traía desde antes de inhabilitarla, o un request stale). getDisponibles ya
+      // la excluye del listado; esto es el candado DURO del lado servidor que cierra
+      // ese hueco de borde. Aplica también a Digital: inhabilitada es inhabilitada.
+      if (esInventarioNoUtilizable(invRow[0]?.estatus)) {
+        throw new Error('INVENTARIO_BLOQUEADO');
+      }
+
       const isDigital = invRow[0]?.td === 'Digital';
 
       if (!isDigital) {
@@ -337,6 +393,9 @@ export async function createReservaConLock(
   } catch (err) {
     if ((err as Error).message === 'ESPACIO_OCUPADO') {
       return { ok: false, reason: 'OCCUPIED' };
+    }
+    if ((err as Error).message === 'INVENTARIO_BLOQUEADO') {
+      return { ok: false, reason: 'BLOCKED' };
     }
     throw err;
   }
