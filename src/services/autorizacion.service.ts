@@ -410,10 +410,22 @@ export async function calcularEstadoAutorizacion(cara: CaraData, userId?: number
     }
   }
 
-  // UDC: tabulador propio de Dirección UDC (y NADA más aplica: ni criterios
-  // CIMU/TRADE, ni regla de impares, ni CT/IN). Ver evaluarTabuladorUDC.
+  // UDC: el inventario de UDC (pantallas del aeropuerto) NO va a autorización
+  // (petición Jos 2026-10: "quitar autorizaciones de inventario de UDC; los
+  // tabuladores solo aplican a gran formato"). Como el gran formato ya NO se
+  // vende dentro de UDC (se vende por CIMU/TRADE, donde su tabulador normal sí
+  // aplica), toda venta UDC = solo pantallas → auto-aprobada. Esto revierte al
+  // comportamiento de la junta 2026-09-04. La infra del tabulador UDC
+  // (evaluarTabuladorUDC / filas criterios_autorizacion sap_database='UDC' /
+  // ruteo DCA) queda INERTE por si Dirección lo reactiva, pero ya no se invoca.
   if ((cara.sap_database || '').toUpperCase() === 'UDC') {
-    return evaluarTabuladorUDC(cara);
+    const totalCarasUdc = cara.caras + (Number(cara.bonificacion) || 0);
+    return {
+      autorizacion_dg: 'aprobado',
+      autorizacion_dcm: 'aprobado',
+      tarifa_efectiva: totalCarasUdc > 0 ? cara.costo / totalCarasUdc : 0,
+      total_caras: totalCarasUdc,
+    };
   }
 
   // Artículos de impresión (IM): NUNCA van a autorización (siempre auto-aprobados,
