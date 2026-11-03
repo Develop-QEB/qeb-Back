@@ -29,6 +29,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampa
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
+import { catorcenaLabel } from '../utils/catorcena';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import {
   parseAutorizacionFiltro,
@@ -2276,8 +2277,21 @@ export class CampanasController {
               const fmtP = (d?: Date | null): string => d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}` : '';
               const oldIni = (campanaActual as { fecha_inicio?: Date | null }).fecha_inicio ?? null;
               const oldFin = (campanaActual as { fecha_fin?: Date | null }).fecha_fin ?? null;
-              const periodoAntes = `${fmtP(oldIni)} – ${fmtP(oldFin)}`;
-              const periodoDespues = `${fmtP(fechaInicio ?? oldIni)} – ${fmtP(fechaFin ?? oldFin)}`;
+              const newIni = fechaInicio ?? oldIni;
+              const newFin = fechaFin ?? oldFin;
+              // Mostrar CATORCENA (no solo fechas, que confundían — feedback Jos):
+              // "Cat N/AAAA – Cat M/AAAA (fecha – fecha)".
+              const [cAI, cAF, cDI, cDF] = await Promise.all([
+                catorcenaLabel(oldIni), catorcenaLabel(oldFin),
+                catorcenaLabel(newIni), catorcenaLabel(newFin),
+              ]);
+              const rangoLabel = (ci: string, cf: string, di?: Date | null, df?: Date | null): string => {
+                const cats = ci && cf ? (ci === cf ? ci : `${ci} – ${cf}`) : '';
+                const fechas = `${fmtP(di)} – ${fmtP(df)}`;
+                return cats ? `${cats} (${fechas})` : fechas;
+              };
+              const periodoAntes = rangoLabel(cAI, cAF, oldIni, oldFin);
+              const periodoDespues = rangoLabel(cDI, cDF, newIni, newFin);
               addC('Período', periodoAntes, periodoDespues || 'modificado');
             }
             if (reservasSoltadasPorChoque > 0) addC('Reservas liberadas por choque', '', String(reservasSoltadasPorChoque));
@@ -8750,8 +8764,11 @@ export class CampanasController {
       await prisma.$queryRawUnsafe('UPDATE campania SET posted_to_sap = 1 WHERE id = ?', campanaId);
 
       await logHistorial({
-        tipo: 'campana',
-        refId: campanaId,
+        // tipo 'Campaña' + ref_id = propuesta para que SÍ salga en el tab
+        // Historial de la campaña (filtra por ref_id=propuestaId). Antes usaba
+        // 'campana'/campanaId y no aparecía (feedback Jos).
+        tipo: 'Campaña',
+        refId: before?.propuesta_id ?? campanaId,
         accion: `POST a SAP en campaña #${campanaId} ${before?.nombre ? `"${before.nombre}"` : ''}`.trim(),
         usuario: req.user?.nombre || 'Usuario',
         usuarioId: req.user?.userId,
@@ -8814,6 +8831,24 @@ export class CampanasController {
           });
           propuestaId = cot?.id_propuesta ?? null;
         }
+        // Qué se posteó (feedback Jos: antes solo salían los números de APS):
+        // artículo · catorcena · caras · $monto de las reservas de esos APS.
+        const rsvAps = await prisma.reservas.findMany({
+          where: { APS: { in: apsNuevos }, deleted_at: null },
+          select: { solicitudCaras_id: true },
+        });
+        const caraIdsAps = [...new Set(rsvAps.map(r => r.solicitudCaras_id).filter(Boolean))];
+        const carasAps = caraIdsAps.length > 0 ? await prisma.solicitudCaras.findMany({
+          where: { id: { in: caraIdsAps as number[] } },
+          select: { articulo: true, formato: true, inicio_periodo: true, costo: true, caras: true },
+        }) : [];
+        const circuitosAps = await Promise.all(carasAps.map(async c => ({
+          articulo: c.articulo,
+          formato: c.formato,
+          catorcena: await catorcenaLabel(c.inicio_periodo),
+          caras: c.caras,
+          monto: c.costo != null ? Number(c.costo) : null,
+        })));
         await prisma.historial.create({
           data: {
             tipo: 'Campaña',
@@ -8826,6 +8861,7 @@ export class CampanasController {
               campaniaId: campanaId,
               apsPosteados: apsNuevos,
               totalApsPosteados: apsNuevos.length,
+              circuitos: circuitosAps,
             }),
           },
         }).catch(err => console.error('Error guardando historial POST APS:', err));
@@ -12022,6 +12058,13 @@ export class CampanasController {
       const campanaId = parseInt(req.params.id);
       const campana = await prisma.campania.findUnique({ where: { id: campanaId }, select: { nombre: true, cotizacion_id: true } });
       const cotizacion = campana?.cotizacion_id ? await prisma.cotizacion.findUnique({ where: { id: campana.cotizacion_id }, select: { id_propuesta: true } }) : null;
+      // Enriquecer con CATORCENA (feedback Jos: antes solo decía artículo/formato,
+      // no de qué catorcena salían las reservas eliminadas).
+      const circuitosElim = await Promise.all(carasInfo.map(async c => ({
+        articulo: c.articulo,
+        formato: c.formato,
+        catorcena: await catorcenaLabel(c.inicio_periodo),
+      })));
       await prisma.historial.create({
         data: {
           tipo: 'Campaña',
@@ -12033,7 +12076,7 @@ export class CampanasController {
             origen: 'campaña',
             campaña: campana?.nombre || campanaId,
             reservas_eliminadas: reservaIds.length,
-            circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+            circuitos: circuitosElim,
           }),
         },
       });

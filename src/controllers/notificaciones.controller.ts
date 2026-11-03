@@ -1814,6 +1814,7 @@ export class NotificacionesController {
       const motivoFinal = String(motivo || comentario || '').trim();
       if (!tareaId || isNaN(tareaId)) { res.status(400).json({ success: false, error: 'tareaId inválido' }); return; }
       if (!motivoFinal) { res.status(400).json({ success: false, error: 'Se requiere un motivo de rechazo' }); return; }
+      if (motivoFinal.replace(/[\s\p{P}\p{S}]+/gu, '').length < 3) { res.status(400).json({ success: false, error: 'El motivo de rechazo debe explicar la razón (no solo puntuación).' }); return; }
 
       const tarea = await prisma.tareas.findUnique({ where: { id: tareaId }, select: { id_asignado: true, tipo: true } });
       if (!tarea) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
@@ -1857,6 +1858,15 @@ export class NotificacionesController {
         res.status(400).json({
           success: false,
           error: 'Se requiere un comentario/motivo de rechazo',
+        });
+        return;
+      }
+      // Endurecer: no aceptar motivos triviales (solo puntuación/espacios como
+      // "." o "-"), que dejaban el historial con "Motivo: ." (feedback Jos).
+      if (String(comentario).replace(/[\s\p{P}\p{S}]+/gu, '').length < 3) {
+        res.status(400).json({
+          success: false,
+          error: 'El motivo de rechazo debe explicar la razón (mínimo 3 caracteres, no solo puntuación).',
         });
         return;
       }
