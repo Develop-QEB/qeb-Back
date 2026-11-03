@@ -26,6 +26,7 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
+import { catorcenaLabel } from '../utils/catorcena';
 import {
   parseAutorizacionFiltro,
   parseStatusLista,
@@ -4107,6 +4108,12 @@ export class PropuestasController {
 
       // Registrar en historial
       if (propuestaId) {
+        // Enriquecer con CATORCENA (feedback Jos: antes no decía de qué cat).
+        const circuitosElim = await Promise.all(carasInfo.map(async c => ({
+          articulo: c.articulo,
+          formato: c.formato,
+          catorcena: await catorcenaLabel(c.inicio_periodo),
+        })));
         await prisma.historial.create({
           data: {
             tipo: 'Propuesta',
@@ -4117,7 +4124,7 @@ export class PropuestasController {
               usuario: userName,
               origen: 'propuesta',
               reservas_eliminadas: reservaIds.length,
-              circuitos: carasInfo.map(c => ({ articulo: c.articulo, formato: c.formato })),
+              circuitos: circuitosElim,
             }),
           },
         });

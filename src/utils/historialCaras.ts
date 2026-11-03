@@ -14,6 +14,7 @@ interface CaraSnapshot {
   tipo: string | null;
   formato: string | null;
   inicio_periodo: Date | null;
+  catorcena?: string | null;
 }
 
 const TRACKED_FIELDS: Record<string, string> = {
@@ -69,6 +70,9 @@ export async function snapshotCaras(caraIds: number[]): Promise<Map<number, Cara
       tipo: c.tipo,
       formato: c.formato,
       inicio_periodo: c.inicio_periodo ?? null,
+      // Catorcena legible para el historial (feedback Jos: eliminar/editar caras
+      // ahora dice de qué cat). Cacheado, barato por-cara.
+      catorcena: await catorcenaLabel(c.inicio_periodo),
     });
   }
   return map;
