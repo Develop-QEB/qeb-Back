@@ -16,6 +16,7 @@ import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { logHistorial } from '../utils/historial';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampanaIds, getVisiblePropuestaIds } from '../utils/permissions';
 
 // Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
 // al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
@@ -2173,18 +2174,29 @@ export class NotificacionesController {
   async getCampanasParaActividad(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
-      const rol = req.user?.rol;
+      const rol = req.user?.rol || '';
       if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
       if (!puedeCrearActividadComercial(rol)) {
         res.status(403).json({ success: false, error: 'Rol no autorizado' });
         return;
       }
       const search = (req.query.search as string || '').trim();
-      const userIdStr = String(userId);
       const like = search ? `%${search}%` : null;
 
-      // Match "propio" del asesor: propuesta.id_asignado contiene su id
-      // (comma-separated) o solicitud.usuario_id == su id.
+      // Misma logica de visibilidad que /campanas: DEV/Admin/Gerente ven todo,
+      // Asesor Comercial ve suyas + donde tenga tarea abierta. Antes el modal
+      // solo mostraba las "propias" por FIND_IN_SET, lo que impedia buscar por
+      // ID campanas ajenas (reporte Jos 2026-11-04 con 80905 PINTURAS BEREL).
+      let visibleClause = '';
+      const visibleParams: unknown[] = [];
+      if (!hasFullVisibility(rol)) {
+        const teamIds = hasTeamVisibility(rol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisibleCampanaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) { res.json({ success: true, data: [] }); return; }
+        visibleClause = `AND c.id IN (${visibleIds.map(() => '?').join(',')})`;
+        visibleParams.push(...visibleIds);
+      }
+
       const rows = await prisma.$queryRawUnsafe<Array<{
         id: number; nombre: string; status: string;
         cliente: string | null; marca: string | null;
@@ -2198,18 +2210,12 @@ export class NotificacionesController {
         LEFT JOIN propuesta p ON p.id = ct.id_propuesta
         LEFT JOIN solicitud s ON s.id = p.solicitud_id
         LEFT JOIN cliente cl ON cl.id = c.cliente_id
-        WHERE
-          c.status <> 'Rechazada'
-          AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )
+        WHERE c.status <> 'Rechazada'
+          ${visibleClause}
           ${like ? 'AND (CAST(c.id AS CHAR) LIKE ? OR c.nombre LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
         ORDER BY c.fecha_inicio DESC
         LIMIT 100
-      `, ...(like
-        ? [userIdStr, userId, like, like, like, like]
-        : [userIdStr, userId]));
+      `, ...visibleParams, ...(like ? [like, like, like, like] : []));
 
       res.json({ success: true, data: rows });
     } catch (error) {
@@ -2222,15 +2228,25 @@ export class NotificacionesController {
   async getPropuestasParaActividad(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user?.userId;
-      const rol = req.user?.rol;
+      const rol = req.user?.rol || '';
       if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
       if (!puedeCrearActividadComercial(rol)) {
         res.status(403).json({ success: false, error: 'Rol no autorizado' });
         return;
       }
       const search = (req.query.search as string || '').trim();
-      const userIdStr = String(userId);
       const like = search ? `%${search}%` : null;
+
+      // Misma logica de visibilidad que /propuestas (ver getCampanasParaActividad).
+      let visibleClause = '';
+      const visibleParams: unknown[] = [];
+      if (!hasFullVisibility(rol)) {
+        const teamIds = hasTeamVisibility(rol) ? await getTeamMemberIds(prisma, userId) : undefined;
+        const visibleIds = await getVisiblePropuestaIds(prisma, userId, teamIds);
+        if (visibleIds.length === 0) { res.json({ success: true, data: [] }); return; }
+        visibleClause = `AND p.id IN (${visibleIds.map(() => '?').join(',')})`;
+        visibleParams.push(...visibleIds);
+      }
 
       const rows = await prisma.$queryRawUnsafe<Array<{
         id: number; status: string;
@@ -2243,23 +2259,55 @@ export class NotificacionesController {
         FROM propuesta p
         LEFT JOIN solicitud s ON s.id = p.solicitud_id
         LEFT JOIN cliente cl ON cl.id = p.cliente_id
-        WHERE
-          p.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL
           AND p.status NOT IN ('Descartada','Rechazada')
-          AND (
-            FIND_IN_SET(?, REPLACE(IFNULL(p.id_asignado, ''), ' ', '')) > 0
-            OR s.usuario_id = ?
-          )
+          ${visibleClause}
           ${like ? 'AND (CAST(p.id AS CHAR) LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ?)' : ''}
         ORDER BY p.updated_at DESC, p.id DESC
         LIMIT 100
-      `, ...(like
-        ? [userIdStr, userId, like, like, like]
-        : [userIdStr, userId]));
+      `, ...visibleParams, ...(like ? [like, like, like] : []));
 
       res.json({ success: true, data: rows });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al obtener propuestas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  // Lista solicitudes para vincular una actividad comercial. Solicitudes NO
+  // tiene filtro de visibilidad (igual que /solicitudes — cualquier rol de la
+  // whitelist de Actividad Comercial ve todas).
+  async getSolicitudesParaActividad(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.userId;
+      const rol = req.user?.rol || '';
+      if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+      if (!puedeCrearActividadComercial(rol)) {
+        res.status(403).json({ success: false, error: 'Rol no autorizado' });
+        return;
+      }
+      const search = (req.query.search as string || '').trim();
+      const like = search ? `%${search}%` : null;
+
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        id: number; status: string;
+        cliente: string | null; marca: string | null;
+      }>>(`
+        SELECT
+          s.id, s.status,
+          COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
+          s.marca_nombre AS marca
+        FROM solicitud s
+        LEFT JOIN cliente cl ON cl.id = s.cliente_id
+        WHERE s.status <> 'Rechazada'
+          ${like ? 'AND (CAST(s.id AS CHAR) LIKE ? OR cl.T0_U_Cliente LIKE ? OR s.marca_nombre LIKE ? OR s.razon_social LIKE ?)' : ''}
+        ORDER BY s.updated_at DESC, s.id DESC
+        LIMIT 100
+      `, ...(like ? [like, like, like, like] : []));
+
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al obtener solicitudes';
       res.status(500).json({ success: false, error: message });
     }
   }
@@ -2291,6 +2339,8 @@ export class NotificacionesController {
         catorcenas: catorcenasInput,
         estatus_actividad,
         base,
+        tipo_cliente,
+        tipo_actividad,
       } = req.body as {
         subtipo?: string;
         ref_id?: number | string;
@@ -2305,6 +2355,8 @@ export class NotificacionesController {
         catorcenas?: Array<number | string>;
         estatus_actividad?: string;
         base?: string;
+        tipo_cliente?: string;
+        tipo_actividad?: string;
       };
 
       const descripcionTrim = (descripcion || '').trim();
@@ -2326,7 +2378,7 @@ export class NotificacionesController {
       let idSolicitud = '';
 
       const refIdNum = ref_id != null ? Number(ref_id) : NaN;
-      const hasRef = subtipo && ['Campaña', 'Propuesta'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
+      const hasRef = subtipo && ['Campaña', 'Propuesta', 'Solicitud'].includes(subtipo) && !Number.isNaN(refIdNum) && refIdNum > 0;
 
       // Lead: subtipo valido sin referencia (no se busca en BD).
       // Feedback ajuste 2026-08-13: el asesor puede registrar actividad sobre
@@ -2364,7 +2416,7 @@ export class NotificacionesController {
           if (!marca) marca = rows[0].marca;
           campaniaId = refIdNum;
           idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
-        } else {
+        } else if (subtipo === 'Propuesta') {
           const rows = await prisma.$queryRawUnsafe<Array<{
             cliente: string | null; marca: string | null; solicitud_id: number | null;
           }>>(`
@@ -2386,6 +2438,26 @@ export class NotificacionesController {
           if (!marca) marca = rows[0].marca;
           idPropuestaStr = String(refIdNum);
           idSolicitud = rows[0].solicitud_id ? String(rows[0].solicitud_id) : '';
+        } else {
+          // Solicitud (feedback Jos 2026-11-04)
+          const rows = await prisma.$queryRawUnsafe<Array<{
+            cliente: string | null; marca: string | null;
+          }>>(`
+            SELECT
+              COALESCE(NULLIF(cl.T0_U_Cliente, 'Cliente'), NULLIF(cl.T0_U_RazonSocial, ''), s.razon_social) AS cliente,
+              s.marca_nombre AS marca
+            FROM solicitud s
+            LEFT JOIN cliente cl ON cl.id = s.cliente_id
+            WHERE s.id = ?
+            LIMIT 1
+          `, refIdNum);
+          if (!rows.length) {
+            res.status(404).json({ success: false, error: 'Solicitud no encontrada' });
+            return;
+          }
+          if (!cliente) cliente = rows[0].cliente;
+          if (!marca) marca = rows[0].marca;
+          idSolicitud = String(refIdNum);
         }
       }
 
@@ -2428,6 +2500,16 @@ export class NotificacionesController {
       const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
+      // Nuevos campos (feedback Jos 2026-11-04): "Tipo Cliente" (Lead/Cliente)
+      // y "Tipo Actividad" (Llamada/Mail/Visita). Se guardan en el JSON
+      // contenido para no requerir migration.
+      const tipoClienteValido: 'Lead' | 'Cliente' | null =
+        tipo_cliente === 'Lead' || tipo_cliente === 'Cliente' ? tipo_cliente : null;
+      const tipoActividadValido: 'Llamada' | 'Mail' | 'Visita' | null =
+        tipo_actividad === 'Llamada' || tipo_actividad === 'Mail' || tipo_actividad === 'Visita'
+          ? tipo_actividad
+          : null;
+
       const contenido = JSON.stringify({
         cliente,
         marca,
@@ -2442,6 +2524,8 @@ export class NotificacionesController {
         catorcenas: catorcenasValidas,
         estatus_actividad: estatusActividadValido,
         base: baseValida,
+        tipo_cliente: tipoClienteValido,
+        tipo_actividad: tipoActividadValido,
       });
 
       // Título dinámico según si hay referencia a campaña/propuesta o no.
@@ -2493,8 +2577,9 @@ export class NotificacionesController {
         },
       });
 
-      // Espejo en el historial del ID vinculado para que desde la campaña
-      // o propuesta también se vea la actividad — feedback Jos 2026-09-25.
+      // Espejo en el historial del ID vinculado para que desde la campaña,
+      // propuesta o solicitud también se vea la actividad — feedback Jos
+      // 2026-09-25 / 2026-11-04 (Solicitud).
       if (campaniaId) {
         await logHistorial({
           tipo: 'Campaña', refId: campaniaId,
@@ -2506,6 +2591,14 @@ export class NotificacionesController {
       } else if (idPropuestaStr) {
         await logHistorial({
           tipo: 'Propuesta', refId: Number(idPropuestaStr),
+          accion: `Actividad comercial #${tarea.id} creada`,
+          usuario: userName, usuarioId: userId, usuarioRol: rol,
+          origen: 'notificaciones_actividad_comercial',
+          extras: { tareaId: tarea.id, descripcion: descripcionTrim.slice(0, 200) },
+        });
+      } else if (subtipoOut === 'Solicitud' && idSolicitud) {
+        await logHistorial({
+          tipo: 'Solicitud', refId: Number(idSolicitud),
           accion: `Actividad comercial #${tarea.id} creada`,
           usuario: userName, usuarioId: userId, usuarioRol: rol,
           origen: 'notificaciones_actividad_comercial',
@@ -2592,6 +2685,8 @@ export class NotificacionesController {
         catorcenas: catorcenasInput,
         estatus_actividad,
         base,
+        tipo_cliente,
+        tipo_actividad,
       } = req.body as {
         subtipo?: string;
         ref_id?: number | string;
@@ -2606,6 +2701,8 @@ export class NotificacionesController {
         catorcenas?: Array<number | string>;
         estatus_actividad?: string;
         base?: string;
+        tipo_cliente?: string;
+        tipo_actividad?: string;
       };
 
       const descripcionTrim = (descripcion || '').trim();
