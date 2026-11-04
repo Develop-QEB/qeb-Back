@@ -21,6 +21,7 @@
 //     todo lo que tuviera reservado, sin importar en qué período esté el inventario.
 
 import prisma from '../utils/prisma';
+import { ESTATUS_BLOQUEADO } from './inventario-bloqueo.service';
 import {
   emitToAll,
   emitToPropuesta,
@@ -160,6 +161,20 @@ async function liberarUnaPropuesta(
     select: { id: true, inventario_id: true, solicitudCaras_id: true, APS: true },
   });
   if (reservas.length === 0) return 0;
+
+  // Guarda: si la propuesta tiene reservas BLOQUEADAS por Tráfico (apartado
+  // exclusivo), NO se auto-libera — es una intervención activa, no un
+  // estancamiento. Se omite y se reporta (como las de APS). Las bloqueadas no
+  // están en ESTATUS_RESERVA_ACTIVOS, así que se cuentan aparte.
+  const bloqueadasCount = await prisma.reservas.count({
+    where: { solicitudCaras_id: { in: caraIds }, deleted_at: null, estatus: { in: [...ESTATUS_BLOQUEADO] } },
+  });
+  if (bloqueadasCount > 0) {
+    console.warn(
+      `[LiberacionReservas] Propuesta #${prop.id} OMITIDA: ${bloqueadasCount} reserva(s) bloqueadas por Tráfico (apartado exclusivo).`
+    );
+    return -1;
+  }
 
   // Guarda de seguridad (misma filosofía que zombi-monitor): si alguna reserva
   // tiene APS, su documento ya está en SAP; NO se auto-libera, se reporta.

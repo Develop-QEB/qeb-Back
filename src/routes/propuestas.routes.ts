@@ -26,6 +26,8 @@ router.post('/:id/comments', propuestasController.addComment.bind(propuestasCont
 router.post('/:id/approve', propuestasController.approve.bind(propuestasController));
 router.post('/:id/reservas', propuestasController.createReservas.bind(propuestasController));
 router.post('/:id/reservas/toggle', propuestasController.toggleReserva.bind(propuestasController));
+// Bloquear / desbloquear un circuito (apartado exclusivo de Tráfico). body: { activo: boolean }
+router.post('/:id/circuito/:caraId/bloqueo', propuestasController.toggleBloqueoCircuito.bind(propuestasController));
 
 // PATCH routes
 router.patch('/:id/status', propuestasController.updateStatus.bind(propuestasController));

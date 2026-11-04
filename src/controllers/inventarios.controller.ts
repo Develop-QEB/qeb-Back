@@ -6,6 +6,7 @@ import { cache, CACHE_TTL } from '../utils/cache';
 import {
   ESTATUS_QUE_BLOQUEAN,
   ESTATUS_FIRME,
+  ESTATUS_OCUPA,
   ESTATUS_INVENTARIO_BLOQUEO,
   ESTATUS_INVENTARIO_NO_UTILIZABLE,
   TipoBloqueoInventario,
@@ -196,7 +197,7 @@ export class InventariosController {
              AND rsv.deleted_at IS NULL
              AND cal.deleted_at IS NULL
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Reservado Bloqueado', 'Bonificado Bloqueado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -712,12 +713,13 @@ export class InventariosController {
           where: {
             deleted_at: null,
             calendario_id: { in: calendarioIds },
-            // Ocupa la pieza si: (a) es FIRME de CUALQUIER propuesta —
-            // Reservado/Bonificado NO bloquean cross-propuesta (duplicados OK); o
-            // (b) es de una cara HERMANA del mismo grupo_rt_bf, con cualquier
-            // estatus (la RT y su BF pareja no comparten pieza en el período).
+            // Ocupa la pieza si: (a) OCUPA de CUALQUIER propuesta = FIRME (vendido)
+            // o BLOQUEADO (apartado exclusivo de Tráfico) — Reservado/Bonificado NO
+            // bloquean cross-propuesta (duplicados OK); o (b) es de una cara HERMANA
+            // del mismo grupo_rt_bf, con cualquier estatus (la RT y su BF pareja no
+            // comparten pieza en el período).
             OR: [
-              { estatus: { in: [...ESTATUS_FIRME] } },
+              { estatus: { in: [...ESTATUS_OCUPA] } },
               ...(grupoHermanasCaraIds.length > 0
                 ? [{ solicitudCaras_id: { in: grupoHermanasCaraIds } }]
                 : []),
@@ -1970,7 +1972,7 @@ export class InventariosController {
                AND cal.deleted_at IS NULL
                AND cal.fecha_inicio <= CURDATE()
                AND cal.fecha_fin >= CURDATE()
-               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
+               AND rsv.estatus IN ('Reservado', 'Bonificado', 'Reservado Bloqueado', 'Bonificado Bloqueado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
             ...invIds
           );
           for (const row of rows) {
@@ -2151,7 +2153,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Reservado Bloqueado', 'Bonificado Bloqueado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of rows) {
@@ -2179,7 +2181,7 @@ export class InventariosController {
              AND cal.deleted_at IS NULL
              AND cal.fecha_inicio <= CURDATE()
              AND cal.fecha_fin >= CURDATE()
-             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
+             AND rsv.estatus IN ('Reservado', 'Bonificado', 'Reservado Bloqueado', 'Bonificado Bloqueado', 'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte')`,
           ...invIds
         );
         for (const row of campRows) {

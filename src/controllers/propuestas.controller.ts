@@ -12,7 +12,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable, bloquearCircuitoPropuesta, desbloquearCircuitoPropuesta } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
@@ -4213,6 +4213,65 @@ export class PropuestasController {
       emitToDashboard(SOCKET_EVENTS.DASHBOARD_UPDATED, { tipo: 'reserva', accion: 'eliminada' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al eliminar reservas';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+
+  // Bloquear / desbloquear un circuito (solicitudCaras) de la propuesta. SOLO
+  // Tráfico. Al bloquear, las reservas del circuito pasan a EXCLUSIVAS
+  // ('Reservado Bloqueado'): ocupan como un vendido (nadie más las aparta ni las
+  // roba una campaña) y se le quita la pieza a otras propuestas que la tenían en
+  // multireserva. Al desbloquear regresan a 'Reservado' (vuelve la multireserva).
+  async toggleBloqueoCircuito(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id, caraId } = req.params;
+      const propuestaId = parseInt(id);
+      const solicitudCaraId = parseInt(caraId);
+      const activo = req.body?.activo === true || req.body?.activo === 'true';
+
+      // Gate de rol: solo Tráfico gestiona el bloqueo de circuitos.
+      if (!esTrafico(req.user?.rol)) {
+        res.status(403).json({ success: false, error: 'Solo Tráfico puede bloquear o desbloquear circuitos.' });
+        return;
+      }
+
+      // La cara debe pertenecer a esta propuesta (idquote = id de la propuesta).
+      const cara = await prisma.solicitudCaras.findUnique({
+        where: { id: solicitudCaraId },
+        select: { id: true, idquote: true },
+      });
+      if (!cara || String(cara.idquote) !== String(propuestaId)) {
+        res.status(404).json({ success: false, error: 'Circuito no encontrado en esta propuesta.' });
+        return;
+      }
+
+      const ctx = { usuarioNombre: req.user?.nombre, usuarioId: req.user?.userId };
+      if (activo) {
+        const r = await bloquearCircuitoPropuesta(solicitudCaraId, ctx);
+        res.json({
+          success: true,
+          bloqueado: true,
+          bloqueadas: r.bloqueadas,
+          desplazadas: r.desplazadas.length,
+          message: r.bloqueadas > 0
+            ? `Circuito bloqueado (${r.bloqueadas} reserva(s) apartadas en exclusiva` +
+              (r.desplazadas.length ? `, ${r.desplazadas.length} desplazada(s) de otras propuestas).` : ').')
+            : 'El circuito no tiene reservas que bloquear.',
+        });
+      } else {
+        const r = await desbloquearCircuitoPropuesta(solicitudCaraId, ctx);
+        res.json({
+          success: true,
+          bloqueado: false,
+          desbloqueadas: r.desbloqueadas,
+          message: r.desbloqueadas > 0
+            ? `Circuito desbloqueado (${r.desbloqueadas} reserva(s) regresan a multireserva).`
+            : 'El circuito no estaba bloqueado.',
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al cambiar el bloqueo del circuito';
       res.status(500).json({ success: false, error: message });
     }
   }
