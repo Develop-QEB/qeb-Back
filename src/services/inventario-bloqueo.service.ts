@@ -113,16 +113,48 @@ export const ESTATUS_TENTATIVO = [
   'Bonificado',
 ] as const;
 
+// BLOQUEADO = apartado EXCLUSIVO de propuesta (candado de Tráfico, feature
+// "bloquear circuitos" 2026-11). Se comporta como FIRME para OCUPAR el espacio:
+// bloquea el alta (no se puede duplicar) y NO se puede desplazar/robar — pero NO
+// es una venta (no cuenta como Vendido en reportes/SAP). Al pase a ventas se
+// convierte a Vendido / Vendido bonificado. Reversible: al quitarlo regresa a
+// Reservado / Bonificado (multireserva).
+export const ESTATUS_BLOQUEADO = [
+  'Reservado Bloqueado',
+  'Bonificado Bloqueado',
+] as const;
+
+// Mapas de ida/vuelta entre el hold tentativo y su variante bloqueada.
+export const ESTATUS_A_BLOQUEADO: Record<string, string> = {
+  Reservado: 'Reservado Bloqueado',
+  Bonificado: 'Bonificado Bloqueado',
+};
+export const ESTATUS_DESDE_BLOQUEADO: Record<string, string> = {
+  'Reservado Bloqueado': 'Reservado',
+  'Bonificado Bloqueado': 'Bonificado',
+};
+
+// OCUPA = firme (vendido) + bloqueado (apartado exclusivo de propuesta). Ambos
+// impiden que OTRA propuesta/campaña aparte la misma pieza en el período; los
+// tentativos NO. Este es el set correcto para el candado de alta y disponibles.
+export const ESTATUS_OCUPA = [
+  ...ESTATUS_FIRME,
+  ...ESTATUS_BLOQUEADO,
+] as const;
+
 // Estatus que HOY impiden reusar un espacio físico tradicional en el mismo
-// período. Unión firme+tentativo = lista histórica → comportamiento sin cambios.
+// período. Unión firme+bloqueado+tentativo = lista histórica (ahora incluye el
+// bloqueado, que bloquea aún más que un tentativo).
 // IMPORTANTE: alinear con `getDisponibles` en inventarios.controller.ts.
 export const ESTATUS_QUE_BLOQUEAN = [
   ...ESTATUS_FIRME,
+  ...ESTATUS_BLOQUEADO,
   ...ESTATUS_TENTATIVO,
 ] as const;
 
 // Listas listas para interpolar en SQL raw (valores constantes → sin inyección).
 export const ESTATUS_FIRME_SQL = ESTATUS_FIRME.map((e) => `'${e}'`).join(',');
+export const ESTATUS_OCUPA_SQL = ESTATUS_OCUPA.map((e) => `'${e}'`).join(',');
 export const ESTATUS_QUE_BLOQUEAN_SQL = ESTATUS_QUE_BLOQUEAN.map((e) => `'${e}'`).join(',');
 
 /** ¿El estatus de una reserva OCUPA físicamente el espacio (venta firme)? */
@@ -133,6 +165,11 @@ export function esEstatusFirme(estatus: string | null | undefined): boolean {
 /** ¿El estatus es un hold tentativo de propuesta (no ocupa)? */
 export function esEstatusTentativo(estatus: string | null | undefined): boolean {
   return !!estatus && (ESTATUS_TENTATIVO as readonly string[]).includes(estatus);
+}
+
+/** ¿El estatus es un apartado EXCLUSIVO/bloqueado de propuesta (ocupa, no es venta)? */
+export function esEstatusBloqueado(estatus: string | null | undefined): boolean {
+  return !!estatus && (ESTATUS_BLOQUEADO as readonly string[]).includes(estatus);
 }
 
 /**
@@ -231,7 +268,8 @@ export async function getEspaciosBloqueados(
      FROM reservas rv
      INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
      WHERE rv.deleted_at IS NULL
-       AND rv.estatus IN (${ESTATUS_FIRME_SQL})
+       -- Ocupan: firmes (vendidas) + bloqueadas (apartado exclusivo de propuesta).
+       AND rv.estatus IN (${ESTATUS_OCUPA_SQL})
        -- IM (impresión) no ocupa el espacio físico → no bloquea.
        AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
        AND sc.inicio_periodo <= ?
@@ -320,15 +358,16 @@ export async function createReservaConLock(
         const excludeFilter = excludeCaraIds && excludeCaraIds.length > 0
           ? `AND rv.solicitudCaras_id NOT IN (${excludeCaraIds.map(() => '?').join(',')})`
           : '';
-        // Solo choca contra reservas FIRMES (vendidas). Las tentativas de otras
-        // propuestas (Reservado/Bonificado) NO bloquean → se permiten duplicados
-        // en propuestas; el ganador se resuelve al vender.
+        // Choca contra reservas que OCUPAN: firmes (vendidas) + bloqueadas
+        // (apartado exclusivo de propuesta). Las tentativas de otras propuestas
+        // (Reservado/Bonificado) NO bloquean → se permiten duplicados en
+        // propuestas; el ganador se resuelve al vender o al bloquear.
         const conflict = await tx.$queryRawUnsafe<{ c: bigint }[]>(
           `SELECT COUNT(*) c FROM reservas rv
            INNER JOIN solicitudCaras sc ON sc.id = rv.solicitudCaras_id
            WHERE rv.inventario_id = ?
              AND rv.deleted_at IS NULL
-             AND rv.estatus IN (${ESTATUS_FIRME_SQL})
+             AND rv.estatus IN (${ESTATUS_OCUPA_SQL})
              AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')
              AND sc.inicio_periodo <= ?
              AND sc.fin_periodo >= ?
@@ -497,7 +536,9 @@ export async function venderReservasPropuestaConGuardian(
      LEFT JOIN inventarios invD ON invD.id = r.inventario_id
      WHERE sc.idquote = CAST(? AS CHAR)
        AND r.deleted_at IS NULL
-       AND r.estatus IN ('Reservado','Bonificado')
+       -- Incluye las BLOQUEADAS: un circuito bloqueado por Tráfico también cruza
+       -- a venta ('Reservado Bloqueado'→Vendido, 'Bonificado Bloqueado'→Vendido bonificado).
+       AND r.estatus IN ('Reservado','Bonificado','Reservado Bloqueado','Bonificado Bloqueado')
      ORDER BY r.inventario_id`,
     propuestaId,
   );
@@ -508,7 +549,8 @@ export async function venderReservasPropuestaConGuardian(
   const idsVendidoBon: number[] = [];
   const ocupaEspacios = new Set<number>();
   for (const t of tentativas) {
-    if (t.estatus === 'Bonificado') idsVendidoBon.push(t.reserva_id);
+    // Bonificado y Bonificado Bloqueado → Vendido bonificado; el resto → Vendido.
+    if (t.estatus === 'Bonificado' || t.estatus === 'Bonificado Bloqueado') idsVendidoBon.push(t.reserva_id);
     else idsVendido.push(t.reserva_id);
     if (!Number(t.es_digital) && !Number(t.es_im)) ocupaEspacios.add(t.espacio_id);
   }
@@ -546,12 +588,13 @@ export async function venderReservasPropuestaConGuardian(
        LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
        LEFT JOIN inventarios invD ON invD.id = r.inventario_id
        INNER JOIN reservas r2 ON r2.inventario_id = r.inventario_id
-         AND r2.deleted_at IS NULL AND r2.estatus IN (${ESTATUS_FIRME_SQL})
+         -- Conflicto = la pieza ya la OCUPA otra cotización (vendida O bloqueada).
+         AND r2.deleted_at IS NULL AND r2.estatus IN (${ESTATUS_OCUPA_SQL})
        INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
          AND sc2.idquote <> CAST(? AS CHAR)
          AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
        WHERE sc.idquote = CAST(? AS CHAR)
-         AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
+         AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado','Reservado Bloqueado','Bonificado Bloqueado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
          AND (sc.articulo IS NULL OR sc.articulo NOT LIKE 'IM-%')`,
       propuestaId, propuestaId,
@@ -728,7 +771,7 @@ export interface DesplazamientoContexto {
   usuarioId?: number;
   campanaId?: number;      // campaña/propuesta GANADORA (a donde se fueron las piezas)
   campanaNombre?: string;
-  origen?: 'campana' | 'aprobacion';
+  origen?: 'campana' | 'aprobacion' | 'bloqueo';
 }
 
 /**
@@ -974,10 +1017,153 @@ export async function notificarReservasDesplazadas(
             reservas_eliminadas: totalDesplazadas,
             motivo: ganadorEsCampana
               ? `Se reservaron ${totalDesplazadas} ubicación(es) que tenían otras propuestas (${perdedorasResumen.join(', ')}), desplazándolas.`
+              : ctx.origen === 'bloqueo'
+              ? `El bloqueo de circuito tomó ${totalDesplazadas} ubicación(es) que tenían otras propuestas (${perdedorasResumen.join(', ')}), desplazándolas.`
               : `El pase a ventas tomó ${totalDesplazadas} ubicación(es) que tenían otras propuestas (${perdedorasResumen.join(', ')}), desplazándolas.`,
           }),
         },
       });
     } catch { /* noop */ }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BLOQUEO DE CIRCUITO (feature Tráfico, 2026-11).
+//
+// Vuelve EXCLUSIVAS las reservas de un circuito (solicitudCaras) de una propuesta:
+// las pasa de tentativas ('Reservado'/'Bonificado') a bloqueadas ('Reservado
+// Bloqueado'/'Bonificado Bloqueado') — que OCUPAN como un vendido pero NO son una
+// venta — y le "roba" a las otras propuestas lo que compartían en multireserva
+// (mismo desalojo que el pase a ventas). Reversible: al desbloquear regresan a
+// tentativas y vuelve la multireserva. Al pase a ventas la bloqueada se convierte
+// sola en Vendido (ver venderReservasPropuestaConGuardian). SOLO Tráfico puede
+// gestionarlo — el gate de rol va en el controlador.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function bloquearCircuitoPropuesta(
+  solicitudCaraId: number,
+  ctx: { usuarioNombre?: string; usuarioId?: number } = {},
+): Promise<{ bloqueadas: number; desplazadas: DesplazadaInfo[]; idquote: string | null }> {
+  const res = await defaultPrisma.$transaction(async (tx) => {
+    const cara = await tx.solicitudCaras.findUnique({
+      where: { id: solicitudCaraId },
+      select: { id: true, idquote: true, inicio_periodo: true, fin_periodo: true },
+    });
+    if (!cara || !cara.idquote) throw new Error('CARA_NO_ENCONTRADA');
+
+    // Solo las reservas TENTATIVAS vigentes del circuito pasan a bloqueadas.
+    const reservas = await tx.reservas.findMany({
+      where: { solicitudCaras_id: solicitudCaraId, deleted_at: null, estatus: { in: [...ESTATUS_TENTATIVO] } },
+      select: { id: true, inventario_id: true, estatus: true },
+    });
+    if (reservas.length === 0) {
+      return { bloqueadas: 0, desplazadas: [] as DesplazadaInfo[], idquote: cara.idquote };
+    }
+
+    // Lock de los espacios (ORDER BY id = deadlock-safe) antes de robar/voltear.
+    const espacios = [...new Set(reservas.map((r) => Number(r.inventario_id)).filter((n) => !Number.isNaN(n)))].sort((a, b) => a - b);
+    if (espacios.length > 0) {
+      const ph = espacios.map(() => '?').join(',');
+      await tx.$executeRawUnsafe(`SELECT id FROM espacio_inventario WHERE id IN (${ph}) ORDER BY id FOR UPDATE`, ...espacios);
+    }
+
+    // Robar: desaloja (soft-delete) las tentativas de OTRAS propuestas sobre estas
+    // piezas tradicionales en el período (mismo motor que el pase a ventas).
+    const desplazadas = cara.inicio_periodo && cara.fin_periodo
+      ? await desplazarTentativasEnEspacios(tx, espacios, cara.inicio_periodo, cara.fin_periodo, String(cara.idquote))
+      : [];
+
+    // Voltear las propias a su variante bloqueada.
+    const toBloq: number[] = [];
+    const toBloqBon: number[] = [];
+    for (const r of reservas) {
+      if (r.estatus === 'Bonificado') toBloqBon.push(r.id);
+      else toBloq.push(r.id);
+    }
+    if (toBloq.length) await tx.reservas.updateMany({ where: { id: { in: toBloq } }, data: { estatus: 'Reservado Bloqueado' } });
+    if (toBloqBon.length) await tx.reservas.updateMany({ where: { id: { in: toBloqBon } }, data: { estatus: 'Bonificado Bloqueado' } });
+
+    return { bloqueadas: reservas.length, desplazadas, idquote: cara.idquote };
+  });
+
+  // Fuera de la tx (fail-soft): aviso a desplazados, historial y refresco en vivo.
+  if (res.desplazadas.length > 0) {
+    try {
+      await notificarReservasDesplazadas(res.desplazadas, {
+        usuarioNombre: ctx.usuarioNombre,
+        usuarioId: ctx.usuarioId,
+        campanaId: res.idquote ? parseInt(res.idquote) : undefined,
+        origen: 'bloqueo',
+      });
+    } catch (e) {
+      console.error('[bloqueo-circuito] error notificando desplazadas', e);
+    }
+  }
+  if (res.idquote && res.bloqueadas > 0) {
+    try {
+      await defaultPrisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: parseInt(res.idquote),
+          accion: 'Circuito bloqueado',
+          fecha_hora: new Date(),
+          detalles: JSON.stringify({
+            usuario: ctx.usuarioNombre,
+            solicitud_cara_id: solicitudCaraId,
+            reservas_bloqueadas: res.bloqueadas,
+            desplazadas: res.desplazadas.length,
+            motivo: `Se bloqueó el circuito (apartado exclusivo): ${res.bloqueadas} reserva(s)` +
+              (res.desplazadas.length ? `, desplazando ${res.desplazadas.length} de otras propuestas.` : '.'),
+          }),
+        },
+      });
+    } catch { /* noop */ }
+    try { emitToPropuesta(parseInt(res.idquote), SOCKET_EVENTS.RESERVA_CREADA, { propuestaId: parseInt(res.idquote) }); } catch { /* noop */ }
+  }
+  return res;
+}
+
+export async function desbloquearCircuitoPropuesta(
+  solicitudCaraId: number,
+  ctx: { usuarioNombre?: string; usuarioId?: number } = {},
+): Promise<{ desbloqueadas: number; idquote: string | null }> {
+  const cara = await defaultPrisma.solicitudCaras.findUnique({
+    where: { id: solicitudCaraId },
+    select: { idquote: true },
+  });
+  const reservas = await defaultPrisma.reservas.findMany({
+    where: { solicitudCaras_id: solicitudCaraId, deleted_at: null, estatus: { in: [...ESTATUS_BLOQUEADO] } },
+    select: { id: true, estatus: true },
+  });
+  if (reservas.length === 0) return { desbloqueadas: 0, idquote: cara?.idquote ?? null };
+
+  const toRes: number[] = [];
+  const toBon: number[] = [];
+  for (const r of reservas) {
+    if (r.estatus === 'Bonificado Bloqueado') toBon.push(r.id);
+    else toRes.push(r.id);
+  }
+  if (toRes.length) await defaultPrisma.reservas.updateMany({ where: { id: { in: toRes } }, data: { estatus: 'Reservado' } });
+  if (toBon.length) await defaultPrisma.reservas.updateMany({ where: { id: { in: toBon } }, data: { estatus: 'Bonificado' } });
+
+  if (cara?.idquote) {
+    try {
+      await defaultPrisma.historial.create({
+        data: {
+          tipo: 'Propuesta',
+          ref_id: parseInt(cara.idquote),
+          accion: 'Circuito desbloqueado',
+          fecha_hora: new Date(),
+          detalles: JSON.stringify({
+            usuario: ctx.usuarioNombre,
+            solicitud_cara_id: solicitudCaraId,
+            reservas_desbloqueadas: reservas.length,
+            motivo: `Se quitó el bloqueo del circuito: ${reservas.length} reserva(s) regresan a multireserva.`,
+          }),
+        },
+      });
+    } catch { /* noop */ }
+    try { emitToPropuesta(parseInt(cara.idquote), SOCKET_EVENTS.RESERVA_CREADA, { propuestaId: parseInt(cara.idquote) }); } catch { /* noop */ }
+  }
+  return { desbloqueadas: reservas.length, idquote: cara?.idquote ?? null };
 }
