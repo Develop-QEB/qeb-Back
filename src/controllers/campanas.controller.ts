@@ -35,7 +35,7 @@ import {
   parseAutorizacionFiltro,
   parseStatusLista,
   sqlStatusOAutorizacion,
-  parseEstatusValorAutorizacion,
+  parseEstatusValorLista, sqlDetallesDespuesEn,
   periodoDesdeFiltro,
   sqlExisteCaraConAutorizacion,
   sqlPropuestasConCambioAutorizacion,
@@ -670,7 +670,7 @@ export class CampanasController {
       // y fechas de último cambio por fila (`includeCambios=true`, para el orden
       // "Último cambio"). Ver utils/autorizacionFiltro.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
@@ -721,19 +721,27 @@ export class CampanasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        // "Cambió a <autorización>" en el rango: historial de autorización de
-        // la propuesta de la campaña (ver utils/autorizacionFiltro).
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
-        params.push(...(sub.params as (string | number)[]));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        conditions.push(sub);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`ct.id_propuesta IN (${sub.sql})`);
+          params.push(...(sub.params as (string | number)[]));
+        }
+        conditions.push(ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`);
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -2381,7 +2389,7 @@ export class CampanasController {
       const userRol = req.user?.rol || '';
       // Filtro por autorización de circuitos — mismo contrato que getAll.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
         u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
@@ -2448,17 +2456,27 @@ export class CampanasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
-        params.push(...(sub.params as (string | number)[]));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        conditions.push(sub);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`ct.id_propuesta IN (${sub.sql})`);
+          params.push(...(sub.params as (string | number)[]));
+        }
+        conditions.push(ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`);
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;

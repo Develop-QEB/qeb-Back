@@ -26,7 +26,8 @@ import { serializeBigInt } from '../utils/serialization';
 import {
   parseAutorizacionFiltro,
   parseStatusLista,
-  parseEstatusValorAutorizacion,
+  parseEstatusValorLista,
+  sqlDetallesDespuesEn,
   periodoDesdeFiltro,
   sqlExisteCaraConAutorizacion,
   sqlPropuestasConCambioAutorizacion,
@@ -448,7 +449,7 @@ export class SolicitudesController {
       // `includeCambios` agrega por fila las fechas de último cambio por estatus
       // (para el orden "Último cambio"). Ver utils/autorizacionFiltro.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const includeCambios = req.query.includeCambios === 'true';
 
       const where: Record<string, unknown> = {
@@ -607,29 +608,34 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        // "Cambió a <autorización>" en el rango: solicitudes cuya propuesta
-        // tiene historial de autorización con esa clave (ver utils/autorizacionFiltro).
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT DISTINCT s.id FROM solicitud s
-           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
-           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
-        addHistorialIdFilter(rows.map(r => Number(r.id)));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
-        const qp: any[] = [];
-        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
-        // Filtro por estatus especifico (ej. "Pase a ventas"): match en el
-        // JSON `detalles` por el campo "despues" del cambio de estado.
-        if (estatusValor) {
-          conds.push('detalles LIKE ?');
-          qp.push(`%"despues":"${estatusValor}"%`);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const idsCambio = new Set<number>();
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+          const qp: any[] = [];
+          if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+          // Estatus especifico(s): match en el JSON `detalles` por "despues".
+          const d = sqlDetallesDespuesEn('detalles', estatusValorLista.estatus);
+          if (d.sql) { conds.push(d.sql); qp.push(...d.params); }
+          const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+            `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+          rows.forEach(r => idsCambio.add(Number(r.ref_id)));
         }
-        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
-          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
-        addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
+        if (estatusValorLista.auth.length > 0) {
+          // Solicitudes cuya propuesta tiene historial de autorización con esas claves.
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+          rows.forEach(r => idsCambio.add(Number(r.id)));
+        }
+        addHistorialIdFilter([...idsCambio]);
       }
       if (creacionDesde || creacionHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
@@ -1443,7 +1449,7 @@ export class SolicitudesController {
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
       // Filtro por autorización de circuitos — mismo contrato que getAll.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
 
       const where: Record<string, unknown> = { deleted_at: null };
 
@@ -1506,22 +1512,34 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT DISTINCT s.id FROM solicitud s
-           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
-           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
-        addIdFilter(rows.map(r => Number(r.id)));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
-        const qp: any[] = [];
-        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
-        if (estatusValor) { conds.push('detalles LIKE ?'); qp.push(`%"despues":"${estatusValor}"%`); }
-        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
-          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
-        addIdFilter(rows.map(r => Number(r.ref_id)));
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const idsCambio = new Set<number>();
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+          const qp: any[] = [];
+          if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+          // Estatus especifico(s): match en el JSON `detalles` por "despues".
+          const d = sqlDetallesDespuesEn('detalles', estatusValorLista.estatus);
+          if (d.sql) { conds.push(d.sql); qp.push(...d.params); }
+          const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+            `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+          rows.forEach(r => idsCambio.add(Number(r.ref_id)));
+        }
+        if (estatusValorLista.auth.length > 0) {
+          // Solicitudes cuya propuesta tiene historial de autorización con esas claves.
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+          rows.forEach(r => idsCambio.add(Number(r.id)));
+        }
+        addIdFilter([...idsCambio]);
       }
       if (creacionDesde || creacionHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
