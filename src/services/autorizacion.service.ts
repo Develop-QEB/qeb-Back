@@ -138,27 +138,6 @@ async function getGerenteComercialParaSolicitud(
 }
 
 /**
- * GC del asesor para el filtro DCM.
- *
- * Feedback 2026-09-10 (Jos): la version anterior buscaba al Gerente Comercial
- * Aeropuerto y hacia fallback al unico global, pero la regla correcta es que
- * el Filtro DCM lo aprueba EL MISMO Gerente Comercial que el Filtro DG del
- * asesor (VP o Plazas segun su equipo). Solo cambia el director final al
- * que llega la autorizacion ya aprobada: DG => Director General, DCM =>
- * Director Comercial (Rodrigo Margain).
- *
- * Por eso ahora esta funcion es un alias directo de getGerenteComercialPara
- * Solicitud. Si el asesor no tiene GC en su equipo filtro_autorizacion,
- * devuelve null y el llamador cae al fallback historico: crear 'Autorización
- * DCM' directa a Rodrigo Margain sin pasar por filtro.
- */
-async function getGerenteComercialDcmParaSolicitud(
-  solicitudId: number
-): Promise<{ id: number; nombre: string } | null> {
-  return getGerenteComercialParaSolicitud(solicitudId);
-}
-
-/**
  * Normaliza el nombre de la plaza para buscar en criterios
  * Para Ciudad de México usa el estado (porque las ciudades son alcaldías)
  * Para las demás plazas usa la ciudad directamente
@@ -1030,17 +1009,12 @@ export async function crearTareasAutorizacion(
   // Feedback 2026-07-17: cada asesor está en un equipo cuyo líder es su
   // Gerente Comercial (Vía Pública o Plazas). El Filtro Autorización DG va
   // a ESE Gerente específico según quién es el asesor.
-  // Feedback 2026-08-15: espejo para DCM. Si el asesor tiene GC Aeropuerto
-  // en su equipo, la tarea Filtro Autorización DCM va a ese GC (misma
-  // mecánica que DG).
   const gerenteComercial = await getGerenteComercialParaSolicitud(solicitudId);
-  const gerenteComercialDcm = await getGerenteComercialDcmParaSolicitud(solicitudId);
 
   console.log('[crearTareasAutorizacion] Usuarios encontrados:', {
     usuariosDg,
     usuariosDcm,
     gerenteComercial,
-    gerenteComercialDcm,
   });
 
   const fechaFin = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -1064,9 +1038,10 @@ export async function crearTareasAutorizacion(
 
   // Consideramos "existe tarea DG" si ya hay Filtro Autorización DG (paso previo)
   // O Autorización DG (Director General final). Ambas son el flujo DG.
-  // Igual criterio para DCM: Filtro Autorización DCM O Autorización DCM.
+  // DCM ya no tiene filtro intermedio (feedback Jos 2026-11-05): solo
+  // 'Autorización DCM' directa.
   const existeTareaDg = tareasExistentes.some(t => t.tipo === 'Autorización DG' || t.tipo === 'Filtro Autorización DG');
-  const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM' || t.tipo === 'Filtro Autorización DCM');
+  const existeTareaDcm = tareasExistentes.some(t => t.tipo === 'Autorización DCM');
 
   // Pre-calcular escalación DG+DCM → DG ANTES de la transacción
   const carasEscaladasDcmADg: number[] = [];
@@ -1192,35 +1167,20 @@ export async function crearTareasAutorizacion(
       }
     }
 
-    // 4. Tarea DCM — feedback 2026-08-15: espejo del flujo DG. Si el asesor
-    // tiene GC DCM (Aeropuerto) en su equipo, se crea Filtro Autorización DCM
-    // al GC (paso previo). Si no hay GC DCM, va directo a Autorización DCM
-    // (fallback = comportamiento actual mientras la matriz se actualiza).
-    //
-    // Feedback 2026-09-09 (Jos): el Filtro DCM aun no esta listo para prod
-    // (falta ajustar equipos + probar); temporalmente lo desactivamos con
-    // este flag para que todas las caras dcm=pendiente vayan directo a
-    // Autorización DCM (Rodrigo Margain). El flag se pondra en true cuando
-    // el ajuste (aprobado en stage) se merge a main. Ver hotfix/desactivar-filtro-dcm.
-    const FILTRO_DCM_HABILITADO = false;
+    // 4. Tarea DCM — feedback Jos 2026-11-05: el "Filtro DCM con gerentes"
+    // ya no se contempla. Todas las caras dcm=pendiente van directo a
+    // 'Autorización DCM' (Rodrigo Margain, o Marcos en UDC). El flujo
+    // intermedio por GC fue eliminado (antes estaba bajo flag false).
     let tareaDcmId: number | null = null;
-    let tareaDcmTipo: 'Filtro Autorización DCM' | 'Autorización DCM' = 'Autorización DCM';
+    const tareaDcmTipo: 'Autorización DCM' = 'Autorización DCM';
     if (pendientesDcm.length > 0 && !existeTareaDcm) {
-      const usarFiltroDcm = FILTRO_DCM_HABILITADO && gerenteComercialDcm !== null;
       // UDC: la autorización DCM va a la Dirección Comercial de Aeropuerto (Marcos).
       // Si no hay ese usuario en el entorno, fallback al DCM normal (Rodrigo) para
       // no perder la tarea.
-      const asignadosDcm = usarFiltroDcm
-        ? [gerenteComercialDcm!]
-        : (esVentaUDC && usuariosDcmUDC.length > 0 ? usuariosDcmUDC : usuariosDcm);
+      const asignadosDcm = esVentaUDC && usuariosDcmUDC.length > 0 ? usuariosDcmUDC : usuariosDcm;
       if (asignadosDcm.length > 0) {
-        tareaDcmTipo = usarFiltroDcm ? 'Filtro Autorización DCM' : 'Autorización DCM';
-        const descDcm = usarFiltroDcm
-          ? `Revisar ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen} antes de enviar a Dirección Comercial.`
-          : `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`;
-        const tituloDcm = usarFiltroDcm
-          ? `Filtro autorización DCM - ${etiquetaOrigen} #${idOrigen}`
-          : `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`;
+        const descDcm = `Se requiere autorización de Dirección Comercial para ${pendientesDcm.length} circuito(s) de la ${etiquetaOrigen} #${idOrigen}`;
+        const tituloDcm = `Autorización requerida - ${etiquetaOrigen} #${idOrigen}`;
         const tareaDcm = await tx.tareas.create({
           data: {
             tipo: tareaDcmTipo,
@@ -1439,34 +1399,32 @@ export async function aprobarCaras(
         solicitudId: propuesta.solicitud_id
       });
 
-      // Además del asesor/creador, notificar al Gerente Comercial que filtró.
-      // Feedback 2026-07-17: aplicaba solo a DG.
-      // Feedback 2026-08-15: espejo para DCM — si hay GC Aeropuerto que
-      // filtro la solicitud, tambien recibe la notificacion del desenlace.
-      const gerente = tipoAutorizacion === 'dg'
-        ? await getGerenteComercialParaSolicitud(propuesta.solicitud_id)
-        : await getGerenteComercialDcmParaSolicitud(propuesta.solicitud_id);
-      if (gerente && gerente.id !== destinatarioId) {
-        const dirLabel = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
-        const notifGerente = await prisma.tareas.create({
-          data: {
-            tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
-            titulo: `${etiquetaOrigen} #${idOrigen} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
-            descripcion: `${result.count} circuito(s) que enviaste a ${dirLabel} fueron aprobados por ${aprobadorNombre}.`,
-            estatus: 'Pendiente',
-            id_responsable: gerente.id,
-            responsable: gerente.nombre,
-            id_solicitud: propuesta.solicitud_id.toString(),
-            id_propuesta: propuestaId,
-            campania_id: tareaOriginal?.campania_id || null,
-            contenido: origen,
-            id_asignado: gerente.id.toString(),
-            asignado: gerente.nombre,
-            fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
-            fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
-          }
-        });
-        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifGerente.id, tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}` });
+      // Además del asesor/creador, notificar al Gerente Comercial que filtró
+      // (solo para DG — DCM ya no tiene filtro intermedio con gerentes,
+      // feedback Jos 2026-11-05).
+      if (tipoAutorizacion === 'dg') {
+        const gerente = await getGerenteComercialParaSolicitud(propuesta.solicitud_id);
+        if (gerente && gerente.id !== destinatarioId) {
+          const notifGerente = await prisma.tareas.create({
+            data: {
+              tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}`,
+              titulo: `${etiquetaOrigen} #${idOrigen} - Aprobación ${tipoAutorizacion.toUpperCase()}`,
+              descripcion: `${result.count} circuito(s) que enviaste a Dirección General fueron aprobados por ${aprobadorNombre}.`,
+              estatus: 'Pendiente',
+              id_responsable: gerente.id,
+              responsable: gerente.nombre,
+              id_solicitud: propuesta.solicitud_id.toString(),
+              id_propuesta: propuestaId,
+              campania_id: tareaOriginal?.campania_id || null,
+              contenido: origen,
+              id_asignado: gerente.id.toString(),
+              asignado: gerente.nombre,
+              fecha_inicio: new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })),
+              fecha_fin: (() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })); d.setDate(d.getDate() + 7); return d; })(),
+            }
+          });
+          emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: notifGerente.id, tipo: `Aprobación ${tipoAutorizacion.toUpperCase()}` });
+        }
       }
     }
   }
@@ -1582,21 +1540,17 @@ export async function rechazarSolicitud(
       solicitudId
     });
 
-    // Además del asesor/creador, notificar al Gerente Comercial que filtró.
-    // Feedback 2026-07-17: aplicaba solo a DG.
-    // Feedback 2026-08-15: espejo para DCM — el GC Aeropuerto también
-    // recibe el rechazo si fue quien filtro.
-    const gerenteR = tipoAutorizacion === 'dg'
-      ? await getGerenteComercialParaSolicitud(solicitudId)
-      : await getGerenteComercialDcmParaSolicitud(solicitudId);
-    if (gerenteR && gerenteR.id !== destinatarioId) {
-      const dirLabelR = tipoAutorizacion === 'dg' ? 'Dirección General' : 'Dirección Comercial';
-      {
+    // Además del asesor/creador, notificar al Gerente Comercial que filtró
+    // (solo para DG — DCM ya no tiene filtro intermedio con gerentes,
+    // feedback Jos 2026-11-05).
+    if (tipoAutorizacion === 'dg') {
+      const gerenteR = await getGerenteComercialParaSolicitud(solicitudId);
+      if (gerenteR && gerenteR.id !== destinatarioId) {
         const notifGerente = await prisma.tareas.create({
           data: {
             tipo: `Rechazo ${tipoAutorizacion.toUpperCase()}`,
             titulo: `${etiquetaOrigen} #${idOrigen} - Rechazo ${tipoAutorizacion.toUpperCase()}`,
-            descripcion: `La ${etiquetaOrigen.toLowerCase()} que enviaste a ${dirLabelR} fue rechazada por ${rechazadorNombre}. Motivo: ${comentario}`,
+            descripcion: `La ${etiquetaOrigen.toLowerCase()} que enviaste a Dirección General fue rechazada por ${rechazadorNombre}. Motivo: ${comentario}`,
             estatus: 'Pendiente',
             id_responsable: gerenteR.id,
             responsable: gerenteR.nombre,
@@ -1662,9 +1616,9 @@ export async function aprobarFiltroDg(
 
   const comentarioLimpio = (comentario || '').trim();
 
-  // Mismo caso que en aprobarFiltroDcm: la descripción del filtro dice
-  // "Revisar N circuito(s) ... antes de enviar a Dirección General" y aquí ya
-  // está CON Dirección General. Feedback 2026-09-17 (Jos).
+  // La descripción del filtro dice "Revisar N circuito(s) ... antes de
+  // enviar a Dirección General" y aquí ya está CON Dirección General.
+  // Feedback 2026-09-17 (Jos).
   const origenFiltro = filtro.contenido || 'solicitud';
   const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
   const idOrigenFiltro = filtro.campania_id
@@ -1756,261 +1710,6 @@ export async function aprobarFiltroDg(
   return result;
 }
 
-/**
- * Filtro DCM — espejo de aprobarFiltroDg. El Gerente Comercial Aeropuerto
- * aprueba y pasa a DCM. Cierra la tarea Filtro Autorización DCM y crea la
- * Autorización DCM real asignada al Director Comercial. Comentario opcional
- * genera tarea 'Notificación' al asesor. Feedback 2026-08-15.
- */
-export async function aprobarFiltroDcm(
-  tareaFiltroId: number,
-  aprobadorNombre: string,
-  comentario?: string
-): Promise<{ tareaDcmId: number; tareaNotifAsesorId: number | null }> {
-  const filtro = await prisma.tareas.findUnique({ where: { id: tareaFiltroId } });
-  if (!filtro || filtro.tipo !== 'Filtro Autorización DCM') {
-    throw new Error('Tarea de filtro no encontrada');
-  }
-  if (filtro.estatus === 'Atendido' || filtro.estatus === 'Cancelado' || filtro.estatus === 'Rechazado') {
-    throw new Error('La tarea de filtro ya fue procesada');
-  }
-
-  const usuariosDcm = await prisma.usuario.findMany({
-    where: {
-      deleted_at: null,
-      NOT: { user_role: 'Gerente Comercial' },
-      OR: [
-        { puesto: 'DCM' },
-        { puesto: 'Director Comercial' },
-        { puesto: 'Dirección Comercial' },
-        { puesto: 'Direccion Comercial' },
-        { user_role: 'Director Comercial' },
-        { user_role: 'Dirección Comercial' },
-      ],
-    },
-    select: { id: true, nombre: true }
-  });
-  if (usuariosDcm.length === 0) {
-    throw new Error('No hay usuarios Director Comercial configurados');
-  }
-
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  const fechaFin = new Date(now.getTime());
-  fechaFin.setDate(fechaFin.getDate() + 7);
-
-  const comentarioLimpio = (comentario || '').trim();
-
-  // La tarea DCM real NO puede heredar la descripción del filtro: ese texto es
-  // "Revisar N circuito(s) de la X #N antes de enviar a Dirección Comercial" y
-  // en este punto la autorización YA está con Dirección Comercial, así que se
-  // leía al revés. Reconstruimos el mismo texto que usa la tarea DCM directa
-  // en crearTareasAutorizacion. Feedback 2026-09-17 (Jos).
-  const origenFiltro = filtro.contenido || 'solicitud';
-  const etiquetaFiltro = origenFiltro === 'campana' ? 'Campaña' : origenFiltro === 'propuesta' ? 'Propuesta' : 'Solicitud';
-  const idOrigenFiltro = filtro.campania_id
-    || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0)
-    || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
-  // El conteo de circuitos solo vive en el texto del filtro; si no se puede
-  // leer, caemos al texto genérico en vez de inventar un número.
-  const circuitosFiltro = Number(/(\d+)\s*circuito/i.exec(filtro.descripcion || '')?.[1]) || 0;
-  const descripcionDcm = circuitosFiltro > 0 && idOrigenFiltro
-    ? `Se requiere autorización de Dirección Comercial para ${circuitosFiltro} circuito(s) de la ${etiquetaFiltro} #${idOrigenFiltro}`
-    : 'Se requiere autorización de Dirección Comercial';
-
-  const result = await prisma.$transaction(async (tx) => {
-    await tx.tareas.update({
-      where: { id: tareaFiltroId },
-      data: { estatus: 'Atendido' },
-    });
-    const tareaDcm = await tx.tareas.create({
-      data: {
-        tipo: 'Autorización DCM',
-        titulo: filtro.titulo?.replace('Filtro autorización DCM', 'Autorización requerida') || 'Autorización requerida',
-        descripcion: descripcionDcm,
-        estatus: 'Pendiente',
-        id_responsable: filtro.id_responsable,
-        responsable: filtro.responsable,
-        id_solicitud: filtro.id_solicitud,
-        id_propuesta: filtro.id_propuesta,
-        campania_id: filtro.campania_id,
-        contenido: filtro.contenido,
-        id_asignado: usuariosDcm.map(u => u.id).join(','),
-        asignado: usuariosDcm.map(u => u.nombre).join(', '),
-        fecha_fin: fechaFin,
-      },
-    });
-
-    let tareaNotifAsesorId: number | null = null;
-    if (comentarioLimpio && filtro.id_responsable) {
-      const origen = filtro.contenido || 'solicitud';
-      const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
-      const idOrigenNotif = filtro.campania_id || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0) || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0);
-      const tareaNotif = await tx.tareas.create({
-        data: {
-          tipo: 'Notificación',
-          titulo: `Filtro DCM aprobado con comentario - ${etiquetaOrigen} #${idOrigenNotif}`,
-          descripcion: `${aprobadorNombre} (Gerente Comercial Aeropuerto) aprobó el filtro y envió a Dirección Comercial.\n\nComentario: ${comentarioLimpio}`,
-          estatus: 'Pendiente',
-          id_responsable: filtro.id_responsable,
-          responsable: filtro.responsable,
-          id_solicitud: filtro.id_solicitud,
-          id_propuesta: filtro.id_propuesta,
-          campania_id: filtro.campania_id,
-          contenido: origen,
-          id_asignado: String(filtro.id_responsable),
-          asignado: filtro.responsable,
-          fecha_fin: fechaFin,
-        },
-      });
-      tareaNotifAsesorId = tareaNotif.id;
-    }
-
-    await tx.historial.create({
-      data: {
-        tipo: `autorizacion_solicitud_${filtro.contenido || 'solicitud'}`,
-        ref_id: filtro.campania_id || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0) || (filtro.id_solicitud ? parseInt(filtro.id_solicitud) : 0),
-        accion: `${aprobadorNombre} (Gerente Comercial Aeropuerto) aprobó filtro y envió a Dirección Comercial${comentarioLimpio ? ' (con comentario)' : ''}`,
-        detalles: JSON.stringify({ tareaFiltroId, tareaDcmId: tareaDcm.id, aprobadorNombre, comentario: comentarioLimpio || null, tareaNotifAsesorId }),
-      },
-    });
-    return { tareaDcmId: tareaDcm.id, tareaNotifAsesorId };
-  });
-
-  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-    tareaId: result.tareaDcmId,
-    tipo: 'Autorización DCM',
-  });
-  emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
-    tareaId: result.tareaDcmId,
-    tipo: 'Autorización DCM',
-  });
-  if (result.tareaNotifAsesorId) {
-    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-      tareaId: result.tareaNotifAsesorId,
-      tipo: 'Notificación',
-    });
-    emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
-      tareaId: result.tareaNotifAsesorId,
-      tipo: 'Notificación',
-    });
-  }
-
-  return result;
-}
-
-/**
- * Filtro DCM — el Gerente Comercial Aeropuerto rechaza como Corrección.
- * Espejo de rechazarFiltroDgComoCorreccion pero para la dimensión DCM.
- * Cierra la tarea Filtro Autorización DCM, marca caras dcm='correccion',
- * crea tarea Corrección Autorización al asesor. Feedback 2026-08-15.
- */
-export async function rechazarFiltroDcmComoCorreccion(
-  tareaFiltroId: number,
-  rechazadorNombre: string,
-  motivo: string
-): Promise<{ tareaCorreccionId: number; carasCorregidas: number }> {
-  const filtro = await prisma.tareas.findUnique({ where: { id: tareaFiltroId } });
-  if (!filtro || filtro.tipo !== 'Filtro Autorización DCM') {
-    throw new Error('Tarea de filtro no encontrada');
-  }
-  if (filtro.estatus === 'Atendido' || filtro.estatus === 'Cancelado' || filtro.estatus === 'Rechazado') {
-    throw new Error('La tarea de filtro ya fue procesada');
-  }
-  if (!motivo || !motivo.trim()) {
-    throw new Error('Motivo de la corrección requerido');
-  }
-
-  const solId = filtro.id_solicitud ? parseInt(filtro.id_solicitud) : NaN;
-  let creadorId: number | null = null;
-  let creadorNombre: string | null = null;
-  if (!isNaN(solId)) {
-    const sol = await prisma.solicitud.findFirst({
-      where: { id: solId, deleted_at: null },
-      select: { usuario_id: true, nombre_usuario: true, asesor: true },
-    });
-    if (sol) {
-      creadorId = sol.usuario_id ?? null;
-      creadorNombre = sol.nombre_usuario || sol.asesor || null;
-    }
-  }
-  if (!creadorId) {
-    throw new Error('No se pudo determinar el creador de la solicitud para crear la Corrección');
-  }
-
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  const fechaFin = new Date(now.getTime());
-  fechaFin.setDate(fechaFin.getDate() + 7);
-
-  const origen = filtro.contenido || 'solicitud';
-  const etiquetaOrigen = origen === 'campana' ? 'Campaña' : origen === 'propuesta' ? 'Propuesta' : 'Solicitud';
-  const idOrigen = filtro.campania_id || (filtro.id_propuesta ? parseInt(filtro.id_propuesta) : 0) || solId;
-
-  const result = await prisma.$transaction(async (tx) => {
-    await tx.tareas.update({
-      where: { id: tareaFiltroId },
-      data: { estatus: 'Rechazado' },
-    });
-
-    let carasCorregidas = 0;
-    if (filtro.id_propuesta) {
-      const upd = await tx.solicitudCaras.updateMany({
-        where: { idquote: filtro.id_propuesta, autorizacion_dcm: 'pendiente' },
-        data: { autorizacion_dcm: 'correccion' },
-      });
-      carasCorregidas = upd.count;
-    } else if (solId && !isNaN(solId)) {
-      const propuestas = await tx.propuesta.findMany({
-        where: { solicitud_id: solId },
-        select: { id: true },
-      });
-      for (const p of propuestas) {
-        const upd = await tx.solicitudCaras.updateMany({
-          where: { idquote: String(p.id), autorizacion_dcm: 'pendiente' },
-          data: { autorizacion_dcm: 'correccion' },
-        });
-        carasCorregidas += upd.count;
-      }
-    }
-
-    const tareaCorreccion = await tx.tareas.create({
-      data: {
-        tipo: 'Corrección Autorización',
-        titulo: `Corrección Autorización DCM - ${etiquetaOrigen} #${idOrigen}`,
-        descripcion: `El Gerente Comercial Aeropuerto (${rechazadorNombre}) devolvió esta ${etiquetaOrigen.toLowerCase()} para corrección antes de enviarla a Dirección Comercial.\n\nMotivo: ${motivo}\n\n${carasCorregidas} circuito(s) en estado de corrección — edita y reenvía a autorización.`,
-        estatus: 'Pendiente',
-        id_responsable: creadorId,
-        responsable: creadorNombre,
-        id_solicitud: filtro.id_solicitud,
-        id_propuesta: filtro.id_propuesta,
-        campania_id: filtro.campania_id,
-        contenido: origen,
-        id_asignado: String(creadorId),
-        asignado: creadorNombre,
-        fecha_fin: fechaFin,
-      },
-    });
-    await tx.historial.create({
-      data: {
-        tipo: `autorizacion_solicitud_${origen}`,
-        ref_id: idOrigen,
-        accion: `${rechazadorNombre} (Gerente Comercial Aeropuerto) devolvió para corrección DCM — ${carasCorregidas} circuito(s) marcados`,
-        detalles: JSON.stringify({ tareaFiltroId, tareaCorreccionId: tareaCorreccion.id, motivo, creadorId, creadorNombre, carasCorregidas, dimension: 'DCM' }),
-      },
-    });
-    return { tareaCorreccionId: tareaCorreccion.id, carasCorregidas };
-  });
-
-  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
-    tareaId: result.tareaCorreccionId,
-    tipo: 'Corrección Autorización',
-  });
-  emitToAll(SOCKET_EVENTS.TAREA_CREADA, {
-    tareaId: result.tareaCorreccionId,
-    tipo: 'Corrección Autorización',
-  });
-
-  return result;
-}
 
 /**
  * Filtro DG — el Gerente Comercial rechaza como Corrección.
