@@ -19,6 +19,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
+import { aplicarHookRecepcion, aplicarHookInstalacion } from '../services/almacenArtes.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -322,6 +323,23 @@ const markReservasComoInstaladas = async (params: {
       });
     } catch (errHist) {
       console.error('historial markReservasComoInstaladas:', errHist);
+    }
+  }
+
+  // 5.b) Hook Almacen Artes — restar 1 del stock del arte por cada reserva
+  //     marcada como instalada. Solo en modo 'instalado' (en rotacion la
+  //     reserva NO queda instalada). #1219184885843086
+  if (mode === 'instalado') {
+    try {
+      await aplicarHookInstalacion(prisma, {
+        tareaId: nuevaInstalacion.id,
+        campaniaId: campanaId,
+        idsReservas: allAffectedReservaIds,
+        usuarioId: params.userId ?? null,
+        usuarioNombre: userName,
+      });
+    } catch (errAlm) {
+      console.error('Almacen Artes hook Instalacion fallo (no bloquea):', errAlm);
     }
   }
 
@@ -7895,6 +7913,56 @@ export class CampanasController {
           }
         } catch (e) {
           console.error('[updateTarea] hook Recepción falló:', e);
+        }
+      }
+
+      // Hook Almacen Artes — al atender una tarea de Recepción, sumar al
+      // stock los artes recibidos (num_impresiones - faltantes). Idempotente
+      // por tarea_id. #1219184885843086
+      if (esRecepcion && tarea.campania_id && (estatus === 'Atendido' || estatus === 'Completado' || estatus === 'Finalizada')) {
+        try {
+          const idsReservas = String(tarea.ids_reservas || '')
+            .split(',').map(s => parseInt(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+          let faltantesPorArte: Array<{ arte: string; cantidad_faltante: number }> = [];
+          if (tarea.evidencia) {
+            try {
+              const ev = JSON.parse(tarea.evidencia);
+              if (Array.isArray(ev?.faltantesPorArte)) faltantesPorArte = ev.faltantesPorArte;
+            } catch {}
+          }
+          await aplicarHookRecepcion(prisma, {
+            tareaId: tarea.id,
+            campaniaId: tarea.campania_id,
+            numImpresiones: Number(tarea.num_impresiones || 0),
+            idsReservas,
+            faltantesPorArte,
+            usuarioId: userId ?? null,
+            usuarioNombre: userName,
+          });
+        } catch (e) {
+          console.error('[updateTarea] hook Almacen Artes Recepcion fallo (no bloquea):', e);
+        }
+      }
+
+      // Hook Almacen Artes — al atender una tarea de Instalación (flujo normal
+      // del usuario, no la auto-creada por markReservasComoInstaladas), restar
+      // 1 del stock por cada reserva marcada como instalada. Idempotente.
+      // #1219184885843086
+      if (tarea.tipo === 'Instalación' && tarea.campania_id && (estatus === 'Atendido' || estatus === 'Completado' || estatus === 'Finalizada')) {
+        try {
+          const idsReservas = String(tarea.ids_reservas || '')
+            .split(',').map(s => parseInt(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+          if (idsReservas.length > 0) {
+            await aplicarHookInstalacion(prisma, {
+              tareaId: tarea.id,
+              campaniaId: tarea.campania_id,
+              idsReservas,
+              usuarioId: userId ?? null,
+              usuarioNombre: userName,
+            });
+          }
+        } catch (e) {
+          console.error('[updateTarea] hook Almacen Artes Instalacion fallo (no bloquea):', e);
         }
       }
 
