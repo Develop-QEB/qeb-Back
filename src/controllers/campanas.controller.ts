@@ -19,7 +19,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { aplicarHookRecepcion, aplicarHookInstalacion } from '../services/almacenArtes.service';
+import { aplicarHookRecepcion, aplicarHookInstalacion, registrarMovimiento } from '../services/almacenArtes.service';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -5517,7 +5517,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5561,6 +5561,37 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, userId || null);
+
+        // Alta inicial del almacen (mismo patron que assignArteTradicional).
+        // #1219184885843086
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: uniqueFilename } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al cargar el arte digital',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial digital fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -5682,7 +5713,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5726,6 +5757,36 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, req.user?.userId || null);
+
+        // Alta inicial del almacen (addArteDigital). #1219184885843086
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: uniqueFilename } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: req.user?.userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al agregar arte digital',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial addArteDigital fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Registrar en historial
@@ -13416,7 +13477,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -13451,6 +13512,40 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, nombreGenericoVal, userId || null);
+
+        // Alta inicial del almacen si el usuario capturo cantidad en el modal
+        // de carga (feedback Jos 2026-11-05 — fase 1 cierre). Se omite si
+        // cantidad_inicial no viene o es 0. Idempotente por tarea = null:
+        // revisa si ya hay una alta_inicial previa para este arte, si no, la
+        // crea. Asi reimprimir el modal con el mismo archivo no duplica.
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: archivoFinal } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al cargar el arte en el Versionario',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)
