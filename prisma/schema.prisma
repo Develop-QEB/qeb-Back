@@ -189,9 +189,54 @@ model biblioteca_artes {
   created_at          DateTime @default(now()) @db.DateTime(0)
   updated_at          DateTime @default(now()) @db.DateTime(0)
 
+  stock               almacen_artes_stock?
+  movimientos         almacen_artes_movimientos[]
+
   @@unique([campania_id, archivo], map: "uniq_biblioteca_campania_archivo")
   @@index([campania_id], map: "idx_biblioteca_campania")
   @@index([tipo], map: "idx_biblioteca_tipo")
+}
+
+// Almacen Artes — stock consolidado por arte (feedback Jos 2026-11-05).
+// 1 fila por biblioteca_artes.id. "disponible" = inicial + recibida - instalada
+// - salidas_manuales. Se mantiene sincronizado por hooks automaticos en las
+// tareas de Recepcion e Instalacion, y por endpoints manuales.
+model almacen_artes_stock {
+  id                        Int      @id @default(autoincrement())
+  biblioteca_artes_id       Int      @unique
+  campania_id               Int
+  cantidad_inicial          Int      @default(0)
+  cantidad_recibida         Int      @default(0)
+  cantidad_instalada        Int      @default(0)
+  cantidad_salidas_manuales Int      @default(0)
+  updated_at                DateTime @default(now()) @updatedAt @db.DateTime(0)
+
+  biblioteca_arte           biblioteca_artes @relation(fields: [biblioteca_artes_id], references: [id], onDelete: Cascade)
+
+  @@index([campania_id], map: "idx_almacen_stock_campania")
+}
+
+// Log de movimientos del almacen de artes. Auditoria de entradas/salidas
+// para historial. Cantidad POSITIVA = entrada, NEGATIVA = salida.
+model almacen_artes_movimientos {
+  id                   Int      @id @default(autoincrement())
+  biblioteca_artes_id  Int
+  campania_id          Int
+  tipo                 String   @db.VarChar(40) // 'alta_inicial' | 'entrada_recepcion' | 'salida_instalacion' | 'entrada_manual' | 'salida_manual' | 'ajuste'
+  cantidad             Int
+  tarea_id             Int?
+  reserva_id           Int?
+  usuario_id           Int?
+  usuario_nombre       String?  @db.VarChar(255)
+  nota                 String?  @db.Text
+  fecha_hora           DateTime @default(now()) @db.DateTime(0)
+
+  biblioteca_arte      biblioteca_artes @relation(fields: [biblioteca_artes_id], references: [id], onDelete: Cascade)
+
+  @@index([biblioteca_artes_id], map: "idx_mov_biblioteca")
+  @@index([campania_id], map: "idx_mov_campania")
+  @@index([tipo], map: "idx_mov_tipo")
+  @@index([fecha_hora], map: "idx_mov_fecha")
 }
 
 model cliente {
@@ -364,11 +409,11 @@ model pruebas_color {
   notas             String?   @db.Text
   // estatus: 'solicitada' | 'enviada_proveedor' | 'aprobada' | 'rechazada'
   estatus           String    @default("solicitada") @db.VarChar(50)
-  // Jos 2026-10-23: expansion a dos flujos. 'prueba_color' (default) mantiene
-  // comportamiento original. 'revision_anticipada' es el flujo nuevo de arte
-  // revisado antes de impresion. Columna aplicada via ALTER TABLE en dev
-  // (scripts/alter_pruebas_color_add_tipo.cjs) con DEFAULT 'prueba_color'
-  // para registros existentes.
+  // Jos 2026-10-23: el modulo se expande a "Revision de Artes Anticipada" con
+  // dos flujos. 'prueba_color' = flujo original (NO vincula a biblioteca al
+  // aprobar). 'revision_anticipada' = nuevo flujo (SI vincula arte aprobado a
+  // biblioteca con badge "RA vN"). Al eliminar una revision_anticipada aprobada
+  // se borra tambien el arte de la biblioteca.
   tipo              String    @default("prueba_color") @db.VarChar(25)
   version           Int       @default(1)
   created_by        Int
