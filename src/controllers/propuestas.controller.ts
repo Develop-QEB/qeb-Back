@@ -4574,6 +4574,34 @@ export class PropuestasController {
       // toda la propuesta en cada clic era medio segundo extra por clic.
       await evaluarCompletadoPorReservasSeguro([newReserva.id], { usuarioId: userId, usuarioNombre: userName, origen: 'toggleReserva' });
 
+      // Audit historial 'Creación de reservas' (toggle individual). Hueco previo al
+      // caso Oral B: createReservas lo audita pero toggleReserva pasaba silencioso.
+      try {
+        const caraForAudit = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId) },
+          select: { articulo: true, formato: true, inicio_periodo: true },
+        });
+        const catorcena = caraForAudit?.inicio_periodo ? await catorcenaLabel(caraForAudit.inicio_periodo) : null;
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Creación de reservas',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              origen: 'propuesta',
+              reservas_creadas: 1,
+              via: 'toggleReserva',
+              circuitos: [{ articulo: caraForAudit?.articulo, formato: caraForAudit?.formato, catorcena }],
+            }),
+          },
+        });
+      } catch (err) {
+        console.error('[audit creación de reservas toggleReserva] fallo:', err);
+      }
+
       res.json({
         success: true,
         data: {
