@@ -30,7 +30,17 @@
 //   ESTATUS TENTATIVO  Reservado · Bonificado
 //                    = HOLD de propuesta. NO ocupa y NO bloquea: varias
 //                    propuestas pueden apartar la misma cara a proposito y el
-//                    ganador se resuelve al vender. Nunca es conflicto.
+//                    ganador se resuelve al vender. Nunca es conflicto...
+//                    SALVO cuando el hold pertenece a una propuesta que YA PASO
+//                    A VENTAS (ya es campaña). Caso ORAL B 82120 (2026-10-30):
+//                    116 reservas se cargaron desde el modal de propuesta
+//                    despues del pase a ventas y quedaron 'Reservado' dentro de
+//                    la campaña; no bloqueaban, 14 campañas vendieron encima y
+//                    el guard del bug 81279 (no desplazar holds de propuestas
+//                    vendidas) las dejo vivas: doble venta sin aviso. Un hold
+//                    de campaña se cuenta aqui como OCUPACION (es una venta que
+//                    nunca se marco), la celda sale como CHOQUE con la bandera
+//                    `tentativas_campania` y NUNCA se auto-limpia.
 //   ARTICULO IM-     Impresion. Es produccion, no renta de la cara: no ocupa el
 //                    espacio fisico, asi que se excluye aunque este vendida.
 //                    Sin esto, una campaña con renta RT + impresion IM sobre la
@@ -55,6 +65,21 @@ import prisma from '../utils/prisma';
 // masivos y arriesgaba auto-limpiar reservas legitimas de propuestas.
 const ESTATUS_FIRME_CONF = ['Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte'];
 const FIRME_SQL = ESTATUS_FIRME_CONF.map(e => `'${e}'`).join(',');
+
+// "La propuesta del circuito `sc` ya paso a ventas (ya es campaña)". Mismo
+// criterio que el guard del bug 81279 en inventario-bloqueo.service.ts: la sola
+// fila en campania NO sirve (nace junto con la cotizacion); lo que marca la
+// venta es fecha_aprobacion o status Aprobada/Pase a ventas.
+const PROPUESTA_VENDIDA_SQL = `EXISTS (
+         SELECT 1 FROM campania camv
+           INNER JOIN cotizacion cotv ON cotv.id = camv.cotizacion_id
+           INNER JOIN propuesta pv ON pv.id = cotv.id_propuesta
+          WHERE cotv.id_propuesta = CAST(sc.idquote AS UNSIGNED)
+            AND (camv.fecha_aprobacion IS NOT NULL OR pv.status IN ('Aprobada', 'Pase a ventas')))`;
+// Hold tentativo que vive dentro de una campaña ya vendida (caso ORAL B).
+const TENTATIVA_EN_CAMPANIA_SQL = `(rsv.estatus IN ('Reservado','Bonificado') AND ${PROPUESTA_VENDIDA_SQL})`;
+// Lo que OCUPA la cara para este detector: venta firme, o hold de campaña.
+const OCUPA_SQL = `(rsv.estatus IN (${FIRME_SQL}) OR ${TENTATIVA_EN_CAMPANIA_SQL})`;
 
 // Solo documental: los estatus que NO cuentan aqui. Se exporta para que la UI
 // pueda explicar la particion sin re-declararla.
@@ -108,6 +133,12 @@ export interface ReservaEnCelda {
    * firmes todas las reservas son firmes y viene `false`.
    */
   es_apartado?: boolean;
+  /**
+   * true = reserva tentativa (Reservado/Bonificado) que vive dentro de una
+   * propuesta YA VENDIDA (campaña). Es una venta que nunca se marco como tal:
+   * ocupa para este detector, y la celda no se auto-limpia (caso ORAL B 82120).
+   */
+  tentativa_en_campania?: boolean;
 }
 
 export interface CeldaConflicto {
@@ -133,6 +164,12 @@ export interface CeldaConflicto {
   firmes?: number;
   /** Solo en apartados-sobre-venta: cuántos apartados tentativos hay encima. */
   apartados?: number;
+  /**
+   * Reservas tentativas de una campaña ya vendida en la celda (ver
+   * ReservaEnCelda.tentativa_en_campania). > 0 = DOBLE VENTA silenciosa:
+   * revision manual, nunca limpieza automatica.
+   */
+  tentativas_campania?: number;
 }
 
 /** Roles que reciben el aviso. Lista corta a propósito: el módulo de
@@ -240,7 +277,7 @@ export async function detectarConflictos(
        INNER JOIN catorcenas cat    ON sc.inicio_periodo BETWEEN cat.fecha_inicio AND cat.fecha_fin
        INNER JOIN inventarios i     ON i.id = ei.inventario_id
      WHERE rsv.deleted_at IS NULL
-       AND rsv.estatus IN (${FIRME_SQL})
+       AND ${OCUPA_SQL}
        AND ${NO_OCUPA_ARTICULO_SQL}
        AND (i.tradicional_digital IS NULL OR i.tradicional_digital <> 'Digital')
        AND sc.inicio_periodo BETWEEN ? AND ?
@@ -285,7 +322,7 @@ export async function detectarConflictos(
        LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
      WHERE rsv.deleted_at IS NULL
-       AND rsv.estatus IN (${FIRME_SQL})
+       AND ${OCUPA_SQL}
        AND ${NO_OCUPA_ARTICULO_SQL}
        AND ei.inventario_id IN (${phConf})
        AND sc.inicio_periodo BETWEEN ? AND ?
@@ -320,6 +357,7 @@ export async function detectarConflictos(
     espacio_id: number;
     inicio_periodo: string | null;
     fin_periodo: string | null;
+    tentativa_en_campania: number | null;
   }>>(
     `SELECT
        ei.inventario_id, cat.año AS anio, cat.numero_catorcena,
@@ -339,7 +377,8 @@ export async function detectarConflictos(
        CAST(sc.idquote AS UNSIGNED) AS propuesta_id,
        sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
        DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
-       DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo
+       DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo,
+       CASE WHEN ${TENTATIVA_EN_CAMPANIA_SQL} THEN 1 ELSE 0 END AS tentativa_en_campania
      FROM espacio_inventario ei
        INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
        INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
@@ -347,7 +386,7 @@ export async function detectarConflictos(
        LEFT JOIN cotizacion ct ON sc.idquote = CAST(ct.id_propuesta AS CHAR) COLLATE utf8mb4_unicode_ci
        LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
      WHERE rsv.deleted_at IS NULL
-       AND rsv.estatus IN (${FIRME_SQL})
+       AND ${OCUPA_SQL}
        AND ${NO_OCUPA_ARTICULO_SQL}
        AND ei.inventario_id IN (${phConf})
        AND sc.inicio_periodo BETWEEN ? AND ?
@@ -382,6 +421,7 @@ export async function detectarConflictos(
       espacio_id: Number(d.espacio_id),
       inicio_periodo: d.inicio_periodo ?? null,
       fin_periodo: d.fin_periodo ?? null,
+      tentativa_en_campania: Boolean(Number(d.tentativa_en_campania ?? 0)),
     });
     reservasPorCelda.set(k, lista);
   }
@@ -406,6 +446,7 @@ export async function detectarConflictos(
 
   return celdas.map(c => {
     const extra = porCelda.get(clave(c));
+    const reservas = reservasPorCelda.get(clave(c)) ?? [];
     return {
       ...c,
       n: Number(c.n),
@@ -413,7 +454,8 @@ export async function detectarConflictos(
       origenes: extra?.origenes ?? 1,
       campanas: extra?.campanas ?? [],
       propuestas: extra?.propuestas ?? [],
-      reservas: reservasPorCelda.get(clave(c)) ?? [],
+      reservas,
+      tentativas_campania: reservas.filter(r => r.tentativa_en_campania).length,
     };
   });
 }
@@ -521,6 +563,7 @@ export async function detectarApartadosSobreVenta(
     inicio_periodo: string | null;
     fin_periodo: string | null;
     es_apartado: number;
+    apartado_de_campania: number | null;
   }>>(
     `SELECT
        ei.inventario_id, cat.año AS anio, cat.numero_catorcena,
@@ -539,7 +582,8 @@ export async function detectarApartadosSobreVenta(
        sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
        DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
        DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo,
-       CASE WHEN rsv.estatus IN (${TENTATIVO_SQL}) THEN 1 ELSE 0 END AS es_apartado
+       CASE WHEN rsv.estatus IN (${TENTATIVO_SQL}) THEN 1 ELSE 0 END AS es_apartado,
+       CASE WHEN ${TENTATIVA_EN_CAMPANIA_SQL} THEN 1 ELSE 0 END AS apartado_de_campania
      FROM espacio_inventario ei
        INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
        INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
@@ -583,6 +627,7 @@ export async function detectarApartadosSobreVenta(
       inicio_periodo: d.inicio_periodo ?? null,
       fin_periodo: d.fin_periodo ?? null,
       es_apartado: Boolean(Number(d.es_apartado ?? 0)),
+      tentativa_en_campania: Boolean(Number(d.apartado_de_campania ?? 0)),
     });
     reservasPorCelda.set(k, lista);
   }
@@ -595,8 +640,11 @@ export async function detectarApartadosSobreVenta(
     );
     // Solo interesa el apartado de OTRA propuesta. Si la misma propuesta tiene
     // firme y tentativo sobre la pieza es un residuo suyo, no un choque con un tercero.
+    // Un apartado de una propuesta YA VENDIDA no es "apartado sobre venta": es
+    // doble venta y lo reporta detectarConflictos como CHOQUE (caso ORAL B).
+    // Aqui se excluye para no listarlo dos veces con dos severidades distintas.
     const apartadosAjenos = reservas.filter(
-      r => r.es_apartado && r.propuesta_id != null && !duenosFirmes.has(r.propuesta_id)
+      r => r.es_apartado && !r.tentativa_en_campania && r.propuesta_id != null && !duenosFirmes.has(r.propuesta_id)
     );
     if (apartadosAjenos.length === 0) continue;
 
@@ -693,9 +741,11 @@ export async function limpiarCeldasDuplicadas(
       idquote: string | null;
       campana_id: number | null;
       campana_nombre: string | null;
+      tentativa_en_campania: number | null;
     }>>(
       `SELECT rsv.id, rsv.APS, rsv.inventario_id AS espacio_id,
-              sc.idquote, cm.id AS campana_id, cm.nombre AS campana_nombre
+              sc.idquote, cm.id AS campana_id, cm.nombre AS campana_nombre,
+              CASE WHEN ${TENTATIVA_EN_CAMPANIA_SQL} THEN 1 ELSE 0 END AS tentativa_en_campania
          FROM espacio_inventario ei
          INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
          INNER JOIN solicitudCaras sc ON sc.id = rsv.solicitudCaras_id
@@ -704,7 +754,7 @@ export async function limpiarCeldasDuplicadas(
          LEFT JOIN campania cm ON cm.cotizacion_id = ct.id
         WHERE ei.inventario_id = ?
           AND rsv.deleted_at IS NULL
-          AND rsv.estatus IN (${FIRME_SQL})
+          AND ${OCUPA_SQL}
           AND ${NO_OCUPA_ARTICULO_SQL}
           AND cat.año = ? AND cat.numero_catorcena = ?
         GROUP BY rsv.id, rsv.APS, rsv.inventario_id, sc.idquote, cm.id, cm.nombre
@@ -717,6 +767,22 @@ export async function limpiarCeldasDuplicadas(
         inventario_id: celda.inventario_id, anio: celda.anio,
         numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
         motivo: 'Ya no hay reservas en conflicto',
+      });
+      continue;
+    }
+
+    // DOBLE VENTA (caso ORAL B 82120): un hold tentativo dentro de una campaña ya
+    // vendida casi siempre es el MAS ANTIGUO de la celda. La regla de choque
+    // conservaria ese hold y liberaria la venta firme de la otra campaña (si no
+    // tiene APS), que es exactamente al reves de lo que alguien querria decidir
+    // a ciegas. Nunca se limpia solo: va a revision manual con SAP.
+    const holdsCampania = reservas.filter(r => Number(r.tentativa_en_campania ?? 0) === 1);
+    if (holdsCampania.length > 0) {
+      const dueno = holdsCampania[0].campana_nombre ? ` (${holdsCampania[0].campana_nombre})` : '';
+      resultado.omitidas.push({
+        inventario_id: celda.inventario_id, anio: celda.anio,
+        numero_catorcena: celda.numero_catorcena, tipo: tipoCelda,
+        motivo: `DOBLE VENTA: reserva(s) tentativa(s) #${holdsCampania.map(r => r.id).join(', #')} pertenecen a una campaña ya vendida${dueno} y nunca se marcaron como venta. Decidir con Comercial y SAP, no se limpia solo`,
       });
       continue;
     }
@@ -1195,6 +1261,24 @@ async function notificarConflictos(
   };
 
   const secciones: string[] = [];
+  // DOBLE VENTA silenciosa (caso ORAL B): va primero porque es lo mas grave y
+  // nunca se limpia solo.
+  const doblesVentas = [...choques, ...duplicados].filter(c => (c.tentativas_campania ?? 0) > 0);
+  if (doblesVentas.length > 0) {
+    const lineas = doblesVentas.slice(0, 8).map(c => {
+      const hold = c.reservas.find(r => r.tentativa_en_campania);
+      const otras = c.campanas.filter(x => x.id !== hold?.campana_id).map(x => x.nombre);
+      return `• ${c.codigo_unico || `#${c.inventario_id}`} · C${c.numero_catorcena}-${c.anio} · ` +
+        `${hold?.campana_nombre || `prop. #${hold?.propuesta_id}`} tiene la cara solo como apartado tentativo (reserva #${hold?.reserva_id}) ` +
+        `y ${otras.length > 0 ? otras.join(' / ') : 'otra campaña'} la vendió en firme encima`;
+    });
+    const resto = doblesVentas.length > 8 ? `\n… y ${doblesVentas.length - 8} más.` : '';
+    secciones.push(
+      `DOBLE VENTA (${doblesVentas.length} ${plural(doblesVentas.length, 'cara', 'caras')}): una campaña ya vendida tiene la cara solo como apartado tentativo ` +
+      `(nunca se marcó Vendido) y otra campaña la vendió en firme encima. No se limpia automáticamente: hay que decidir con Comercial y revisar APS en SAP.\n` +
+      lineas.join('\n') + resto
+    );
+  }
   if (limpiadas > 0 && limpieza) {
     const choquesLimpiados = limpieza.detalle.filter(d => d.tipo === 'choque').length;
     const dupsLimpiados = limpieza.detalle.length - choquesLimpiados;
@@ -1231,6 +1315,7 @@ async function notificarConflictos(
 
   // Resumen corto para el título.
   const resumen: string[] = [];
+  if (doblesVentas.length > 0) resumen.push(`${doblesVentas.length} DOBLE VENTA`);
   if (limpiadas > 0) resumen.push(`${limpiadas} ${plural(limpiadas, 'resuelto', 'resueltos')} automáticamente`);
   if (omitidas.length > 0) resumen.push(`${omitidas.length} ${plural(omitidas.length, 'requiere', 'requieren')} revisión`);
   if (!limpieza && (choques.length + duplicados.length) > 0) resumen.push(`${choques.length + duplicados.length} pendientes`);
