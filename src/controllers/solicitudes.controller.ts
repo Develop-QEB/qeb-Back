@@ -2491,6 +2491,19 @@ export class SolicitudesController {
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
+      // Audit historial 'Creación de circuito' por cada cara creada (hueco previo al caso Oral B:
+      // solicitudes.controller.create/update creaban caras completas sin pasar por registrarCaraNueva,
+      // que solo se llamaba en propuestas/campanas.controller.createCara — ese se dispara solo con
+      // circuitos shell '0 caras'. Las caras COMPLETAS que entran por este path quedaban silenciosas).
+      try {
+        const { registrarCaraNueva } = await import('../utils/historialCaras');
+        for (const cara of result.caras) {
+          await registrarCaraNueva(result.propuesta.id, 'solicitud', userName, cara.id);
+        }
+      } catch (err) {
+        console.error('[audit creación de circuito solicitud.create] fallo:', err);
+      }
+
       // Verificar caras pendientes de autorización (no debe bloquear la respuesta)
       let autorizacionInfo: { tienePendientes: boolean; pendientesDg: any[]; pendientesDcm: any[] } = { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
       try {
@@ -3442,6 +3455,10 @@ export class SolicitudesController {
       // Resumen de cambios (se llena dentro de la tx) para reusar en el correo.
       let cambiosResumen = 'datos generales';
 
+      // IDs de caras nuevas creadas en el bulk update, para auditar fuera del tx
+      // (hueco previo al caso Oral B — estas caras nacian sin registro en historial).
+      const nuevasCarasIds: number[] = [];
+
       await prisma.$transaction(async (tx) => {
         // Update solicitud
         await tx.solicitud.update({
@@ -3758,6 +3775,7 @@ export class SolicitudesController {
               );
             }
             recreatedCaras.push(createdCara);
+            nuevasCarasIds.push(createdCara.id);
 
             // [APAGADO 2026-06-02] Auto-reserva circuito digital — el equipo
             // pidió tenerla deshabilitada (las asesoras reservan manualmente
@@ -3897,6 +3915,19 @@ export class SolicitudesController {
         maxWait: 60000,
         timeout: 120000,
       });
+
+      // Audit historial 'Creación de circuito' por cada cara nueva creada en el bulk update
+      // (hueco previo al caso Oral B — pasaba silencioso para caras completas).
+      if (nuevasCarasIds.length > 0 && propuesta) {
+        try {
+          const { registrarCaraNueva } = await import('../utils/historialCaras');
+          for (const caraId of nuevasCarasIds) {
+            await registrarCaraNueva(propuesta.id, 'solicitud', userName, caraId);
+          }
+        } catch (err) {
+          console.error('[audit creación de circuito solicitud.update] fallo:', err);
+        }
+      }
 
       // Enviar correo
       const involucradosCorreo = new Set<number>();
