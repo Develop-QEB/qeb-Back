@@ -3515,6 +3515,17 @@ export class PropuestasController {
         return;
       }
 
+      // Guard: no reservar sobre propuesta ya pasada a ventas. El modal de Ajuste de Caras
+      // en NotificacionesPage dejaba agregar caras aquí y nacían 'Reservado' colgadas
+      // (caso Oral B 30-oct-2026: 116 caras cat 23 invisibles para candados).
+      if (propuesta.status === 'Aprobada' || propuesta.status === 'Pase a ventas') {
+        res.status(403).json({
+          success: false,
+          error: 'La propuesta ya pasó a ventas. Agrega las reservas desde Campañas.',
+        });
+        return;
+      }
+
       // Check authorization only for the specific cara being reserved (not all caras in propuesta)
       let esCortesia = false;
       if (solicitudCaraId) {
@@ -5296,6 +5307,20 @@ export class PropuestasController {
       const bloqueoACCreateCara = await bloqueoAjusteComercialPropuesta(prisma, parseInt(id), req.user?.rol);
       if (bloqueoACCreateCara) {
         res.status(403).json({ success: false, error: bloqueoACCreateCara });
+        return;
+      }
+
+      // Guard: no agregar caras sobre propuesta ya pasada a ventas. Mismo motivo que
+      // createReservas más arriba (caso Oral B 30-oct-2026). Hay que agregar desde Campañas.
+      const propuestaStatus = await prisma.propuesta.findUnique({
+        where: { id: parseInt(id) },
+        select: { status: true },
+      });
+      if (propuestaStatus?.status === 'Aprobada' || propuestaStatus?.status === 'Pase a ventas') {
+        res.status(403).json({
+          success: false,
+          error: 'La propuesta ya pasó a ventas. Agrega los circuitos desde Campañas.',
+        });
         return;
       }
 
