@@ -127,6 +127,8 @@ export interface ReservaEnCelda {
   espacio_id: number;
   inicio_periodo: string | null;
   fin_periodo: string | null;
+  /** `reservas.fecha_reserva` (YYYY-MM-DD): cuándo se apartó/vendió la pieza. */
+  fecha_reserva: string | null;
   /**
    * true = apartado TENTATIVO de propuesta (Reservado/Bonificado).
    * Solo lo llena `detectarApartadosSobreVenta`; en la auditoría de ventas
@@ -357,6 +359,7 @@ export async function detectarConflictos(
     espacio_id: number;
     inicio_periodo: string | null;
     fin_periodo: string | null;
+    fecha_reserva: string | null;
     tentativa_en_campania: number | null;
   }>>(
     `SELECT
@@ -378,6 +381,7 @@ export async function detectarConflictos(
        sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
        DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
        DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo,
+       DATE_FORMAT(rsv.fecha_reserva, '%Y-%m-%d') AS fecha_reserva,
        CASE WHEN ${TENTATIVA_EN_CAMPANIA_SQL} THEN 1 ELSE 0 END AS tentativa_en_campania
      FROM espacio_inventario ei
        INNER JOIN reservas rsv      ON ei.id = rsv.inventario_id
@@ -421,6 +425,7 @@ export async function detectarConflictos(
       espacio_id: Number(d.espacio_id),
       inicio_periodo: d.inicio_periodo ?? null,
       fin_periodo: d.fin_periodo ?? null,
+      fecha_reserva: d.fecha_reserva ?? null,
       tentativa_en_campania: Boolean(Number(d.tentativa_en_campania ?? 0)),
     });
     reservasPorCelda.set(k, lista);
@@ -562,6 +567,7 @@ export async function detectarApartadosSobreVenta(
     espacio_id: number;
     inicio_periodo: string | null;
     fin_periodo: string | null;
+    fecha_reserva: string | null;
     es_apartado: number;
     apartado_de_campania: number | null;
   }>>(
@@ -582,6 +588,7 @@ export async function detectarApartadosSobreVenta(
        sc.id AS solicitud_cara_id, rsv.inventario_id AS espacio_id,
        DATE_FORMAT(sc.inicio_periodo, '%Y-%m-%d') AS inicio_periodo,
        DATE_FORMAT(sc.fin_periodo, '%Y-%m-%d') AS fin_periodo,
+       DATE_FORMAT(rsv.fecha_reserva, '%Y-%m-%d') AS fecha_reserva,
        CASE WHEN rsv.estatus IN (${TENTATIVO_SQL}) THEN 1 ELSE 0 END AS es_apartado,
        CASE WHEN ${TENTATIVA_EN_CAMPANIA_SQL} THEN 1 ELSE 0 END AS apartado_de_campania
      FROM espacio_inventario ei
@@ -626,6 +633,7 @@ export async function detectarApartadosSobreVenta(
       espacio_id: Number(d.espacio_id),
       inicio_periodo: d.inicio_periodo ?? null,
       fin_periodo: d.fin_periodo ?? null,
+      fecha_reserva: d.fecha_reserva ?? null,
       es_apartado: Boolean(Number(d.es_apartado ?? 0)),
       tentativa_en_campania: Boolean(Number(d.apartado_de_campania ?? 0)),
     });

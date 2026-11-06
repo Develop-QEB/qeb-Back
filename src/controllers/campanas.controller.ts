@@ -11763,7 +11763,7 @@ export class CampanasController {
       // Verificar que la campaña existe
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
-        select: { cotizacion_id: true }
+        select: { cotizacion_id: true, nombre: true }
       });
 
       if (!campana) {
