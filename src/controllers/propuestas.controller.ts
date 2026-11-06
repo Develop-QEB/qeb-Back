@@ -3653,6 +3653,36 @@ export class PropuestasController {
         await evaluarCompletadoPorReservasSeguro(createdReservas.map(r => r.id), { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'createReservas' });
       }
 
+      // Audit historial 'Creación de reservas' (hueco previo al caso Oral B:
+      // se auditaba eliminación pero no creación — por eso no se sabía quién
+      // habia agregado las 116 caras colgadas). Espeja a 'Eliminación de reservas'.
+      if (createdReservas.length > 0 && solicitudCaraId) {
+        try {
+          const caraInfo = await prisma.solicitudCaras.findUnique({
+            where: { id: parseInt(solicitudCaraId) },
+            select: { articulo: true, formato: true, inicio_periodo: true },
+          });
+          const catorcena = caraInfo?.inicio_periodo ? await catorcenaLabel(caraInfo.inicio_periodo) : null;
+          await prisma.historial.create({
+            data: {
+              tipo: 'Propuesta',
+              ref_id: propuestaId,
+              accion: 'Creación de reservas',
+              fecha_hora: new Date(),
+              detalles: JSON.stringify({
+                usuario: userName,
+                usuarioId: userId,
+                origen: 'propuesta',
+                reservas_creadas: createdReservas.length,
+                circuitos: [{ articulo: caraInfo?.articulo, formato: caraInfo?.formato, catorcena }],
+              }),
+            },
+          });
+        } catch (err) {
+          console.error('[audit creación de reservas propuesta] fallo:', err);
+        }
+      }
+
       res.json({
         success: true,
         data: {

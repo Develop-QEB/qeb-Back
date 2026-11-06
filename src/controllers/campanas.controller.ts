@@ -11344,6 +11344,40 @@ export class CampanasController {
         });
       }
 
+      // Audit historial 'Creación de reservas' (hueco previo al caso Oral B:
+      // se auditaba eliminación pero no creación). Espeja a 'Eliminación de reservas'.
+      if (reservasCreadas > 0 && solicitudCaraId) {
+        try {
+          const caraInfo = await prisma.solicitudCaras.findUnique({
+            where: { id: solicitudCaraId },
+            select: { articulo: true, formato: true, inicio_periodo: true },
+          });
+          const catorcena = caraInfo?.inicio_periodo ? await catorcenaLabel(caraInfo.inicio_periodo) : null;
+          const cotProp = campana.cotizacion_id ? await prisma.cotizacion.findUnique({
+            where: { id: campana.cotizacion_id },
+            select: { id_propuesta: true },
+          }) : null;
+          await prisma.historial.create({
+            data: {
+              tipo: 'Campaña',
+              ref_id: cotProp?.id_propuesta || campanaId,
+              accion: 'Creación de reservas',
+              fecha_hora: new Date(),
+              detalles: JSON.stringify({
+                usuario: req.user?.nombre || 'Usuario',
+                usuarioId: req.user?.userId,
+                origen: 'campaña',
+                campaña: campana?.nombre || campanaId,
+                reservas_creadas: reservasCreadas,
+                circuitos: [{ articulo: caraInfo?.articulo, formato: caraInfo?.formato, catorcena }],
+              }),
+            },
+          });
+        } catch (err) {
+          console.error('[audit creación de reservas campaña] fallo:', err);
+        }
+      }
+
       res.json({
         success: true,
         data: {
