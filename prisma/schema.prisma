@@ -62,6 +62,19 @@ model inventarios {
   mueble_chico         String?  @db.VarChar(10)
   isla_vip             String?  @db.VarChar(10)
   cto                  String?  @db.VarChar(20)
+  // Vigencia del bloqueo administrativo (No Disponible / Inhabilitado). Ver
+  // services/vigencia-bloqueo.service.ts. Todas nullables (cambio aditivo):
+  //  - bloqueo_tipo: clasificación pendiente de aplicar cuando el bloqueo está
+  //    PROGRAMADO (fecha_inicio futura). Ya aplicado, el tipo vive en `estatus`.
+  //  - bloqueo_fecha_inicio / bloqueo_fecha_fin: periodo de vigencia. fin NULL =
+  //    indefinido (se queda bloqueado hasta que alguien lo habilite a mano).
+  //  - bloqueo_usuario_id: quién bloqueó; recibe la tarea al cumplirse la vigencia.
+  //  - bloqueo_aviso_at: cuándo se creó esa tarea (idempotencia del job diario).
+  bloqueo_tipo         String?   @db.VarChar(50)
+  bloqueo_fecha_inicio DateTime? @db.Date
+  bloqueo_fecha_fin    DateTime? @db.Date
+  bloqueo_usuario_id   Int?
+  bloqueo_aviso_at     DateTime? @db.DateTime(0)
 
   @@index([archivos_id], map: "idx_archivos_id")
   // Indices aditivos para dashboard.controller.ts (getStats/getInventoryDetail):

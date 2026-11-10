@@ -14,6 +14,13 @@ import {
   esInventarioNoUtilizable,
   expandEstatusInventarioFiltro,
 } from '../services/inventario-bloqueo.service';
+import {
+  aplicarBloqueoInventario,
+  programarBloqueoInventario,
+  datosLimpiarVigencia,
+  parseVigenciaBody,
+  hoyCDMX,
+} from '../services/vigencia-bloqueo.service';
 import { logHistorial } from '../utils/historial';
 import {
   CatorcenaRef,
@@ -178,6 +185,11 @@ export class InventariosController {
             sentido: true,
             isla: true,
             mueble_isla: true,
+            // Vigencia del bloqueo (badge en la tabla y modal de desbloqueo).
+            bloqueo_tipo: true,
+            bloqueo_fecha_inicio: true,
+            bloqueo_fecha_fin: true,
+            bloqueo_usuario_id: true,
           },
         }),
         prisma.inventarios.count({ where }),
@@ -2271,6 +2283,14 @@ export class InventariosController {
       if (data.tarifa_piso !== undefined) updateData.tarifa_piso = data.tarifa_piso ? parseFloat(data.tarifa_piso) : null;
       if (data.tarifa_publica !== undefined) updateData.tarifa_publica = data.tarifa_publica ? parseFloat(data.tarifa_publica) : null;
 
+      // Si por el formulario la pieza deja de estar bloqueada (o nunca lo
+      // estuvo), la vigencia del bloqueo deja de tener sentido: se limpia para
+      // que no quede un "programado" fantasma ni un vencimiento viejo que el
+      // job diario pudiera avisar. Bloquear/vigencia se maneja en toggleBlock.
+      if (updateData.estatus !== undefined && !esInventarioBloqueado(updateData.estatus as string | null)) {
+        Object.assign(updateData, datosLimpiarVigencia());
+      }
+
       const inventario = await prisma.inventarios.update({
         where: { id },
         data: updateData,
@@ -2319,73 +2339,89 @@ export class InventariosController {
       }
       const tipoBloqueo: TipoBloqueoInventario = tipoRaw ?? 'No Disponible';
 
+      // Vigencia opcional del bloqueo ({ fecha_inicio?, fecha_fin? } en
+      // 'YYYY-MM-DD'). Sin fechas = desde hoy e indefinida. Ver
+      // services/vigencia-bloqueo.service.ts.
+      const parsed = parseVigenciaBody(req.body);
+      if (parsed.error !== undefined) {
+        res.status(400).json({ success: false, error: parsed.error });
+        return;
+      }
+      const vigencia = parsed.vigencia;
+      const hoy = hoyCDMX();
+
       const wasBloqueado = esInventarioBloqueado(inventario.estatus);
+      const eraProgramado = !wasBloqueado && !!inventario.bloqueo_tipo;
       // Con `tipo` explícito la intención es BLOQUEAR con esa clasificación, nunca
       // desbloquear: si la pieza ya estaba bloqueada solo se reclasifica. Así los
       // flujos masivos no "desbloquean" por accidente una pieza que ya lo estaba.
       // Sin `tipo` se conserva el toggle de siempre (el desbloqueo no manda body).
       const desbloquear = wasBloqueado && tipoRaw === undefined;
-      const newEstatus = desbloquear ? 'Disponible' : tipoBloqueo;
+      // Sin `tipo` sobre una pieza con bloqueo PROGRAMADO (aún Disponible) =
+      // cancelar la programación, no bloquearla.
+      const cancelarProgramado = eraProgramado && tipoRaw === undefined;
+      // `fecha_inicio` futura sobre una pieza aún no bloqueada = programar. Si ya
+      // está bloqueada, la reclasificación/nueva vigencia aplica de inmediato.
+      const programar = !wasBloqueado && !desbloquear && !cancelarProgramado && vigencia.fecha_inicio > hoy;
       const userName = req.user?.nombre || req.user?.email || 'Sistema';
-      const accion = desbloquear
-        ? (inventario.estatus === 'Inhabilitado' ? 'Habilitado' : 'Desbloqueado')
-        : tipoBloqueo;
-      const verbo = accion === 'Bloqueado' ? 'bloqueó'
-        : accion === 'No Disponible' ? 'marcó como No Disponible'
-        : accion === 'Inhabilitado' ? 'inhabilitó'
-        : accion === 'Habilitado' ? 'habilitó'
-        : 'desbloqueó';
+      const usuarioId = req.user?.userId ?? null;
 
-      // Cuando se PASA a No Disponible/Bloqueado/Inhabilitado, soft-delete las reservas activas del
-      // inventario (`deleted_at = NOW()`). El estatus de la reserva se
-      // preserva para auditoría — solo el deleted_at las saca del flujo.
-      // Esto "desocupa" el espacio: la campaña que tenía la cara la pierde
-      // y el asesor recibirá la tarea para reasignar.
-      // Al DESBLOQUEAR no se restauran reservas — eso lo decide el asesor
-      // manualmente vía las tareas creadas.
-      //
-      // Solo se liberan reservas ACTUALES o FUTURAS: las cuyo período aún no
-      // termina (`sc.fin_periodo >= CURDATE()`). Las pasadas se conservan
-      // intactas — bloquear el inventario no debe borrar historial de pautas
-      // ya vencidas. El período real vive en `solicitudCaras.inicio/fin_periodo`
-      // (no en `reservas.calendario_id`, que tiene datos sucios); misma fuente
-      // de verdad que usa `inventario-bloqueo.service.ts`.
       let liberadas = 0;
+      let programado = false;
       await prisma.$transaction(async (tx) => {
-        if (!desbloquear) {
-          // Resolver inventario polimórfico: r.inventario_id puede apuntar a
-          // inventarios.id directamente o a espacio_inventario.id (que a su
-          // vez apunta a inventarios.id). Soft-delete ambos casos.
-          const result = await tx.$executeRawUnsafe(
-            `UPDATE reservas r
-             LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
-             INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-             SET r.deleted_at = NOW()
-             WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
-               AND r.deleted_at IS NULL
-               AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
-               AND sc.fin_periodo >= CURDATE()`,
-            id
-          );
-          liberadas = Number(result) || 0;
+        if (desbloquear) {
+          // Al DESBLOQUEAR no se restauran reservas — eso lo decide el asesor
+          // manualmente vía las tareas creadas. Se limpia la vigencia.
+          const accion = inventario.estatus === 'Inhabilitado' ? 'Habilitado' : 'Desbloqueado';
+          const verbo = accion === 'Habilitado' ? 'habilitó' : 'desbloqueó';
+          await tx.inventarios.update({
+            where: { id },
+            data: { estatus: 'Disponible', ...datosLimpiarVigencia() },
+          });
+          await tx.historial.create({
+            data: {
+              tipo: 'Inventario',
+              ref_id: id,
+              accion,
+              fecha_hora: new Date(),
+              detalles: `${userName} ${verbo} el inventario ${inventario.codigo_unico || id}`,
+            },
+          });
+          return;
         }
 
-        await tx.inventarios.update({
-          where: { id },
-          data: { estatus: newEstatus },
-        });
+        if (cancelarProgramado) {
+          await tx.inventarios.update({ where: { id }, data: datosLimpiarVigencia() });
+          await tx.historial.create({
+            data: {
+              tipo: 'Inventario',
+              ref_id: id,
+              accion: 'Bloqueo programado cancelado',
+              fecha_hora: new Date(),
+              detalles: `${userName} canceló el bloqueo programado (${inventario.bloqueo_tipo}) del inventario ${inventario.codigo_unico || id}`,
+            },
+          });
+          return;
+        }
 
-        await tx.historial.create({
-          data: {
-            tipo: 'Inventario',
-            ref_id: id,
-            accion,
-            fecha_hora: new Date(),
-            detalles: liberadas > 0
-              ? `${userName} ${verbo} el inventario ${inventario.codigo_unico || id} — ${liberadas} reservas liberadas`
-              : `${userName} ${verbo} el inventario ${inventario.codigo_unico || id}`,
-          },
-        });
+        const args = {
+          id,
+          codigo: inventario.codigo_unico,
+          tipo: tipoBloqueo,
+          vigencia,
+          usuarioId,
+          userName,
+        };
+
+        if (programar) {
+          await programarBloqueoInventario(tx, args);
+          programado = true;
+          return;
+        }
+
+        // Bloqueo inmediato: soft-delete de reservas vigentes + estatus +
+        // vigencia + historial (lógica compartida con el job de programados).
+        liberadas = (await aplicarBloqueoInventario(tx, args)).liberadas;
       });
 
       // El catálogo de estatus (filtro de la tabla) se cachea 1h: se invalida para
@@ -2393,7 +2429,7 @@ export class InventariosController {
       cache.delete('inventarios:estatus');
 
       const updated = await prisma.inventarios.findUnique({ where: { id } });
-      res.json({ success: true, data: updated, reservas_liberadas: liberadas });
+      res.json({ success: true, data: updated, reservas_liberadas: liberadas, programado });
     } catch (error) {
       console.error('Error toggling block:', error);
       const message = error instanceof Error ? error.message : 'Error al bloquear/desbloquear inventario';
