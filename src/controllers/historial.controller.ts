@@ -283,6 +283,29 @@ export class HistorialController {
     }
   }
 
+  // Historial (bitacora) de una tarea especifica. Devuelve los registros en
+  // historial con tipo='Tarea' y ref_id=:id ordenados por fecha descendente.
+  // Lo consume el drawer lateral de Notificaciones para mostrar las ediciones.
+  async getHistorialTarea(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        res.status(400).json({ success: false, error: 'ID invalido' });
+        return;
+      }
+      const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 50, 1), 200);
+      const rows = await prisma.historial.findMany({
+        where: { tipo: 'Tarea', ref_id: id },
+        orderBy: { fecha_hora: 'desc' },
+        take: limit,
+      });
+      res.json(serializeBigInt({ success: true, data: rows }));
+    } catch (error) {
+      console.error('Error en historial getHistorialTarea:', error);
+      res.status(500).json({ success: false, error: 'Error al obtener historial de la tarea' });
+    }
+  }
+
   async moverActividadComercial(req: AuthRequest, res: Response): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
