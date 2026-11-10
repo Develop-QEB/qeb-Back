@@ -794,25 +794,56 @@ export class SolicitudesController {
           });
         }
 
-        // Recalculate presupuesto based on catorcena filter (sum only overlapping caras)
-        if (filterFechaInicio && filterFechaFin) {
-          const presupuestoData = await prisma.$queryRawUnsafe<{ solicitud_id: number; presupuesto_filtrado: number }[]>(`
-            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_filtrado
+        // Jos 2026-11-10 (ticket #516, Elvia #81488): el listado siempre
+        // devolvía el valor guardado en `solicitud.presupuesto`, pero ese
+        // campo no se actualiza cuando desde Propuestas se agregan o quitan
+        // caras. El detalle (modal) sí lo recalcula en vivo, por eso en
+        // el listado unos casos se veían mal (34% de las solicitudes del
+        // año tenían el número desfasado). Ahora siempre sumamos los
+        // `solicitudCaras` reales — misma fuente de verdad que el detalle.
+        // Si hay filtro de catorcena activo, se restringe a las caras cuyo
+        // periodo intersecta el rango seleccionado (comportamiento previo).
+        //
+        // `solicitud.id === propuesta.id === solicitudCaras.idquote` en QEB
+        // (el id se preserva al escalar de solicitud a propuesta), así que
+        // unimos directo sin pasar por propuesta.
+        const presupuestoQuery = (filterFechaInicio && filterFechaFin)
+          ? `
+            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_real
             FROM solicitud s
-            LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
-            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(s.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE s.id IN (${placeholders})
             GROUP BY s.id
-          `, filterFechaFin, filterFechaInicio, ...solicitudIds);
-
-          const presupuestoMap = new Map(presupuestoData.map((p: any) => [Number(p.solicitud_id), Number(p.presupuesto_filtrado)]));
-          enrichedSolicitudes = enrichedSolicitudes.map((s: any) => ({
+          `
+          : `
+            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_real
+            FROM solicitud s
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(s.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE s.id IN (${placeholders})
+            GROUP BY s.id
+          `;
+        const presupuestoParams = (filterFechaInicio && filterFechaFin)
+          ? [filterFechaFin, filterFechaInicio, ...solicitudIds]
+          : [...solicitudIds];
+        const presupuestoData = await prisma.$queryRawUnsafe<{ solicitud_id: number; presupuesto_real: number }[]>(
+          presupuestoQuery,
+          ...presupuestoParams
+        );
+        const presupuestoMap = new Map(presupuestoData.map((p: any) => [Number(p.solicitud_id), Number(p.presupuesto_real)]));
+        enrichedSolicitudes = enrichedSolicitudes.map((s: any) => {
+          const presupuestoCalculado = presupuestoMap.get(s.id);
+          // Si la solicitud tiene caras, usamos la suma real. Si no tiene
+          // ninguna cara (caso raro pero posible — solicitud borrador),
+          // respetamos el valor guardado.
+          return {
             ...s,
-            presupuesto: presupuestoMap.get(s.id) ?? s.presupuesto,
-          }));
-        }
+            presupuesto: presupuestoCalculado && presupuestoCalculado > 0
+              ? presupuestoCalculado
+              : s.presupuesto,
+          };
+        });
       }
 
       // Group data if requested

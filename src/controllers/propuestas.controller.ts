@@ -40,6 +40,7 @@ import {
   unirCambios,
   type CambiosFechas,
 } from '../utils/autorizacionFiltro';
+import { recalcularPresupuestoSolicitud, recalcularPresupuestoMultiple } from '../services/solicitud-presupuesto.service';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -5536,6 +5537,10 @@ export class PropuestasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
 
+      // Mantener solicitud.presupuesto sincronizado con la nueva suma real
+      // de caras (Jos 2026-11-10, ticket #516). Fire-and-forget.
+      void recalcularPresupuestoSolicitud(id);
+
       let mensaje = 'Circuito creado exitosamente';
       // Default vacío para la respuesta cuando se difiere la autorización (deferAuth).
       let autorizacion: { tienePendientes: boolean; pendientesDg: number[]; pendientesDcm: number[] } =
@@ -5863,6 +5868,11 @@ export class PropuestasController {
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
 
+      // bulkUpdate puede haber cambiado costos → recalcular solicitud.presupuesto
+      // (Jos 2026-11-10, ticket #516). El idquote de las caras es el id de la
+      // propuesta, que coincide con el id de la solicitud en QEB.
+      void recalcularPresupuestoSolicitud(id as string);
+
       // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0) {
         const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
@@ -5998,6 +6008,12 @@ export class PropuestasController {
           extras: { caras_eliminadas: carasSnapshot, eliminarGrupo },
         });
       }
+
+      // Recalcular solicitud.presupuesto para las solicitudes afectadas
+      // (Jos 2026-11-10, ticket #516). Puede haber caras de varias
+      // propuestas/solicitudes en una misma llamada, así que usamos la
+      // variante bulk sobre los idquote únicos del snapshot.
+      void recalcularPresupuestoMultiple(carasSnapshot.map(c => c.idquote));
 
       res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {

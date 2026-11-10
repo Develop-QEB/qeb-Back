@@ -52,6 +52,7 @@ import {
   puedeBypassearDesposteo,
 } from '../services/desposteo.service';
 import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
+import { recalcularPresupuestoSolicitud, recalcularPresupuestoMultiple } from '../services/solicitud-presupuesto.service';
 
 // Select seguro para campania - excluye posted_aps que puede no existir en producción
 const CAMPANIA_SAFE_SELECT = {
@@ -2349,7 +2350,7 @@ export class CampanasController {
       }
 
       // Rango de fechas del filtro de catorcena (mismo recorte por periodo que getAll)
-      // para el filtro de autorizaci�n de circuitos.
+      // para el filtro de autorizaci�n de circuitos.
       let filterFechaInicio: Date | null = null;
       let filterFechaFin: Date | null = null;
       if (yearInicio && yearFin && catorcenaInicio && catorcenaFin) {
@@ -12518,6 +12519,11 @@ export class CampanasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
+      // Mantener solicitud.presupuesto sincronizado (Jos 2026-11-10, ticket #516).
+      // Las caras creadas desde campaña usan idquote = cotizacion.id_propuesta
+      // = id de la solicitud original en QEB.
+      void recalcularPresupuestoSolicitud(cotizacion.id_propuesta);
+
       // Create authorization tasks if the new cara needs approval.
       // [deferAuth] En borrador NO se crean tareas aquí: se difieren al Guardar
       // (bulkUpdateCaras las crea una sola vez). El badge Pend. es solo informativo.
@@ -12843,6 +12849,13 @@ export class CampanasController {
       const firstCaraForRef = await prisma.solicitudCaras.findUnique({ where: { id: allCaraIds[0] }, select: { idquote: true } });
       const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
       if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
+
+      // Recalcular solicitud.presupuesto para la solicitud afectada
+      // (Jos 2026-11-10, ticket #516). En campañas todas las caras editadas
+      // pertenecen a una misma propuesta/solicitud (idquote compartido).
+      if (firstCaraForRef?.idquote) {
+        void recalcularPresupuestoSolicitud(firstCaraForRef.idquote);
+      }
 
       // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0 && refIdHist) {
