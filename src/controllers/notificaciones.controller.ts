@@ -2387,6 +2387,12 @@ export class NotificacionesController {
         subtipoOut = 'Lead';
       }
 
+      // 'Actividad' (feedback Jos 2026-11-10): standalone sin referencia,
+      // usado para registrar actividades sueltas sin vincular a un recurso.
+      if (!hasRef && subtipo === 'Actividad') {
+        subtipoOut = 'Actividad';
+      }
+
       if (hasRef) {
         subtipoOut = subtipo as string;
         refIdOut = refIdNum;
@@ -2501,12 +2507,23 @@ export class NotificacionesController {
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
       // Nuevos campos (feedback Jos 2026-11-04): "Tipo Cliente" (Lead/Cliente)
-      // y "Tipo Actividad" (Llamada/Mail/Visita). Se guardan en el JSON
-      // contenido para no requerir migration.
+      // y "Tipo Actividad". Se guardan en el JSON contenido para no requerir
+      // migration. Picker ampliado a 10 opciones por Jos 2026-11-10. Legacy
+      // 'Mail'/'Visita' siguen aceptados para no romper flujos existentes
+      // (filas viejas ya tienen esos valores guardados).
       const tipoClienteValido: 'Lead' | 'Cliente' | null =
         tipo_cliente === 'Lead' || tipo_cliente === 'Cliente' ? tipo_cliente : null;
-      const tipoActividadValido: 'Llamada' | 'Mail' | 'Visita' | null =
-        tipo_actividad === 'Llamada' || tipo_actividad === 'Mail' || tipo_actividad === 'Visita'
+      const TIPOS_ACTIVIDAD_ACEPTADOS = [
+        'Llamada', 'Correo',
+        'Reunión virtual', 'Reunión en oficina', 'Reunión fuera de oficina',
+        'Recorrido',
+        'Presentación general virtual', 'Presentación general presencial',
+        'Presentación estratégica virtual', 'Presentación estratégica presencial',
+        // Legacy (pre 2026-11-10): se mantienen para filas viejas.
+        'Mail', 'Visita',
+      ];
+      const tipoActividadValido: string | null =
+        typeof tipo_actividad === 'string' && TIPOS_ACTIVIDAD_ACEPTADOS.includes(tipo_actividad)
           ? tipo_actividad
           : null;
 
@@ -2725,6 +2742,11 @@ export class NotificacionesController {
 
       if (!hasRef && subtipo === 'Lead') {
         subtipoOut = 'Lead';
+      }
+
+      // 'Actividad' (feedback Jos 2026-11-10): standalone sin referencia.
+      if (!hasRef && subtipo === 'Actividad') {
+        subtipoOut = 'Actividad';
       }
 
       if (hasRef) {
