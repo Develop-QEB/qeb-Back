@@ -1158,10 +1158,18 @@ export async function crearTareasAutorizacion(
     // "Rechazar como Corrección" (crea tarea Corrección al asesor).
     // Fallback: si el asesor no tiene Gerente Comercial asignado (matriz de
     // equipos incompleta), va directo al DG (mantiene compatibilidad).
+    //
+    // Feedback 2026-11-10 (Jos): desactivamos el Filtro DG también —
+    // temporalmente las caras dg=pendiente van directo a Autorización DG
+    // (comportamiento pre-filtro). Mismo patrón que FILTRO_DCM_HABILITADO:
+    // todo el código del filtro (crearAutorizacionFiltroDg, aprobar/rechazar
+    // filtro, resolverFiltroDg, etc.) queda intacto para reactivar sin
+    // re-hacer nada. Al poner esto en true, el flujo vuelve a 2 pasos.
+    const FILTRO_DG_HABILITADO = false;
     let tareaDgId: number | null = null;
     let tareaDgTipo: 'Filtro Autorización DG' | 'Autorización DG' = 'Autorización DG';
     if (pendientesDg.length > 0 && !existeTareaDg) {
-      const usarFiltro = gerenteComercial !== null;
+      const usarFiltro = FILTRO_DG_HABILITADO && gerenteComercial !== null;
       const asignados = usarFiltro ? [gerenteComercial!] : usuariosDg;
       if (asignados.length > 0) {
         tareaDgTipo = usarFiltro ? 'Filtro Autorización DG' : 'Autorización DG';
