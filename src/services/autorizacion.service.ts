@@ -2481,6 +2481,21 @@ export async function ejecutarEliminacionCarasCampana(
       },
     });
   }
+
+  // Jos 2026-11-10 (ticket #516): mantener solicitud.presupuesto sincronizado
+  // tras eliminar circuitos — cubre el bypass sinAutorizacion, la excepción
+  // de Luis y el camino normal cuando DG aprueba la autorización. Lazy import
+  // para evitar ciclos con los controllers.
+  try {
+    const idquotes = Array.from(new Set(carasParaHistorial.map(c => c.idquote).filter(Boolean)));
+    if (idquotes.length > 0) {
+      const { recalcularPresupuestoMultiple } = await import('./solicitud-presupuesto.service');
+      void recalcularPresupuestoMultiple(idquotes as string[]);
+    }
+  } catch (e) {
+    console.error('[ejecutarEliminacionCarasCampana] no se pudo recalcular presupuesto:', e);
+  }
+
   return { eliminadas: caraIds.length, reservas: reservasCount, circuitos: detalle.items, resumen: detalle.resumen };
 }
 
