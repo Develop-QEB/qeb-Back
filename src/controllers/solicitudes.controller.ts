@@ -21,6 +21,7 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { serializeBigInt } from '../utils/serialization';
+import { recalcularPresupuestoSolicitud } from '../services/solicitud-presupuesto.service';
 import {
   parseAutorizacionFiltro,
   parseStatusLista,
@@ -2727,6 +2728,14 @@ export class SolicitudesController {
         autorizacion: autorizacionInfo,
       });
 
+      // Asegurar que solicitud.presupuesto quede sincronizado con la suma real
+      // de caras (Jos 2026-11-10, ticket #516). El flujo normal ya calcula
+      // `presupuesto: presupuesto || totalInversion` al insertar la solicitud,
+      // pero si el front manda un presupuesto distinto al total (ej. el valor
+      // tecleado por el asesor en el modal), queda guardado algo distinto a la
+      // suma real. Este fire-and-forget la re-suma al final para blindar.
+      void recalcularPresupuestoSolicitud(result.solicitud.id);
+
       // Emitir eventos WebSocket (siempre, independiente de lógica post-transacción)
       emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_CREADA, {
         solicitud: result.solicitud,
@@ -4291,6 +4300,13 @@ export class SolicitudesController {
         message: mensaje,
         autorizacion,
       });
+
+      // Blindar que solicitud.presupuesto quede igual a SUM(caras.costo) tras
+      // la edición (Jos 2026-11-10, ticket #516). El flujo de update ya hace
+      // `presupuesto: presupuesto || totalInversion`, pero al agregar/quitar
+      // caras individuales dentro del PUT el `presupuesto` recibido del body
+      // puede quedar desfasado. Este fire-and-forget lo normaliza al final.
+      void recalcularPresupuestoSolicitud(solicitud.id);
 
       // Emitir eventos WebSocket
       emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, {
