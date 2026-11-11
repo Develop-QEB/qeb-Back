@@ -24,3 +24,21 @@ export function getMexicoDate(): Date {
   // Así cuando Prisma la envíe a MySQL, se guardará con los valores exactos de México
   return new Date(Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second')));
 }
+
+/**
+ * Normaliza una hora a formato "HH:MM" (24h). Acepta "H:MM", "HH:MM",
+ * "HH:MM:SS" y recorta a HH:MM. Devuelve null si no es una hora válida
+ * (hora 0-23, minuto 0-59). Se usa para el horario de circuitos DIGITALES
+ * (feature "Horario inicio/fin - Digital"); el resto de tipos guarda null.
+ */
+export function normalizaHoraHHMM(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}

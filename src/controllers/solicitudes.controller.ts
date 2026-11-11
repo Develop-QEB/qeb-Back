@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../types';
-import { getMexicoDate } from '../utils/dateHelper';
+import { getMexicoDate, normalizaHoraHHMM } from '../utils/dateHelper';
 import {
   calcularEstadoAutorizacion,
   verificarCarasPendientes,
@@ -2523,6 +2523,9 @@ export class SolicitudesController {
               autorizacion_dcm: estadoResult.autorizacion_dcm,
               cortesia: (cara.articulo || articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
               grupo_rt_bf: cara.grupo_rt_bf || null,
+              // Horario diario solo para circuitos digitales (feature Horario inicio/fin).
+              hora_inicio: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_inicio) : null,
+              hora_fin: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_fin) : null,
             },
           });
           // grupo_masivo_id (campo nuevo, escrito por SQL crudo hasta regenerar Prisma client)
@@ -3902,6 +3905,8 @@ export class SolicitudesController {
                 autorizacion_dg,
                 autorizacion_dcm,
                 grupo_rt_bf: cara.grupo_rt_bf || null,
+                hora_inicio: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_inicio) : null,
+                hora_fin: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_fin) : null,
               },
             });
             if (cara.grupo_masivo_id) {
@@ -3938,6 +3943,8 @@ export class SolicitudesController {
                 autorizacion_dg,
                 autorizacion_dcm,
                 grupo_rt_bf: cara.grupo_rt_bf || null,
+                hora_inicio: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_inicio) : null,
+                hora_fin: cara.tipo === 'Digital' ? normalizaHoraHHMM(cara.hora_fin) : null,
               },
             });
             // grupo_masivo_id (SQL crudo hasta regenerar Prisma client)

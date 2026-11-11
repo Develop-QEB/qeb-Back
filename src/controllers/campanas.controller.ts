@@ -19,6 +19,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
+import { normalizaHoraHHMM } from '../utils/dateHelper';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -2803,6 +2804,8 @@ export class CampanasController {
           MAX(sc.tipo) as tipo_medio,
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
+          MAX(sc.hora_inicio) as hora_inicio,
+          MAX(sc.hora_fin) as hora_fin,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
@@ -2860,6 +2863,8 @@ export class CampanasController {
           sc.tipo as tipo_medio,
           sc.inicio_periodo as inicio_periodo,
           sc.fin_periodo as fin_periodo,
+          sc.hora_inicio as hora_inicio,
+          sc.hora_fin as hora_fin,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
           COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
@@ -3381,6 +3386,8 @@ export class CampanasController {
           MAX(sc.tipo) as tipo_medio,
           MAX(sc.inicio_periodo) as inicio_periodo,
           MAX(sc.fin_periodo) as fin_periodo,
+          MAX(sc.hora_inicio) as hora_inicio,
+          MAX(sc.hora_fin) as hora_fin,
           MAX(sc.formato) as formato,
           COALESCE(MAX(sc.tarifa_publica), MIN(i.tarifa_publica), 0) as tarifa_publica_sc,
           COALESCE(MAX(sc.costo / NULLIF(sc.caras, 0)), 0) as tarifa_bruta_sc,
@@ -3520,6 +3527,8 @@ export class CampanasController {
           sc.tipo as tipo_medio,
           sc.inicio_periodo as inicio_periodo,
           sc.fin_periodo as fin_periodo,
+          sc.hora_inicio as hora_inicio,
+          sc.hora_fin as hora_fin,
           sc.formato as formato,
           COALESCE(sc.tarifa_publica, 0) as tarifa_publica_sc,
           COALESCE(sc.costo / NULLIF(sc.caras, 0), 0) as tarifa_bruta_sc,
@@ -10154,6 +10163,8 @@ export class CampanasController {
         sc_tipo: string | null;
         inicio_periodo: Date | string | null;
         fin_periodo: Date | string | null;
+        hora_inicio: string | null;
+        hora_fin: string | null;
         campania_id: number;
         campania_nombre: string | null;
         cliente_id: number | null;
@@ -10180,6 +10191,8 @@ export class CampanasController {
           sc.tipo AS sc_tipo,
           sc.inicio_periodo,
           sc.fin_periodo,
+          sc.hora_inicio,
+          sc.hora_fin,
           cm.id AS campania_id,
           cm.nombre AS campania_nombre,
           cm.cliente_id,
@@ -10478,6 +10491,9 @@ export class CampanasController {
           tipo_periodo: sc.tipo_periodo || 'catorcena',
           fecha_inicio_periodo: dateOnly(sc.inicio_periodo),
           fecha_fin_periodo: dateOnly(sc.fin_periodo),
+          // Horario diario del circuito digital (feature Horario inicio/fin). null si no aplica.
+          hora_inicio: sc.sc_tipo === 'Digital' ? (sc.hora_inicio ?? null) : null,
+          hora_fin: sc.sc_tipo === 'Digital' ? (sc.hora_fin ?? null) : null,
           catorcena_numero: cat?.numero ?? null,
           catorcena_year: cat?.year ?? null,
           cliente: cliente?.T1_U_Cliente ?? null,
@@ -12271,6 +12287,13 @@ export class CampanasController {
         autorizacion_dg,
         autorizacion_dcm,
       };
+      // Horario digital: undefined = no tocar; si pasa a Tradicional se limpia (null).
+      updateData.hora_inicio = tipoFinal === 'Tradicional'
+        ? null
+        : (data.hora_inicio === undefined ? undefined : normalizaHoraHHMM(data.hora_inicio));
+      updateData.hora_fin = tipoFinal === 'Tradicional'
+        ? null
+        : (data.hora_fin === undefined ? undefined : normalizaHoraHHMM(data.hora_fin));
       if (data.inicio_periodo) {
         // Anclar periodo a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
         const _anc = await anclarPeriodoCatorcena(prisma, currentCara.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
@@ -12655,6 +12678,9 @@ export class CampanasController {
         descuento: data.descuento,
         autorizacion_dg: estadoResult.autorizacion_dg,
         autorizacion_dcm: estadoResult.autorizacion_dcm,
+        // Horario diario solo para circuitos digitales (feature Horario inicio/fin).
+        hora_inicio: data.tipo === 'Digital' ? normalizaHoraHHMM(data.hora_inicio) : null,
+        hora_fin: data.tipo === 'Digital' ? normalizaHoraHHMM(data.hora_fin) : null,
       };
       if (data.inicio_periodo) {
         // Anclar el periodo del sc a su catorcena real: si no, una cara CATORCENA
@@ -12983,6 +13009,13 @@ export class CampanasController {
             autorizacion_dg,
             autorizacion_dcm,
           };
+          // Horario digital (bulk): undefined = no tocar; Tradicional limpia a null.
+          updateData.hora_inicio = tipoFinalBulk === 'Tradicional'
+            ? null
+            : (data.hora_inicio === undefined ? undefined : normalizaHoraHHMM(data.hora_inicio));
+          updateData.hora_fin = tipoFinalBulk === 'Tradicional'
+            ? null
+            : (data.hora_fin === undefined ? undefined : normalizaHoraHHMM(data.hora_fin));
           if (data.inicio_periodo) {
             // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
             const _anc = await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
