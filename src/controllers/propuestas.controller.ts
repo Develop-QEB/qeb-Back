@@ -25,6 +25,7 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
+import { catorcenaLabel } from '../utils/catorcena';
 import { recalcularPresupuestoSolicitud, recalcularPresupuestoMultiple } from '../services/solicitud-presupuesto.service';
 
 // transporter
