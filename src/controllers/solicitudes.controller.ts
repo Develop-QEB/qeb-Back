@@ -965,9 +965,16 @@ export class SolicitudesController {
         autor_foto: c.autor_id ? (autoresMap.get(c.autor_id)?.foto_perfil || null) : null,
       }));
 
-      // Get historial
+      // Get historial. Incluye las entradas de CARA (nueva/cambio) que se guardan
+      // con ref_id = propuesta.id y tipo 'autorizacion_*_solicitud' — antes NO
+      // salían en el detalle de la solicitud (bug Jos: las caras no aparecían).
       const historial = await prisma.historial.findMany({
-        where: { ref_id: solicitud.id, tipo: 'Solicitud' },
+        where: {
+          OR: [
+            { ref_id: solicitud.id, tipo: 'Solicitud' },
+            ...(propuesta ? [{ ref_id: propuesta.id, tipo: { in: ['autorizacion_nueva_cara_solicitud', 'autorizacion_cambio_solicitud'] } }] : []),
+          ],
+        },
         orderBy: { fecha_hora: 'desc' },
       });
 
@@ -3706,6 +3713,10 @@ export class SolicitudesController {
       // IDs de caras nuevas creadas en el bulk update, para auditar fuera del tx
       // (hueco previo al caso Oral B — estas caras nacian sin registro en historial).
       const nuevasCarasIds: number[] = [];
+      // Snapshot ANTES de caras que se ACTUALIZAN en sitio (id estable), para
+      // registrar los cambios (caras/inversion/tarifa/autorizacion…) fuera del tx.
+      // Bug Jos: "cambié caras y el historial solo decía del presupuesto".
+      const carasCambiadasBefore = new Map<number, import('../utils/historialCaras').CaraSnapshot>();
 
       await prisma.$transaction(async (tx) => {
         // Update solicitud
@@ -3853,6 +3864,26 @@ export class SolicitudesController {
             }
           }
           const idsToDelete = oldCaras.filter(oc => !claimedOldIds.has(oc.id)).map(oc => oc.id);
+
+          // Snapshot ANTES de las caras reclamadas (update en sitio) para diff
+          // post-tx vía registrarCambiosCaras (campos: caras, inversion, tarifa,
+          // autorizaciones, tipo, formato). Se arma desde oldCara en memoria (sin query).
+          for (const { oldCara } of carasToUpdate) {
+            carasCambiadasBefore.set(oldCara.id, {
+              id: oldCara.id,
+              caras: oldCara.caras,
+              bonificacion: oldCara.bonificacion != null ? Number(oldCara.bonificacion) : null,
+              costo: oldCara.costo != null ? Number(oldCara.costo) : null,
+              tarifa_publica: oldCara.tarifa_publica != null ? Number(oldCara.tarifa_publica) : null,
+              autorizacion_dg: oldCara.autorizacion_dg,
+              autorizacion_dcm: oldCara.autorizacion_dcm,
+              articulo: oldCara.articulo,
+              ciudad: oldCara.ciudad,
+              tipo: oldCara.tipo,
+              formato: oldCara.formato,
+              inicio_periodo: oldCara.inicio_periodo ?? null,
+            });
+          }
 
           // Log al historial ANTES de borrar (para que quede rastro).
           if (idsToDelete.length > 0) {
@@ -4086,7 +4117,13 @@ export class SolicitudesController {
         if (descripcion !== solicitud.descripcion) addCambio('descripción', solicitud.descripcion, descripcion);
         if (razon_social !== solicitud.razon_social) addCambio('razón social', solicitud.razon_social, razon_social);
         if (marca_nombre !== solicitud.marca_nombre) addCambio('marca', solicitud.marca_nombre, marca_nombre);
-        if (presupuesto !== solicitud.presupuesto) addCambio('presupuesto', solicitud.presupuesto, presupuesto);
+        // Solo loguear presupuesto si el body mandó un valor explícito y distinto.
+        // Al editar SOLO caras el body no manda presupuesto (o lo manda vacío) y se
+        // recalcula server-side → antes salía el falso "presupuesto: 62000 → (vacío)" (bug Jos).
+        const presupuestoBody = presupuesto != null && String(presupuesto).trim() !== '' ? Number(presupuesto) : null;
+        if (presupuestoBody != null && !Number.isNaN(presupuestoBody) && presupuestoBody !== Number(solicitud.presupuesto || 0)) {
+          addCambio('presupuesto', solicitud.presupuesto, presupuestoBody);
+        }
         if (asignadosStr !== solicitud.asignado) addCambio('asignados', solicitud.asignado, asignadosStr);
         if (nombre_campania && cotizacion && nombre_campania !== cotizacion.nombre_campania) addCambio('nombre de campaña', cotizacion.nombre_campania, nombre_campania);
         if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) addCambio('fecha inicio', cotizacion.fecha_inicio?.toISOString()?.split('T')[0], fecha_inicio);
@@ -4179,6 +4216,25 @@ export class SolicitudesController {
           }
         } catch (err) {
           console.error('[audit creación de circuito solicitud.update] fallo:', err);
+        }
+      }
+
+      // Audit historial 'Cambios de circuito' por cada cara ACTUALIZADA en sitio
+      // (bug Jos: cambiar caras en un circuito no dejaba rastro, solo salía el
+      // presupuesto). registrarCambiosCaras compara el before vs los valores ya
+      // commiteados y solo escribe si hubo cambios reales.
+      if (carasCambiadasBefore.size > 0 && propuesta) {
+        try {
+          const { registrarCambiosCaras } = await import('../utils/historialCaras');
+          await registrarCambiosCaras(
+            propuesta.id,
+            'solicitud',
+            userName,
+            carasCambiadasBefore,
+            Array.from(carasCambiadasBefore.keys()),
+          );
+        } catch (err) {
+          console.error('[audit cambios de circuito solicitud.update] fallo:', err);
         }
       }
 

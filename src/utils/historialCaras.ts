@@ -1,7 +1,7 @@
 import prisma from './prisma';
 import { catorcenaLabel } from './catorcena';
 
-interface CaraSnapshot {
+export interface CaraSnapshot {
   id: number;
   caras: number;
   bonificacion: number | null;
