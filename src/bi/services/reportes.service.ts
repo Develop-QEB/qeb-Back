@@ -4,8 +4,9 @@ import { normalizaAsesor } from '../lib/asesores';
 import { normalizaPlaza } from '../lib/plazas';
 import type {
   CampaniaDetalle, Ciclo, ConteoMonto, ConteoNombre, ConteoPeriodo, Dimension,
-  Embudo, EtapaEmbudo, FiltrosReporte, OpcionesReporte, Periodo,
+  Embudo, EtapaEmbudo, FiltrosReporte, OpcionesReporte, Periodo, PropuestasAutMes,
 } from '../types';
+import { MESES_ES } from '../types';
 
 const toISO = (v: unknown): string | null => (v == null ? null : v instanceof Date ? v.toISOString() : String(v));
 
@@ -252,6 +253,57 @@ export async function getCicloTendencia(f: FiltrosReporte): Promise<{ mes: numbe
       nAprob: r ? Number(r.nAprob) : 0,
     };
   });
+}
+
+/**
+ * Indicador de tiempos de respuesta (Embudo): propuestas generadas por mes (Comercial)
+ * y qué % requieren autorización de la Dirección General. "Requiere DG" = la propuesta
+ * tiene una tarea 'Aprobación DG'/'Autorización DG' (cualquier estatus), ligada por
+ * tareas.id_propuesta. Respeta los filtros del Embudo (cliente/asesor/plaza/formato),
+ * pero IGNORA el filtro de mes (es una tendencia de los 12 meses).
+ * Para 2026 arranca en MAYO: mar+abr son la carga masiva de migración (inflan el conteo).
+ */
+export async function getPropuestasAutorizacion(f: FiltrosReporte): Promise<PropuestasAutMes[]> {
+  const { cond, params } = await pipelineCond({ ...f, mes: null }, 'p.id');
+  // 1) Propuestas filtradas del año + su mes de creación.
+  const props = await query<{ id: number; mes: number }>(
+    `SELECT p.id, MONTH(p.fecha) mes
+       FROM solicitud s
+       JOIN propuesta p ON p.solicitud_id = s.id
+      WHERE ${cond.join(' AND ')}`,
+    params
+  );
+  // 2) Set de propuestas que requieren autorización DG (una sola pasada por `tareas`,
+  //    evitando el subquery correlacionado que hace timeout).
+  const dg = await query<{ id_propuesta: string | number }>(
+    `SELECT DISTINCT id_propuesta FROM tareas
+      WHERE tipo IN ('Aprobación DG', 'Autorización DG')
+        AND id_propuesta IS NOT NULL AND id_propuesta <> ''`
+  );
+  const setDG = new Set(dg.map((r) => String(r.id_propuesta)));
+  // 3) Agregamos por mes.
+  const acc = new Map<number, { propuestas: number; conDG: number }>();
+  for (const p of props) {
+    const m = Number(p.mes);
+    const a = acc.get(m) ?? { propuestas: 0, conDG: 0 };
+    a.propuestas++;
+    if (setDG.has(String(p.id))) a.conDG++;
+    acc.set(m, a);
+  }
+  const desdeMes = f.anio === 2026 ? 5 : 1; // 2026: arrancar en mayo (migración mar+abr)
+  const out: PropuestasAutMes[] = [];
+  for (let m = desdeMes; m <= 12; m++) {
+    const a = acc.get(m);
+    if (!a) continue;
+    out.push({
+      mes: m,
+      etiqueta: MESES_ES[m - 1],
+      propuestas: a.propuestas,
+      conDG: a.conDG,
+      pctDG: a.propuestas ? Math.round((a.conDG / a.propuestas) * 100) : 0,
+    });
+  }
+  return out;
 }
 
 /** Detalle de campañas recientes (filtrado). */
