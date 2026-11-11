@@ -6,6 +6,12 @@ const router = Router();
 
 router.use(authMiddleware);
 
+// Historial de una tarea especifica (bitacora de ediciones). Devuelve registros
+// con tipo='Tarea' y ref_id=:id, ordenados por fecha descendente. Se usa en el
+// drawer lateral de Notificaciones para mostrar quien edito que campo y cuando
+// (feedback Jos 2026-11-06).
+router.get('/tarea/:id', historialController.getHistorialTarea.bind(historialController));
+
 router.get('/', historialController.getAll.bind(historialController));
 router.get('/tipos', historialController.getTipos.bind(historialController));
 router.get('/acciones', historialController.getAcciones.bind(historialController));
