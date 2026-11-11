@@ -29,6 +29,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampa
 import { uploadToCloudinary } from '../config/cloudinary';
 import { serializeBigInt } from '../utils/serialization';
 import { logHistorial } from '../utils/historial';
+import { catorcenaLabel } from '../utils/catorcena';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import {
   parseAutorizacionFiltro,
