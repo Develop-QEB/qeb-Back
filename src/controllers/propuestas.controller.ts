@@ -27,6 +27,7 @@ import nodemailer from 'nodemailer';
 import { cache, CACHE_KEYS, CACHE_TTL } from '../utils/cache';
 import { logHistorial } from '../utils/historial';
 import { catorcenaLabel } from '../utils/catorcena';
+import { normalizaHoraHHMM } from '../utils/dateHelper';
 import {
   parseAutorizacionFiltro,
   parseStatusLista,
@@ -1024,6 +1025,8 @@ export class PropuestasController {
           descuento: true,
           autorizacion_dg: true,
           autorizacion_dcm: true,
+          hora_inicio: true,
+          hora_fin: true,
         },
       });
 
@@ -4975,6 +4978,8 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf,
+        hora_inicio: horaInicioRaw,
+        hora_fin: horaFinRaw,
         aplicarAGrupo, // si true, propaga campos no-temporales a las demás caras con el mismo grupo_masivo_id
       } = req.body;
 
@@ -5118,6 +5123,15 @@ export class PropuestasController {
         ? await anclarPeriodoCatorcena(prisma, currentCara.idquote, inicio_periodo, fin_periodo || inicio_periodo)
         : null;
 
+      // Horario digital: undefined = no tocar; si la cara pasa a Tradicional se
+      // limpia (null); si es digital y viene valor, se normaliza a HH:MM.
+      const horaIniUp = tipo === 'Tradicional'
+        ? null
+        : (horaInicioRaw === undefined ? undefined : normalizaHoraHHMM(horaInicioRaw));
+      const horaFinUp = tipo === 'Tradicional'
+        ? null
+        : (horaFinRaw === undefined ? undefined : normalizaHoraHHMM(horaFinRaw));
+
       let updatedCara;
       let reservasLiberadasUp = 0;
       try {
@@ -5149,6 +5163,8 @@ export class PropuestasController {
               autorizacion_dg,
               autorizacion_dcm,
               cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+              hora_inicio: horaIniUp,
+              hora_fin: horaFinUp,
             },
           });
         });
@@ -5352,6 +5368,10 @@ export class PropuestasController {
         articulo,
         descuento,
         grupo_rt_bf: grupoRtBfCreate,
+        // Horario diario (solo circuitos DIGITALES): franja "HH:MM" que aplica a
+        // todos los dias del rango. Feature "Horario inicio/fin - Digital".
+        hora_inicio: horaInicioRaw,
+        hora_fin: horaFinRaw,
         // Direcciones/autorización: cuando el circuito se agrega DURANTE la edición
         // de una propuesta (modal), el front manda deferAuth=true para que la cara
         // se persista (necesita id para reservas) PERO no se dispare la autorización
@@ -5522,6 +5542,9 @@ export class PropuestasController {
           autorizacion_dg: estadoResult.autorizacion_dg,
           autorizacion_dcm: estadoResult.autorizacion_dcm,
           cortesia: (articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+          // Horario solo para digital; en tradicional se guarda null (no aplica).
+          hora_inicio: tipo === 'Digital' ? normalizaHoraHHMM(horaInicioRaw) : null,
+          hora_fin: tipo === 'Digital' ? normalizaHoraHHMM(horaFinRaw) : null,
         },
       });
 
@@ -5839,6 +5862,15 @@ export class PropuestasController {
             ? await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo)
             : null;
 
+          // Horario digital (bulk): undefined = no tocar; Tradicional limpia a null.
+          const effTipoBk = data.tipo ?? currentCara?.tipo;
+          const horaIniBk = effTipoBk === 'Tradicional'
+            ? null
+            : (data.hora_inicio === undefined ? undefined : normalizaHoraHHMM(data.hora_inicio));
+          const horaFinBk = effTipoBk === 'Tradicional'
+            ? null
+            : (data.hora_fin === undefined ? undefined : normalizaHoraHHMM(data.hora_fin));
+
           const updatedCara = await tx.solicitudCaras.update({
             where: { id: parseInt(caraId) },
             data: {
@@ -5862,6 +5894,8 @@ export class PropuestasController {
               autorizacion_dg,
               autorizacion_dcm,
               cortesia: (data.articulo || '').toUpperCase().startsWith('CT') ? 1 : 0,
+              hora_inicio: horaIniBk,
+              hora_fin: horaFinBk,
             },
           });
 

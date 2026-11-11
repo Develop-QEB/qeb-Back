@@ -662,6 +662,11 @@ model solicitudCaras {
   cortesia             Int?     @default(0)
   grupo_rt_bf          Int?
   grupo_masivo_id      Int?
+  // Horario diario (solo circuitos DIGITALES en periodo mensual): franja
+  // "HH:MM" que aplica a todos los dias del rango inicio_periodo..fin_periodo.
+  // NULL = sin horario (tradicional / no aplica). Feature "Horario inicio/fin - Digital".
+  hora_inicio          String?  @db.VarChar(5)
+  hora_fin             String?  @db.VarChar(5)
 
   @@index([idquote])
   @@index([inicio_periodo, fin_periodo], map: "idx_periodos")

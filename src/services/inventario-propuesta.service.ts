@@ -37,6 +37,9 @@ export interface FilaInventarioPropuesta {
   tipo_medio: string | null;
   inicio_periodo: Date | string | null;
   fin_periodo: Date | string | null;
+  // Horario diario del circuito digital (feature Horario inicio/fin). null si no aplica.
+  hora_inicio: string | null;
+  hora_fin: string | null;
   tradicional_digital: string | null;
   tipo_de_mueble: string | null;
   ancho: number | null;
@@ -89,6 +92,8 @@ const SQL_INVENTARIO_ACTUAL = `
     MAX(sc.tipo) as tipo_medio,
     MAX(sc.inicio_periodo) as inicio_periodo,
     MAX(sc.fin_periodo) as fin_periodo,
+    MAX(sc.hora_inicio) as hora_inicio,
+    MAX(sc.hora_fin) as hora_fin,
     MIN(i.tradicional_digital) as tradicional_digital,
     MIN(i.mueble) as tipo_de_mueble,
     MIN(i.ancho) as ancho,
@@ -121,6 +126,7 @@ const SQL_NO_VIGENTES = (phReservas: string, phVersiones: string) => `
     i.latitud, i.longitud, i.plaza, i.tradicional_digital, i.ancho, i.alto, i.nivel_socioeconomico,
     i.tarifa_publica AS inv_tarifa,
     sc.articulo, sc.tipo AS tipo_medio, sc.inicio_periodo, sc.fin_periodo, sc.formato,
+    sc.hora_inicio, sc.hora_fin,
     sc.tarifa_publica AS sc_tarifa, sc.costo, sc.caras,
     cat.numero_catorcena, cat.año AS anio_catorcena,
     r.id AS reserva_viva_id, r.deleted_at AS reserva_deleted_at, r.solicitudCaras_id AS reserva_sc_actual
@@ -305,6 +311,8 @@ export async function getInventarioPropuestaConVersion(propuestaId: number): Pro
           tipo_medio: (r.tipo_medio as string | null) ?? null,
           inicio_periodo: (r.inicio_periodo as Date | null) ?? null,
           fin_periodo: (r.fin_periodo as Date | null) ?? null,
+          hora_inicio: (r.hora_inicio as string | null) ?? null,
+          hora_fin: (r.hora_fin as string | null) ?? null,
           tradicional_digital: (r.tradicional_digital as string | null) ?? null,
           tipo_de_mueble: (r.mueble as string | null) ?? null,
           ancho: numOrNull(r.ancho),
