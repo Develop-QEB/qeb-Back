@@ -19,6 +19,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
+import { aplicarHookRecepcion, aplicarHookInstalacion, registrarMovimiento } from '../services/almacenArtes.service';
 import { normalizaHoraHHMM } from '../utils/dateHelper';
 import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
@@ -36,7 +37,7 @@ import {
   parseAutorizacionFiltro,
   parseStatusLista,
   sqlStatusOAutorizacion,
-  parseEstatusValorAutorizacion,
+  parseEstatusValorLista, sqlDetallesDespuesEn,
   periodoDesdeFiltro,
   sqlExisteCaraConAutorizacion,
   sqlPropuestasConCambioAutorizacion,
@@ -55,6 +56,7 @@ import {
 } from '../services/desposteo.service';
 import { onFinalizarTareaSeguimiento } from '../services/pruebasColor.service';
 import { computePosteoStats } from '../services/posteo-stats.service';
+import { recalcularPresupuestoSolicitud, recalcularPresupuestoMultiple } from '../services/solicitud-presupuesto.service';
 
 // Candado APS ↔ autorización de Direcciones. Devuelve null si la cara está
 // aprobada por DG y DCM (null/undefined cuenta como 'aprobado', igual que el
@@ -323,6 +325,23 @@ const markReservasComoInstaladas = async (params: {
       });
     } catch (errHist) {
       console.error('historial markReservasComoInstaladas:', errHist);
+    }
+  }
+
+  // 5.b) Hook Almacen Artes — restar 1 del stock del arte por cada reserva
+  //     marcada como instalada. Solo en modo 'instalado' (en rotacion la
+  //     reserva NO queda instalada). #1219184885843086
+  if (mode === 'instalado') {
+    try {
+      await aplicarHookInstalacion(prisma, {
+        tareaId: nuevaInstalacion.id,
+        campaniaId: campanaId,
+        idsReservas: allAffectedReservaIds,
+        usuarioId: params.userId ?? null,
+        usuarioNombre: userName,
+      });
+    } catch (errAlm) {
+      console.error('Almacen Artes hook Instalacion fallo (no bloquea):', errAlm);
     }
   }
 
@@ -671,7 +690,7 @@ export class CampanasController {
       // y fechas de último cambio por fila (`includeCambios=true`, para el orden
       // "Último cambio"). Ver utils/autorizacionFiltro.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación de usuario+filtros devuelve resultado cacheado (30s)
@@ -722,19 +741,27 @@ export class CampanasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Campaña'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        // "Cambió a <autorización>" en el rango: historial de autorización de
-        // la propuesta de la campaña (ver utils/autorizacionFiltro).
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
-        params.push(...(sub.params as (string | number)[]));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        conditions.push(sub);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`ct.id_propuesta IN (${sub.sql})`);
+          params.push(...(sub.params as (string | number)[]));
+        }
+        conditions.push(ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`);
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -2382,7 +2409,7 @@ export class CampanasController {
       const userRol = req.user?.rol || '';
       // Filtro por autorización de circuitos — mismo contrato que getAll.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
 
       const cacheKey = CACHE_KEYS.CAMPANAS_STATS(JSON.stringify({
         u: userId, status, search, yearInicio, yearFin, catorcenaInicio, catorcenaFin, tipoPeriodo,
@@ -2449,17 +2476,27 @@ export class CampanasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        conditions.push(`ct.id_propuesta IN (${sub.sql})`);
-        params.push(...(sub.params as (string | number)[]));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        conditions.push(sub);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = cm.id AND h_ce.tipo = 'Campaña' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(cambioEstatusDesde); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`ct.id_propuesta IN (${sub.sql})`);
+          params.push(...(sub.params as (string | number)[]));
+        }
+        conditions.push(ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`);
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = cm.id AND h_cr.tipo = 'Campaña' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -5490,7 +5527,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5534,6 +5571,37 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, userId || null);
+
+        // Alta inicial del almacen (mismo patron que assignArteTradicional).
+        // #1219184885843086
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: uniqueFilename } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al cargar el arte digital',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial digital fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Actualizar el campo archivo en reservas con el primer archivo (para mostrar preview)
@@ -5655,7 +5723,7 @@ export class CampanasController {
       // Subir cada archivo (a Cloudinary si está configurado, sino base64 en BD)
       const savedFiles: string[] = [];
       for (const archivo of archivos) {
-        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: base64Data, spot, nombre, tipo, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Extraer extensión del nombre o del tipo MIME
         let extension = nombre.split('.').pop() || 'jpg';
@@ -5699,6 +5767,36 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, uniqueFilename, nombreArteVal, '', estatusOpVal, nombreGenericoVal, req.user?.userId || null);
+
+        // Alta inicial del almacen (addArteDigital). #1219184885843086
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: uniqueFilename } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: req.user?.userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al agregar arte digital',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial addArteDigital fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Registrar en historial
@@ -7886,6 +7984,56 @@ export class CampanasController {
           }
         } catch (e) {
           console.error('[updateTarea] hook Recepción falló:', e);
+        }
+      }
+
+      // Hook Almacen Artes — al atender una tarea de Recepción, sumar al
+      // stock los artes recibidos (num_impresiones - faltantes). Idempotente
+      // por tarea_id. #1219184885843086
+      if (esRecepcion && tarea.campania_id && (estatus === 'Atendido' || estatus === 'Completado' || estatus === 'Finalizada')) {
+        try {
+          const idsReservas = String(tarea.ids_reservas || '')
+            .split(',').map(s => parseInt(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+          let faltantesPorArte: Array<{ arte: string; cantidad_faltante: number }> = [];
+          if (tarea.evidencia) {
+            try {
+              const ev = JSON.parse(tarea.evidencia);
+              if (Array.isArray(ev?.faltantesPorArte)) faltantesPorArte = ev.faltantesPorArte;
+            } catch {}
+          }
+          await aplicarHookRecepcion(prisma, {
+            tareaId: tarea.id,
+            campaniaId: tarea.campania_id,
+            numImpresiones: Number(tarea.num_impresiones || 0),
+            idsReservas,
+            faltantesPorArte,
+            usuarioId: userId ?? null,
+            usuarioNombre: userName,
+          });
+        } catch (e) {
+          console.error('[updateTarea] hook Almacen Artes Recepcion fallo (no bloquea):', e);
+        }
+      }
+
+      // Hook Almacen Artes — al atender una tarea de Instalación (flujo normal
+      // del usuario, no la auto-creada por markReservasComoInstaladas), restar
+      // 1 del stock por cada reserva marcada como instalada. Idempotente.
+      // #1219184885843086
+      if (tarea.tipo === 'Instalación' && tarea.campania_id && (estatus === 'Atendido' || estatus === 'Completado' || estatus === 'Finalizada')) {
+        try {
+          const idsReservas = String(tarea.ids_reservas || '')
+            .split(',').map(s => parseInt(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+          if (idsReservas.length > 0) {
+            await aplicarHookInstalacion(prisma, {
+              tareaId: tarea.id,
+              campaniaId: tarea.campania_id,
+              idsReservas,
+              usuarioId: userId ?? null,
+              usuarioNombre: userName,
+            });
+          }
+        } catch (e) {
+          console.error('[updateTarea] hook Almacen Artes Instalacion fallo (no bloquea):', e);
         }
       }
 
@@ -11632,7 +11780,7 @@ export class CampanasController {
       // Verificar que la campaña existe
       const campana = await prisma.campania.findFirst({
         where: { id: campanaId },
-        select: { cotizacion_id: true }
+        select: { cotizacion_id: true, nombre: true }
       });
 
       if (!campana) {
@@ -11973,6 +12121,40 @@ export class CampanasController {
         await evaluarCompletadoSeguro(cotVer?.id_propuesta, {
           usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'campana.createReservas',
         });
+      }
+
+      // Audit historial 'Creación de reservas' (hueco previo al caso Oral B:
+      // se auditaba eliminación pero no creación). Espeja a 'Eliminación de reservas'.
+      if (reservasCreadas > 0 && solicitudCaraId) {
+        try {
+          const caraInfo = await prisma.solicitudCaras.findUnique({
+            where: { id: solicitudCaraId },
+            select: { articulo: true, formato: true, inicio_periodo: true },
+          });
+          const catorcena = caraInfo?.inicio_periodo ? await catorcenaLabel(caraInfo.inicio_periodo) : null;
+          const cotProp = campana.cotizacion_id ? await prisma.cotizacion.findUnique({
+            where: { id: campana.cotizacion_id },
+            select: { id_propuesta: true },
+          }) : null;
+          await prisma.historial.create({
+            data: {
+              tipo: 'Campaña',
+              ref_id: cotProp?.id_propuesta || campanaId,
+              accion: 'Creación de reservas',
+              fecha_hora: new Date(),
+              detalles: JSON.stringify({
+                usuario: req.user?.nombre || 'Usuario',
+                usuarioId: req.user?.userId,
+                origen: 'campaña',
+                campaña: campana?.nombre || campanaId,
+                reservas_creadas: reservasCreadas,
+                circuitos: [{ articulo: caraInfo?.articulo, formato: caraInfo?.formato, catorcena }],
+              }),
+            },
+          });
+        } catch (err) {
+          console.error('[audit creación de reservas campaña] fallo:', err);
+        }
       }
 
       res.json({
@@ -12738,6 +12920,11 @@ export class CampanasController {
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(cotizacion.id_propuesta, 'campana', userName, cara.id);
 
+      // Mantener solicitud.presupuesto sincronizado (Jos 2026-11-10, ticket #516).
+      // Las caras creadas desde campaña usan idquote = cotizacion.id_propuesta
+      // = id de la solicitud original en QEB.
+      void recalcularPresupuestoSolicitud(cotizacion.id_propuesta);
+
       // Create authorization tasks if the new cara needs approval.
       // [deferAuth] En borrador NO se crean tareas aquí: se difieren al Guardar
       // (bulkUpdateCaras las crea una sola vez). El badge Pend. es solo informativo.
@@ -13071,6 +13258,13 @@ export class CampanasController {
       const refIdHist = parseInt(firstCaraForRef?.idquote || '0');
       if (refIdHist) await registrarCambiosCaras(refIdHist, 'campana', userName, beforeSnap, allCaraIds);
 
+      // Recalcular solicitud.presupuesto para la solicitud afectada
+      // (Jos 2026-11-10, ticket #516). En campañas todas las caras editadas
+      // pertenecen a una misma propuesta/solicitud (idquote compartido).
+      if (firstCaraForRef?.idquote) {
+        void recalcularPresupuestoSolicitud(firstCaraForRef.idquote);
+      }
+
       // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0 && refIdHist) {
         const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
@@ -13363,7 +13557,7 @@ export class CampanasController {
       const savedFiles: string[] = [];
       const insertedPairs = new Set<string>();
       for (const archivo of archivos) {
-        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico } = archivo;
+        const { archivo: archivoUrl, nota, spot, nombre_arte, estatus_operaciones, nombre_generico, cantidad_inicial } = archivo;
 
         // Asegurar que el archivo está almacenado
         const archivoFinal = await ensureStoredFileUrl(
@@ -13398,6 +13592,40 @@ export class CampanasController {
             estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
             nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
         `, campanaId, archivoFinal, nombreArteVal, nota.trim(), estatusOpVal, nombreGenericoVal, userId || null);
+
+        // Alta inicial del almacen si el usuario capturo cantidad en el modal
+        // de carga (feedback Jos 2026-11-05 — fase 1 cierre). Se omite si
+        // cantidad_inicial no viene o es 0. Idempotente por tarea = null:
+        // revisa si ya hay una alta_inicial previa para este arte, si no, la
+        // crea. Asi reimprimir el modal con el mismo archivo no duplica.
+        const cantInicial = Number(cantidad_inicial);
+        if (Number.isFinite(cantInicial) && cantInicial > 0) {
+          try {
+            const biblio = await prisma.biblioteca_artes.findUnique({
+              where: { campania_id_archivo: { campania_id: campanaId, archivo: archivoFinal } },
+              select: { id: true },
+            });
+            if (biblio) {
+              const yaAlta = await prisma.almacen_artes_movimientos.findFirst({
+                where: { biblioteca_artes_id: biblio.id, tipo: 'alta_inicial' },
+                select: { id: true },
+              });
+              if (!yaAlta) {
+                await registrarMovimiento(prisma, {
+                  biblioteca_artes_id: biblio.id,
+                  campania_id: campanaId,
+                  tipo: 'alta_inicial',
+                  cantidad: cantInicial,
+                  usuario_id: userId ?? null,
+                  usuario_nombre: userName,
+                  nota: 'Alta inicial al cargar el arte en el Versionario',
+                });
+              }
+            }
+          } catch (errAlm) {
+            console.error('Almacen Artes alta_inicial fallo (no bloquea):', errAlm);
+          }
+        }
       }
 
       // Actualizar reservas.archivo con la primera imagen (para fallback y preview)

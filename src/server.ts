@@ -10,6 +10,7 @@ import { enviarRecordatoriosPendientes } from './services/recordatorios.service'
 import { finalizarCampanasPorIniciarVencidas, inicializarCampanasPorIniciarActivas } from './services/campania-status.service';
 import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
 import { ejecutarMonitorConflictos } from './services/conflictos-ocupacion.service';
+import { procesarVigenciasBloqueo } from './services/vigencia-bloqueo.service';
 import { chatbotController } from './controllers/chatbot.controller';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -183,6 +184,16 @@ async function main() {
       // Tambien corre al arrancar para procesar las ya vencidas (idempotente).
       liberarReservasPropuestasVencidas().catch((err: unknown) => {
         console.error('[LiberacionReservas] Error en ejecucion inicial:', err);
+      });
+
+      // Vigencia de bloqueos de inventario (No Disponible / Inhabilitado). Cada
+      // dia a las 00:00 CDMX: aplica los bloqueos programados cuya fecha de
+      // inicio ya llego y crea la tarea 'Vigencia Bloqueo Inventario' a quien
+      // bloqueo cuando se cumple la fecha fin (desde la tarea se rehabilita).
+      // Idempotente (bloqueo_aviso_at) + corrida inicial al arrancar.
+      programarDiario(0, 'VigenciaBloqueos 00:00', async () => { await procesarVigenciasBloqueo(); });
+      procesarVigenciasBloqueo().catch((err: unknown) => {
+        console.error('[VigenciaBloqueos] Error en ejecucion inicial:', err);
       });
 
       // Monitor de conflictos de ocupacion sobre las catorcenas vigentes.

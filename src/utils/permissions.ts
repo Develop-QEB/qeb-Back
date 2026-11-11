@@ -350,7 +350,6 @@ const TAREA_TIPOS_INFORMATIVOS = [
   'Autorización DG',
   'Autorización DCM',
   'Filtro Autorización DG',
-  'Filtro Autorización DCM',
   'Notificación',
 ];
 

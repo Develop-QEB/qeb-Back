@@ -24,6 +24,7 @@ import reorganizarOcupacionRoutes from './reorganizar-ocupacion.routes';
 import pruebasColorRoutes from './pruebasColor.routes';
 import desposteoRoutes from './desposteo.routes';
 import capasMapaRoutes from './capas-mapa.routes';
+import almacenArtesRoutes from './almacenArtes.routes';
 
 import publicRoutes from './public.routes';
 
@@ -55,5 +56,6 @@ router.use('/reorganizar-ocupacion', reorganizarOcupacionRoutes);
 router.use('/pruebas-color', pruebasColorRoutes);
 router.use('/desposteo', desposteoRoutes);
 router.use('/capas-mapa', capasMapaRoutes);
+router.use('/almacen-artes', almacenArtesRoutes);
 
 export default router;

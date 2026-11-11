@@ -11,8 +11,6 @@ import {
   conservarAprobacionSiIncrementa,
   aprobarFiltroDg,
   rechazarFiltroDgComoCorreccion,
-  aprobarFiltroDcm,
-  rechazarFiltroDcmComoCorreccion,
 } from '../services/autorizacion.service';
 import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
@@ -23,10 +21,12 @@ import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { serializeBigInt } from '../utils/serialization';
+import { recalcularPresupuestoSolicitud } from '../services/solicitud-presupuesto.service';
 import {
   parseAutorizacionFiltro,
   parseStatusLista,
-  parseEstatusValorAutorizacion,
+  parseEstatusValorLista,
+  sqlDetallesDespuesEn,
   periodoDesdeFiltro,
   sqlExisteCaraConAutorizacion,
   sqlPropuestasConCambioAutorizacion,
@@ -448,7 +448,7 @@ export class SolicitudesController {
       // `includeCambios` agrega por fila las fechas de último cambio por estatus
       // (para el orden "Último cambio"). Ver utils/autorizacionFiltro.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const includeCambios = req.query.includeCambios === 'true';
 
       const where: Record<string, unknown> = {
@@ -607,29 +607,34 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        // "Cambió a <autorización>" en el rango: solicitudes cuya propuesta
-        // tiene historial de autorización con esa clave (ver utils/autorizacionFiltro).
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT DISTINCT s.id FROM solicitud s
-           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
-           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
-        addHistorialIdFilter(rows.map(r => Number(r.id)));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
-        const qp: any[] = [];
-        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
-        // Filtro por estatus especifico (ej. "Pase a ventas"): match en el
-        // JSON `detalles` por el campo "despues" del cambio de estado.
-        if (estatusValor) {
-          conds.push('detalles LIKE ?');
-          qp.push(`%"despues":"${estatusValor}"%`);
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const idsCambio = new Set<number>();
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+          const qp: any[] = [];
+          if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+          // Estatus especifico(s): match en el JSON `detalles` por "despues".
+          const d = sqlDetallesDespuesEn('detalles', estatusValorLista.estatus);
+          if (d.sql) { conds.push(d.sql); qp.push(...d.params); }
+          const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+            `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+          rows.forEach(r => idsCambio.add(Number(r.ref_id)));
         }
-        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
-          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
-        addHistorialIdFilter(rows.map(r => Number(r.ref_id)));
+        if (estatusValorLista.auth.length > 0) {
+          // Solicitudes cuya propuesta tiene historial de autorización con esas claves.
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+          rows.forEach(r => idsCambio.add(Number(r.id)));
+        }
+        addHistorialIdFilter([...idsCambio]);
       }
       if (creacionDesde || creacionHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
@@ -794,25 +799,56 @@ export class SolicitudesController {
           });
         }
 
-        // Recalculate presupuesto based on catorcena filter (sum only overlapping caras)
-        if (filterFechaInicio && filterFechaFin) {
-          const presupuestoData = await prisma.$queryRawUnsafe<{ solicitud_id: number; presupuesto_filtrado: number }[]>(`
-            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_filtrado
+        // Jos 2026-11-10 (ticket #516, Elvia #81488): el listado siempre
+        // devolvía el valor guardado en `solicitud.presupuesto`, pero ese
+        // campo no se actualiza cuando desde Propuestas se agregan o quitan
+        // caras. El detalle (modal) sí lo recalcula en vivo, por eso en
+        // el listado unos casos se veían mal (34% de las solicitudes del
+        // año tenían el número desfasado). Ahora siempre sumamos los
+        // `solicitudCaras` reales — misma fuente de verdad que el detalle.
+        // Si hay filtro de catorcena activo, se restringe a las caras cuyo
+        // periodo intersecta el rango seleccionado (comportamiento previo).
+        //
+        // `solicitud.id === propuesta.id === solicitudCaras.idquote` en QEB
+        // (el id se preserva al escalar de solicitud a propuesta), así que
+        // unimos directo sin pasar por propuesta.
+        const presupuestoQuery = (filterFechaInicio && filterFechaFin)
+          ? `
+            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_real
             FROM solicitud s
-            LEFT JOIN propuesta pr ON pr.solicitud_id = s.id
-            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(pr.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(s.id AS CHAR) COLLATE utf8mb4_unicode_ci
               AND sc.inicio_periodo <= ?
               AND sc.fin_periodo >= ?
             WHERE s.id IN (${placeholders})
             GROUP BY s.id
-          `, filterFechaFin, filterFechaInicio, ...solicitudIds);
-
-          const presupuestoMap = new Map(presupuestoData.map((p: any) => [Number(p.solicitud_id), Number(p.presupuesto_filtrado)]));
-          enrichedSolicitudes = enrichedSolicitudes.map((s: any) => ({
+          `
+          : `
+            SELECT s.id as solicitud_id, COALESCE(SUM(sc.costo), 0) as presupuesto_real
+            FROM solicitud s
+            LEFT JOIN solicitudCaras sc ON sc.idquote = CAST(s.id AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE s.id IN (${placeholders})
+            GROUP BY s.id
+          `;
+        const presupuestoParams = (filterFechaInicio && filterFechaFin)
+          ? [filterFechaFin, filterFechaInicio, ...solicitudIds]
+          : [...solicitudIds];
+        const presupuestoData = await prisma.$queryRawUnsafe<{ solicitud_id: number; presupuesto_real: number }[]>(
+          presupuestoQuery,
+          ...presupuestoParams
+        );
+        const presupuestoMap = new Map(presupuestoData.map((p: any) => [Number(p.solicitud_id), Number(p.presupuesto_real)]));
+        enrichedSolicitudes = enrichedSolicitudes.map((s: any) => {
+          const presupuestoCalculado = presupuestoMap.get(s.id);
+          // Si la solicitud tiene caras, usamos la suma real. Si no tiene
+          // ninguna cara (caso raro pero posible — solicitud borrador),
+          // respetamos el valor guardado.
+          return {
             ...s,
-            presupuesto: presupuestoMap.get(s.id) ?? s.presupuesto,
-          }));
-        }
+            presupuesto: presupuestoCalculado && presupuestoCalculado > 0
+              ? presupuestoCalculado
+              : s.presupuesto,
+          };
+        });
       }
 
       // Group data if requested
@@ -1443,7 +1479,7 @@ export class SolicitudesController {
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
       // Filtro por autorización de circuitos — mismo contrato que getAll.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
 
       const where: Record<string, unknown> = { deleted_at: null };
 
@@ -1506,22 +1542,34 @@ export class SolicitudesController {
         (where.AND as any[]).push({ id: { in: ids } });
       };
       const endOfDay = (s: string): Date => { const d = new Date(s); d.setHours(23, 59, 59, 999); return d; };
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-          `SELECT DISTINCT s.id FROM solicitud s
-           INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
-           WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
-        addIdFilter(rows.map(r => Number(r.id)));
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
-        const qp: any[] = [];
-        if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
-        if (estatusValor) { conds.push('detalles LIKE ?'); qp.push(`%"despues":"${estatusValor}"%`); }
-        const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
-          `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
-        addIdFilter(rows.map(r => Number(r.ref_id)));
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const idsCambio = new Set<number>();
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          const conds = [`tipo = 'Solicitud'`, `accion = 'Cambio de estado'`];
+          const qp: any[] = [];
+          if (cambioEstatusDesde) { conds.push('fecha_hora >= ?'); qp.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { conds.push('fecha_hora <= ?'); qp.push(endOfDay(cambioEstatusHasta)); }
+          // Estatus especifico(s): match en el JSON `detalles` por "despues".
+          const d = sqlDetallesDespuesEn('detalles', estatusValorLista.estatus);
+          if (d.sql) { conds.push(d.sql); qp.push(...d.params); }
+          const rows = await prisma.$queryRawUnsafe<{ ref_id: number }[]>(
+            `SELECT DISTINCT ref_id FROM historial WHERE ${conds.join(' AND ')}`, ...qp);
+          rows.forEach(r => idsCambio.add(Number(r.ref_id)));
+        }
+        if (estatusValorLista.auth.length > 0) {
+          // Solicitudes cuya propuesta tiene historial de autorización con esas claves.
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+            `SELECT DISTINCT s.id FROM solicitud s
+             INNER JOIN propuesta pr ON pr.solicitud_id = s.id AND pr.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND pr.id IN (${sub.sql})`, ...sub.params);
+          rows.forEach(r => idsCambio.add(Number(r.id)));
+        }
+        addIdFilter([...idsCambio]);
       }
       if (creacionDesde || creacionHasta) {
         const conds = [`tipo = 'Solicitud'`, `accion IN ('Creación','Creacion','Inicio')`];
@@ -2603,6 +2651,19 @@ export class SolicitudesController {
         timeout: 120000, // 2 minutes for the transaction to complete
       });
 
+      // Audit historial 'Creación de circuito' por cada cara creada (hueco previo al caso Oral B:
+      // solicitudes.controller.create/update creaban caras completas sin pasar por registrarCaraNueva,
+      // que solo se llamaba en propuestas/campanas.controller.createCara — ese se dispara solo con
+      // circuitos shell '0 caras'. Las caras COMPLETAS que entran por este path quedaban silenciosas).
+      try {
+        const { registrarCaraNueva } = await import('../utils/historialCaras');
+        for (const cara of result.caras) {
+          await registrarCaraNueva(result.propuesta.id, 'solicitud', userName, cara.id);
+        }
+      } catch (err) {
+        console.error('[audit creación de circuito solicitud.create] fallo:', err);
+      }
+
       // Verificar caras pendientes de autorización (no debe bloquear la respuesta)
       let autorizacionInfo: { tienePendientes: boolean; pendientesDg: any[]; pendientesDcm: any[] } = { tienePendientes: false, pendientesDg: [], pendientesDcm: [] };
       try {
@@ -2669,6 +2730,14 @@ export class SolicitudesController {
         message: mensaje,
         autorizacion: autorizacionInfo,
       });
+
+      // Asegurar que solicitud.presupuesto quede sincronizado con la suma real
+      // de caras (Jos 2026-11-10, ticket #516). El flujo normal ya calcula
+      // `presupuesto: presupuesto || totalInversion` al insertar la solicitud,
+      // pero si el front manda un presupuesto distinto al total (ej. el valor
+      // tecleado por el asesor en el modal), queda guardado algo distinto a la
+      // suma real. Este fire-and-forget la re-suma al final para blindar.
+      void recalcularPresupuestoSolicitud(result.solicitud.id);
 
       // Emitir eventos WebSocket (siempre, independiente de lógica post-transacción)
       emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_CREADA, {
@@ -3634,6 +3703,10 @@ export class SolicitudesController {
       // Resumen de cambios (se llena dentro de la tx) para reusar en el correo.
       let cambiosResumen = 'datos generales';
 
+      // IDs de caras nuevas creadas en el bulk update, para auditar fuera del tx
+      // (hueco previo al caso Oral B — estas caras nacian sin registro en historial).
+      const nuevasCarasIds: number[] = [];
+
       await prisma.$transaction(async (tx) => {
         // Update solicitud
         await tx.solicitud.update({
@@ -3955,6 +4028,7 @@ export class SolicitudesController {
               );
             }
             recreatedCaras.push(createdCara);
+            nuevasCarasIds.push(createdCara.id);
 
             // [APAGADO 2026-06-02] Auto-reserva circuito digital — el equipo
             // pidió tenerla deshabilitada (las asesoras reservan manualmente
@@ -4095,6 +4169,19 @@ export class SolicitudesController {
         timeout: 120000,
       });
 
+      // Audit historial 'Creación de circuito' por cada cara nueva creada en el bulk update
+      // (hueco previo al caso Oral B — pasaba silencioso para caras completas).
+      if (nuevasCarasIds.length > 0 && propuesta) {
+        try {
+          const { registrarCaraNueva } = await import('../utils/historialCaras');
+          for (const caraId of nuevasCarasIds) {
+            await registrarCaraNueva(propuesta.id, 'solicitud', userName, caraId);
+          }
+        } catch (err) {
+          console.error('[audit creación de circuito solicitud.update] fallo:', err);
+        }
+      }
+
       // Enviar correo
       const involucradosCorreo = new Set<number>();
       
@@ -4220,6 +4307,13 @@ export class SolicitudesController {
         message: mensaje,
         autorizacion,
       });
+
+      // Blindar que solicitud.presupuesto quede igual a SUM(caras.costo) tras
+      // la edición (Jos 2026-11-10, ticket #516). El flujo de update ya hace
+      // `presupuesto: presupuesto || totalInversion`, pero al agregar/quitar
+      // caras individuales dentro del PUT el `presupuesto` recibido del body
+      // puede quedar desfasado. Este fire-and-forget lo normaliza al final.
+      void recalcularPresupuestoSolicitud(solicitud.id);
 
       // Emitir eventos WebSocket
       emitToSolicitudes(SOCKET_EVENTS.SOLICITUD_ACTUALIZADA, {
@@ -4516,81 +4610,6 @@ export class SolicitudesController {
     }
   }
 
-  // Feedback 2026-09-10 (Jos): el Filtro DCM lo aprueba el MISMO Gerente
-  // Comercial que el Filtro DG del asesor (VP/Plazas), no el GC Aeropuerto.
-  // Solo cambia el director final al que llega la Autorización aprobada
-  // (DCM → Rodrigo Margain). Por eso permitimos los mismos roles GC que en
-  // el filtro DG. Dejamos 'Gerente Comercial Aeropuerto' por si alguna
-  // tarea DCM ya asignada a Aeropuerto necesita procesarla.
-  async aprobarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
-    try {
-      const tareaId = parseInt(req.params.tareaId);
-      const { comentario } = (req.body || {}) as { comentario?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial';
-      const userRol = req.user?.rol;
-      const rolesPermitidos = [
-        'Gerente Comercial Vía Pública',
-        'Gerente Comercial Via Publica',
-        'Gerente Comercial Plazas',
-        'Gerente Comercial (Plazas)',
-        'Gerente Comercial',
-        'Gerente Comercial Aeropuerto',
-        'Administrador',
-        'DEV',
-      ];
-      if (!userRol || !rolesPermitidos.includes(userRol)) {
-        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar el filtro DCM' });
-        return;
-      }
-      if (isNaN(tareaId)) {
-        res.status(400).json({ success: false, error: 'tareaId invalido' });
-        return;
-      }
-      const result = await aprobarFiltroDcm(tareaId, userName, comentario);
-      res.json({ success: true, data: result });
-    } catch (error) {
-      console.error('Error aprobarFiltroDcm:', error);
-      const message = error instanceof Error ? error.message : 'Error al aprobar filtro DCM';
-      res.status(500).json({ success: false, error: message });
-    }
-  }
-
-  async rechazarFiltroDcm(req: AuthRequest, res: Response): Promise<void> {
-    try {
-      const tareaId = parseInt(req.params.tareaId);
-      const { motivo } = req.body as { motivo?: string };
-      const userName = req.user?.nombre || 'Gerente Comercial';
-      const userRol = req.user?.rol;
-      const rolesPermitidos = [
-        'Gerente Comercial Vía Pública',
-        'Gerente Comercial Via Publica',
-        'Gerente Comercial Plazas',
-        'Gerente Comercial (Plazas)',
-        'Gerente Comercial',
-        'Gerente Comercial Aeropuerto',
-        'Administrador',
-        'DEV',
-      ];
-      if (!userRol || !rolesPermitidos.includes(userRol)) {
-        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar el filtro DCM' });
-        return;
-      }
-      if (isNaN(tareaId)) {
-        res.status(400).json({ success: false, error: 'tareaId invalido' });
-        return;
-      }
-      if (!motivo || !motivo.trim()) {
-        res.status(400).json({ success: false, error: 'Motivo requerido' });
-        return;
-      }
-      const result = await rechazarFiltroDcmComoCorreccion(tareaId, userName, motivo.trim());
-      res.json({ success: true, data: result });
-    } catch (error) {
-      console.error('Error rechazarFiltroDcm:', error);
-      const message = error instanceof Error ? error.message : 'Error al rechazar filtro DCM';
-      res.status(500).json({ success: false, error: message });
-    }
-  }
 }
 
 export const solicitudesController = new SolicitudesController();

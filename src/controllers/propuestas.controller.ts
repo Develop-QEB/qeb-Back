@@ -32,7 +32,7 @@ import {
   parseAutorizacionFiltro,
   parseStatusLista,
   sqlStatusOAutorizacion,
-  parseEstatusValorAutorizacion,
+  parseEstatusValorLista, sqlDetallesDespuesEn,
   periodoDesdeFiltro,
   sqlExisteCaraConAutorizacion,
   sqlPropuestasConCambioAutorizacion,
@@ -42,6 +42,7 @@ import {
   unirCambios,
   type CambiosFechas,
 } from '../utils/autorizacionFiltro';
+import { recalcularPresupuestoSolicitud, recalcularPresupuestoMultiple } from '../services/solicitud-presupuesto.service';
 
 // transporter
 const transporter = nodemailer.createTransport({
@@ -503,7 +504,7 @@ export class PropuestasController {
       // y fechas de último cambio por fila (`includeCambios=true`, para el orden
       // "Último cambio"). Ver utils/autorizacionFiltro.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const includeCambios = req.query.includeCambios === 'true';
 
       // Caché: misma combinación usuario+filtros devuelve resultado cacheado (30s)
@@ -589,20 +590,27 @@ export class PropuestasController {
       // Filtros por historial (cambio de estatus / creacion) en rango de fechas.
       // EXISTS contra historial con tipo='Propuesta'. fecha hasta = fin de dia.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        // "Cambió a <autorización>" en el rango: historial de autorización de
-        // la propuesta (ver utils/autorizacionFiltro).
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        whereConditions += ` AND pr.id IN (${sub.sql})`;
-        params.push(...sub.params);
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        // Filtro por estatus especifico via JSON detalles del cambio.
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        whereConditions += ` AND ${sub}`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`pr.id IN (${sub.sql})`);
+          params.push(...sub.params);
+        }
+        whereConditions += ` AND ${ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`}`;
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -1759,7 +1767,7 @@ export class PropuestasController {
       const excludeRechazadas = req.query.excludeRechazadas === 'true';
       // Filtro por autorización de circuitos — mismo contrato que getAll.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
 
       const userId = req.user?.userId;
       const userRol = req.user?.rol || '';
@@ -1831,17 +1839,27 @@ export class PropuestasController {
       // Mismo EXISTS que getAll: si los KPIs no lo aplican, el total se queda en
       // el universo sin filtrar y no cuadra con el listado.
       const endOfDayStr = (s: string): string => `${s} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        whereConditions += ` AND pr.id IN (${sub.sql})`;
-        statsParams.push(...sub.params);
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; statsParams.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; statsParams.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; statsParams.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        whereConditions += ` AND ${sub}`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; statsParams.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; statsParams.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; statsParams.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`pr.id IN (${sub.sql})`);
+          statsParams.push(...sub.params);
+        }
+        whereConditions += ` AND ${ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`}`;
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -2843,7 +2861,7 @@ export class PropuestasController {
       const creacionHasta = (modoHistorial === 'creacion' ? fechaHasta : '') || (req.query.creacionHasta as string);
       // Filtro por autorización de circuitos — mismo contrato que getAll/getStats.
       const autorizacionKeys = parseAutorizacionFiltro(req.query.autorizacion);
-      const estatusValorAut = parseEstatusValorAutorizacion(estatusValor);
+      const estatusValorLista = parseEstatusValorLista(estatusValor);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       // Tope: el desglose pide todo sin paginar pero 5000 OOMeaba el back en DO.
       // 1000 cubre ~858 propuestas activas con margen, sin reventar memoria.
@@ -2918,17 +2936,27 @@ export class PropuestasController {
       // Mismo EXISTS que getAll/getStats: si el desglose no lo aplica, muestra
       // el universo completo mientras el listado y los KPIs si estan acotados.
       const endOfDayStr = (d: string): string => `${d} 23:59:59`;
-      if ((cambioEstatusDesde || cambioEstatusHasta) && estatusValorAut) {
-        const sub = sqlPropuestasConCambioAutorizacion(estatusValorAut, cambioEstatusDesde, cambioEstatusHasta);
-        whereConditions += ` AND pr.id IN (${sub.sql})`;
-        params.push(...sub.params);
-      } else if (cambioEstatusDesde || cambioEstatusHasta) {
-        let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
-        if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
-        if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
-        if (estatusValor) { sub += ` AND h_ce.detalles LIKE ?`; params.push(`%"despues":"${estatusValor}"%`); }
-        sub += `)`;
-        whereConditions += ` AND ${sub}`;
+      if (cambioEstatusDesde || cambioEstatusHasta) {
+        // "Cambió a ..." es multiselect: OR entre estatus de la entidad (EXISTS
+        // sobre "Cambio de estado") y estatus de autorización de circuitos
+        // (historial de autorización de la propuesta; ver utils/autorizacionFiltro).
+        // Sin selección, cualquier cambio de estado en el rango.
+        const ors: string[] = [];
+        if (estatusValorLista.estatus.length > 0 || estatusValorLista.auth.length === 0) {
+          let sub = `EXISTS (SELECT 1 FROM historial h_ce WHERE h_ce.ref_id = pr.id AND h_ce.tipo = 'Propuesta' AND h_ce.accion = 'Cambio de estado'`;
+          if (cambioEstatusDesde) { sub += ` AND h_ce.fecha_hora >= ?`; params.push(new Date(cambioEstatusDesde)); }
+          if (cambioEstatusHasta) { sub += ` AND h_ce.fecha_hora <= ?`; params.push(endOfDayStr(cambioEstatusHasta)); }
+          const d = sqlDetallesDespuesEn('h_ce.detalles', estatusValorLista.estatus);
+          if (d.sql) { sub += ` AND ${d.sql}`; params.push(...d.params); }
+          sub += `)`;
+          ors.push(sub);
+        }
+        if (estatusValorLista.auth.length > 0) {
+          const sub = sqlPropuestasConCambioAutorizacion(estatusValorLista.auth, cambioEstatusDesde, cambioEstatusHasta);
+          ors.push(`pr.id IN (${sub.sql})`);
+          params.push(...sub.params);
+        }
+        whereConditions += ` AND ${ors.length === 1 ? ors[0] : `(${ors.join(' OR ')})`}`;
       }
       if (creacionDesde || creacionHasta) {
         let sub = `EXISTS (SELECT 1 FROM historial h_cr WHERE h_cr.ref_id = pr.id AND h_cr.tipo = 'Propuesta' AND h_cr.accion IN ('Creación','Creacion','Inicio')`;
@@ -3491,6 +3519,17 @@ export class PropuestasController {
         return;
       }
 
+      // Guard: no reservar sobre propuesta ya pasada a ventas. El modal de Ajuste de Caras
+      // en NotificacionesPage dejaba agregar caras aquí y nacían 'Reservado' colgadas
+      // (caso Oral B 30-oct-2026: 116 caras cat 23 invisibles para candados).
+      if (propuesta.status === 'Aprobada' || propuesta.status === 'Pase a ventas') {
+        res.status(403).json({
+          success: false,
+          error: 'La propuesta ya pasó a ventas. Agrega las reservas desde Campañas.',
+        });
+        return;
+      }
+
       // Check authorization only for the specific cara being reserved (not all caras in propuesta)
       let esCortesia = false;
       if (solicitudCaraId) {
@@ -3813,6 +3852,36 @@ export class PropuestasController {
       // de lo recien creado (evaluar toda la propuesta cuesta ~0.9 s en las grandes).
       if (createdReservas.length > 0) {
         await evaluarCompletadoPorReservasSeguro(createdReservas.map(r => r.id), { usuarioId: req.user?.userId, usuarioNombre: req.user?.nombre, origen: 'createReservas' });
+      }
+
+      // Audit historial 'Creación de reservas' (hueco previo al caso Oral B:
+      // se auditaba eliminación pero no creación — por eso no se sabía quién
+      // habia agregado las 116 caras colgadas). Espeja a 'Eliminación de reservas'.
+      if (createdReservas.length > 0 && solicitudCaraId) {
+        try {
+          const caraInfo = await prisma.solicitudCaras.findUnique({
+            where: { id: parseInt(solicitudCaraId) },
+            select: { articulo: true, formato: true, inicio_periodo: true },
+          });
+          const catorcena = caraInfo?.inicio_periodo ? await catorcenaLabel(caraInfo.inicio_periodo) : null;
+          await prisma.historial.create({
+            data: {
+              tipo: 'Propuesta',
+              ref_id: propuestaId,
+              accion: 'Creación de reservas',
+              fecha_hora: new Date(),
+              detalles: JSON.stringify({
+                usuario: userName,
+                usuarioId: userId,
+                origen: 'propuesta',
+                reservas_creadas: createdReservas.length,
+                circuitos: [{ articulo: caraInfo?.articulo, formato: caraInfo?.formato, catorcena }],
+              }),
+            },
+          });
+        } catch (err) {
+          console.error('[audit creación de reservas propuesta] fallo:', err);
+        }
       }
 
       res.json({
@@ -4542,6 +4611,34 @@ export class PropuestasController {
       // la reserva recien creada: el toggle se usa pieza por pieza y evaluar
       // toda la propuesta en cada clic era medio segundo extra por clic.
       await evaluarCompletadoPorReservasSeguro([newReserva.id], { usuarioId: userId, usuarioNombre: userName, origen: 'toggleReserva' });
+
+      // Audit historial 'Creación de reservas' (toggle individual). Hueco previo al
+      // caso Oral B: createReservas lo audita pero toggleReserva pasaba silencioso.
+      try {
+        const caraForAudit = await prisma.solicitudCaras.findUnique({
+          where: { id: parseInt(solicitudCaraId) },
+          select: { articulo: true, formato: true, inicio_periodo: true },
+        });
+        const catorcena = caraForAudit?.inicio_periodo ? await catorcenaLabel(caraForAudit.inicio_periodo) : null;
+        await prisma.historial.create({
+          data: {
+            tipo: 'Propuesta',
+            ref_id: propuestaId,
+            accion: 'Creación de reservas',
+            fecha_hora: new Date(),
+            detalles: JSON.stringify({
+              usuario: userName,
+              usuarioId: userId,
+              origen: 'propuesta',
+              reservas_creadas: 1,
+              via: 'toggleReserva',
+              circuitos: [{ articulo: caraForAudit?.articulo, formato: caraForAudit?.formato, catorcena }],
+            }),
+          },
+        });
+      } catch (err) {
+        console.error('[audit creación de reservas toggleReserva] fallo:', err);
+      }
 
       res.json({
         success: true,
@@ -5292,6 +5389,20 @@ export class PropuestasController {
         return;
       }
 
+      // Guard: no agregar caras sobre propuesta ya pasada a ventas. Mismo motivo que
+      // createReservas más arriba (caso Oral B 30-oct-2026). Hay que agregar desde Campañas.
+      const propuestaStatus = await prisma.propuesta.findUnique({
+        where: { id: parseInt(id) },
+        select: { status: true },
+      });
+      if (propuestaStatus?.status === 'Aprobada' || propuestaStatus?.status === 'Pase a ventas') {
+        res.status(403).json({
+          success: false,
+          error: 'La propuesta ya pasó a ventas. Agrega los circuitos desde Campañas.',
+        });
+        return;
+      }
+
       // Validar fechas obligatorias.
       if (!inicio_periodo || !fin_periodo) {
         res.status(400).json({
@@ -5482,6 +5593,10 @@ export class PropuestasController {
       // Registrar nueva cara en historial
       const { registrarCaraNueva } = await import('../utils/historialCaras');
       await registrarCaraNueva(parseInt(id), 'propuesta', userName, newCara.id);
+
+      // Mantener solicitud.presupuesto sincronizado con la nueva suma real
+      // de caras (Jos 2026-11-10, ticket #516). Fire-and-forget.
+      void recalcularPresupuestoSolicitud(id);
 
       let mensaje = 'Circuito creado exitosamente';
       // Default vacío para la respuesta cuando se difiere la autorización (deferAuth).
@@ -5821,6 +5936,11 @@ export class PropuestasController {
       // Registrar cambios en historial
       await registrarCambiosCaras(parseInt(id as string), 'propuesta', userName, beforeSnap, allCaraIds);
 
+      // bulkUpdate puede haber cambiado costos → recalcular solicitud.presupuesto
+      // (Jos 2026-11-10, ticket #516). El idquote de las caras es el id de la
+      // propuesta, que coincide con el id de la solicitud en QEB.
+      void recalcularPresupuestoSolicitud(id as string);
+
       // Historial: reservas liberadas por cambio de periodo y/o de artículo
       if (totalReservasLiberadas > 0) {
         const motivosTxt = [...motivosLiberacion].join(' y ') || 'periodo';
@@ -5956,6 +6076,12 @@ export class PropuestasController {
           extras: { caras_eliminadas: carasSnapshot, eliminarGrupo },
         });
       }
+
+      // Recalcular solicitud.presupuesto para las solicitudes afectadas
+      // (Jos 2026-11-10, ticket #516). Puede haber caras de varias
+      // propuestas/solicitudes en una misma llamada, así que usamos la
+      // variante bulk sobre los idquote únicos del snapshot.
+      void recalcularPresupuestoMultiple(carasSnapshot.map(c => c.idquote));
 
       res.json({ success: true, eliminadas: idsToDelete.length });
     } catch (error) {

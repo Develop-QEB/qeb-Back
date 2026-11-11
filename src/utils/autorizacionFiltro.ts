@@ -55,6 +55,42 @@ export function parseEstatusValorAutorizacion(estatusValor: string | undefined |
   return esKey(k) ? k : null;
 }
 
+export interface EstatusValorLista {
+  /** Estatus de la entidad ('Aprobada', 'Pase a ventas', ...). */
+  estatus: string[];
+  /** Claves de autorización de circuitos (llegaron como `auth:<key>`). */
+  auth: AutorizacionFiltroKey[];
+}
+
+/**
+ * `estatusValor` del filtro de Historial es MULTISELECT (CSV, igual que
+ * `status` y `autorizacion`): `?estatusValor=Aprobada,auth:pend_dg`. Separa
+ * los estatus de entidad de las claves de autorización porque cada grupo se
+ * resuelve con un SQL distinto (EXISTS sobre "Cambio de estado" vs. subquery
+ * de historial de autorización) y entre ambos aplica OR.
+ */
+export function parseEstatusValorLista(raw: unknown): EstatusValorLista {
+  const out: EstatusValorLista = { estatus: [], auth: [] };
+  for (const v of parseStatusLista(raw)) {
+    const k = parseEstatusValorAutorizacion(v);
+    if (k) { if (!out.auth.includes(k)) out.auth.push(k); continue; }
+    if (!out.estatus.includes(v)) out.estatus.push(v);
+  }
+  return out;
+}
+
+/**
+ * `(col LIKE ? OR col LIKE ?)` sobre el JSON `detalles` de un "Cambio de
+ * estado", por el campo "despues". Devuelve '' sin estatus (sin filtro).
+ */
+export function sqlDetallesDespuesEn(col: string, estatus: string[]): { sql: string; params: string[] } {
+  if (estatus.length === 0) return { sql: '', params: [] };
+  return {
+    sql: `(${estatus.map(() => `${col} LIKE ?`).join(' OR ')})`,
+    params: estatus.map((e) => `%"despues":"${e}"%`),
+  };
+}
+
 /** `?status=Atendido,Pase a ventas` → ['Atendido','Pase a ventas'] (el chip Status es multiselect). */
 export function parseStatusLista(raw: unknown): string[] {
   if (raw === undefined || raw === null || raw === '') return [];
@@ -252,15 +288,20 @@ const SQL_JOIN_HIST_PROPUESTA = `
  * `pr.id IN (<sql>)` / `ct.id_propuesta IN (<sql>)`.
  */
 export function sqlPropuestasConCambioAutorizacion(
-  key: AutorizacionFiltroKey,
+  key: AutorizacionFiltroKey | AutorizacionFiltroKey[],
   desde?: string | null,
   hasta?: string | null,
 ): { sql: string; params: unknown[] } {
-  // La clave va como literal (no como parámetro): comparar el CASE con un `?`
-  // mezcla collations (CASE toma la de la conexión, el parámetro otra) y MySQL
-  // tira 1267. `key` viene de la whitelist AUTORIZACION_FILTRO_KEYS, sin riesgo.
+  // Las claves van como literales (no como parámetros): comparar el CASE con
+  // un `?` mezcla collations (CASE toma la de la conexión, el parámetro otra)
+  // y MySQL tira 1267. Vienen de la whitelist AUTORIZACION_FILTRO_KEYS, sin
+  // riesgo. Con varias claves (multiselect) es `IN ('a','b')`.
+  const keys = (Array.isArray(key) ? key : [key]).filter(esKey);
   const params: unknown[] = [];
-  let sql = `SELECT DISTINCT pr_h.id ${SQL_JOIN_HIST_PROPUESTA} WHERE pr_h.deleted_at IS NULL AND ${SQL_CLAVE_AUT} = '${key}'`;
+  const claveSql = keys.length === 1
+    ? `${SQL_CLAVE_AUT} = '${keys[0]}'`
+    : `${SQL_CLAVE_AUT} IN (${keys.map((k) => `'${k}'`).join(',')})`;
+  let sql = `SELECT DISTINCT pr_h.id ${SQL_JOIN_HIST_PROPUESTA} WHERE pr_h.deleted_at IS NULL AND ${claveSql}`;
   if (desde) { sql += ` AND h.fecha_hora >= ?`; params.push(new Date(desde)); }
   if (hasta) { sql += ` AND h.fecha_hora <= ?`; params.push(`${hasta} 23:59:59`); }
   return { sql, params };

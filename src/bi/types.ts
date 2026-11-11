@@ -294,6 +294,18 @@ export interface Ciclo {
   total: number;
 }
 
+/** Propuestas generadas por mes y cuántas requieren autorización de la Dirección General. */
+export interface PropuestasAutMes {
+  mes: number;
+  etiqueta: string;
+  /** Propuestas creadas en el mes (área Comercial). */
+  propuestas: number;
+  /** De esas, cuántas tienen tarea de autorización DG. */
+  conDG: number;
+  /** % que requieren autorización DG. */
+  pctDG: number;
+}
+
 /** Fila de "Detalle de campañas". */
 export interface CampaniaDetalle {
   id: number;

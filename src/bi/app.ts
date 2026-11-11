@@ -7,7 +7,7 @@ import { listar as listarUsuarios, crear as crearUsuario, actualizar as actualiz
 import { getAnios, getAsesores, getClientes, getResumenVentas } from './services/resumenVentas.service';
 import { getPresupuesto, upsertPresupuesto } from './services/presupuesto.service';
 import { getContexto, getEventos, getImpacto, getResumen } from './services/historial.service';
-import { dimensionValida, getCampanias, getCatorcenas, getCiclo, getCicloTendencia, getDistribucion, getEmbudo, getOpciones, getTarifas, getVentasPeriodo, getVentaTotal } from './services/reportes.service';
+import { dimensionValida, getCampanias, getCatorcenas, getCiclo, getCicloTendencia, getDistribucion, getEmbudo, getOpciones, getPropuestasAutorizacion, getTarifas, getVentasPeriodo, getVentaTotal } from './services/reportes.service';
 import type { FiltrosReporte } from './types';
 import {
   getObjetivos,
@@ -179,7 +179,7 @@ app.get('/', (_req, res) =>
     service: 'bi-back',
     ok: true,
     // Sello para verificar qué build está vivo en prod (abrir <url>/bi/ ).
-    version: '2026-10-15-ciclo-tendencia',
+    version: '2026-11-10-rechazo-elim-autdg',
     ventaDef: getBiConfig().ventaDef,          // 'VENTA' = Embudo/Variaciones cuentan solo U_dscTAsig='Venta' (igual que BI)
     mesRule: 'fecha_fin',                       // mes de la catorcena por Fecha Fin Periodo
     endpoints: ['/health', '/resumen-ventas', '/asesores', '/clientes', '/anios', '/presupuesto', '/historial/eventos', '/historial/resumen', 'ws:/ws/historial'],
@@ -434,6 +434,10 @@ app.get('/reportes/ciclo', wrap(async (req, res) => {
 
 app.get('/reportes/ciclo-tendencia', wrap(async (req, res) => {
   res.json(await getCicloTendencia(parseFiltrosReporte(req)));
+}));
+
+app.get('/reportes/propuestas-autorizacion', wrap(async (req, res) => {
+  res.json(await getPropuestasAutorizacion(parseFiltrosReporte(req)));
 }));
 
 app.get('/reportes/campanias', wrap(async (req, res) => {

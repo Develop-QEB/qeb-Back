@@ -22,6 +22,7 @@ router.post('/autorizacion/depurar', notificacionesController.depurarAutorizacio
 // Actividad Comercial (tarea manual del asesor). ANTES de rutas con :id.
 router.get('/actividad-comercial/campanas', notificacionesController.getCampanasParaActividad.bind(notificacionesController));
 router.get('/actividad-comercial/propuestas', notificacionesController.getPropuestasParaActividad.bind(notificacionesController));
+router.get('/actividad-comercial/solicitudes', notificacionesController.getSolicitudesParaActividad.bind(notificacionesController));
 router.post('/actividad-comercial', notificacionesController.crearActividadComercial.bind(notificacionesController));
 router.patch('/actividad-comercial/:id', notificacionesController.editarActividadComercial.bind(notificacionesController));
 
