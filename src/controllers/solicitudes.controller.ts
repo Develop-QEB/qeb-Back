@@ -4129,7 +4129,12 @@ export class SolicitudesController {
         if (fecha_inicio && cotizacion && new Date(fecha_inicio).getTime() !== cotizacion.fecha_inicio?.getTime()) addCambio('fecha inicio', cotizacion.fecha_inicio?.toISOString()?.split('T')[0], fecha_inicio);
         if (fecha_fin && cotizacion && new Date(fecha_fin).getTime() !== cotizacion.fecha_fin?.getTime()) addCambio('fecha fin', cotizacion.fecha_fin?.toISOString()?.split('T')[0], fecha_fin);
         if (notas !== solicitud.notas) addCambio('notas', solicitud.notas, notas);
-        if (archivo !== solicitud.archivo) addCambio('archivo', solicitud.archivo ? 'sí' : 'no', archivo ? 'sí' : 'no');
+        // Archivo: solo loguear si REALMENTE cambió. Tratar null/''/undefined como
+        // "sin archivo" y, si el body no lo manda (undefined), asumir que no cambió.
+        // Antes salía "archivo: no → no" en cada guardado (undefined vs null) — ruido (Jos).
+        const archivoPrev = solicitud.archivo || null;
+        const archivoNuevo = archivo === undefined ? archivoPrev : (archivo || null);
+        if (archivoNuevo !== archivoPrev) addCambio('archivo', archivoPrev ? 'sí' : 'no', archivoNuevo ? 'sí' : 'no');
 
         const cambiosStr = cambiosLabels.length > 0 ? cambiosLabels.join(', ') : 'datos generales';
         cambiosResumen = cambiosStr;
