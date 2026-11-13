@@ -10033,7 +10033,16 @@ export class CampanasController {
             MAX(COALESCE(pc.tipo, 'prueba_color')) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM pruebas_color pc
           WHERE pc.campania_id = ?
-            AND pc.estatus = 'aprobada'
+            -- Jos 2026-11-13: en Revision Anticipada el arte debe aparecer en
+            -- la biblioteca desde que se aprueba la Revision (estatus
+            -- 'arte_aprobado'), sin esperar a que se finalice el Seguimiento
+            -- (estatus 'aprobada'). En Prueba de Color seguimos requiriendo
+            -- 'aprobada' porque el flujo PC llega a biblioteca al cerrar
+            -- Recepcion, no al aprobar la Revision.
+            AND (
+              pc.estatus = 'aprobada'
+              OR (pc.tipo = 'revision_anticipada' AND pc.estatus = 'arte_aprobado')
+            )
             AND pc.deleted_at IS NULL
             AND (NULLIF(pc.archivo, '') IS NOT NULL OR pc.enlace_externo IS NOT NULL)
           GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte, pc.tipo
