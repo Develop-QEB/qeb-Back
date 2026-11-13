@@ -21,7 +21,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampa
 // Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
 // al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
 // para que el conteo del header y el de la página no se descuadren.
-const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
+const ESTATUS_RESUELTOS = ['Atendido', 'Finalizada', 'Aprobada', 'Completado', 'Rechazado', 'Cancelado'];
 
 // Tipos cuya referencia (solicitud / propuesta / campaña) viaja en `contenido` y no
 // se infiere por prioridad de ids. Antes solo Autorización/Rechazo/Aprobación:
