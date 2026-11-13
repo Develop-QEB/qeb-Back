@@ -10101,6 +10101,68 @@ export class CampanasController {
     }
   }
 
+  // Akary 2026-11-13: persiste un arte en biblioteca_artes DESDE que se sube
+  // (antes solo entraba al completar el wizard assignArteTradicional/Digital).
+  // Reporte Jos: si cargaba un arte y recargaba antes de asignar, se perdia
+  // porque addedArtes del front vive solo en state React. Idempotente via
+  // INSERT ... ON DUPLICATE KEY UPDATE (unique por campania_id+archivo).
+  async addToBibliotecaArtes(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campaniaId = parseInt(id);
+      if (!Number.isFinite(campaniaId) || campaniaId <= 0) {
+        res.status(400).json({ success: false, error: 'id de campaña inválido' });
+        return;
+      }
+      const {
+        archivo,
+        tipo,
+        nombre_arte,
+        nota,
+        estatus_operaciones,
+        nombre_generico,
+      } = req.body as {
+        archivo?: string;
+        tipo?: string;
+        nombre_arte?: string | null;
+        nota?: string | null;
+        estatus_operaciones?: string | null;
+        nombre_generico?: string | null;
+      };
+      const archivoTrim = (archivo || '').trim();
+      if (!archivoTrim) {
+        res.status(400).json({ success: false, error: 'archivo (url) es requerido' });
+        return;
+      }
+      const tipoVal = tipo === 'digital' ? 'digital' : 'tradicional';
+      const userId = (req.user as any)?.id ?? null;
+      await prisma.$executeRawUnsafe(
+        `
+        INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+          nota = COALESCE(VALUES(nota), nota),
+          estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+          nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `,
+        campaniaId,
+        archivoTrim,
+        tipoVal,
+        nombre_arte || null,
+        nota || null,
+        estatus_operaciones || null,
+        nombre_generico || null,
+        userId,
+      );
+      res.json({ success: true, data: { archivo: archivoTrim, tipo: tipoVal } });
+    } catch (error) {
+      console.error('Error en addToBibliotecaArtes:', error);
+      const message = error instanceof Error ? error.message : 'Error al persistir arte en biblioteca';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   // Listar usuarios activos del área "Operaciones" — para el selector que
   // aparece en el modal Asignar Arte cuando el usuario elige Rotación, así
   // la tarea de Instalación generada queda asignada a personas de Operaciones.
