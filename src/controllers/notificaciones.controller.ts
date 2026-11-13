@@ -21,7 +21,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampa
 // Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
 // al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
 // para que el conteo del header y el de la página no se descuadren.
-const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
+const ESTATUS_RESUELTOS = ['Atendido', 'Finalizada', 'Aprobada', 'Completado', 'Rechazado', 'Cancelado'];
 
 // Exact token match for comma-separated id_asignado field (avoids substring false positives)
 function idAsignadoMatch(userId: number | string): Record<string, unknown>[] {

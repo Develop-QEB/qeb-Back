@@ -475,6 +475,10 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
         archivo_adjunto,
         enlace_adjunto,
       });
+      // Jos 2026-11-12: cerrar notificaciones 'Prueba de Color' Pendientes
+      // asociadas a esta prueba — ya hay Seguimiento que las reemplaza. Fix
+      // para notificaciones colgadas en Mis Tareas (feedback Akary).
+      await cerrarTareaAsociada(pruebaId, 'Prueba de Color', userNombre);
     } catch (e) {
       console.error('[pruebasColor.actualizar] hook arte_aprobado falló:', e);
     }
@@ -554,6 +558,12 @@ async function notificarActualizacionEstatus(input: {
 }) {
   const { prueba, nuevoEstatus, actor, actorId, comentario, archivo_adjunto, enlace_adjunto } = input;
   if (prueba.created_by === actorId) return; // el mismo creador no se auto-notifica
+
+  // Jos 2026-11-12: al pasar a 'arte_aprobado' el hook ya crea la tarea
+  // Seguimiento (es la que el creador debe atender). La notificación
+  // 'Prueba de Color' tipo "arte aprobado" queda redundante y se veía
+  // colgada en Mis Tareas (feedback Akary). Se omite para evitar duplicados.
+  if (nuevoEstatus === 'arte_aprobado') return;
 
   const labelEstatus: Record<EstatusPruebaColor, string> = {
     solicitada: 'en revisión de arte',
@@ -643,6 +653,20 @@ export async function eliminarPruebaColor(pruebaId: number, userId: number, user
     where: { id: pruebaId },
     data: { deleted_at: new Date() },
   });
+
+  // Jos 2026-11-12: al borrar una prueba de color, cerrar también todas las
+  // tareas asociadas (Revisión / Seguimiento / Impresión / Recepción /
+  // notificación "Prueba de Color") de ESA versión específica para que no
+  // queden huérfanas en Mis Tareas (feedback Akary). Cada cerrarTareaAsociada
+  // filtra por pruebaColorId en contenido, así que no toca tareas de otras
+  // versiones de la misma propuesta/circuito.
+  for (const tipoTarea of ['Revisión de artes', 'Seguimiento Prueba de color', 'Impresión', 'Recepción', 'Prueba de Color']) {
+    try {
+      await cerrarTareaAsociada(pruebaId, tipoTarea, userNombre);
+    } catch (e) {
+      console.error(`[pruebasColor.eliminar] cerrar tareas tipo '${tipoTarea}' falló:`, e);
+    }
+  }
 
   await logHistorial({
     tipo: 'Propuesta',
@@ -768,7 +792,7 @@ async function cerrarTareaAsociada(pruebaId: number, tipo: string, actorNombre: 
   const tareas = await prisma.tareas.findMany({
     where: {
       tipo,
-      estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+      estatus: { in: ['Pendiente', 'En proceso', 'En Proceso', 'Atendido'] },
     },
     select: { id: true, contenido: true },
   });
@@ -798,9 +822,12 @@ async function cerrarTareaAsociada(pruebaId: number, tipo: string, actorNombre: 
  */
 export async function listarTareasAsociadas(pruebaId: number) {
   // Pre-filtrar por tipos relevantes para no scanear toda la tabla tareas.
+  // Jos 2026-11-12: incluimos 'Impresión' para que el pedido de impresión
+  // creado desde Seguimiento aparezca en el drawer TAREAS DE LA PRUEBA
+  // (el front guarda pruebaColorId en contenido al disparar createTarea).
   const tareas = await prisma.tareas.findMany({
     where: {
-      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color'] },
+      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Impresión', 'Recepción'] },
     },
     orderBy: { id: 'desc' },
     take: 100,
