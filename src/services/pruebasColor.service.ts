@@ -482,6 +482,19 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     } catch (e) {
       console.error('[pruebasColor.actualizar] hook arte_aprobado falló:', e);
     }
+    // Jos 2026-11-13: en Revisión Anticipada, el arte debe entrar a la
+    // biblioteca de la campaña DESDE que se aprueba la Revisión (antes
+    // de que el analista finalice Seguimiento). Antes solo se vinculaba
+    // al pasar a 'aprobada' (al finalizar Seguimiento), lo cual era tarde:
+    // Jos necesita el arte disponible en el Gestor para seleccionarlo mientras
+    // el seguimiento sigue vivo. Idempotente via ON DUPLICATE KEY UPDATE.
+    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && (prueba.archivo || prueba.enlace_externo)) {
+      try {
+        await vincularArteAprobadoABibliotecaCampania(prueba);
+      } catch (e) {
+        console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca (arte_aprobado) falló:', e);
+      }
+    }
   }
 
   // Hook 2: al llegar a aprobada se cierra la tarea Seguimiento (si existe).
