@@ -138,6 +138,9 @@ export function esAsesorComercial(rol?: string | null): boolean {
  */
 export const esTrafico = (rol?: string | null): boolean => /trafico/i.test(String(rol || ''));
 
+// Admin del sistema: Administrador y DEV (case-insensitive, tolerante a espacios).
+export const esAdmin = (rol?: string | null): boolean => /^(administrador|dev)$/i.test(String(rol || '').trim());
+
 // toFixed(2) para comparar decimales sin falsos positivos por precisión float
 // (mismo criterio que decimalEq/decimalEqC en los controllers).
 const dec2Tarifa = (v: unknown): string => {
