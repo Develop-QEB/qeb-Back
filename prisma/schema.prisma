@@ -936,6 +936,21 @@ model analisis_ocupacion {
   @@map("analisis_ocupacion")
 }
 
+/// Propuesta económica (cotización "GRUPO IMU - Propuesta de Servicio") armada
+/// desde Solicitudes. Mismo patrón que analisis_ocupacion: el documento completo
+/// vive como JSON en `data` y se comparte por enlace entre usuarios del sistema.
+model propuesta_economica {
+  id                  Int       @id @default(autoincrement())
+  usuario_id          Int
+  nombre              String    @db.VarChar(255)
+  data                String    @db.LongText
+  fecha_creacion      DateTime  @default(now()) @db.Timestamp(0)
+  fecha_actualizacion DateTime? @db.Timestamp(0)
+
+  @@index([usuario_id])
+  @@map("propuesta_economica")
+}
+
 /// Estado del monitor de conflictos de ocupacion. Una fila por celda
 /// (inventario x catorcena) detectada. Sin esto no se puede distinguir un
 /// conflicto NUEVO de uno que ya se avisó ayer, y el cron notificaría lo mismo
