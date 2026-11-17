@@ -20,7 +20,7 @@ import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, esAdmin, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
 import { uploadBufferToSpaces } from '../config/spaces';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
@@ -4275,9 +4275,9 @@ export class PropuestasController {
       const solicitudCaraId = parseInt(caraId);
       const activo = req.body?.activo === true || req.body?.activo === 'true';
 
-      // Gate de rol: solo Tráfico gestiona el bloqueo de circuitos.
-      if (!esTrafico(req.user?.rol)) {
-        res.status(403).json({ success: false, error: 'Solo Tráfico puede bloquear o desbloquear circuitos.' });
+      // Gate de rol: Tráfico y Admin (Administrador/DEV) gestionan el bloqueo de circuitos.
+      if (!esTrafico(req.user?.rol) && !esAdmin(req.user?.rol)) {
+        res.status(403).json({ success: false, error: 'Solo Tráfico o un administrador pueden bloquear o desbloquear circuitos.' });
         return;
       }
 
