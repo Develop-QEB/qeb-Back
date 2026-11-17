@@ -2821,16 +2821,41 @@ export class NotificacionesController {
       const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
+      // Akary 2026-11-17: tipo_cliente y tipo_actividad llegaban en el body pero
+      // no se persistian en contenidoNuevo ni se diffeaban, asi que al editar
+      // una actividad comercial se BORRABAN del JSON contenido (regresion desde
+      // el commit que los agrego a crear). Mismo whitelist que crearActividadComercial
+      // (mantener en sync con la lista de L2516).
+      const tipoClienteValido: 'Lead' | 'Cliente' | null =
+        tipo_cliente === 'Lead' || tipo_cliente === 'Cliente' ? tipo_cliente : null;
+      const TIPOS_ACTIVIDAD_ACEPTADOS = [
+        'Llamada', 'Correo',
+        'Reunión virtual', 'Reunión en oficina', 'Reunión fuera de oficina',
+        'Recorrido',
+        'Presentación general virtual', 'Presentación general presencial',
+        'Presentación estratégica virtual', 'Presentación estratégica presencial',
+        'Mail', 'Visita',
+      ];
+      const tipoActividadValido: string | null =
+        typeof tipo_actividad === 'string' && TIPOS_ACTIVIDAD_ACEPTADOS.includes(tipo_actividad)
+          ? tipo_actividad
+          : null;
+      const recordarDiasAntesValido: number | null =
+        activar_recordatorio && recordar_dias_antes != null
+          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
+          : null;
+
       const contenidoNuevo = JSON.stringify({
         cliente, marca,
         subtipo: subtipoOut, ref_id: refIdOut,
         activar_recordatorio: !!activar_recordatorio,
-        recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
-          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0)) : null,
+        recordar_dias_antes: recordarDiasAntesValido,
         anio: anioValido,
         catorcena: catorcenaValida,
         catorcenas: catorcenasValidas,
         estatus_actividad: estatusActividadValido, base: baseValida,
+        tipo_cliente: tipoClienteValido,
+        tipo_actividad: tipoActividadValido,
       });
 
       const tituloExtra = [cliente, marca].filter(Boolean).join(' · ');
@@ -2881,6 +2906,12 @@ export class NotificacionesController {
       cmp('estatus_actividad', 'Estatus', prevContenido.estatus_actividad, estatusActividadValido);
       cmp('base', 'Base', prevContenido.base, baseValida);
       cmp('activar_recordatorio', 'Recordatorio', !!prevContenido.activar_recordatorio, !!activar_recordatorio);
+      // Akary 2026-11-17: faltaba diff para los dias del recordatorio y para los
+      // dos campos nuevos (tipo_cliente, tipo_actividad). Sin esto cambiarlos
+      // no quedaba en la bitacora del drawer.
+      cmp('recordar_dias_antes', 'Días antes del recordatorio', prevContenido.recordar_dias_antes, recordarDiasAntesValido);
+      cmp('tipo_cliente', 'Tipo Cliente', prevContenido.tipo_cliente, tipoClienteValido);
+      cmp('tipo_actividad', 'Tipo Actividad', prevContenido.tipo_actividad, tipoActividadValido);
 
       await logHistorial({
         tipo: 'Tarea',
@@ -2897,6 +2928,10 @@ export class NotificacionesController {
           catorcena: catorcenaValida,
           catorcenas: catorcenasValidas,
           estatus_actividad: estatusActividadValido, base: baseValida,
+          // Akary 2026-11-17: incluir tambien los dos campos nuevos para que
+          // el extras del log tenga la foto completa (igual que crear).
+          tipo_cliente: tipoClienteValido,
+          tipo_actividad: tipoActividadValido,
         },
       });
 
