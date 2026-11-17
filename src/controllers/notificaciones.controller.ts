@@ -2864,6 +2864,32 @@ export class NotificacionesController {
           ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
           : null;
 
+      // Snapshot previo para diff + para decidir si preservamos el marcador
+      // de recordatorio ya enviado (ver bloque siguiente). Se movio arriba del
+      // contenidoNuevo para poder consultar prevContenido.recordatorio_enviado_at
+      // al armar el JSON.
+      const prevContenido = previa.contenido ? (() => {
+        try { return JSON.parse(previa.contenido); } catch { return {}; }
+      })() : {};
+
+      // Akary 2026-11-17: idempotencia del recordatorio por correo. El scanner
+      // (enviarRecordatoriosActividadComercial en recordatorios.service) marca
+      // contenido.recordatorio_enviado_at tras disparar; si editamos la tarea
+      // sin tocar los triggers del recordatorio debemos PRESERVARLO (si no se
+      // reenviaria al dia siguiente). Si el usuario cambia fecha_fin,
+      // activar_recordatorio o recordar_dias_antes, lo RESETEAMOS a null para
+      // que la proxima pasada del cron vuelva a disparar.
+      const fechaFinNueva = fecha_fin ? new Date(fecha_fin) : (previa.fecha_fin as Date | null);
+      const fechaFinPrevISO = previa.fecha_fin instanceof Date ? previa.fecha_fin.toISOString() : String(previa.fecha_fin || '');
+      const fechaFinNuevaISO = fechaFinNueva instanceof Date ? fechaFinNueva.toISOString() : String(fechaFinNueva || '');
+      const fechaCambio = fechaFinPrevISO !== fechaFinNuevaISO;
+      const activarCambio = !!prevContenido.activar_recordatorio !== !!activar_recordatorio;
+      const diasCambio = (prevContenido.recordar_dias_antes ?? null) !== (recordarDiasAntesValido ?? null);
+      const invalidarRecordatorio = fechaCambio || activarCambio || diasCambio;
+      const recordatorioEnviadoAt: string | null = invalidarRecordatorio
+        ? null
+        : (typeof prevContenido.recordatorio_enviado_at === 'string' ? prevContenido.recordatorio_enviado_at : null);
+
       const contenidoNuevo = JSON.stringify({
         cliente, marca,
         subtipo: subtipoOut, ref_id: refIdOut,
@@ -2875,17 +2901,13 @@ export class NotificacionesController {
         estatus_actividad: estatusActividadValido, base: baseValida,
         tipo_cliente: tipoClienteValido,
         tipo_actividad: tipoActividadValido,
+        recordatorio_enviado_at: recordatorioEnviadoAt,
       });
 
       const tituloExtra = [cliente, marca].filter(Boolean).join(' · ');
       const tituloNuevo = hasRef
         ? `Actividad Comercial · ${subtipoOut} #${refIdOut}`
         : (tituloExtra ? `Actividad Comercial · ${tituloExtra}` : 'Actividad Comercial');
-
-      // Snapshot para diff.
-      const prevContenido = previa.contenido ? (() => {
-        try { return JSON.parse(previa.contenido); } catch { return {}; }
-      })() : {};
 
       const tareaUpd = await prisma.tareas.update({
         where: { id: tareaId },

@@ -230,3 +230,157 @@ export async function enviarRecordatoriosPendientes(): Promise<{
   console.log(`[Recordatorios] Procesados=${procesados} Errores=${errores}`);
   return { procesados, errores };
 }
+
+/**
+ * Akary 2026-11-17 (feedback Jos 2026-11-06 y 2026-11-11): recordatorios de
+ * tareas 'Actividad Comercial' por correo.
+ *
+ * Diferencia con enviarRecordatoriosPendientes: aqui la "tarea" YA existe —
+ * es la actividad comercial misma, con fecha_fin y recordar_dias_antes
+ * guardados en `tareas.contenido` (JSON) — asi que NO se crea tarea nueva;
+ * solo se emite socket NOTIFICACION_NUEVA y se envia correo.
+ *
+ * Idempotencia: al mandar se marca contenido.recordatorio_enviado_at con el
+ * ISO de ahora. La query filtra por ese campo via JSON_EXTRACT. Si Jos cambia
+ * fecha_fin / activar_recordatorio / recordar_dias_antes al editar, el flag
+ * se resetea desde editarActividadComercial (ver notificaciones.controller.ts).
+ *
+ * Se usa el mismo cron de las 08:00 que enviarRecordatoriosPendientes; en
+ * server.ts se llama con try/catch independiente para que un fallo aqui no
+ * tumbe los recordatorios del modulo historial.
+ */
+export async function enviarRecordatoriosActividadComercial(): Promise<{
+  procesados: number;
+  errores: number;
+}> {
+  let procesados = 0;
+  let errores = 0;
+
+  try {
+    // Estatus "resueltos" (actividad ya cerrada) — no debemos mandar recordatorio.
+    // 'Finalizado' viene del picker de Actividad Comercial (Abierto/Activo/Finalizado);
+    // los otros son generales de tareas/notificaciones.
+    const pendientes: any[] = await prisma.$queryRawUnsafe(`
+      SELECT id, titulo, descripcion, fecha_fin, id_responsable, id_asignado,
+             contenido, campania_id, id_propuesta, id_solicitud
+      FROM tareas
+      WHERE tipo = 'Actividad Comercial'
+        AND fecha_fin IS NOT NULL
+        AND contenido IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(contenido, '$.activar_recordatorio')) = 'true'
+        AND JSON_EXTRACT(contenido, '$.recordatorio_enviado_at') IS NULL
+        AND (estatus IS NULL OR estatus NOT IN (
+          'Finalizado', 'Finalizada', 'Atendido', 'Aprobada', 'Completado', 'Rechazado', 'Cancelado'
+        ))
+        AND DATE_SUB(
+          fecha_fin,
+          INTERVAL COALESCE(
+            CAST(JSON_UNQUOTE(JSON_EXTRACT(contenido, '$.recordar_dias_antes')) AS SIGNED),
+            0
+          ) DAY
+        ) <= NOW()
+      ORDER BY fecha_fin ASC
+      LIMIT 500
+    `);
+
+    if (!pendientes.length) {
+      console.log('[RecordatoriosAC] Sin pendientes por procesar.');
+      return { procesados, errores };
+    }
+
+    console.log(`[RecordatoriosAC] ${pendientes.length} pendientes por procesar.`);
+
+    for (const row of pendientes) {
+      try {
+        const tareaId = typeof row.id === 'bigint' ? Number(row.id) : Number(row.id);
+        // Destinatario: id_asignado puede ser CSV (multi-asignado); usamos
+        // id_responsable como fuente principal, y si viene vacio al primer
+        // id_asignado parseable.
+        let destinatarioId = Number(row.id_responsable);
+        if (!destinatarioId || !Number.isFinite(destinatarioId)) {
+          const firstAsignado = String(row.id_asignado || '').split(',').map(s => s.trim()).filter(Boolean)[0];
+          destinatarioId = firstAsignado ? Number(firstAsignado) : NaN;
+        }
+        if (!destinatarioId || !Number.isFinite(destinatarioId)) {
+          console.warn(`[RecordatoriosAC] tarea #${tareaId} sin destinatario valido, skip.`);
+          continue;
+        }
+
+        const fechaEntrega = row.fecha_fin instanceof Date
+          ? row.fecha_fin
+          : new Date(row.fecha_fin);
+
+        const usuario = await prisma.usuario.findUnique({
+          where: { id: destinatarioId },
+          select: { id: true, nombre: true, correo_electronico: true },
+        });
+        if (!usuario) {
+          console.warn(`[RecordatoriosAC] Usuario ${destinatarioId} no encontrado para tarea #${tareaId}, skip.`);
+          continue;
+        }
+
+        const notaOriginal = String(row.descripcion || row.titulo || 'Actividad comercial programada').trim();
+        const fechaEntregaStr = fechaEntrega.toLocaleDateString('es-MX', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+        });
+
+        // Marcar como enviado ANTES del socket/mail para evitar duplicados si
+        // el cron re-dispara mientras sendMail aun no termina. JSON_SET hace
+        // merge sobre contenido sin perder el resto de campos.
+        await prisma.$executeRawUnsafe(
+          `UPDATE tareas
+           SET contenido = JSON_SET(COALESCE(contenido, '{}'), '$.recordatorio_enviado_at', ?)
+           WHERE id = ?`,
+          new Date().toISOString(),
+          tareaId,
+        );
+
+        // Socket al destinatario (mismo patron que enviarRecordatoriosPendientes).
+        emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+          tipo: 'Actividad Comercial',
+          clase: 'tarea',
+          categoria: 'recordatorio',
+          titulo: row.titulo || 'Actividad Comercial',
+          descripcion: notaOriginal,
+          tarea_id: tareaId,
+          fecha_entrega: fechaEntrega.toISOString(),
+          destinatarios: [destinatarioId],
+        });
+
+        // Correo (best-effort; no rompemos el flujo si falla).
+        // Doble guard: preferencia por notificacion+recordatorio (canal general)
+        // Y por tarea+Actividad Comercial (canal especifico). Si el usuario
+        // apago cualquiera de los dos, no se manda.
+        const permitidoRec = await correoPermitido(destinatarioId, 'notificacion', 'recordatorio');
+        const permitidoAC = await correoPermitido(destinatarioId, 'tarea', 'Actividad Comercial');
+        if (usuario.correo_electronico && permitidoRec && permitidoAC) {
+          try {
+            const asunto = row.titulo || `Actividad Comercial #${tareaId}`;
+            await enviarCorreoRecordatorio(
+              usuario.correo_electronico,
+              usuario.nombre,
+              asunto,
+              notaOriginal,
+              fechaEntrega,
+              tareaId,
+            );
+            console.log(`[RecordatoriosAC] Email enviado a ${usuario.correo_electronico} (tarea #${tareaId})`);
+          } catch (emailErr) {
+            console.error(`[RecordatoriosAC] Error enviando email a ${usuario.correo_electronico}:`, emailErr);
+          }
+        }
+
+        procesados++;
+        console.log(`[RecordatoriosAC] tarea #${tareaId} notificada a usuario ${usuario.nombre}`);
+      } catch (e) {
+        errores++;
+        console.error(`[RecordatoriosAC] Error procesando tarea #${row.id}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error('[RecordatoriosAC] Error global:', e);
+  }
+
+  console.log(`[RecordatoriosAC] Procesados=${procesados} Errores=${errores}`);
+  return { procesados, errores };
+}
