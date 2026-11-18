@@ -69,13 +69,15 @@ const FIRME_SQL = ESTATUS_FIRME_CONF.map(e => `'${e}'`).join(',');
 // "La propuesta del circuito `sc` ya paso a ventas (ya es campaña)". Mismo
 // criterio que el guard del bug 81279 en inventario-bloqueo.service.ts: la sola
 // fila en campania NO sirve (nace junto con la cotizacion); lo que marca la
-// venta es fecha_aprobacion o status Aprobada/Pase a ventas.
+// venta es la APROBACION: fecha_aprobacion o status 'Aprobada'. El status
+// 'Pase a ventas' sin aprobar no cuenta: sigue siendo propuesta y su apartado
+// encima de una venta es "apartado sobre venta", no doble venta.
 const PROPUESTA_VENDIDA_SQL = `EXISTS (
          SELECT 1 FROM campania camv
            INNER JOIN cotizacion cotv ON cotv.id = camv.cotizacion_id
            INNER JOIN propuesta pv ON pv.id = cotv.id_propuesta
           WHERE cotv.id_propuesta = CAST(sc.idquote AS UNSIGNED)
-            AND (camv.fecha_aprobacion IS NOT NULL OR pv.status IN ('Aprobada', 'Pase a ventas')))`;
+            AND (camv.fecha_aprobacion IS NOT NULL OR pv.status = 'Aprobada'))`;
 // Hold tentativo que vive dentro de una campaña ya vendida (caso ORAL B).
 const TENTATIVA_EN_CAMPANIA_SQL = `(rsv.estatus IN ('Reservado','Bonificado') AND ${PROPUESTA_VENDIDA_SQL})`;
 // Lo que OCUPA la cara para este detector: venta firme, o hold de campaña.

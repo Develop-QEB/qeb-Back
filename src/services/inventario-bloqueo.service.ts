@@ -546,10 +546,21 @@ export async function venderReservasPropuestaConGuardian(
        LEFT JOIN inventarios invE ON invE.id = ei.inventario_id
        LEFT JOIN inventarios invD ON invD.id = r.inventario_id
        INNER JOIN reservas r2 ON r2.inventario_id = r.inventario_id
-         AND r2.deleted_at IS NULL AND r2.estatus IN (${ESTATUS_FIRME_SQL})
+         AND r2.deleted_at IS NULL
        INNER JOIN solicitudCaras sc2 ON sc2.id = r2.solicitudCaras_id
          AND sc2.idquote <> CAST(? AS CHAR)
          AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
+         -- Conflicto = la pieza ya la OCUPA otra cotización: vendida, o
+         -- un apartado tentativo que quedó colgado dentro de una campaña YA APROBADA
+         -- (caso ORAL B). Ese apartado no se desaloja (guard 81279), así que tiene
+         -- que contar como ocupación; si no, se vendía encima sin aviso.
+         AND (r2.estatus IN (${ESTATUS_FIRME_SQL})
+              OR (r2.estatus IN ('Reservado','Bonificado') AND EXISTS (
+                    SELECT 1 FROM campania camc
+                      INNER JOIN cotizacion cotc ON cotc.id = camc.cotizacion_id
+                      INNER JOIN propuesta pc ON pc.id = cotc.id_propuesta
+                     WHERE cotc.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
+                       AND (camc.fecha_aprobacion IS NOT NULL OR pc.status = 'Aprobada'))))
        WHERE sc.idquote = CAST(? AS CHAR)
          AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
@@ -586,6 +597,10 @@ export async function venderReservasPropuestaConGuardian(
          AND sc2.idquote <> CAST(? AS CHAR)
          AND sc2.inicio_periodo <= sc.fin_periodo AND sc2.fin_periodo >= sc.inicio_periodo
          -- No robar reservas de una propuesta YA VENDIDA (bug 81279).
+         -- "Vendida" = APROBADA (fecha_aprobacion o status 'Aprobada'). El status
+         -- 'Pase a ventas' solo NO cuenta: es el paso previo, sus reservas siguen
+         -- tentativas y no bloquean a nadie. Protegerlas del desalojo las dejaba
+         -- vivas encima de la venta de otra campaña (caso 82221 vs 82239, 17-nov-2026).
          -- OJO: NO basta con que exista fila en campania. Esa fila se crea junto
          -- con la cotización (solicitudes.controller, "5. Create campania", status
          -- 'inactiva'), así que TODA propuesta tiene una desde que nace y este
@@ -597,7 +612,7 @@ export async function venderReservasPropuestaConGuardian(
              INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
             WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
               AND (cam2.fecha_aprobacion IS NOT NULL
-                   OR p2.status IN ('Aprobada', 'Pase a ventas')))
+                   OR p2.status = 'Aprobada'))
        WHERE sc.idquote = CAST(? AS CHAR)
          AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
@@ -696,7 +711,7 @@ export async function desplazarTentativasEnEspacios(
            INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
           WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
             AND (cam2.fecha_aprobacion IS NOT NULL
-                 OR p2.status IN ('Aprobada', 'Pase a ventas')))`,
+                 OR p2.status = 'Aprobada'))`,
     ...espacios, fechaFin, fechaInicio,
   );
   if (rows.length === 0) return [];
@@ -836,15 +851,17 @@ export async function notificarReservasDesplazadas(
     // OJO: la sola existencia de la fila en campania NO sirve como criterio. Esa
     // fila se crea junto con la cotización (status 'inactiva'), así que TODA
     // propuesta la tiene desde que nace y este guard dejaba el status congelado
-    // para todas. "Ya es campaña" = ya hubo pase a ventas: fecha_aprobacion
-    // llena o status Aprobada/Pase a ventas. Mismo criterio que el guard del
-    // desalojo en venderReservasPropuestaConGuardian / desplazarTentativasEnEspacios.
+    // para todas. "Ya es campaña" = ya se APROBÓ: fecha_aprobacion llena o
+    // status 'Aprobada'. El status 'Pase a ventas' sin aprobar NO cuenta (sus
+    // reservas sí se desalojan y la propuesta vuelve a Ajuste Inventario). Mismo
+    // criterio que el guard del desalojo en venderReservasPropuestaConGuardian /
+    // desplazarTentativasEnEspacios.
     const campRows = await defaultPrisma.$queryRawUnsafe<{ c: bigint }[]>(
       `SELECT COUNT(*) c FROM campania cam
          INNER JOIN cotizacion cot ON cot.id = cam.cotizacion_id
          INNER JOIN propuesta p ON p.id = cot.id_propuesta
         WHERE cot.id_propuesta = ?
-          AND (cam.fecha_aprobacion IS NOT NULL OR p.status IN ('Aprobada', 'Pase a ventas'))`,
+          AND (cam.fecha_aprobacion IS NOT NULL OR p.status = 'Aprobada')`,
       parseInt(idquote),
     );
     const yaEsCampania = Number(campRows[0]?.c ?? 0) > 0;
