@@ -4430,6 +4430,17 @@ export class PropuestasController {
         return;
       }
 
+      // Guard: no reservar sobre propuesta ya pasada a ventas (mismo candado que
+      // createReservas). Sin esto, por aquí seguían naciendo reservas 'Reservado'
+      // colgadas dentro de una campaña (caso Oral B).
+      if (propuesta.status === 'Aprobada' || propuesta.status === 'Pase a ventas') {
+        res.status(403).json({
+          success: false,
+          error: 'La propuesta ya pasó a ventas. Agrega las reservas desde Campañas.',
+        });
+        return;
+      }
+
       // CANDADO anti-desfase: validar que la fecha caiga dentro del periodo de la cara.
       if (solicitudCaraId) {
         const errPeriodo = await validarFechaEnPeriodoCara(solicitudCaraId, fechaInicio);
