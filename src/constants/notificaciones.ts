@@ -54,7 +54,10 @@ export const TIPOS_TAREA: CatalogoItem[] = [
   { clave: 'Recepción', label: 'Recepción', email: false },
   { clave: 'Producción', label: 'Producción', email: false },
   { clave: 'Seguimiento', label: 'Seguimiento' },
-  { clave: 'Actividad Comercial', label: 'Actividad Comercial', email: false },
+  // Akary 2026-11-17: habilitar canal correo para que el toggle aparezca en
+  // PreferenciasNotificacionesCard y el scanner enviarRecordatoriosActividadComercial
+  // pueda disparar email cuando el usuario no lo haya deshabilitado.
+  { clave: 'Actividad Comercial', label: 'Actividad Comercial' },
   { clave: 'Seguimiento Prueba de color', label: 'Seguimiento Prueba de color', email: false },
 ];
 

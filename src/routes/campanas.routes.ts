@@ -79,6 +79,7 @@ router.post('/:id/cancel-prefactura', campanasController.cancelPrefactura.bind(c
 
 // Gestión de Artes
 router.get('/:id/artes-existentes', campanasController.getArtesExistentes.bind(campanasController));
+router.post('/:id/biblioteca-artes', campanasController.addToBibliotecaArtes.bind(campanasController));
 router.post('/:id/verificar-arte', campanasController.verificarArteExistente.bind(campanasController));
 router.post('/:id/assign-arte', campanasController.assignArte.bind(campanasController));
 router.post('/:id/assign-arte-digital', campanasController.assignArteDigital.bind(campanasController));

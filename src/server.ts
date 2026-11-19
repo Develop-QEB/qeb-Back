@@ -6,7 +6,7 @@ import { initializeSocket } from './config/socket';
 import { withBi, attachBiRealtime } from './bi';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
-import { enviarRecordatoriosPendientes } from './services/recordatorios.service';
+import { enviarRecordatoriosPendientes, enviarRecordatoriosActividadComercial } from './services/recordatorios.service';
 import { finalizarCampanasPorIniciarVencidas, inicializarCampanasPorIniciarActivas } from './services/campania-status.service';
 import { liberarReservasPropuestasVencidas } from './services/liberacion-reservas.service';
 import { ejecutarMonitorConflictos } from './services/conflictos-ocupacion.service';
@@ -124,10 +124,21 @@ async function main() {
       // Recordatorios de historial (Acciones Manuales con fecha programada).
       // Cada dia a las 8am CDMX revisa entradas listas para notificar segun
       // fecha_entrega - recordar_dias_antes y crea tareas de tipo "Recordatorio".
-      programarDiario(8, 'Recordatorios 08:00', async () => { await enviarRecordatoriosPendientes(); });
+      // Akary 2026-11-17: tambien dispara recordatorios de Actividad Comercial
+      // (tareas tipo='Actividad Comercial' con activar_recordatorio en el JSON
+      // contenido). Son 2 flujos independientes: si uno truena, el otro sigue.
+      programarDiario(8, 'Recordatorios 08:00', async () => {
+        try { await enviarRecordatoriosPendientes(); }
+        catch (err) { console.error('[Recordatorios] Error en enviarRecordatoriosPendientes:', err); }
+        try { await enviarRecordatoriosActividadComercial(); }
+        catch (err) { console.error('[RecordatoriosAC] Error en enviarRecordatoriosActividadComercial:', err); }
+      });
       // Tambien dispara al arrancar para procesar pendientes acumulados (idempotente).
       enviarRecordatoriosPendientes().catch((err: unknown) => {
         console.error('[Recordatorios] Error en ejecucion inicial:', err);
+      });
+      enviarRecordatoriosActividadComercial().catch((err: unknown) => {
+        console.error('[RecordatoriosAC] Error en ejecucion inicial:', err);
       });
 
       // A medianoche CDMX: ciclo de vida automatico del status de campaña alineado

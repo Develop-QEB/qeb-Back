@@ -21,7 +21,7 @@ import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisibleCampa
 // Estatus que cuentan como "resueltos": no entran al badge de la campanita ni
 // al filtro "sin finalizar" / "no leídas" de la lista. Fuente única de verdad
 // para que el conteo del header y el de la página no se descuadren.
-const ESTATUS_RESUELTOS = ['Atendido', 'Rechazado', 'Cancelado'];
+const ESTATUS_RESUELTOS = ['Atendido', 'Finalizada', 'Aprobada', 'Completado', 'Rechazado', 'Cancelado'];
 
 // Tipos cuya referencia (solicitud / propuesta / campaña) viaja en `contenido` y no
 // se infiere por prioridad de ids. Antes solo Autorización/Rechazo/Aprobación:
@@ -2840,27 +2840,74 @@ export class NotificacionesController {
       const baseValida: 'CIMU' | 'TRADE' | 'UDC' | null =
         base === 'CIMU' || base === 'TRADE' || base === 'UDC' ? base : null;
 
+      // Akary 2026-11-17: tipo_cliente y tipo_actividad llegaban en el body pero
+      // no se persistian en contenidoNuevo ni se diffeaban, asi que al editar
+      // una actividad comercial se BORRABAN del JSON contenido (regresion desde
+      // el commit que los agrego a crear). Mismo whitelist que crearActividadComercial
+      // (mantener en sync con la lista de L2516).
+      const tipoClienteValido: 'Lead' | 'Cliente' | null =
+        tipo_cliente === 'Lead' || tipo_cliente === 'Cliente' ? tipo_cliente : null;
+      const TIPOS_ACTIVIDAD_ACEPTADOS = [
+        'Llamada', 'Correo',
+        'Reunión virtual', 'Reunión en oficina', 'Reunión fuera de oficina',
+        'Recorrido',
+        'Presentación general virtual', 'Presentación general presencial',
+        'Presentación estratégica virtual', 'Presentación estratégica presencial',
+        'Mail', 'Visita',
+      ];
+      const tipoActividadValido: string | null =
+        typeof tipo_actividad === 'string' && TIPOS_ACTIVIDAD_ACEPTADOS.includes(tipo_actividad)
+          ? tipo_actividad
+          : null;
+      const recordarDiasAntesValido: number | null =
+        activar_recordatorio && recordar_dias_antes != null
+          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0))
+          : null;
+
+      // Snapshot previo para diff + para decidir si preservamos el marcador
+      // de recordatorio ya enviado (ver bloque siguiente). Se movio arriba del
+      // contenidoNuevo para poder consultar prevContenido.recordatorio_enviado_at
+      // al armar el JSON.
+      const prevContenido = previa.contenido ? (() => {
+        try { return JSON.parse(previa.contenido); } catch { return {}; }
+      })() : {};
+
+      // Akary 2026-11-17: idempotencia del recordatorio por correo. El scanner
+      // (enviarRecordatoriosActividadComercial en recordatorios.service) marca
+      // contenido.recordatorio_enviado_at tras disparar; si editamos la tarea
+      // sin tocar los triggers del recordatorio debemos PRESERVARLO (si no se
+      // reenviaria al dia siguiente). Si el usuario cambia fecha_fin,
+      // activar_recordatorio o recordar_dias_antes, lo RESETEAMOS a null para
+      // que la proxima pasada del cron vuelva a disparar.
+      const fechaFinNueva = fecha_fin ? new Date(fecha_fin) : (previa.fecha_fin as Date | null);
+      const fechaFinPrevISO = previa.fecha_fin instanceof Date ? previa.fecha_fin.toISOString() : String(previa.fecha_fin || '');
+      const fechaFinNuevaISO = fechaFinNueva instanceof Date ? fechaFinNueva.toISOString() : String(fechaFinNueva || '');
+      const fechaCambio = fechaFinPrevISO !== fechaFinNuevaISO;
+      const activarCambio = !!prevContenido.activar_recordatorio !== !!activar_recordatorio;
+      const diasCambio = (prevContenido.recordar_dias_antes ?? null) !== (recordarDiasAntesValido ?? null);
+      const invalidarRecordatorio = fechaCambio || activarCambio || diasCambio;
+      const recordatorioEnviadoAt: string | null = invalidarRecordatorio
+        ? null
+        : (typeof prevContenido.recordatorio_enviado_at === 'string' ? prevContenido.recordatorio_enviado_at : null);
+
       const contenidoNuevo = JSON.stringify({
         cliente, marca,
         subtipo: subtipoOut, ref_id: refIdOut,
         activar_recordatorio: !!activar_recordatorio,
-        recordar_dias_antes: activar_recordatorio && recordar_dias_antes != null
-          ? Math.max(0, Math.min(365, Number(recordar_dias_antes) || 0)) : null,
+        recordar_dias_antes: recordarDiasAntesValido,
         anio: anioValido,
         catorcena: catorcenaValida,
         catorcenas: catorcenasValidas,
         estatus_actividad: estatusActividadValido, base: baseValida,
+        tipo_cliente: tipoClienteValido,
+        tipo_actividad: tipoActividadValido,
+        recordatorio_enviado_at: recordatorioEnviadoAt,
       });
 
       const tituloExtra = [cliente, marca].filter(Boolean).join(' · ');
       const tituloNuevo = hasRef
         ? `Actividad Comercial · ${subtipoOut} #${refIdOut}`
         : (tituloExtra ? `Actividad Comercial · ${tituloExtra}` : 'Actividad Comercial');
-
-      // Snapshot para diff.
-      const prevContenido = previa.contenido ? (() => {
-        try { return JSON.parse(previa.contenido); } catch { return {}; }
-      })() : {};
 
       const tareaUpd = await prisma.tareas.update({
         where: { id: tareaId },
@@ -2900,6 +2947,12 @@ export class NotificacionesController {
       cmp('estatus_actividad', 'Estatus', prevContenido.estatus_actividad, estatusActividadValido);
       cmp('base', 'Base', prevContenido.base, baseValida);
       cmp('activar_recordatorio', 'Recordatorio', !!prevContenido.activar_recordatorio, !!activar_recordatorio);
+      // Akary 2026-11-17: faltaba diff para los dias del recordatorio y para los
+      // dos campos nuevos (tipo_cliente, tipo_actividad). Sin esto cambiarlos
+      // no quedaba en la bitacora del drawer.
+      cmp('recordar_dias_antes', 'Días antes del recordatorio', prevContenido.recordar_dias_antes, recordarDiasAntesValido);
+      cmp('tipo_cliente', 'Tipo Cliente', prevContenido.tipo_cliente, tipoClienteValido);
+      cmp('tipo_actividad', 'Tipo Actividad', prevContenido.tipo_actividad, tipoActividadValido);
 
       await logHistorial({
         tipo: 'Tarea',
@@ -2916,6 +2969,10 @@ export class NotificacionesController {
           catorcena: catorcenaValida,
           catorcenas: catorcenasValidas,
           estatus_actividad: estatusActividadValido, base: baseValida,
+          // Akary 2026-11-17: incluir tambien los dos campos nuevos para que
+          // el extras del log tenga la foto completa (igual que crear).
+          tipo_cliente: tipoClienteValido,
+          tipo_actividad: tipoActividadValido,
         },
       });
 

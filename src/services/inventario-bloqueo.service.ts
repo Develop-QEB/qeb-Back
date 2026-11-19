@@ -640,7 +640,10 @@ export async function venderReservasPropuestaConGuardian(
              INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
             WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
               AND (cam2.fecha_aprobacion IS NOT NULL
-                   OR p2.status IN ('Aprobada', 'Pase a ventas')))
+                   OR p2.status = 'Aprobada'))
+         -- 'Pase a ventas' SIN aprobar NO cuenta como venta: si se protegía, su
+         -- apartado sobrevivía a la aprobación de otra propuesta → doble venta
+         -- (4157 Flujo Cat24: NESCAFE 82239 vendida vs MENU GRINCH 82221).
        WHERE sc.idquote = CAST(? AS CHAR)
          AND r.deleted_at IS NULL AND r.estatus IN ('Reservado','Bonificado')
          AND COALESCE(invE.tradicional_digital, invD.tradicional_digital) = 'Tradicional'
@@ -739,7 +742,7 @@ export async function desplazarTentativasEnEspacios(
            INNER JOIN propuesta p2 ON p2.id = cot2.id_propuesta
           WHERE cot2.id_propuesta = CAST(sc2.idquote AS UNSIGNED)
             AND (cam2.fecha_aprobacion IS NOT NULL
-                 OR p2.status IN ('Aprobada', 'Pase a ventas')))`,
+                 OR p2.status = 'Aprobada'))`,
     ...espacios, fechaFin, fechaInicio,
   );
   if (rows.length === 0) return [];
@@ -879,15 +882,15 @@ export async function notificarReservasDesplazadas(
     // OJO: la sola existencia de la fila en campania NO sirve como criterio. Esa
     // fila se crea junto con la cotización (status 'inactiva'), así que TODA
     // propuesta la tiene desde que nace y este guard dejaba el status congelado
-    // para todas. "Ya es campaña" = ya hubo pase a ventas: fecha_aprobacion
-    // llena o status Aprobada/Pase a ventas. Mismo criterio que el guard del
+    // para todas. "Ya es campaña" = venta aprobada: fecha_aprobacion llena o
+    // status Aprobada ('Pase a ventas' sin aprobar NO cuenta). Mismo criterio que el guard del
     // desalojo en venderReservasPropuestaConGuardian / desplazarTentativasEnEspacios.
     const campRows = await defaultPrisma.$queryRawUnsafe<{ c: bigint }[]>(
       `SELECT COUNT(*) c FROM campania cam
          INNER JOIN cotizacion cot ON cot.id = cam.cotizacion_id
          INNER JOIN propuesta p ON p.id = cot.id_propuesta
         WHERE cot.id_propuesta = ?
-          AND (cam.fecha_aprobacion IS NOT NULL OR p.status IN ('Aprobada', 'Pase a ventas'))`,
+          AND (cam.fecha_aprobacion IS NOT NULL OR p.status = 'Aprobada')`,
       parseInt(idquote),
     );
     const yaEsCampania = Number(campRows[0]?.c ?? 0) > 0;

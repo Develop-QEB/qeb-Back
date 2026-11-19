@@ -10033,7 +10033,16 @@ export class CampanasController {
             MAX(COALESCE(pc.tipo, 'prueba_color')) COLLATE utf8mb4_unicode_ci as prueba_color_tipo
           FROM pruebas_color pc
           WHERE pc.campania_id = ?
-            AND pc.estatus = 'aprobada'
+            -- Jos 2026-11-13: en Revision Anticipada el arte debe aparecer en
+            -- la biblioteca desde que se aprueba la Revision (estatus
+            -- 'arte_aprobado'), sin esperar a que se finalice el Seguimiento
+            -- (estatus 'aprobada'). En Prueba de Color seguimos requiriendo
+            -- 'aprobada' porque el flujo PC llega a biblioteca al cerrar
+            -- Recepcion, no al aprobar la Revision.
+            AND (
+              pc.estatus = 'aprobada'
+              OR (pc.tipo = 'revision_anticipada' AND pc.estatus = 'arte_aprobado')
+            )
             AND pc.deleted_at IS NULL
             AND (NULLIF(pc.archivo, '') IS NOT NULL OR pc.enlace_externo IS NOT NULL)
           GROUP BY COALESCE(NULLIF(pc.archivo, ''), pc.enlace_externo), pc.version, pc.nombre_arte, pc.tipo
@@ -10089,6 +10098,68 @@ export class CampanasController {
         success: false,
         error: message,
       });
+    }
+  }
+
+  // Akary 2026-11-13: persiste un arte en biblioteca_artes DESDE que se sube
+  // (antes solo entraba al completar el wizard assignArteTradicional/Digital).
+  // Reporte Jos: si cargaba un arte y recargaba antes de asignar, se perdia
+  // porque addedArtes del front vive solo en state React. Idempotente via
+  // INSERT ... ON DUPLICATE KEY UPDATE (unique por campania_id+archivo).
+  async addToBibliotecaArtes(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const campaniaId = parseInt(id);
+      if (!Number.isFinite(campaniaId) || campaniaId <= 0) {
+        res.status(400).json({ success: false, error: 'id de campaña inválido' });
+        return;
+      }
+      const {
+        archivo,
+        tipo,
+        nombre_arte,
+        nota,
+        estatus_operaciones,
+        nombre_generico,
+      } = req.body as {
+        archivo?: string;
+        tipo?: string;
+        nombre_arte?: string | null;
+        nota?: string | null;
+        estatus_operaciones?: string | null;
+        nombre_generico?: string | null;
+      };
+      const archivoTrim = (archivo || '').trim();
+      if (!archivoTrim) {
+        res.status(400).json({ success: false, error: 'archivo (url) es requerido' });
+        return;
+      }
+      const tipoVal = tipo === 'digital' ? 'digital' : 'tradicional';
+      const userId = (req.user as any)?.id ?? null;
+      await prisma.$executeRawUnsafe(
+        `
+        INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+          nota = COALESCE(VALUES(nota), nota),
+          estatus_operaciones = COALESCE(VALUES(estatus_operaciones), estatus_operaciones),
+          nombre_generico = COALESCE(VALUES(nombre_generico), nombre_generico)
+        `,
+        campaniaId,
+        archivoTrim,
+        tipoVal,
+        nombre_arte || null,
+        nota || null,
+        estatus_operaciones || null,
+        nombre_generico || null,
+        userId,
+      );
+      res.json({ success: true, data: { archivo: archivoTrim, tipo: tipoVal } });
+    } catch (error) {
+      console.error('Error en addToBibliotecaArtes:', error);
+      const message = error instanceof Error ? error.message : 'Error al persistir arte en biblioteca';
+      res.status(500).json({ success: false, error: message });
     }
   }
 
