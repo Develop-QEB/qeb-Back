@@ -1930,18 +1930,30 @@ export class SolicitudesController {
       // a usuarios fuera de sus propios equipos (ej. Coordinador de Diseño
       // puede asignar diseñadores aunque no este en ningun equipo de diseño).
       const skipTeamFilter = ['Administrador', 'DEV', 'Coordinador de Diseño'].includes(userRol);
-      const filterByTeam = !skipTeamFilter && req.query.filterByTeam === 'true';
-      const userId = req.user?.userId;
+      // Akary 2026-11-24: forUserId permite filtrar por el equipo de OTRO usuario
+      // (no el logueado). Lo usa AtenderModal para traer el equipo del creador
+      // de la solicitud, ya que los analistas que se asignan al atender son los
+      // del equipo de quien creo (feedback Jos 2026-11-18), no los del que
+      // atiende. Si viene forUserId, se respeta siempre (el skipTeamFilter por
+      // rol no aplica porque el requester pide explicitamente filtrar por otro).
+      const forUserIdRaw = req.query.forUserId as string | undefined;
+      const forUserIdParsed = forUserIdRaw ? parseInt(forUserIdRaw, 10) : NaN;
+      const forUserId = Number.isFinite(forUserIdParsed) && forUserIdParsed > 0 ? forUserIdParsed : null;
+      const filterByTeam = forUserId
+        ? req.query.filterByTeam === 'true'
+        : !skipTeamFilter && req.query.filterByTeam === 'true';
+      const seedUserId = forUserId ?? req.user?.userId;
 
       let teamMemberIds: number[] = [];
 
-      // Si filterByTeam es true, obtener los compañeros de equipo del usuario actual.
+      // Si filterByTeam es true, obtener los compañeros de equipo del seedUserId
+      // (forUserId si vino, sino el usuario actual).
       // Feedback 2026-08-14: excluir equipos con proposito='filtro_autorizacion'
       // (equipos 40/41 y similares) — solo cuentan los equipos de "red de trabajo".
-      if (filterByTeam && userId) {
+      if (filterByTeam && seedUserId) {
         const userTeams = await prisma.usuario_equipo.findMany({
           where: {
-            usuario_id: userId,
+            usuario_id: seedUserId,
             equipo: {
               deleted_at: null,
               proposito: 'red_trabajo',
@@ -3260,14 +3272,32 @@ export class SolicitudesController {
           // Ventas y se convertia en campania (ahi recien les llegaba Seguimiento
           // Campania). Ahora se les asigna desde este pase para que participen y
           // reciban la notificacion de propuesta nueva.
-          const analistas = await tx.usuario.findMany({
-            where: {
-              puesto: 'Analista de Servicio al Cliente',
-              deleted_at: null,
-              ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
-            },
-            select: { id: true, nombre: true },
-          });
+          //
+          // Akary 2026-11-24 (feedback Jos 2026-11-18): antes se jalaban TODOS los
+          // analistas de SAC globalmente sin filtrar por equipo del creador y se
+          // mergeaban a mano a propuesta.id_asignado. Eso ignoraba lo que el user
+          // quitaba en el modal (reporte Brissa VIA PUBLICA 5: 4 miembros del
+          // equipo, 16 asignados en la propuesta). Ahora:
+          //   - Los analistas candidatos vienen del PAYLOAD del modal (ya precargado
+          //     en el front con los analistas del equipo del CREADOR de la solicitud
+          //     via getUsers(undefined, true) + puesto = Analista de Servicio al
+          //     Cliente). Si el user los quita, no estan en nuevosAsignadosIds =>
+          //     el back respeta.
+          //   - Solo se crea tarea Seguimiento Propuesta para aquellos del payload
+          //     cuyo puesto es Analista de Servicio al Cliente.
+          //   - Ya NO se re-mergea nada a propuesta.id_asignado: el front mando la
+          //     lista final, propuesta ya quedo con esa.
+          const analistas = nuevosAsignadosIds.length
+            ? await tx.usuario.findMany({
+                where: {
+                  id: { in: nuevosAsignadosIds },
+                  puesto: 'Analista de Servicio al Cliente',
+                  deleted_at: null,
+                  ...(solicitud.usuario_id ? { id: { not: solicitud.usuario_id } } : {}),
+                },
+                select: { id: true, nombre: true },
+              })
+            : [];
           for (const analista of analistas) {
             await tx.tareas.create({
               data: {
@@ -3286,39 +3316,6 @@ export class SolicitudesController {
                 campania_id: campaniaData?.id || null,
               },
             });
-          }
-
-          // Agregar Analistas al id_asignado de la propuesta sin duplicar lo que ya
-          // tiene (puede traer Trafico + creador segun seleccion del modal). Asi el
-          // pase a Ventas los conserva (el front filtra Trafico y mantiene los que
-          // tengan puesto permitido, incluido Analista de Servicio al Cliente).
-          if (analistas.length > 0) {
-            const current = propuesta.id_asignado || '';
-            const currentIds = new Set(
-              current.split(',').map(s => s.trim()).filter(Boolean)
-            );
-            const currentNombres = (propuesta.asignado || '')
-              .split(',')
-              .map(s => s.trim())
-              .filter(Boolean);
-            const nuevosIds: string[] = [];
-            const nuevosNombres: string[] = [];
-            for (const a of analistas) {
-              const idStr = a.id.toString();
-              if (!currentIds.has(idStr)) {
-                nuevosIds.push(idStr);
-                nuevosNombres.push(a.nombre);
-                currentIds.add(idStr);
-              }
-            }
-            if (nuevosIds.length > 0) {
-              const mergedIds = [...current.split(',').map(s => s.trim()).filter(Boolean), ...nuevosIds].join(',');
-              const mergedNombres = [...currentNombres, ...nuevosNombres].join(', ');
-              await tx.propuesta.update({
-                where: { id: propuesta.id },
-                data: { id_asignado: mergedIds, asignado: mergedNombres },
-              });
-            }
           }
         }
 
