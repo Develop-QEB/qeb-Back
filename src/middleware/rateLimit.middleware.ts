@@ -36,8 +36,18 @@ function ipDe(req: Request): string {
 }
 
 export interface OpcionesLimite {
-  /** Intentos permitidos por ventana. */
+  /** Intentos permitidos por ventana, por dirección IP. */
   max: number;
+  /**
+   * Intentos permitidos por cuenta en la misma ventana. Si se omite, se usa
+   * `max` para las dos cubetas.
+   *
+   * Conviene que sea MÁS ESTRICTO que `max`: en una oficina todo el equipo
+   * sale por la misma IP pública, así que un tope bajo por IP bloquearía a
+   * gente legítima. El ataque que importa va contra UNA cuenta, y ese se
+   * detiene con el tope por cuenta.
+   */
+  maxIdentidad?: number;
   /** Tamaño de la ventana en milisegundos. */
   ventanaMs: number;
   /** Nombre para separar las cubetas de distintos endpoints. */
@@ -67,21 +77,26 @@ function consumir(clave: string, max: number, ventanaMs: number): { permitido: b
 }
 
 export function limitarIntentos(opciones: OpcionesLimite) {
-  const { max, ventanaMs, etiqueta, campoIdentidad } = opciones;
+  const { max, maxIdentidad, ventanaMs, etiqueta, campoIdentidad } = opciones;
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    const claves = [`${etiqueta}:ip:${ipDe(req)}`];
+    const claves: Array<{ clave: string; max: number }> = [
+      { clave: `${etiqueta}:ip:${ipDe(req)}`, max },
+    ];
 
     if (campoIdentidad) {
       const bruto = (req.body as Record<string, unknown> | undefined)?.[campoIdentidad];
       if (typeof bruto === 'string' && bruto.trim().length > 0) {
-        claves.push(`${etiqueta}:id:${bruto.trim().toLowerCase()}`);
+        claves.push({
+          clave: `${etiqueta}:id:${bruto.trim().toLowerCase()}`,
+          max: maxIdentidad ?? max,
+        });
       }
     }
 
     let esperaS = 0;
-    for (const clave of claves) {
-      const r = consumir(clave, max, ventanaMs);
+    for (const { clave, max: tope } of claves) {
+      const r = consumir(clave, tope, ventanaMs);
       if (!r.permitido) esperaS = Math.max(esperaS, r.esperaS);
     }
 
@@ -99,30 +114,38 @@ export function limitarIntentos(opciones: OpcionesLimite) {
   };
 }
 
-/** Login: 10 intentos por 15 min, por IP y por correo. */
+/**
+ * Login: 60 intentos por 15 min desde una misma IP (toda la oficina sale por
+ * una sola IP pública) y 10 por cuenta en esa ventana, que es el tope que
+ * frena la adivinación de contraseñas.
+ */
 export const limiteLogin = limitarIntentos({
   etiqueta: 'login',
-  max: 10,
+  max: 60,
+  maxIdentidad: 10,
   ventanaMs: 15 * 60 * 1000,
   campoIdentidad: 'email',
 });
 
-/** Envío de código de recuperación: 5 por hora (evita usarlo para spamear correos). */
+/** Envío de código de recuperación: 20 por hora por IP, 5 por cuenta. */
 export const limiteOlvidePassword = limitarIntentos({
   etiqueta: 'forgot',
-  max: 5,
+  max: 20,
+  maxIdentidad: 5,
   ventanaMs: 60 * 60 * 1000,
   campoIdentidad: 'correo',
 });
 
 /**
- * Canje del código de recuperación: 5 intentos por hora.
- * Es el que de verdad importa: son 6 dígitos, un millón de combinaciones.
- * Con 5 por hora, adivinarlo dentro de los 15 min de vigencia es inviable.
+ * Canje del código de recuperación: 5 intentos por hora y por cuenta.
+ * Es el tope que de verdad importa: el código es de 6 dígitos, un millón de
+ * combinaciones, y con 5 por hora adivinarlo dentro de sus 15 min de vigencia
+ * es inviable.
  */
 export const limiteResetPassword = limitarIntentos({
   etiqueta: 'reset',
-  max: 5,
+  max: 20,
+  maxIdentidad: 5,
   ventanaMs: 60 * 60 * 1000,
   campoIdentidad: 'correo',
 });
