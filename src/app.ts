@@ -58,6 +58,11 @@ const corsOptions: cors.CorsOptions = {
   optionsSuccessStatus: 204,
 };
 
+// Detrás de nginx: necesario para que req.ip sea la IP real del cliente y no
+// la del proxy. Sin esto, el límite de intentos de autenticación mete a todos
+// los usuarios en la misma cubeta. '1' = confiar solo en el primer salto.
+app.set('trust proxy', 1);
+
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 app.use(helmet({
@@ -86,9 +91,10 @@ app.use('/uploads', (req, res, next) => {
   fallthrough: true,
 }));
 
-// Public route for client propuesta view (no auth required)
-import { propuestasController } from './controllers/propuestas.controller';
-app.get('/public/propuestas/:id', propuestasController.getPublicDetails.bind(propuestasController));
+// Se eliminó el montaje directo de GET /public/propuestas/:id (nov-2026): era
+// una segunda puerta a los mismos datos, sin el token firmado que ahora exige
+// /api/public/propuestas/:id (ver routes/public.routes.ts). El front siempre
+// pega a /api/public/... porque VITE_API_URL ya incluye /api.
 
 // Evitar que el navegador cachee respuestas de la API
 app.use('/api', (req, res, next) => {

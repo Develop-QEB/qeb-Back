@@ -3,8 +3,8 @@ import bcrypt from 'bcryptjs';
 import prisma from '../utils/prisma';
 import { AuthResponse, JwtPayload, UserResponse } from '../types';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'default-refresh-secret';
+import { JWT_SECRET, JWT_REFRESH_SECRET } from '../utils/secrets';
+
 const ACCESS_TOKEN_EXPIRY = '8h';
 const REFRESH_TOKEN_EXPIRY = '7d';
 

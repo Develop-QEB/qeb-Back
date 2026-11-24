@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { AuthRequest, JwtPayload } from '../types';
 import { MAINTENANCE_MODE, isRolAllowedDuringMaintenance } from '../config/maintenance';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
+import { JWT_SECRET } from '../utils/secrets';
 
 export const maintenanceGuard = (
   req: AuthRequest,

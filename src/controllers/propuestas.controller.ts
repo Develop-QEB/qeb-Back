@@ -18,6 +18,7 @@ import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
 import { listarCapasPropuesta } from '../services/capas-mapa.service';
 import { isCircuitoDigital } from '../lib/circuitos';
+import { firmarShareToken, SHARE_DIAS_POR_OMISION } from '../utils/shareToken';
 import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF } from '../utils/bonifCara';
 import { emitToPropuesta, emitToAll, emitToPropuestas, emitToDashboard, SOCKET_EVENTS } from '../config/socket';
 import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, getVisiblePropuestaIds, esAsesorComercial, bloqueoAjusteComercialPropuesta, esTrafico, esAdmin, cambiosTarifaCostoProhibidos, mensajeBloqueoTrafico, logIntentoTrafico } from '../utils/permissions';
@@ -3343,6 +3344,49 @@ export class PropuestasController {
   }
 
   // Public endpoint for client view (no auth required)
+  /**
+   * Emite el token firmado de la liga que se comparte con el cliente.
+   * Requiere sesión (la ruta va detrás de authMiddleware). El front arma
+   * `/cliente/propuesta/:id?t=<token>` con lo que regresa aquí.
+   *
+   * ?dias=N cambia la vigencia; 0 emite una liga sin caducidad.
+   */
+  async getShareLink(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const propuestaId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(propuestaId) || propuestaId <= 0) {
+        res.status(400).json({ success: false, error: 'Propuesta inválida' });
+        return;
+      }
+
+      const propuesta = await prisma.propuesta.findFirst({
+        where: { id: propuestaId, deleted_at: null },
+        select: { id: true },
+      });
+      if (!propuesta) {
+        res.status(404).json({ success: false, error: 'Propuesta no encontrada' });
+        return;
+      }
+
+      const diasCrudo = req.query.dias !== undefined ? Number(req.query.dias) : SHARE_DIAS_POR_OMISION;
+      const dias = Number.isFinite(diasCrudo) && diasCrudo >= 0 ? Math.min(diasCrudo, 365) : SHARE_DIAS_POR_OMISION;
+
+      const { token, expiraMs } = firmarShareToken(propuestaId, dias);
+
+      res.json({
+        success: true,
+        data: {
+          token,
+          dias,
+          expira: expiraMs > 0 ? new Date(expiraMs).toISOString() : null,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al generar la liga';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
   async getPublicDetails(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { id } = req.params;

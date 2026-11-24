@@ -1,8 +1,7 @@
 import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthRequest, JwtPayload } from '../types';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
+import { JWT_SECRET } from '../utils/secrets';
 
 export const authMiddleware = (
   req: AuthRequest,
@@ -11,11 +10,10 @@ export const authMiddleware = (
 ): void => {
   const authHeader = req.headers.authorization;
 
-  // Debug log para el endpoint de evaluar-autorizacion
-  if (req.path.includes('evaluar-autorizacion')) {
-    console.log('[AUTH] evaluar-autorizacion - Authorization header presente:', !!authHeader);
-    console.log('[AUTH] evaluar-autorizacion - Headers:', JSON.stringify(req.headers, null, 2));
-  }
+  // Se quitó el volcado de headers de evaluar-autorizacion (nov-2026):
+  // imprimía el header Authorization completo, o sea el token de sesión, en
+  // los logs de pm2. Si hace falta depurar esa ruta, loguear solo si el header
+  // viene presente, nunca su contenido.
 
   if (!authHeader) {
     res.status(401).json({

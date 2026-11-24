@@ -19,6 +19,8 @@ router.get('/:id/reservas-historial', propuestasController.getReservasHistorial.
 router.get('/:id/caras', propuestasController.getCaras.bind(propuestasController));
 router.get('/:id/historial', propuestasController.getHistorial.bind(propuestasController));
 router.get('/:id/completitud', propuestasController.getCompletitud.bind(propuestasController));
+// Token firmado para la liga que se manda al cliente (ver utils/shareToken.ts)
+router.get('/:id/share-link', propuestasController.getShareLink.bind(propuestasController));
 router.get('/:id', propuestasController.getById.bind(propuestasController));
 
 // POST routes

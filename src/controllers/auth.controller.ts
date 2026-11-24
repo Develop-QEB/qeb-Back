@@ -6,6 +6,7 @@ import { uploadBufferToSpaces } from '../config/spaces';
 import prisma from '../utils/prisma';
 import nodemailer from 'nodemailer';
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { logHistorial } from '../utils/historial';
 
 const transporter = nodemailer.createTransport({
@@ -17,6 +18,14 @@ const transporter = nodemailer.createTransport({
 });
 
 export class AuthController {
+  /**
+   * NO ENRUTAR. Alta de usuarios auto-servicio: se quitó de auth.routes.ts en
+   * nov-2026 porque estaba abierta a internet y el rol salía del body
+   * (`area === 'Desarrollo'` daba rol DEV). El alta real es POST /api/usuarios,
+   * que exige sesión y rol Administrador o DEV. Se conserva el método solo
+   * para no romper referencias; si vuelve a hacer falta, va detrás de
+   * authMiddleware + validación de rol y sin tomar el rol del cliente.
+   */
   async register(req: Request, res: Response): Promise<void> {
     try {
       const errors = validationResult(req);
@@ -249,7 +258,9 @@ export class AuthController {
       return;
     }
 
-    const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+    // crypto.randomInt, no Math.random: Math.random no es criptográficamente
+    // seguro y su estado se puede inferir a partir de valores observados.
+    const codigo = crypto.randomInt(100000, 1000000).toString();
     const expiry = new Date(Date.now() + 15 * 60 * 1000);
 
     await prisma.usuario.update({
@@ -297,6 +308,18 @@ export class AuthController {
 
 async resetPassword(req: Request, res: Response): Promise<void> {
   try {
+    // Las reglas de auth.routes.ts (correo válido, código de 6 dígitos,
+    // contraseña de 8+) no sirven de nada si no se revisan aquí.
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        error: 'Datos de entrada inválidos',
+        details: errors.array(),
+      });
+      return;
+    }
+
     const { correo, codigo, nuevaPassword } = req.body;
 
     const usuario = await prisma.usuario.findFirst({
