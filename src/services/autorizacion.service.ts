@@ -2987,3 +2987,422 @@ export async function rechazarEliminacionCampana(
 export function esTareaEliminacion(tipo: string | null | undefined): boolean {
   return tipo === TIPO_FILTRO_ELIMINACION || tipo === TIPO_AUTORIZACION_ELIMINACION;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// AUTORIZACIÓN DE CAMBIO DE PERIODO DE CIRCUITOS — SOLO CAMPAÑAS
+// ════════════════════════════════════════════════════════════════════════════
+// Clon del filtro de eliminación (crearAutorizacionEliminacionCampana) pero para
+// CAMBIO DE PERIODO. Pedido por Jos (nov-2026): cuando a un circuito YA CREADO se
+// le cambia el periodo a OTRA catorcena (o a otro mes en campañas mensuales), el
+// cambio NO se aplica al instante — se DIFIERE hasta que la Gerencia Comercial lo
+// apruebe:
+//   • Al guardar: el circuito se queda FIRME en su periodo original + insignia
+//     "cambio de periodo pendiente". Las reservas NO se liberan todavía.
+//   • Gerente APRUEBA → se aplica el movimiento (se liberan las reservas del
+//     periodo viejo y el sc pasa al periodo nuevo; el asesor re-reserva).
+//   • Gerente RECHAZA → no pasó nada, el circuito queda en su periodo original.
+// Ruteo: mismo Gerente de filtro del asesor (equipo proposito 'filtro_autorizacion').
+// Nunca escala a DG, salvo el fallback UDC (igual que eliminación). Las cara-ids
+// del circuito viajan en `tareas.ids_reservas` (CSV); el periodo solicitado y el
+// original viajan en el historial 'autorizacion_cambio_periodo_campana'.
+export const TIPO_FILTRO_CAMBIO_PERIODO = 'Filtro Autorización Cambio Periodo';
+export const TIPO_AUTORIZACION_CAMBIO_PERIODO = 'Autorización Cambio Periodo'; // fallback UDC → DG
+export const TIPO_AVISO_CAMBIO_PERIODO = 'Aviso Cambio Periodo';
+
+/** ¿La tarea es de autorización de cambio de periodo (filtro o DG)? */
+export function esTareaCambioPeriodo(tipo: string | null | undefined): boolean {
+  return tipo === TIPO_FILTRO_CAMBIO_PERIODO || tipo === TIPO_AUTORIZACION_CAMBIO_PERIODO;
+}
+
+/** Etiqueta legible del periodo ("Cat N/AAAA" si cae en una catorcena, si no la fecha). */
+async function etiquetaPeriodo(fecha: Date | string | null | undefined): Promise<string> {
+  if (!fecha) return '—';
+  const d = fecha instanceof Date ? fecha : new Date(fecha);
+  if (isNaN(d.getTime())) return '—';
+  const cat = await prisma.catorcenas.findFirst({
+    where: { fecha_inicio: { lte: d }, fecha_fin: { gte: d } },
+    select: { numero_catorcena: true, a_o: true },
+    orderBy: { fecha_inicio: 'desc' },
+  });
+  if (cat) return `Cat ${cat.numero_catorcena}/${cat.a_o}`;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * ¿El cambio de periodo mueve el circuito a OTRA catorcena (o a otro mes, si la
+ * campaña es mensual)? Ancla ambos lados a su catorcena y compara. Un corrimiento
+ * de inicio/fin DENTRO de la misma catorcena NO cuenta (decisión de Jos). El
+ * `inicio_periodo` guardado ya viene anclado a su catorcena; el nuevo es el valor
+ * crudo de la UI, por eso hay que anclar antes de comparar.
+ */
+export async function esCambioDeOtraCatorcena(
+  idquote: number | string | null | undefined,
+  inicioActual: Date | string | null | undefined,
+  inicioNuevo: Date | string | null | undefined,
+): Promise<boolean> {
+  // Sin periodo nuevo, o sin periodo previo (circuito sin periodo asignado): no detona.
+  if (!inicioNuevo || !inicioActual) return false;
+  const dOld = new Date(inicioActual);
+  const dNew = new Date(inicioNuevo);
+  if (isNaN(dOld.getTime()) || isNaN(dNew.getTime())) return false;
+
+  const propId = Number(idquote);
+  const cot = Number.isFinite(propId) && propId > 0
+    ? await prisma.cotizacion.findFirst({ where: { id_propuesta: propId }, select: { tipo_periodo: true } })
+    : null;
+  const esMensual = cot?.tipo_periodo === 'mensual';
+  if (esMensual) {
+    // Mensual: "otro periodo" = otro mes (año+mes).
+    return dOld.getUTCFullYear() !== dNew.getUTCFullYear() || dOld.getUTCMonth() !== dNew.getUTCMonth();
+  }
+  // Catorcena: anclar ambos a la catorcena que los contiene y comparar su inicio.
+  const anclar = async (d: Date): Promise<number> => {
+    const cat = await prisma.catorcenas.findFirst({
+      where: { fecha_inicio: { lte: d }, fecha_fin: { gte: d } },
+      select: { fecha_inicio: true },
+      orderBy: { fecha_inicio: 'desc' },
+    });
+    return cat?.fecha_inicio ? new Date(cat.fecha_inicio).getTime() : d.getTime();
+  };
+  const [a, b] = [await anclar(dOld), await anclar(dNew)];
+  return a !== b;
+}
+
+/**
+ * Prevalida (sin mutar nada) que el cambio de periodo SE PUEDA rutear antes de
+ * tocar los circuitos. Así el controller devuelve un 400 claro en vez de dejar
+ * el sc a medias (arregla el 500 críptico que tenía el flujo de eliminación).
+ */
+export async function prevalidarCambioPeriodo(
+  solicitudId: number
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const sol = await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { sap_database: true } });
+  const esUDC = (sol?.sap_database || '').toUpperCase() === 'UDC';
+  if (esUDC) {
+    const dg = await prisma.usuario.count({
+      where: {
+        deleted_at: null,
+        OR: [
+          { puesto: 'DG' }, { puesto: 'Director General' }, { puesto: 'Dirección General' },
+          { puesto: 'Direccion General' }, { user_role: 'Director General' },
+        ],
+      },
+    });
+    if (dg === 0) return { ok: false, error: 'No hay Director General para autorizar el cambio de periodo (venta UDC).' };
+    return { ok: true };
+  }
+  const gc = await getGerenteComercialParaSolicitud(solicitudId);
+  if (!gc) {
+    return { ok: false, error: 'El asesor de esta campaña no tiene Gerente de autorización configurado (equipo de filtro). No se puede solicitar el cambio de periodo.' };
+  }
+  return { ok: true };
+}
+
+/** Crea la tarea de autorización de cambio de periodo (Filtro GC; UDC → DG).
+ *  NO mueve nada: el periodo solicitado y el original quedan en el historial para
+ *  aplicarlos al aprobar. Dedup: ignora caras que ya tengan una tarea abierta. */
+export async function crearAutorizacionCambioPeriodoCampana(params: {
+  campaniaId: number;
+  propuestaId: number;
+  solicitudId: number;
+  caraIds: number[];
+  solicitanteNombre: string;
+  inicioNuevo: Date;
+  finNuevo: Date;
+  inicioAnterior: Date | null;
+  finAnterior: Date | null;
+  motivo?: string; // Nota del cambio (por qué se mueve) — viaja en la tarea → la ve el gerente.
+}): Promise<{ tareaId: number; tipo: string; caras: number }> {
+  const { campaniaId, propuestaId, solicitudId, caraIds, solicitanteNombre, inicioNuevo, finNuevo, inicioAnterior, finAnterior, motivo } = params;
+
+  // Dedup vs tareas de cambio de periodo abiertas de esta campaña.
+  const abiertas = await prisma.tareas.findMany({
+    where: {
+      campania_id: campaniaId,
+      tipo: { in: [TIPO_FILTRO_CAMBIO_PERIODO, TIPO_AUTORIZACION_CAMBIO_PERIODO] },
+      estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+    },
+    select: { id: true, ids_reservas: true },
+  });
+  const yaPedidas = new Set<number>();
+  for (const t of abiertas) {
+    (t.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n)).forEach((n) => yaPedidas.add(n));
+  }
+  const caraIdsNuevas = caraIds.filter((c) => !yaPedidas.has(c));
+  if (caraIdsNuevas.length === 0) {
+    return { tareaId: abiertas[0]?.id ?? 0, tipo: 'existente', caras: 0 };
+  }
+
+  const gc = await getGerenteComercialParaSolicitud(solicitudId);
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const fechaFin = new Date(now.getTime());
+  fechaFin.setDate(fechaFin.getDate() + 7);
+
+  const etqAnterior = await etiquetaPeriodo(inicioAnterior);
+  const etqNuevo = await etiquetaPeriodo(inicioNuevo);
+  const motivoTxt = (motivo || '').trim();
+  const desc = `📅 CAMBIO DE PERIODO — ${solicitanteNombre} solicita mover ${caraIdsNuevas.length} circuito(s) de la Campaña #${campaniaId} de ${etqAnterior} a ${etqNuevo}.`
+    + (motivoTxt ? `\n\nMotivo del cambio: ${motivoTxt}` : '')
+    + `\n\nEl circuito queda en su periodo original hasta que apruebes. Al aprobar se mueve a ${etqNuevo} (se liberan sus reservas del periodo anterior).`;
+
+  // Ruteo: Gerente del asesor. UDC no tiene equipo de filtro → fallback a Dirección
+  // General (mismo criterio que el flujo de eliminación, decisión de Mario 2026-10-28).
+  const solCp = await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { sap_database: true } });
+  const esVentaUDCcp = (solCp?.sap_database || '').toUpperCase() === 'UDC';
+  let responsables: { id: number; nombre: string }[];
+  let tipoTarea: string;
+  if (esVentaUDCcp) {
+    const dgUsers = await prisma.usuario.findMany({
+      where: {
+        deleted_at: null,
+        OR: [
+          { puesto: 'DG' }, { puesto: 'Director General' }, { puesto: 'Dirección General' },
+          { puesto: 'Direccion General' }, { user_role: 'Director General' },
+        ],
+      },
+      select: { id: true, nombre: true },
+    });
+    if (dgUsers.length === 0) {
+      throw new Error('No hay usuarios Director General para autorizar el cambio de periodo de la venta UDC.');
+    }
+    responsables = dgUsers.map((u) => ({ id: u.id, nombre: u.nombre }));
+    tipoTarea = TIPO_AUTORIZACION_CAMBIO_PERIODO;
+  } else {
+    if (!gc) {
+      throw new Error('No se encontró Gerente de autorización para el asesor de esta campaña. Revisa su equipo de filtro de autorización.');
+    }
+    responsables = [{ id: gc.id, nombre: gc.nombre }];
+    tipoTarea = TIPO_FILTRO_CAMBIO_PERIODO;
+  }
+
+  const tarea = await prisma.tareas.create({
+    data: {
+      tipo: tipoTarea,
+      titulo: `Cambio de periodo de ${caraIdsNuevas.length} circuito(s) — Campaña #${campaniaId}`,
+      descripcion: desc,
+      estatus: 'Pendiente',
+      id_responsable: responsables[0].id,
+      responsable: responsables[0].nombre,
+      id_solicitud: String(solicitudId),
+      id_propuesta: String(propuestaId),
+      campania_id: campaniaId,
+      contenido: 'campana',
+      ids_reservas: caraIdsNuevas.join(','), // cara-ids del circuito a mover
+      id_asignado: responsables.map((u) => u.id).join(','),
+      asignado: responsables.map((u) => u.nombre).join(', '),
+      fecha_fin: fechaFin,
+    },
+  });
+
+  await prisma.historial.create({
+    data: {
+      tipo: 'autorizacion_cambio_periodo_campana',
+      ref_id: campaniaId,
+      accion: `${solicitanteNombre} solicitó autorización para cambiar el periodo de ${caraIdsNuevas.length} circuito(s) (${etqAnterior} → ${etqNuevo})`,
+      detalles: JSON.stringify({
+        tareaId: tarea.id,
+        solicitanteNombre,
+        caraIds: caraIdsNuevas,
+        inicioNuevo: new Date(inicioNuevo).toISOString(),
+        finNuevo: new Date(finNuevo).toISOString(),
+        inicioAnterior: inicioAnterior ? new Date(inicioAnterior).toISOString() : null,
+        finAnterior: finAnterior ? new Date(finAnterior).toISOString() : null,
+        conFiltro: !!gc,
+      }),
+    },
+  });
+
+  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId: tarea.id, tipo: tipoTarea });
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: tarea.id, tipo: tipoTarea });
+
+  return { tareaId: tarea.id, tipo: tipoTarea, caras: caraIdsNuevas.length };
+}
+
+/** Aprueba una tarea de cambio de periodo → APLICA el movimiento: libera las
+ *  reservas del periodo anterior y pasa el circuito (grupo RT/BF) al periodo nuevo.
+ *  El GERENTE decide (no escala). Re-chequea el candado APS al aplicar. */
+export async function aprobarCambioPeriodoCampana(
+  tareaId: number,
+  aprobadorNombre: string,
+  comentario?: string
+): Promise<{ accion: 'movido'; caras: number; reservasLiberadas: number }> {
+  const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
+  if (!tarea) throw new Error('Tarea no encontrada');
+  if (['Atendido', 'Cancelado', 'Rechazado'].includes(tarea.estatus || '')) {
+    throw new Error('La tarea ya fue procesada');
+  }
+  if (!esTareaCambioPeriodo(tarea.tipo)) throw new Error('La tarea no es de autorización de cambio de periodo');
+
+  const caraIdsTarea = (tarea.ids_reservas || '').split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
+
+  // Recuperar el periodo solicitado + el solicitante del evento de solicitud.
+  let inicioNuevo: Date | null = null;
+  let finNuevo: Date | null = null;
+  let solicitanteNombre = '';
+  const evt = await prisma.historial.findFirst({
+    where: { tipo: 'autorizacion_cambio_periodo_campana', detalles: { contains: `"tareaId":${tareaId},` } },
+    orderBy: { id: 'desc' },
+  });
+  if (evt) {
+    try {
+      const d = JSON.parse(evt.detalles || '{}');
+      if (Number(d?.tareaId) === tareaId) {
+        if (d?.inicioNuevo) inicioNuevo = new Date(d.inicioNuevo);
+        if (d?.finNuevo) finNuevo = new Date(d.finNuevo);
+        if (d?.solicitanteNombre) solicitanteNombre = String(d.solicitanteNombre);
+      }
+    } catch { /* detalles no parseable */ }
+  }
+  if (!inicioNuevo || !finNuevo || isNaN(inicioNuevo.getTime()) || isNaN(finNuevo.getTime())) {
+    throw new Error('No se pudo recuperar el periodo solicitado de esta tarea.');
+  }
+  if (!solicitanteNombre) solicitanteNombre = aprobadorNombre;
+
+  // Aplicar: liberar reservas del grupo (cara + pareja RT/BF) y mover el periodo.
+  // liberarReservasCircuitoPorEdicion resuelve el grupo y lanza si hay APS.
+  const { liberarReservasCircuitoPorEdicion } = await import('./circuitos.service');
+  const grupoIds = new Set<number>();
+  let reservasLiberadas = 0;
+  let idquote = '';
+  await prisma.$transaction(async (tx) => {
+    for (const cid of caraIdsTarea) {
+      const { liberadas, caraIds } = await liberarReservasCircuitoPorEdicion(tx, cid, 'periodo');
+      reservasLiberadas += liberadas;
+      caraIds.forEach((x) => grupoIds.add(x));
+    }
+    if (grupoIds.size > 0) {
+      await tx.solicitudCaras.updateMany({
+        where: { id: { in: [...grupoIds] } },
+        data: { inicio_periodo: inicioNuevo!, fin_periodo: finNuevo! },
+      });
+      const unaCara = await tx.solicitudCaras.findFirst({ where: { id: { in: [...grupoIds] } }, select: { idquote: true } });
+      idquote = unaCara?.idquote || '';
+    }
+  });
+
+  await prisma.tareas.update({ where: { id: tareaId }, data: { estatus: 'Atendido' } });
+
+  const etqNuevo = await etiquetaPeriodo(inicioNuevo);
+  if (idquote) {
+    await prisma.historial.create({
+      data: {
+        tipo: 'Campaña',
+        ref_id: parseInt(idquote) || 0,
+        accion: `Cambio de periodo aprobado — circuito movido a ${etqNuevo}`,
+        fecha_hora: new Date(),
+        detalles: JSON.stringify({
+          usuario: solicitanteNombre,
+          autorizadoPor: aprobadorNombre,
+          origen: 'campaña',
+          via: 'autorización',
+          periodo_nuevo: etqNuevo,
+          reservas_liberadas: reservasLiberadas,
+          comentario: (comentario || '').trim() || null,
+        }),
+      },
+    });
+  }
+  await prisma.historial.create({
+    data: {
+      tipo: 'autorizacion_cambio_periodo_campana',
+      ref_id: tarea.campania_id || 0,
+      accion: `${aprobadorNombre} (Gerencia) aprobó el cambio de periodo de ${grupoIds.size} circuito(s) a ${etqNuevo}`,
+      detalles: JSON.stringify({ tareaId, caras: grupoIds.size, reservasLiberadas, comentario: (comentario || '').trim() || null }),
+    },
+  });
+
+  // Aviso al ASESOR que lo solicitó (best-effort, mismo patrón que eliminación).
+  try {
+    const solicitudId = parseInt(tarea.id_solicitud);
+    const solicitud = !isNaN(solicitudId)
+      ? await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { usuario_id: true, nombre_usuario: true } })
+      : null;
+    const destinatarioId = solicitud?.usuario_id ?? null;
+    const destinatarioNombre = solicitud?.nombre_usuario || solicitanteNombre;
+    if (destinatarioId) {
+      await prisma.tareas.create({
+        data: {
+          tipo: TIPO_AVISO_CAMBIO_PERIODO,
+          titulo: `Cambio de periodo autorizado — Campaña #${tarea.campania_id}`,
+          descripcion:
+            `✅ Se autorizó el cambio de periodo de ${grupoIds.size} circuito(s) que solicitaste de la Campaña #${tarea.campania_id} a ${etqNuevo}`
+            + ` (autorizó ${aprobadorNombre}, Gerencia). Vuelve a reservar el inventario en el nuevo periodo.`
+            + ((comentario || '').trim() ? `\n\nComentario: ${(comentario || '').trim()}` : ''),
+          estatus: 'Pendiente',
+          id_responsable: destinatarioId,
+          responsable: destinatarioNombre,
+          id_solicitud: tarea.id_solicitud,
+          id_propuesta: tarea.id_propuesta,
+          campania_id: tarea.campania_id,
+          contenido: 'campana',
+          id_asignado: String(destinatarioId),
+          asignado: destinatarioNombre,
+          fecha_fin: new Date(),
+        },
+      });
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId, tipo: TIPO_AVISO_CAMBIO_PERIODO });
+    }
+  } catch (e) {
+    console.error('[aprobarCambioPeriodoCampana] no se pudo crear el aviso al asesor:', e);
+  }
+
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: tarea.tipo || TIPO_AUTORIZACION_CAMBIO_PERIODO });
+  return { accion: 'movido', caras: grupoIds.size, reservasLiberadas };
+}
+
+/** Rechaza una tarea de cambio de periodo: NO mueve nada (el circuito ya estaba
+ *  en su periodo original), marca Rechazado y avisa al asesor con el motivo. */
+export async function rechazarCambioPeriodoCampana(
+  tareaId: number,
+  rechazadorNombre: string,
+  motivo: string
+): Promise<void> {
+  const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
+  if (!tarea) throw new Error('Tarea no encontrada');
+  if (['Atendido', 'Cancelado', 'Rechazado'].includes(tarea.estatus || '')) {
+    throw new Error('La tarea ya fue procesada');
+  }
+  const motivoLimpio = (motivo || '').trim();
+  if (!motivoLimpio) throw new Error('El motivo del rechazo es obligatorio');
+
+  const solicitudId = parseInt(tarea.id_solicitud);
+  const solicitud = !isNaN(solicitudId)
+    ? await prisma.solicitud.findUnique({ where: { id: solicitudId }, select: { usuario_id: true, nombre_usuario: true } })
+    : null;
+  const destinatarioId = solicitud?.usuario_id ?? null;
+  const destinatarioNombre = solicitud?.nombre_usuario || '';
+  const nCircuitos = (tarea.ids_reservas || '').split(',').map((s) => s.trim()).filter(Boolean).length;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.tareas.update({ where: { id: tareaId }, data: { estatus: 'Rechazado' } });
+    if (destinatarioId) {
+      await tx.tareas.create({
+        data: {
+          tipo: 'Rechazo Cambio Periodo',
+          titulo: `Cambio de periodo rechazado — Campaña #${tarea.campania_id}`,
+          descripcion: `Tu solicitud para cambiar el periodo de ${nCircuitos} circuito(s) de la Campaña #${tarea.campania_id} fue RECHAZADA por ${rechazadorNombre} (Gerencia). El circuito se queda en su periodo original. Motivo: ${motivoLimpio}.`,
+          estatus: 'Pendiente',
+          id_responsable: destinatarioId,
+          responsable: destinatarioNombre,
+          id_solicitud: tarea.id_solicitud,
+          id_propuesta: tarea.id_propuesta,
+          campania_id: tarea.campania_id,
+          contenido: 'campana',
+          id_asignado: String(destinatarioId),
+          asignado: destinatarioNombre,
+          fecha_fin: new Date(),
+        },
+      });
+    }
+    await tx.historial.create({
+      data: {
+        tipo: 'autorizacion_rechazo_campana',
+        ref_id: tarea.campania_id || 0,
+        accion: `${rechazadorNombre} rechazó el cambio de periodo de circuito(s)`,
+        detalles: JSON.stringify({ tareaId, motivo: motivoLimpio, rechazadorNombre, destinatarioId, tipo: 'cambio_periodo' }),
+      },
+    });
+  });
+  emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, { tareaId, tipo: 'Rechazo Cambio Periodo' });
+  emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId, tipo: 'Rechazo Cambio Periodo' });
+}

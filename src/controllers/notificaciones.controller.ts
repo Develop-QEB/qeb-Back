@@ -11,6 +11,9 @@ import {
   aprobarEliminacionCampana,
   rechazarEliminacionCampana,
   esTareaEliminacion,
+  aprobarCambioPeriodoCampana,
+  rechazarCambioPeriodoCampana,
+  esTareaCambioPeriodo,
 } from '../services/autorizacion.service';
 import { emitToAll, SOCKET_EVENTS } from '../config/socket';
 import { correoPermitido } from '../utils/correoPrefs';
@@ -1823,6 +1826,81 @@ export class NotificacionesController {
       res.json({ success: true, message: 'Eliminación rechazada.' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error al rechazar eliminación';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Aprueba una tarea de AUTORIZACIÓN DE CAMBIO DE PERIODO (por tareaId): aplica el
+   * movimiento del circuito al periodo solicitado. Permiso: asignado a la tarea o
+   * Admin/DEV (mismo criterio que eliminación).
+   */
+  async aprobarCambioPeriodo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario } = req.body || {};
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      if (!tareaId || isNaN(tareaId)) {
+        res.status(400).json({ success: false, error: 'tareaId inválido' });
+        return;
+      }
+      const tarea = await prisma.tareas.findUnique({ where: { id: tareaId }, select: { id_asignado: true, tipo: true } });
+      if (!tarea) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
+      if (!esTareaCambioPeriodo(tarea.tipo)) { res.status(400).json({ success: false, error: 'La tarea no es de autorización de cambio de periodo' }); return; }
+
+      const asignados = (tarea.id_asignado || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      const rol = (req.user?.rol || '').toUpperCase();
+      const esAdmin = rol === 'ADMINISTRADOR' || rol === 'DEV';
+      if (!esAdmin && !(userId && asignados.includes(userId))) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para aprobar este cambio de periodo' });
+        return;
+      }
+
+      const result = await aprobarCambioPeriodoCampana(tareaId, userName, comentario);
+      res.json({
+        success: true,
+        message: `Cambio de periodo aprobado: ${result.caras} circuito(s) movido(s).`,
+        data: result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al aprobar cambio de periodo';
+      res.status(500).json({ success: false, error: message });
+    }
+  }
+
+  /**
+   * Rechaza una tarea de AUTORIZACIÓN DE CAMBIO DE PERIODO (por tareaId): NO mueve
+   * nada (el circuito queda en su periodo original), marca Rechazado y guarda el
+   * motivo. Permiso: asignado a la tarea o Admin/DEV.
+   */
+  async rechazarCambioPeriodo(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const tareaId = parseInt(req.params.tareaId);
+      const { comentario, motivo } = req.body || {};
+      const userId = req.user?.userId;
+      const userName = req.user?.nombre || 'Usuario';
+      const motivoFinal = String(motivo || comentario || '').trim();
+      if (!tareaId || isNaN(tareaId)) { res.status(400).json({ success: false, error: 'tareaId inválido' }); return; }
+      if (!motivoFinal) { res.status(400).json({ success: false, error: 'Se requiere un motivo de rechazo' }); return; }
+      if (motivoFinal.replace(/[\s\p{P}\p{S}]+/gu, '').length < 3) { res.status(400).json({ success: false, error: 'El motivo de rechazo debe explicar la razón (no solo puntuación).' }); return; }
+
+      const tarea = await prisma.tareas.findUnique({ where: { id: tareaId }, select: { id_asignado: true, tipo: true } });
+      if (!tarea) { res.status(404).json({ success: false, error: 'Tarea no encontrada' }); return; }
+      if (!esTareaCambioPeriodo(tarea.tipo)) { res.status(400).json({ success: false, error: 'La tarea no es de autorización de cambio de periodo' }); return; }
+
+      const asignados = (tarea.id_asignado || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      const rol = (req.user?.rol || '').toUpperCase();
+      const esAdmin = rol === 'ADMINISTRADOR' || rol === 'DEV';
+      if (!esAdmin && !(userId && asignados.includes(userId))) {
+        res.status(403).json({ success: false, error: 'No tienes permiso para rechazar este cambio de periodo' });
+        return;
+      }
+
+      await rechazarCambioPeriodoCampana(tareaId, userName, motivoFinal);
+      res.json({ success: true, message: 'Cambio de periodo rechazado.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al rechazar cambio de periodo';
       res.status(500).json({ success: false, error: message });
     }
   }
