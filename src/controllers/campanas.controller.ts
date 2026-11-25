@@ -16,6 +16,11 @@ import {
   ejecutarEliminacionCarasCampana,
   TIPO_FILTRO_ELIMINACION,
   TIPO_AUTORIZACION_ELIMINACION,
+  crearAutorizacionCambioPeriodoCampana,
+  esCambioDeOtraCatorcena,
+  prevalidarCambioPeriodo,
+  TIPO_FILTRO_CAMBIO_PERIODO,
+  TIPO_AUTORIZACION_CAMBIO_PERIODO,
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
@@ -2754,6 +2759,26 @@ export class CampanasController {
           (t.ids_reservas || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)).forEach(n => pendSet.add(n));
         }
         carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_eliminacion: pendSet.has(Number(c.id)) }));
+      }
+
+      // pendiente_cambio_periodo: caras con una tarea de CAMBIO DE PERIODO abierta
+      // (Gerencia). El circuito sigue firme en su periodo original hasta que se
+      // apruebe; el badge "Pend. Ger. (periodo)" lo marca en el modal. Mismo criterio
+      // de dedup que crearAutorizacionCambioPeriodoCampana.
+      if (carasEnriched.length > 0) {
+        const tareasCp = await prisma.tareas.findMany({
+          where: {
+            campania_id: campanaId,
+            tipo: { in: [TIPO_FILTRO_CAMBIO_PERIODO, TIPO_AUTORIZACION_CAMBIO_PERIODO] },
+            estatus: { notIn: ['Atendido', 'Cancelado', 'Rechazado'] },
+          },
+          select: { ids_reservas: true },
+        });
+        const pendCpSet = new Set<number>();
+        for (const t of tareasCp) {
+          (t.ids_reservas || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)).forEach(n => pendCpSet.add(n));
+        }
+        carasEnriched = carasEnriched.map((c: any) => ({ ...c, pendiente_cambio_periodo: pendCpSet.has(Number(c.id)) }));
       }
 
       // Etapa visual del filtro DG (mismo criterio que propuestas.controller:970).
@@ -12417,6 +12442,24 @@ export class CampanasController {
         where: { id: parseInt(caraId) },
       });
 
+      // ── Cambio de PERIODO diferido a Gerencia (single) ──────────────────────
+      // Si este circuito YA creado se mueve a OTRA catorcena/mes, el cambio se
+      // DIFIERE: el sc NO se mueve aquí (queda en su periodo original con insignia
+      // pendiente) y se crea una tarea de autorización de Gerencia tras guardar.
+      // Prevalidamos el gerente SIN mutar (400 claro si el asesor no tiene filtro).
+      let diferidoCpUp: { inicioNuevo: Date; finNuevo: Date; inicioAnterior: Date | null; finAnterior: Date | null } | null = null;
+      if (currentCaraFull?.inicio_periodo && data.inicio_periodo &&
+          await esCambioDeOtraCatorcena(currentCara.idquote, currentCaraFull.inicio_periodo, data.inicio_periodo)) {
+        const _ancCpUp = await anclarPeriodoCatorcena(prisma, currentCara.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
+        diferidoCpUp = { inicioNuevo: _ancCpUp.inicio, finNuevo: _ancCpUp.fin, inicioAnterior: currentCaraFull.inicio_periodo, finAnterior: currentCaraFull.fin_periodo };
+        const propCpUp = currentCara.idquote ? await prisma.propuesta.findUnique({ where: { id: parseInt(currentCara.idquote) }, select: { solicitud_id: true } }) : null;
+        if (propCpUp?.solicitud_id) {
+          const valUp = await prevalidarCambioPeriodo(propCpUp.solicitud_id);
+          if (!valUp.ok) { res.status(400).json({ success: false, error: valUp.error }); return; }
+        }
+      }
+      const esDiferidaCpUp = !!diferidoCpUp;
+
       // Candado Tráfico (server-side): Tráfico no puede modificar tarifa/costo.
       // Espejo de la regla del front; cierra el bypass por API directa.
       const bloqTrafUp = cambiosTarifaCostoProhibidos(userRol, data, currentCaraFull);
@@ -12431,7 +12474,7 @@ export class CampanasController {
       // 120 * 3327.28 = 399273.59999999997 en JS).
       const decimalEqC = (a: unknown, b: unknown) =>
         parseFloat(String(a)).toFixed(2) === Number(b).toFixed(2);
-      const periodoCambioAuth = currentCaraFull && (
+      const periodoCambioAuth = !esDiferidaCpUp && currentCaraFull && (
         (data.inicio_periodo !== undefined && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
         (data.fin_periodo !== undefined && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
       );
@@ -12547,7 +12590,10 @@ export class CampanasController {
       updateData.hora_fin = tipoFinal === 'Tradicional'
         ? null
         : (data.hora_fin === undefined ? undefined : normalizaHoraHHMM(data.hora_fin));
-      if (data.inicio_periodo) {
+      // Diferido a Gerencia: NO tocar el periodo del sc (queda en el original).
+      if (esDiferidaCpUp) {
+        // nada: el cambio de periodo espera aprobación
+      } else if (data.inicio_periodo) {
         // Anclar periodo a su catorcena al editar (evita re-inflar el sc). Ver anclarPeriodoCatorcena.
         const _anc = await anclarPeriodoCatorcena(prisma, currentCara.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
         updateData.inicio_periodo = _anc.inicio;
@@ -12563,7 +12609,7 @@ export class CampanasController {
       // al periodo anteriores, así que no puede arrastrarse al nuevo.
       // Respeta candado APS: la helper lanza si el grupo tiene APS y se rechaza
       // sin mutar la cara.
-      const periodoCambioUpd = !!currentCaraFull && (
+      const periodoCambioUpd = !esDiferidaCpUp && !!currentCaraFull && (
         (!!data.inicio_periodo && (!currentCaraFull.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCaraFull.inicio_periodo).getTime())) ||
         (!!data.fin_periodo && (!currentCaraFull.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCaraFull.fin_periodo).getTime()))
       );
@@ -12729,11 +12775,40 @@ export class CampanasController {
         await reconciliarCierreTareasAutorizacion(idquote, campanaId, autorizacion.pendientesDg, autorizacion.pendientesDcm);
       }
 
+      // Crear la tarea de CAMBIO DE PERIODO diferida (el sc se dejó en su periodo
+      // original; Gerencia debe aprobar para que se mueva).
+      let diferidoCpUpOk = false;
+      if (diferidoCpUp && userId && idquote) {
+        const propPerUp = await prisma.propuesta.findUnique({ where: { id: parseInt(idquote) }, select: { solicitud_id: true } });
+        if (propPerUp?.solicitud_id) {
+          try {
+            const r = await crearAutorizacionCambioPeriodoCampana({
+              campaniaId: campanaId,
+              propuestaId: parseInt(idquote),
+              solicitudId: propPerUp.solicitud_id,
+              caraIds: [parseInt(caraId)],
+              solicitanteNombre: userName,
+              inicioNuevo: diferidoCpUp.inicioNuevo,
+              finNuevo: diferidoCpUp.finNuevo,
+              inicioAnterior: diferidoCpUp.inicioAnterior,
+              finAnterior: diferidoCpUp.finAnterior,
+              motivo: (data.motivoCambioPeriodo || '').toString(),
+            });
+            diferidoCpUpOk = r.caras > 0;
+          } catch (e) {
+            console.error('[campanas.updateCara] no se pudo crear autorización de cambio de periodo:', e);
+          }
+        }
+      }
+
       // Build response message
       let mensaje = 'Circuito actualizado exitosamente';
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
         mensaje = `Circuito actualizado. ${totalPendientes} circuito(s) requieren autorización.`;
+      }
+      if (diferidoCpUpOk) {
+        mensaje += ` El cambio de periodo quedó pendiente de autorización de Gerencia (el circuito sigue en su periodo original hasta aprobarse).`;
       }
 
       // Versionado Vista Compartir (cambio de caras/bonificacion puede completar el circuito).
@@ -13133,6 +13208,39 @@ export class CampanasController {
         }
       }
 
+      // ── Autorización de CAMBIO DE PERIODO (Gerencia) — pre-pass ─────────────
+      // Si un circuito YA creado se mueve a OTRA catorcena/mes, el cambio NO se
+      // aplica ahora: se DIFIERE hasta que Gerencia apruebe (el circuito queda en
+      // su periodo original con insignia pendiente). Aquí detectamos esas caras,
+      // capturamos el periodo solicitado (anclado) y prevalidamos el gerente SIN
+      // mutar nada (400 claro si el asesor no tiene filtro). Las tareas se crean
+      // después de la transacción; en el loop se salta el apply de periodo.
+      const diferidosCambioPeriodo = new Map<number, { inicioNuevo: Date; finNuevo: Date; inicioAnterior: Date | null; finAnterior: Date | null }>();
+      {
+        const actualesPer = await prisma.solicitudCaras.findMany({
+          where: { id: { in: allCaraIds } },
+          select: { id: true, idquote: true, inicio_periodo: true, fin_periodo: true },
+        });
+        const mapPer = new Map(actualesPer.map(c => [c.id, c] as const));
+        for (const item of carasToUpdate) {
+          const cid = parseInt(String(item.caraId));
+          const cur = mapPer.get(cid);
+          if (!cur?.inicio_periodo || !item.data.inicio_periodo) continue;
+          const otra = await esCambioDeOtraCatorcena(cur.idquote, cur.inicio_periodo, item.data.inicio_periodo);
+          if (!otra) continue;
+          const _ancCp = await anclarPeriodoCatorcena(prisma, cur.idquote, item.data.inicio_periodo, item.data.fin_periodo || item.data.inicio_periodo);
+          diferidosCambioPeriodo.set(cid, { inicioNuevo: _ancCp.inicio, finNuevo: _ancCp.fin, inicioAnterior: cur.inicio_periodo, finAnterior: cur.fin_periodo });
+        }
+        if (diferidosCambioPeriodo.size > 0) {
+          const idquoteVal = mapPer.get(allCaraIds[0])?.idquote || actualesPer[0]?.idquote || '';
+          const propVal = idquoteVal ? await prisma.propuesta.findUnique({ where: { id: parseInt(idquoteVal) }, select: { solicitud_id: true } }) : null;
+          if (propVal?.solicitud_id) {
+            const val = await prevalidarCambioPeriodo(propVal.solicitud_id);
+            if (!val.ok) { res.status(400).json({ success: false, error: val.error }); return; }
+          }
+        }
+      }
+
       // Run all updates in a single transaction.
       // Timeout extendido: con grupos masivos puede iterar 10+ caras,
       // cada una con evaluarAutorizacion + redistribuirReservasCircuito.
@@ -13154,7 +13262,11 @@ export class CampanasController {
           // completo (cara + pareja RT/BF) y dejarlo en 0. El inventario reservado
           // pertenece al artículo/periodo anteriores y no puede arrastrarse.
           // Respeta candado APS (la helper lanza si el grupo tiene APS asignado).
-          const periodoCambioBk = !!currentCara && (
+          // Cambio de periodo DIFERIDO a Gerencia: no se aplica ni libera ahora
+          // (el circuito queda en su periodo original). periodoCambioBk se fuerza a
+          // false para esta cara, así se salta liberación, recálculo y apply.
+          const esDiferidaCp = diferidosCambioPeriodo.has(parseInt(caraId));
+          const periodoCambioBk = !esDiferidaCp && !!currentCara && (
             (!!data.inicio_periodo && (!currentCara.inicio_periodo || new Date(data.inicio_periodo).getTime() !== new Date(currentCara.inicio_periodo).getTime())) ||
             (!!data.fin_periodo && (!currentCara.fin_periodo || new Date(data.fin_periodo).getTime() !== new Date(currentCara.fin_periodo).getTime()))
           );
@@ -13274,7 +13386,10 @@ export class CampanasController {
           updateData.hora_fin = tipoFinalBulk === 'Tradicional'
             ? null
             : (data.hora_fin === undefined ? undefined : normalizaHoraHHMM(data.hora_fin));
-          if (data.inicio_periodo) {
+          // Diferido a Gerencia: NO tocar el periodo del sc (queda en el original).
+          if (esDiferidaCp) {
+            // nada: el cambio de periodo espera aprobación
+          } else if (data.inicio_periodo) {
             // Anclar periodo del sc a su catorcena (bulk). Ver anclarPeriodoCatorcena.
             const _anc = await anclarPeriodoCatorcena(prisma, currentCara?.idquote, data.inicio_periodo, data.fin_periodo || data.inicio_periodo);
             updateData.inicio_periodo = _anc.inicio;
@@ -13382,10 +13497,50 @@ export class CampanasController {
         await reconciliarCierreTareasAutorizacion(idquote, campanaId, autorizacion.pendientesDg, autorizacion.pendientesDcm);
       }
 
+      // Crear las tareas de CAMBIO DE PERIODO diferidas (una por periodo destino).
+      // El periodo del circuito NO se tocó en la transacción; queda a la espera de
+      // que Gerencia apruebe. Agrupamos por periodo destino para no mezclar.
+      let circuitosDiferidos = 0;
+      if (diferidosCambioPeriodo.size > 0 && userId && idquote) {
+        const propPer = await prisma.propuesta.findUnique({ where: { id: parseInt(idquote) }, select: { solicitud_id: true } });
+        if (propPer?.solicitud_id) {
+          const grupos = new Map<string, { inicioNuevo: Date; finNuevo: Date; inicioAnterior: Date | null; finAnterior: Date | null; caraIds: number[] }>();
+          for (const [cid, per] of diferidosCambioPeriodo) {
+            const key = `${per.inicioNuevo.getTime()}|${per.finNuevo.getTime()}`;
+            const g = grupos.get(key);
+            if (g) g.caraIds.push(cid);
+            else grupos.set(key, { ...per, caraIds: [cid] });
+          }
+          const motivoCp = (req.body?.motivoCambioPeriodo || '').toString();
+          for (const g of grupos.values()) {
+            try {
+              const r = await crearAutorizacionCambioPeriodoCampana({
+                campaniaId: campanaId,
+                propuestaId: parseInt(idquote),
+                solicitudId: propPer.solicitud_id,
+                caraIds: g.caraIds,
+                solicitanteNombre: userName,
+                inicioNuevo: g.inicioNuevo,
+                finNuevo: g.finNuevo,
+                inicioAnterior: g.inicioAnterior,
+                finAnterior: g.finAnterior,
+                motivo: motivoCp,
+              });
+              if (r.caras > 0) circuitosDiferidos += r.caras;
+            } catch (e) {
+              console.error('[campanas.bulkUpdateCaras] no se pudo crear autorización de cambio de periodo:', e);
+            }
+          }
+        }
+      }
+
       let mensaje = `${updatedCaras.length} circuito(s) actualizados exitosamente`;
       if (autorizacion.tienePendientes) {
         const totalPendientes = autorizacion.pendientesDg.length + autorizacion.pendientesDcm.length;
         mensaje = `${updatedCaras.length} circuito(s) actualizados. ${totalPendientes} requieren autorización.`;
+      }
+      if (circuitosDiferidos > 0) {
+        mensaje += ` ${circuitosDiferidos} cambio(s) de periodo quedaron pendientes de autorización de Gerencia (el circuito sigue en su periodo original hasta aprobarse).`;
       }
 
       console.log(`[campanas.bulkUpdateCaras] Done. ${updatedCaras.length} updated, pendientes: ${autorizacion.tienePendientes}`);
