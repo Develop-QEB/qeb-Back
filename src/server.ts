@@ -4,6 +4,7 @@ import app from './app';
 import prisma from './utils/prisma';
 import { initializeSocket } from './config/socket';
 import { withBi, attachBiRealtime } from './bi';
+import { withMcp } from './mcp';
 import { enviarResumenAutorizacionesPendientes, depurarTareasAutorizacionResueltas } from './services/autorizacion.service';
 import { detectarYLimpiarZombis } from './services/zombi-monitor.service';
 import { enviarRecordatoriosPendientes, enviarRecordatoriosActividadComercial } from './services/recordatorios.service';
@@ -21,7 +22,8 @@ if (process.env.NODE_ENV !== 'production') {
 const PORT = process.env.PORT || 3000;
 
 // Crear servidor HTTP para Socket.io (withBi devuelve el mismo app si BI_ENABLED no es 'true')
-const httpServer = createServer(withBi(app));
+// withMcp hace lo mismo con MCP_ENABLED (conector MCP en /mcp, ver src/mcp/index.ts).
+const httpServer = createServer(withMcp(withBi(app)));
 
 /**
  * Programa una ejecución diaria a una hora fija en zona horaria America/Mexico_City.
