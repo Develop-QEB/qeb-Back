@@ -34,6 +34,9 @@ router.post('/autorizacion/:idquote/rechazar', notificacionesController.rechazar
 // Autorización de ELIMINACIÓN de circuitos (por tareaId, solo campañas)
 router.post('/autorizacion/eliminacion/:tareaId/aprobar', notificacionesController.aprobarEliminacion.bind(notificacionesController));
 router.post('/autorizacion/eliminacion/:tareaId/rechazar', notificacionesController.rechazarEliminacion.bind(notificacionesController));
+// Autorización de CAMBIO DE PERIODO de circuitos (por tareaId, solo campañas)
+router.post('/autorizacion/cambio-periodo/:tareaId/aprobar', notificacionesController.aprobarCambioPeriodo.bind(notificacionesController));
+router.post('/autorizacion/cambio-periodo/:tareaId/rechazar', notificacionesController.rechazarCambioPeriodo.bind(notificacionesController));
 router.get('/autorizacion/:idquote/historial', notificacionesController.getHistorialAutorizacion.bind(notificacionesController));
 
 // CRUD
