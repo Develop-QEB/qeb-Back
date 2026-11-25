@@ -41,6 +41,9 @@ const LONG_ROUTES: Array<{ pattern: RegExp; ms: number; motivo: string }> = [
   { pattern: /\/archivo$|\/upload-photo$/, ms: 180_000, motivo: 'upload de archivo' },
   // Cargas masivas y mantenimiento de inventario (admin, poco frecuentes).
   { pattern: /^\/inventarios\/(bulk|espacios\/poblar|reservas\/arreglar-huerfanas)/, ms: 300_000, motivo: 'bulk/mantenimiento de inventario' },
+  // QEBooh con herramientas de consulta: varias llamadas al modelo + consultas a la
+  // API en una misma pregunta (el listado de campañas solo ya tarda 4-9s).
+  { pattern: /^\/chatbot\/?$/, ms: 120_000, motivo: 'chatbot con herramientas' },
   // Exports (layouts de campañas, etc.).
   { pattern: /export/, ms: 120_000, motivo: 'export' },
 ];

@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
 import { emitToChatbotAdmin, getIO, SOCKET_EVENTS } from '../config/socket';
+import { chatbotToolsHabilitado, chatbotToolsModelo, ejecutarHerramienta, toolsParaClaude, SECCION_CONSULTAS } from '../mcp/chat';
 
 const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
@@ -1442,6 +1443,72 @@ export class ChatbotController {
     return offTopicPatterns.some(p => p.test(lower));
   }
 
+  /**
+   * QEBooh con consultas de datos: mismo prompt de siempre + las herramientas del MCP
+   * (src/mcp/tools.ts), ejecutadas con la identidad del usuario en sesión.
+   *
+   * El modelo decide si necesita una herramienta; se ejecuta y se le devuelve el
+   * resultado hasta que redacta la respuesta. El prompt base y las herramientas van
+   * con cache_control: en cada vuelta del ciclo se reenvían, y con caché esa parte
+   * cuesta ~10% en lugar del precio completo.
+   */
+  private async chatConHerramientas(
+    messages: { role: string; content: string }[],
+    usuario: { id: number; nombre: string; email: string; rol: string },
+    contextoUI: string | null,
+    permisos: string | null,
+  ): Promise<string> {
+    const MAX_VUELTAS = 6;
+    const client = this.getClient();
+    const uiSection = contextoUI
+      ? `\n\n---\nPANTALLA ACTUAL DEL USUARIO:\nEl usuario está viendo lo siguiente en este momento:\n${contextoUI}\n\nUSA ESTE CONTEXTO: Si el usuario pregunta por un campo, botón o sección de la pantalla, responde usando exactamente la información de arriba. No inventes elementos que no estén descritos. Si menciona "este botón", "este campo", "aquí", asume que se refiere a lo que está descrito en el contexto de pantalla.`
+      : '';
+    const system: Anthropic.TextBlockParam[] = [
+      // Parte estable (idéntica para todos los usuarios): se cachea junto con las tools.
+      { type: 'text', text: BASE_SYSTEM_PROMPT + SECCION_CONSULTAS, cache_control: { type: 'ephemeral' } },
+      // Parte variable por usuario y pantalla: después del punto de caché.
+      { type: 'text', text: (uiSection + buildUserContext(usuario.nombre, usuario.rol, permisos)).trim() || '-' },
+    ];
+    const tools = toolsParaClaude();
+    const convo: Anthropic.MessageParam[] = messages.map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
+
+    for (let vuelta = 1; vuelta <= MAX_VUELTAS; vuelta++) {
+      const response = await client.messages.create({
+        model: chatbotToolsModelo('claude-haiku-4-5-20251001'),
+        max_tokens: 2000,
+        system,
+        tools,
+        // En la última vuelta se le impide pedir más herramientas: debe responder.
+        ...(vuelta === MAX_VUELTAS ? { tool_choice: { type: 'none' as const } } : {}),
+        messages: convo,
+      });
+
+      const usos = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+      if (response.stop_reason !== 'tool_use' || usos.length === 0) {
+        return response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+          .map(b => b.text)
+          .join('\n')
+          .trim();
+      }
+
+      convo.push({ role: 'assistant', content: response.content });
+      // Todas las herramientas pedidas en esta vuelta se ejecutan en paralelo y sus
+      // resultados se devuelven juntos en un solo mensaje.
+      const resultados: Anthropic.ToolResultBlockParam[] = await Promise.all(
+        usos.map(async u => {
+          const r = await ejecutarHerramienta(u.name, u.input, usuario);
+          return { type: 'tool_result' as const, tool_use_id: u.id, content: r.texto, is_error: r.error };
+        }),
+      );
+      convo.push({ role: 'user', content: resultados });
+    }
+    return '';
+  }
+
   async chat(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { messages, pantalla, modal, permisos, contextoUI } = req.body;
@@ -1458,6 +1525,23 @@ export class ChatbotController {
 
       const lastUserMessage = [...messages].reverse().find((m: { role: string }) => m.role === 'user');
       const pregunta = lastUserMessage?.content || '';
+
+      // Con herramientas de consulta (CHATBOT_TOOLS_ENABLED) NO se aplica el filtro por
+      // palabras: bloquea preguntas válidas de datos ("campañas de Netflix", "Amazon",
+      // "Mercado Libre", "calcula"). Ahí el fuera-de-tema lo resuelve el propio modelo.
+      const conHerramientas = chatbotToolsHabilitado(userRol);
+
+      if (conHerramientas) {
+        const reply = await this.chatConHerramientas(
+          messages,
+          { id: userId, nombre: userName, email: userEmail, rol: userRol },
+          contextoUI || null,
+          permisos || null,
+        );
+        this.logConversation(userId, userName, userEmail, userRol, pantalla || null, modal || null, pregunta, reply, false).catch(() => {});
+        res.json({ success: true, data: { reply } });
+        return;
+      }
 
       if (lastUserMessage && this.isClearlyOffTopic(pregunta)) {
         const offTopicReply = 'Hola! Soy QEBooh y estoy aqui para ayudarte con todo lo relacionado a la plataforma QEB. Tienes alguna duda sobre el sistema?';
