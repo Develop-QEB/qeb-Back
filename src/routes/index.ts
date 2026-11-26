@@ -28,11 +28,13 @@ import capasMapaRoutes from './capas-mapa.routes';
 import almacenArtesRoutes from './almacenArtes.routes';
 
 import publicRoutes from './public.routes';
+import sapRoutes from './sap.routes';
 
 const router = Router();
 
 router.use('/auth', authRoutes);
 router.use('/public', publicRoutes);
+router.use('/sap', sapRoutes);
 router.use('/clientes', clientesRoutes);
 router.use('/proveedores', proveedoresRoutes);
 router.use('/inventarios', inventariosRoutes);

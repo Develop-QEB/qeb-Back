@@ -1,6 +1,9 @@
 import { Server as SocketServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
+import jwt from 'jsonwebtoken';
 import { canonicalizarTipoTarea } from '../constants/notificaciones';
+import { JWT_SECRET } from '../utils/secrets';
+import { JwtPayload } from '../types';
 
 let io: SocketServer | null = null;
 
@@ -45,8 +48,50 @@ export function initializeSocket(httpServer: HttpServer): SocketServer {
     },
   });
 
+  // Autenticación del handshake.
+  //
+  // Antes el socket aceptaba a cualquiera: bastaba conectarse y emitir
+  // 'join-propuesta', 'join-campanas', etc. para quedarse escuchando en vivo
+  // todo lo que pasaba en el sistema, sin sesión. Ahora el token se verifica
+  // al conectar, antes de que el socket pueda unirse a un solo room.
+  //
+  // SOCKET_ALLOW_ANON=true deja pasar conexiones sin token, solo como ventana
+  // de transición cuando el back se despliega antes que el front (las pestañas
+  // ya abiertas con el front viejo no mandan token). No dejarlo prendido.
+  const permitirAnonimos = process.env.SOCKET_ALLOW_ANON === 'true';
+
+  io.use((socket, next) => {
+    const deAuth = socket.handshake.auth?.token;
+    const deHeader = (socket.handshake.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const token = typeof deAuth === 'string' && deAuth ? deAuth : deHeader;
+
+    if (!token) {
+      if (permitirAnonimos) {
+        console.warn('[Socket] Conexión sin token aceptada por SOCKET_ALLOW_ANON');
+        return next();
+      }
+      return next(new Error('NO_AUTENTICADO'));
+    }
+
+    try {
+      const payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
+      socket.data.usuario = payload;
+      return next();
+    } catch (error) {
+      const expirado = error instanceof jwt.TokenExpiredError;
+      if (permitirAnonimos) {
+        console.warn(`[Socket] Token ${expirado ? 'expirado' : 'inválido'} aceptado por SOCKET_ALLOW_ANON`);
+        return next();
+      }
+      return next(new Error(expirado ? 'TOKEN_EXPIRADO' : 'TOKEN_INVALIDO'));
+    }
+  });
+
   io.on('connection', (socket) => {
-    console.log(`[Socket] Cliente conectado: ${socket.id}`);
+    const usuario = socket.data.usuario as JwtPayload | undefined;
+    console.log(
+      `[Socket] Cliente conectado: ${socket.id}${usuario ? ` (usuario ${usuario.userId})` : ' (anónimo)'}`
+    );
 
     // Unirse a un room específico de campaña
     socket.on('join-campana', (campanaId: number) => {
