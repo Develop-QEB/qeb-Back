@@ -9,6 +9,8 @@ import {
   ESTATUS_OCUPA,
   ESTATUS_INVENTARIO_BLOQUEO,
   ESTATUS_INVENTARIO_NO_UTILIZABLE,
+  ESTATUS_INVENTARIO_BLOQUEO_TOTAL,
+  getInventarioIdsNoUtilizablesEnRango,
   TipoBloqueoInventario,
   esInventarioBloqueado,
   esInventarioNoUtilizable,
@@ -548,11 +550,24 @@ export class InventariosController {
       // archivados). La lista vive en ESTATUS_INVENTARIO_NO_UTILIZABLE
       // (inventario-bloqueo.service.ts): un estatus nuevo de "no disponible" se
       // agrega allá y aplica aquí solo.
+      //
+      // Con periodo, 'No Disponible' solo excluye si su vigencia se traslapa con
+      // el periodo pedido (fuera de la vigencia sí se puede reservar);
+      // Inhabilitado/Inactivo excluyen siempre. Sin periodo se excluye por
+      // estatus como siempre.
+      const conPeriodo = !!(fecha_inicio && fecha_fin);
       const where: Record<string, unknown> = {
         latitud: { not: 0 },
         longitud: { not: 0 },
-        estatus: { notIn: [...ESTATUS_INVENTARIO_NO_UTILIZABLE] },
+        estatus: { notIn: conPeriodo ? [...ESTATUS_INVENTARIO_BLOQUEO_TOTAL] : [...ESTATUS_INVENTARIO_NO_UTILIZABLE] },
       };
+      if (conPeriodo) {
+        const noUtilizables = await getInventarioIdsNoUtilizablesEnRango(
+          new Date(fecha_inicio as string),
+          new Date(fecha_fin as string)
+        );
+        if (noUtilizables.length > 0) where.id = { notIn: noUtilizables };
+      }
 
       // Filter by city (municipio) - puede ser múltiples ciudades separadas por coma
       if (ciudad) {
@@ -2283,12 +2298,16 @@ export class InventariosController {
       if (data.tarifa_piso !== undefined) updateData.tarifa_piso = data.tarifa_piso ? parseFloat(data.tarifa_piso) : null;
       if (data.tarifa_publica !== undefined) updateData.tarifa_publica = data.tarifa_publica ? parseFloat(data.tarifa_publica) : null;
 
-      // Si por el formulario la pieza deja de estar bloqueada (o nunca lo
-      // estuvo), la vigencia del bloqueo deja de tener sentido: se limpia para
-      // que no quede un "programado" fantasma ni un vencimiento viejo que el
-      // job diario pudiera avisar. Bloquear/vigencia se maneja en toggleBlock.
+      // Si por el formulario la pieza PASA de bloqueada a no bloqueada, la
+      // vigencia deja de tener sentido y se limpia. Solo en esa transición: el
+      // formulario manda siempre `estatus`, y una pieza Disponible con bloqueo
+      // PROGRAMADO perdía la programación con cualquier edición (tarifa,
+      // dirección...). Bloquear/vigencia se maneja en toggleBlock.
       if (updateData.estatus !== undefined && !esInventarioBloqueado(updateData.estatus as string | null)) {
-        Object.assign(updateData, datosLimpiarVigencia());
+        const previo = await prisma.inventarios.findUnique({ where: { id }, select: { estatus: true } });
+        if (esInventarioBloqueado(previo?.estatus)) {
+          Object.assign(updateData, datosLimpiarVigencia());
+        }
       }
 
       const inventario = await prisma.inventarios.update({
@@ -2340,9 +2359,9 @@ export class InventariosController {
       const tipoBloqueo: TipoBloqueoInventario = tipoRaw ?? 'No Disponible';
 
       // Vigencia opcional del bloqueo ({ fecha_inicio?, fecha_fin? } en
-      // 'YYYY-MM-DD'). Sin fechas = desde hoy e indefinida. Ver
-      // services/vigencia-bloqueo.service.ts.
-      const parsed = parseVigenciaBody(req.body);
+      // 'YYYY-MM-DD'). Sin fechas = desde hoy e indefinida. Inhabilitado no
+      // acepta fechas. Ver services/vigencia-bloqueo.service.ts.
+      const parsed = parseVigenciaBody(req.body, tipoBloqueo);
       if (parsed.error !== undefined) {
         res.status(400).json({ success: false, error: parsed.error });
         return;
@@ -2414,7 +2433,9 @@ export class InventariosController {
         };
 
         if (programar) {
-          await programarBloqueoInventario(tx, args);
+          // El rango ya queda bloqueado y sus reservas se liberan desde ahora;
+          // el estatus lo pone el job el día de fecha_inicio.
+          liberadas = (await programarBloqueoInventario(tx, args)).liberadas;
           programado = true;
           return;
         }

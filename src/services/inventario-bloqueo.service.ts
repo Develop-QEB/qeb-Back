@@ -222,9 +222,81 @@ export function esInventarioBloqueado(estatus: string | null | undefined): boole
   return !!estatus && (ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(estatus);
 }
 
-/** ¿El inventario NO se puede utilizar/ocupar (Bloqueado, Inhabilitado o Inactivo)? */
+/** ¿El inventario NO se puede utilizar/ocupar (Bloqueado, Inhabilitado o Inactivo)?
+ *  Solo mira el estatus: úsalo donde NO hay periodo (mapa, tablas, KPIs). Para
+ *  decidir si se puede RESERVAR en un periodo usa inventarioNoUtilizableEnRango. */
 export function esInventarioNoUtilizable(estatus: string | null | undefined): boolean {
   return !!estatus && (ESTATUS_INVENTARIO_NO_UTILIZABLE as readonly string[]).includes(estatus);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BLOQUEO POR RANGO DE FECHAS (vigencia, nov-2026).
+//
+//   • 'No Disponible' (y su legacy 'Bloqueado') bloquea SOLO dentro de su
+//     vigencia [bloqueo_fecha_inicio, bloqueo_fecha_fin] (ambas inclusivas).
+//     Fuera de ese rango la pieza SÍ se puede reservar (p. ej. el año que
+//     viene). fecha_fin NULL = indefinido (bloquea desde el inicio en adelante);
+//     sin fechas (filas previas a la vigencia) = bloquea todo.
+//     Un bloqueo PROGRAMADO (estatus aún Disponible, bloqueo_tipo lleno) ya
+//     bloquea su rango desde que se captura.
+//   • 'Inhabilitado' e 'Inactivo' no llevan vigencia: bloquean TODAS las fechas.
+//
+// El periodo pedido se compara contra las fechas tal cual están en BD
+// (solicitudCaras / catorcenas): si el rango toca aunque sea un día de una
+// catorcena, esa catorcena queda bloqueada.
+// ─────────────────────────────────────────────────────────────────────────────
+export const ESTATUS_INVENTARIO_BLOQUEO_TOTAL = ['Inhabilitado', 'Inactivo'] as const;
+export const ESTATUS_INVENTARIO_BLOQUEO_RANGO = ['No Disponible', 'Bloqueado'] as const;
+const BLOQUEO_TOTAL_SQL = ESTATUS_INVENTARIO_BLOQUEO_TOTAL.map((e) => `'${e}'`).join(',');
+const BLOQUEO_RANGO_SQL = ESTATUS_INVENTARIO_BLOQUEO_RANGO.map((e) => `'${e}'`).join(',');
+
+/**
+ * Condición SQL (booleana) "la pieza `alias` NO se puede usar en el periodo".
+ * `iniExpr`/`finExpr` son expresiones SQL del periodo pedido: columnas
+ * (`sc.inicio_periodo`) o placeholders. OJO con placeholders: el orden en que
+ * aparecen es `finExpr` y luego `iniExpr`.
+ */
+export function sqlInventarioNoUtilizableEnRango(alias: string, iniExpr: string, finExpr: string): string {
+  return `(COALESCE(${alias}.estatus, '') IN (${BLOQUEO_TOTAL_SQL})
+    OR ((COALESCE(${alias}.estatus, '') IN (${BLOQUEO_RANGO_SQL}) OR ${alias}.bloqueo_tipo IS NOT NULL)
+        AND (${alias}.bloqueo_fecha_inicio IS NULL OR ${alias}.bloqueo_fecha_inicio <= ${finExpr})
+        AND (${alias}.bloqueo_fecha_fin IS NULL OR ${alias}.bloqueo_fecha_fin >= ${iniExpr})))`;
+}
+
+export interface InventarioCamposBloqueo {
+  estatus: string | null;
+  bloqueo_tipo?: string | null;
+  bloqueo_fecha_inicio?: Date | string | null;
+  bloqueo_fecha_fin?: Date | string | null;
+}
+
+/** Date (DATE de MySQL = medianoche UTC) o string → 'YYYY-MM-DD'. */
+function aYmd(d: Date | string): string {
+  return typeof d === 'string' ? d.slice(0, 10) : d.toISOString().slice(0, 10);
+}
+
+/** Versión JS de sqlInventarioNoUtilizableEnRango (mismas reglas). */
+export function inventarioNoUtilizableEnRango(inv: InventarioCamposBloqueo | null | undefined, ini: Date | string, fin: Date | string): boolean {
+  if (!inv) return false;
+  const est = inv.estatus || '';
+  if ((ESTATUS_INVENTARIO_BLOQUEO_TOTAL as readonly string[]).includes(est)) return true;
+  const tieneBloqueoRango = (ESTATUS_INVENTARIO_BLOQUEO_RANGO as readonly string[]).includes(est) || !!inv.bloqueo_tipo;
+  if (!tieneBloqueoRango) return false;
+  const pIni = aYmd(ini);
+  const pFin = aYmd(fin);
+  if (inv.bloqueo_fecha_inicio && aYmd(inv.bloqueo_fecha_inicio) > pFin) return false;
+  if (inv.bloqueo_fecha_fin && aYmd(inv.bloqueo_fecha_fin) < pIni) return false;
+  return true;
+}
+
+/** ids de `inventarios` que NO se pueden usar en [ini, fin]. */
+export async function getInventarioIdsNoUtilizablesEnRango(ini: Date, fin: Date, tx?: TxClient): Promise<number[]> {
+  const client = tx ?? defaultPrisma;
+  const rows = await client.$queryRawUnsafe<{ id: number }[]>(
+    `SELECT i.id FROM inventarios i WHERE ${sqlInventarioNoUtilizableEnRango('i', '?', '?')}`,
+    fin, ini
+  );
+  return rows.map((r) => Number(r.id));
 }
 
 type TxClient = PrismaClient | Prisma.TransactionClient;
@@ -335,8 +407,9 @@ export async function createReservaConLock(
 
       // Estatus + tipo del inventario padre (mismo SELECT, con el espacio ya
       // bloqueado por el FOR UPDATE de arriba → lectura consistente).
-      const invRow = await tx.$queryRawUnsafe<{ td: string | null; estatus: string | null }[]>(
-        `SELECT i.tradicional_digital AS td, i.estatus AS estatus
+      const invRow = await tx.$queryRawUnsafe<({ td: string | null } & InventarioCamposBloqueo)[]>(
+        `SELECT i.tradicional_digital AS td, i.estatus AS estatus, i.bloqueo_tipo,
+                i.bloqueo_fecha_inicio, i.bloqueo_fecha_fin
          FROM espacio_inventario ei
          INNER JOIN inventarios i ON i.id = ei.inventario_id
          WHERE ei.id = ? LIMIT 1`,
@@ -348,7 +421,9 @@ export async function createReservaConLock(
       // traía desde antes de inhabilitarla, o un request stale). getDisponibles ya
       // la excluye del listado; esto es el candado DURO del lado servidor que cierra
       // ese hueco de borde. Aplica también a Digital: inhabilitada es inhabilitada.
-      if (esInventarioNoUtilizable(invRow[0]?.estatus)) {
+      // No Disponible solo bloquea dentro de su vigencia (ver
+      // inventarioNoUtilizableEnRango): fuera de ese rango sí se reserva.
+      if (inventarioNoUtilizableEnRango(invRow[0], fechaInicio, fechaFin)) {
         throw new Error('INVENTARIO_BLOQUEADO');
       }
 

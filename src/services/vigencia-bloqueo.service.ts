@@ -1,39 +1,51 @@
-// Vigencia de los bloqueos administrativos de inventario (No Disponible /
-// Inhabilitado). Columnas `inventarios.bloqueo_*` (schema.prisma).
+// Vigencia de los bloqueos administrativos de inventario. Columnas
+// `inventarios.bloqueo_*` (schema.prisma).
 //
-// Al bloquear una pieza (toggleBlock) se puede capturar un periodo opcional:
-//   - fecha_inicio: desde cuándo. Hoy (o sin fecha) = se aplica de inmediato.
-//     Futura = bloqueo PROGRAMADO: el estatus NO cambia hasta esa fecha; lo
-//     aplica el job diario y entre tanto la pieza sigue reservable.
-//   - fecha_fin: hasta cuándo. NULL = indefinido, se queda bloqueado hasta que
-//     alguien lo habilite a mano.
-//   - bloqueo_usuario_id: quién bloqueó. Es a quien le llega la tarea al
-//     cumplirse la vigencia.
+// Reglas (rediseño 2026-11-27):
+//   - 'No Disponible' lleva vigencia [fecha_inicio, fecha_fin] (ambas
+//     inclusivas). Bloquea SOLO ese rango: fuera de él la pieza se puede
+//     reservar (la regla vive en inventario-bloqueo.service.ts →
+//     inventarioNoUtilizableEnRango / sqlInventarioNoUtilizableEnRango).
+//       · fecha_inicio: hoy (o sin fecha) = se aplica de inmediato. Futura =
+//         bloqueo PROGRAMADO: el estatus sigue Disponible hasta ese día (lo
+//         aplica el job), pero el rango ya queda bloqueado desde que se captura.
+//       · fecha_fin: NULL = indefinido (hasta habilitar a mano).
+//   - 'Inhabilitado' NO lleva vigencia: bloquea todas las fechas, se aplica de
+//     inmediato y solo se quita a mano.
+//   - Al bloquear (inmediato o programado) se liberan las reservas que se
+//     traslapan con el rango. Si el rango toca aunque sea un día de una
+//     catorcena, esa reserva se libera.
 //
 // Job diario `procesarVigenciasBloqueo` (server.ts: 00:00 CDMX + al arrancar,
 // idempotente):
-//   1. Aplica los bloqueos programados cuya fecha de inicio ya llegó (libera
-//      reservas vigentes igual que un bloqueo manual) y avisa al usuario.
-//   2. Para los bloqueos cuya fecha fin ya se cumplió y aún no se avisó, crea
-//      una tarea 'Vigencia Bloqueo Inventario' al usuario que bloqueó. Desde la
-//      tarea (NotificacionesPage) se puede rehabilitar la pieza con un clic.
-//      El bloqueo NO se levanta solo: la decisión es del usuario.
+//   1. Aplica el estatus de los bloqueos programados cuya fecha de inicio llegó.
+//   2. Los bloqueos cuya fecha fin ya pasó (fin < hoy) regresan SOLOS a
+//      Disponible y a quien bloqueó le llega una notificación informativa.
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '../utils/prisma';
 import {
   ESTATUS_INVENTARIO_BLOQUEO,
   ESTATUS_INVENTARIO_BLOQUEO_SQL,
+  ESTATUS_INVENTARIO_BLOQUEO_RANGO,
   TipoBloqueoInventario,
 } from './inventario-bloqueo.service';
 
 type TxClient = PrismaClient | Prisma.TransactionClient;
 
-/** `tareas.tipo` de la tarea que se crea al cumplirse la vigencia. Espejo en
- *  el front: lib/bloqueoInventario.ts (TAREA_TIPO_VIGENCIA_BLOQUEO). */
+/** `tareas.tipo` de las tareas que creaba la versión anterior al cumplirse la
+ *  vigencia (rehabilitar a mano). Ya no se crean; se conserva porque el front
+ *  todavía pinta las que existan. */
 export const TAREA_TIPO_VIGENCIA_BLOQUEO = 'Vigencia Bloqueo Inventario';
 
 const RE_FECHA = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Estatus de reserva que se liberan al bloquear (todo lo que aparta o vende la pieza). */
+const ESTATUS_RESERVA_LIBERABLES = [
+  'Reservado', 'Bonificado', 'Reservado Bloqueado', 'Bonificado Bloqueado',
+  'Vendido', 'Vendido bonificado', 'Con Arte', 'Sin Arte',
+];
+const ESTATUS_RESERVA_LIBERABLES_SQL = ESTATUS_RESERVA_LIBERABLES.map((e) => `'${e}'`).join(',');
 
 /** Hoy en CDMX como 'YYYY-MM-DD' (la zona del server puede diferir). */
 export function hoyCDMX(): string {
@@ -68,18 +80,31 @@ export interface VigenciaBloqueo {
   fecha_fin: string | null;
 }
 
+function esTipoConVigencia(tipo: string): boolean {
+  return (ESTATUS_INVENTARIO_BLOQUEO_RANGO as readonly string[]).includes(tipo);
+}
+
 /**
  * Valida el body de toggleBlock ({ fecha_inicio?, fecha_fin? }). Sin fechas →
- * vigencia desde hoy e indefinida. Devuelve `error` con el mensaje para 400.
+ * vigencia desde hoy e indefinida. 'Inhabilitado' no acepta fechas. Devuelve
+ * `error` con el mensaje para 400.
  */
-export function parseVigenciaBody(body: unknown): { vigencia: VigenciaBloqueo; error?: undefined } | { vigencia?: undefined; error: string } {
+export function parseVigenciaBody(body: unknown, tipo: TipoBloqueoInventario): { vigencia: VigenciaBloqueo; error?: undefined } | { vigencia?: undefined; error: string } {
   const b = (body ?? {}) as Record<string, unknown>;
   const hoy = hoyCDMX();
   const rawInicio = b.fecha_inicio;
   const rawFin = b.fecha_fin;
+  const vacio = (v: unknown) => v === undefined || v === null || v === '';
+
+  if (!esTipoConVigencia(tipo)) {
+    if (!vacio(rawInicio) || !vacio(rawFin)) {
+      return { error: `${tipo} no lleva vigencia: bloquea todas las fechas hasta que se habilite manualmente.` };
+    }
+    return { vigencia: { fecha_inicio: hoy, fecha_fin: null } };
+  }
 
   let inicio = hoy;
-  if (rawInicio !== undefined && rawInicio !== null && rawInicio !== '') {
+  if (!vacio(rawInicio)) {
     if (typeof rawInicio !== 'string' || !RE_FECHA.test(rawInicio)) {
       return { error: 'fecha_inicio inválida. Formato esperado: YYYY-MM-DD' };
     }
@@ -89,7 +114,7 @@ export function parseVigenciaBody(body: unknown): { vigencia: VigenciaBloqueo; e
   }
 
   let fin: string | null = null;
-  if (rawFin !== undefined && rawFin !== null && rawFin !== '') {
+  if (!vacio(rawFin)) {
     if (typeof rawFin !== 'string' || !RE_FECHA.test(rawFin)) {
       return { error: 'fecha_fin inválida. Formato esperado: YYYY-MM-DD' };
     }
@@ -120,6 +145,37 @@ function verboDeAccion(accion: string): string {
     : 'desbloqueó';
 }
 
+/**
+ * Soft-delete de las reservas de la pieza que se traslapan con la vigencia.
+ * Nunca toca reservas que ya terminaron (el límite inferior es
+ * max(fecha_inicio, hoy)), para no borrar historial de pautas vencidas. El
+ * estatus de la reserva se preserva para auditoría; solo `deleted_at` la saca
+ * del flujo. Al desbloquear NO se restauran.
+ */
+export async function liberarReservasEnVigencia(tx: TxClient, inventarioId: number, vigencia: VigenciaBloqueo): Promise<number> {
+  const hoy = hoyCDMX();
+  const desde = vigencia.fecha_inicio > hoy ? vigencia.fecha_inicio : hoy;
+  if (vigencia.fecha_fin && vigencia.fecha_fin < desde) return 0;
+  // r.inventario_id puede apuntar a inventarios.id o a espacio_inventario.id
+  // (polimórfico). Soft-delete ambos casos.
+  const result = await tx.$executeRawUnsafe(
+    `UPDATE reservas r
+     LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
+     INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
+     SET r.deleted_at = NOW()
+     WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
+       AND r.deleted_at IS NULL
+       AND r.estatus IN (${ESTATUS_RESERVA_LIBERABLES_SQL})
+       AND sc.fin_periodo >= ?
+       AND (? IS NULL OR sc.inicio_periodo <= ?)`,
+    inventarioId,
+    fechaADate(desde),
+    vigencia.fecha_fin ? fechaADate(vigencia.fecha_fin) : null,
+    vigencia.fecha_fin ? fechaADate(vigencia.fecha_fin) : null
+  );
+  return Number(result) || 0;
+}
+
 interface AplicarBloqueoArgs {
   id: number;
   codigo: string | null;
@@ -132,34 +188,17 @@ interface AplicarBloqueoArgs {
 }
 
 /**
- * Aplica el bloqueo a una pieza: soft-delete de sus reservas vigentes, estatus
- * = tipo, columnas de vigencia e historial. Compartido por toggleBlock (bloqueo
+ * Aplica el bloqueo a una pieza: libera reservas en el rango, estatus = tipo,
+ * columnas de vigencia e historial. Compartido por toggleBlock (bloqueo
  * inmediato) y por el job diario (bloqueo programado). Debe ir dentro de una
  * transacción (recibe `tx`).
- *
- * Solo se liberan reservas ACTUALES o FUTURAS (`sc.fin_periodo >= CURDATE()`):
- * las pasadas se conservan para no borrar historial de pautas vencidas. El
- * estatus de la reserva se preserva para auditoría; solo `deleted_at` la saca
- * del flujo. Al desbloquear NO se restauran: eso lo decide el asesor con las
- * tareas que genera el front.
  */
 export async function aplicarBloqueoInventario(tx: TxClient, args: AplicarBloqueoArgs): Promise<{ liberadas: number }> {
-  const { id, codigo, tipo, vigencia, usuarioId, userName, nota } = args;
+  const { id, codigo, tipo, usuarioId, userName, nota } = args;
+  // Inhabilitado no lleva vigencia (aunque venga de un programado viejo).
+  const vigencia: VigenciaBloqueo = esTipoConVigencia(tipo) ? args.vigencia : { fecha_inicio: args.vigencia.fecha_inicio, fecha_fin: null };
 
-  // r.inventario_id puede apuntar a inventarios.id o a espacio_inventario.id
-  // (polimórfico). Soft-delete ambos casos.
-  const result = await tx.$executeRawUnsafe(
-    `UPDATE reservas r
-     LEFT JOIN espacio_inventario ein ON ein.id = r.inventario_id
-     INNER JOIN solicitudCaras sc ON sc.id = r.solicitudCaras_id
-     SET r.deleted_at = NOW()
-     WHERE COALESCE(ein.inventario_id, r.inventario_id) = ?
-       AND r.deleted_at IS NULL
-       AND r.estatus IN ('Reservado','Bonificado','Vendido','Vendido bonificado','Con Arte','Sin Arte')
-       AND sc.fin_periodo >= CURDATE()`,
-    id
-  );
-  const liberadas = Number(result) || 0;
+  const liberadas = await liberarReservasEnVigencia(tx, id, vigencia);
 
   await tx.inventarios.update({
     where: { id },
@@ -167,14 +206,11 @@ export async function aplicarBloqueoInventario(tx: TxClient, args: AplicarBloque
       estatus: tipo,
       // Ya aplicado, el tipo vive en `estatus`. Se deja NULL a propósito:
       // `bloqueo_tipo` lleno + estatus no bloqueado es lo que el job y el front
-      // leen como "programado pendiente". Si alguien después pone la pieza en
-      // Disponible por otra vía (formulario de edición, CSV), no debe quedar
-      // como programada ni volver a bloquearse sola.
+      // leen como "programado pendiente".
       bloqueo_tipo: null,
       bloqueo_fecha_inicio: fechaADate(vigencia.fecha_inicio),
       bloqueo_fecha_fin: vigencia.fecha_fin ? fechaADate(vigencia.fecha_fin) : null,
       bloqueo_usuario_id: usuarioId,
-      // Nueva vigencia → nuevo aviso al vencer.
       bloqueo_aviso_at: null,
     },
   });
@@ -182,7 +218,7 @@ export async function aplicarBloqueoInventario(tx: TxClient, args: AplicarBloque
   const partes = [
     `${userName} ${verboDeAccion(tipo)} el inventario ${codigo || id}`,
     nota || null,
-    `— vigencia ${describirVigencia(vigencia)}`,
+    esTipoConVigencia(tipo) ? `— vigencia ${describirVigencia(vigencia)}` : '— sin vigencia (todas las fechas)',
     liberadas > 0 ? `— ${liberadas} reservas liberadas` : null,
   ].filter(Boolean);
 
@@ -201,10 +237,13 @@ export async function aplicarBloqueoInventario(tx: TxClient, args: AplicarBloque
 
 /**
  * Deja la pieza como programada: guarda tipo + vigencia + usuario SIN tocar el
- * estatus ni las reservas. El job diario la aplicará el día de fecha_inicio.
+ * estatus. El rango ya queda bloqueado para reservar y las reservas que se
+ * traslapan se liberan desde ahora. El job diario pone el estatus el día de
+ * fecha_inicio.
  */
-export async function programarBloqueoInventario(tx: TxClient, args: Omit<AplicarBloqueoArgs, 'nota'>): Promise<void> {
+export async function programarBloqueoInventario(tx: TxClient, args: Omit<AplicarBloqueoArgs, 'nota'>): Promise<{ liberadas: number }> {
   const { id, codigo, tipo, vigencia, usuarioId, userName } = args;
+  const liberadas = await liberarReservasEnVigencia(tx, id, vigencia);
   await tx.inventarios.update({
     where: { id },
     data: {
@@ -221,9 +260,13 @@ export async function programarBloqueoInventario(tx: TxClient, args: Omit<Aplica
       ref_id: id,
       accion: 'Bloqueo programado',
       fecha_hora: new Date(),
-      detalles: `${userName} programó el inventario ${codigo || id} como ${tipo} — vigencia ${describirVigencia(vigencia)}`,
+      detalles: [
+        `${userName} programó el inventario ${codigo || id} como ${tipo} — vigencia ${describirVigencia(vigencia)}`,
+        liberadas > 0 ? `— ${liberadas} reservas liberadas` : null,
+      ].filter(Boolean).join(' '),
     },
   });
+  return { liberadas };
 }
 
 /** Limpia las columnas de vigencia (al habilitar o al cancelar un programado). */
@@ -253,6 +296,8 @@ const SELECT_FILA = `SELECT id, codigo_unico, ubicacion, plaza, estatus, bloqueo
          bloqueo_fecha_inicio, bloqueo_fecha_fin, bloqueo_usuario_id
   FROM inventarios`;
 
+const BLOQUEO_RANGO_SQL = ESTATUS_INVENTARIO_BLOQUEO_RANGO.map((e) => `'${e}'`).join(',');
+
 async function nombreUsuario(id: number | null): Promise<string> {
   if (!id) return 'Sistema';
   const u = await prisma.usuario.findUnique({ where: { id }, select: { nombre: true } });
@@ -263,17 +308,27 @@ function esTipoBloqueo(v: string | null): v is TipoBloqueoInventario {
   return !!v && (ESTATUS_INVENTARIO_BLOQUEO as readonly string[]).includes(v);
 }
 
+function lineasInventario(inv: FilaVigencia): string[] {
+  return [
+    `Inventario: #${inv.id}${inv.codigo_unico ? ` — ${inv.codigo_unico}` : ''}`,
+    inv.ubicacion ? `Ubicación: ${inv.ubicacion}` : null,
+    inv.plaza ? `Plaza: ${inv.plaza}` : null,
+  ].filter((v): v is string => v !== null);
+}
+
 /**
  * Job diario. Idempotente: los programados se aplican una sola vez (al
  * aplicarse el estatus ya es de bloqueo y salen del filtro); los vencidos se
- * avisan una sola vez (`bloqueo_aviso_at`).
+ * regresan a Disponible y salen del filtro.
  */
-export async function procesarVigenciasBloqueo(): Promise<{ aplicados: number; avisados: number }> {
+export async function procesarVigenciasBloqueo(): Promise<{ aplicados: number; liberados: number }> {
   const hoy = hoyCDMX();
   let aplicados = 0;
-  let avisados = 0;
+  let liberados = 0;
 
   // ── 1) Bloqueos programados cuya fecha de inicio ya llegó ────────────────
+  // Si el server estuvo abajo y el programado ya venció (fin < hoy), no se
+  // aplica: el paso 2 no lo vería (sigue Disponible), así que solo se limpia.
   const programados = await prisma.$queryRawUnsafe<FilaVigencia[]>(
     `${SELECT_FILA}
      WHERE bloqueo_tipo IS NOT NULL
@@ -291,6 +346,10 @@ export async function procesarVigenciasBloqueo(): Promise<{ aplicados: number; a
       fecha_fin: dateAFecha(inv.bloqueo_fecha_fin),
     };
     try {
+      if (vigencia.fecha_fin && vigencia.fecha_fin < hoy) {
+        await prisma.inventarios.update({ where: { id: inv.id }, data: datosLimpiarVigencia() });
+        continue;
+      }
       const userName = await nombreUsuario(inv.bloqueo_usuario_id);
       const { liberadas } = await prisma.$transaction(tx =>
         aplicarBloqueoInventario(tx, {
@@ -310,12 +369,10 @@ export async function procesarVigenciasBloqueo(): Promise<{ aplicados: number; a
           data: {
             titulo: `Bloqueo programado aplicado — #${inv.id}${inv.codigo_unico ? ` ${inv.codigo_unico}` : ''}`,
             descripcion: [
-              `Inventario: #${inv.id}${inv.codigo_unico ? ` — ${inv.codigo_unico}` : ''}`,
-              inv.ubicacion ? `Ubicación: ${inv.ubicacion}` : null,
-              inv.plaza ? `Plaza: ${inv.plaza}` : null,
+              ...lineasInventario(inv),
               `Tipo: ${tipo}`,
               `Vigencia: ${describirVigencia(vigencia)}`,
-              liberadas > 0 ? `Reservas liberadas: ${liberadas}` : 'Sin reservas vigentes que liberar.',
+              liberadas > 0 ? `Reservas liberadas hoy: ${liberadas}` : null,
             ].filter(Boolean).join('\n'),
             tipo: 'Notificación',
             categoria: 'cambio_estatus',
@@ -333,72 +390,63 @@ export async function procesarVigenciasBloqueo(): Promise<{ aplicados: number; a
     }
   }
 
-  // ── 2) Bloqueos cuya vigencia ya se cumplió y aún no se avisó ────────────
+  // ── 2) Vigencias cumplidas: la pieza regresa sola a Disponible ───────────
+  // fecha_fin es inclusiva: el día fin sigue bloqueada; al día siguiente se libera.
   const vencidos = await prisma.$queryRawUnsafe<FilaVigencia[]>(
     `${SELECT_FILA}
-     WHERE estatus IN (${ESTATUS_INVENTARIO_BLOQUEO_SQL})
+     WHERE estatus IN (${BLOQUEO_RANGO_SQL})
        AND bloqueo_fecha_fin IS NOT NULL
-       AND bloqueo_fecha_fin <= ?
-       AND bloqueo_aviso_at IS NULL
-       AND bloqueo_usuario_id IS NOT NULL`,
+       AND bloqueo_fecha_fin < ?`,
     hoy
   );
 
   for (const inv of vencidos) {
-    const usuarioId = inv.bloqueo_usuario_id as number;
     const fechaInicio = dateAFecha(inv.bloqueo_fecha_inicio);
     const fechaFin = dateAFecha(inv.bloqueo_fecha_fin);
     try {
-      const nombre = await nombreUsuario(usuarioId);
-      const etiqueta = inv.estatus === 'Inhabilitado' ? 'Habilitar' : 'Marcar Disponible';
-      await prisma.tareas.create({
-        data: {
-          titulo: `Vigencia cumplida — #${inv.id}${inv.codigo_unico ? ` ${inv.codigo_unico}` : ''}`,
-          descripcion: [
-            `Inventario: #${inv.id}${inv.codigo_unico ? ` — ${inv.codigo_unico}` : ''}`,
-            inv.ubicacion ? `Ubicación: ${inv.ubicacion}` : null,
-            inv.plaza ? `Plaza: ${inv.plaza}` : null,
-            `Estatus actual: ${inv.estatus}`,
-            `Vigencia: ${describirVigencia({ fecha_inicio: fechaInicio, fecha_fin: fechaFin })}`,
-            '',
-            `La vigencia del bloqueo terminó el ${fechaCorta(fechaFin)}. La pieza sigue como ${inv.estatus}: revisa y, si procede, usa "${etiqueta}" desde esta tarea para rehabilitarla.`,
-          ].filter(v => v !== null).join('\n'),
-          tipo: TAREA_TIPO_VIGENCIA_BLOQUEO,
-          estatus: 'Pendiente',
-          id_responsable: usuarioId,
-          responsable: nombre,
-          id_asignado: String(usuarioId),
-          asignado: nombre,
-          id_solicitud: '',
-          // Lo lee el front (NotificacionesPage) para pintar la pieza y el botón
-          // de rehabilitar sin parsear la descripción.
-          contenido: JSON.stringify({
-            inventario_id: inv.id,
-            codigo_unico: inv.codigo_unico,
-            ubicacion: inv.ubicacion,
-            plaza: inv.plaza,
-            tipo: inv.estatus,
-            fecha_inicio: fechaInicio,
-            fecha_fin: fechaFin,
-          }),
-        },
+      await prisma.$transaction(async (tx) => {
+        await tx.inventarios.update({
+          where: { id: inv.id },
+          data: { estatus: 'Disponible', ...datosLimpiarVigencia() },
+        });
+        await tx.historial.create({
+          data: {
+            tipo: 'Inventario',
+            ref_id: inv.id,
+            accion: 'Vigencia cumplida',
+            fecha_hora: new Date(),
+            detalles: `Se cumplió la vigencia del bloqueo del inventario ${inv.codigo_unico || inv.id} (${describirVigencia({ fecha_inicio: fechaInicio, fecha_fin: fechaFin })}); regresó automáticamente a Disponible`,
+          },
+        });
       });
-      await prisma.inventarios.update({ where: { id: inv.id }, data: { bloqueo_aviso_at: new Date() } });
-      await prisma.historial.create({
-        data: {
-          tipo: 'Inventario',
-          ref_id: inv.id,
-          accion: 'Vigencia cumplida',
-          fecha_hora: new Date(),
-          detalles: `Se cumplió la vigencia del bloqueo del inventario ${inv.codigo_unico || inv.id} (${fechaCorta(fechaFin)}); tarea enviada a ${nombre}`,
-        },
-      });
-      avisados += 1;
+      liberados += 1;
+
+      if (inv.bloqueo_usuario_id) {
+        await prisma.tareas.create({
+          data: {
+            titulo: `Inventario Disponible otra vez — #${inv.id}${inv.codigo_unico ? ` ${inv.codigo_unico}` : ''}`,
+            descripcion: [
+              ...lineasInventario(inv),
+              `Vigencia: ${describirVigencia({ fecha_inicio: fechaInicio, fecha_fin: fechaFin })}`,
+              '',
+              `La vigencia del bloqueo terminó el ${fechaCorta(fechaFin)} y la pieza regresó automáticamente a Disponible.`,
+            ].join('\n'),
+            tipo: 'Notificación',
+            categoria: 'cambio_estatus',
+            estatus: 'Pendiente',
+            id_responsable: inv.bloqueo_usuario_id,
+            responsable: '',
+            asignado: 'Sistema',
+            id_asignado: '',
+            id_solicitud: '',
+          },
+        });
+      }
     } catch (err) {
-      console.error(`[VigenciaBloqueos] Error avisando vencimiento del inventario ${inv.id}:`, err);
+      console.error(`[VigenciaBloqueos] Error regresando a Disponible el inventario ${inv.id}:`, err);
     }
   }
 
-  console.log(`[VigenciaBloqueos] hoy CDMX ${hoy}: programados aplicados=${aplicados} (de ${programados.length}), vencimientos avisados=${avisados} (de ${vencidos.length})`);
-  return { aplicados, avisados };
+  console.log(`[VigenciaBloqueos] hoy CDMX ${hoy}: programados aplicados=${aplicados} (de ${programados.length}), vencidos a Disponible=${liberados} (de ${vencidos.length})`);
+  return { aplicados, liberados };
 }
