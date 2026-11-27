@@ -510,6 +510,145 @@ export async function reenviarPruebaRechazada(input: {
   return updated;
 }
 
+// Jos 2026-11-27: reenvío EN LOTE de N pruebas rechazadas del mismo batch.
+// Reemplaza el arte de cada una, las vuelve a 'revision_artes' y crea
+// UNA sola tarea 'Revisión de artes' agrupada con las N pruebas para que
+// Diseño las revise juntas (no N tareas individuales).
+export async function reenviarPruebasBatch(input: {
+  pruebas: Array<{
+    pruebaId: number;
+    archivo: string;
+    archivo_data?: string | null;
+    enlace_externo?: string | null;
+    nombre_arte?: string | null;
+    notas?: string | null;
+  }>;
+  userId: number;
+  userNombre: string;
+}) {
+  const { pruebas: items, userId, userNombre } = input;
+  if (!items || items.length === 0) throw new Error('No hay pruebas para reenviar');
+
+  // Validar y sobreescribir cada prueba en orden.
+  const pruebasActualizadas: Array<any> = [];
+  for (const it of items) {
+    if ((!it.archivo || !it.archivo.trim()) && (!it.enlace_externo || !it.enlace_externo.trim())) {
+      throw new Error(`Falta archivo o link en una de las pruebas (id ${it.pruebaId})`);
+    }
+    const prueba = await prisma.pruebas_color.findFirst({ where: { id: it.pruebaId, deleted_at: null } });
+    if (!prueba) throw new Error(`Prueba #${it.pruebaId} no encontrada`);
+    if (prueba.estatus !== 'rechazada') {
+      throw new Error(`Solo se puede reenviar una prueba rechazada (prueba #${it.pruebaId}, estatus actual: ${prueba.estatus})`);
+    }
+    const updated = await prisma.pruebas_color.update({
+      where: { id: it.pruebaId },
+      data: {
+        archivo: it.archivo || '',
+        archivo_data: it.archivo_data || null,
+        enlace_externo: it.enlace_externo || null,
+        nombre_arte: it.nombre_arte || prueba.nombre_arte,
+        notas: it.notas != null ? it.notas : prueba.notas,
+        estatus: 'revision_artes',
+      },
+    });
+    pruebasActualizadas.push(updated);
+  }
+
+  // Todas las pruebas deben ser del mismo propuesta_id (para crear UNA tarea).
+  const propuestaId = pruebasActualizadas[0].propuesta_id;
+  const scId = pruebasActualizadas[0].sc_id;
+
+  // Crear UNA sola tarea Revisión de artes batch con las N pruebas —
+  // reutiliza crearTareaRevisionArte con pruebaIdsBatch.
+  let nuevaTareaId: number | null = null;
+  try {
+    const sc = await prisma.solicitudCaras.findFirst({ where: { id: scId } });
+    const pivot = pruebasActualizadas[0];
+    nuevaTareaId = await crearTareaRevisionArte(
+      pivot.id,
+      propuestaId,
+      scId,
+      sc?.articulo || null,
+      sc?.formato || null,
+      sc?.ciudad || null,
+      userNombre,
+      userId,
+      pivot.archivo || '',
+      pivot.nombre_arte || null,
+      { pruebaIdsBatch: pruebasActualizadas.map(p => p.id) },
+    );
+    if (nuevaTareaId) {
+      await prisma.pruebas_color.updateMany({
+        where: { id: { in: pruebasActualizadas.map(p => p.id) } },
+        data: { tarea_revision_id: nuevaTareaId },
+      });
+    }
+  } catch (e) {
+    console.error('[pruebasColor.reenviarBatch] crear tarea Revisión batch falló:', e);
+  }
+
+  // Cerrar la tarea Corrección batch que estaban atendiendo (busca por
+  // pruebaColorIds del contenido que coincida con las ids reenviadas).
+  try {
+    const tareasCorreccion = await prisma.tareas.findMany({
+      where: {
+        tipo: { in: ['Corrección', 'Prueba de Color'] },
+        estatus: { in: ['Pendiente', 'En proceso', 'En Proceso'] },
+      },
+      select: { id: true, contenido: true },
+    });
+    const idsAtender = new Set(pruebasActualizadas.map(p => p.id));
+    const cerrar = tareasCorreccion.filter(t => {
+      if (!t.contenido) return false;
+      try {
+        const c = JSON.parse(t.contenido);
+        if (Array.isArray(c.pruebaColorIds)) {
+          return (c.pruebaColorIds as unknown[]).every(v => idsAtender.has(Number(v)));
+        }
+        return idsAtender.has(Number(c.pruebaColorId));
+      } catch { return false; }
+    });
+    if (cerrar.length > 0) {
+      const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+      await prisma.tareas.updateMany({
+        where: { id: { in: cerrar.map(t => t.id) } },
+        data: { estatus: 'Finalizada', fecha_fin: now },
+      });
+    }
+  } catch (e) {
+    console.error('[pruebasColor.reenviarBatch] cerrar tareas Corrección falló:', e);
+  }
+
+  // Log historial + socket.
+  try {
+    await logHistorial({
+      tipo: 'Propuesta',
+      refId: propuestaId,
+      accion: `Reenvió ${pruebasActualizadas.length} artes de prueba de color en lote para re-revisión`,
+      usuario: userNombre,
+      usuarioId: userId,
+      origen: 'pruebas_color',
+      cambios: pruebasActualizadas.map(p => ({ campo: 'estatus', label: `Prueba v${p.version}`, antes: 'rechazada', despues: 'revision_artes' })),
+      extras: { pruebaIds: pruebasActualizadas.map(p => p.id), scId, tareaId: nuevaTareaId },
+    });
+  } catch (e) {
+    console.error('[pruebasColor.reenviarBatch] logHistorial falló:', e);
+  }
+
+  try {
+    emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+      tipo: 'Revisión de artes',
+      propuestaId,
+      scId,
+      tareaId: nuevaTareaId,
+    });
+  } catch (e) {
+    console.error('[pruebasColor.reenviarBatch] emitToAll falló:', e);
+  }
+
+  return { pruebas: pruebasActualizadas, tareaId: nuevaTareaId };
+}
+
 async function resolverCampaniaIdDePropuesta(propuestaId: number): Promise<number | null> {
   const cot = await prisma.cotizacion.findFirst({
     where: { id_propuesta: propuestaId },

@@ -12,6 +12,7 @@ import {
   listarTareasAsociadas,
   resolverTareaAsociada,
   reenviarPruebaRechazada,
+  reenviarPruebasBatch,
   esTipoPruebaValido,
   EstatusPruebaColor,
   TipoPrueba,
@@ -364,6 +365,49 @@ export async function reenviar(req: AuthRequest, res: Response): Promise<void> {
     res.json({ success: true, data: result });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Error al reenviar prueba';
+    res.status(400).json({ success: false, error: message });
+  }
+}
+
+// Jos 2026-11-27: reenvío en LOTE de N pruebas rechazadas del mismo batch.
+// El back crea UNA sola tarea Revisión de artes agrupada para Diseño en
+// vez de N tareas individuales.
+export async function reenviarBatch(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const rol = req.user?.rol;
+    const userId = req.user?.userId;
+    const userNombre = req.user?.nombre || 'Usuario';
+    if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    if (!puedeCrearPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo analistas y administradores pueden reenviar pruebas' });
+      return;
+    }
+    const { pruebas } = req.body as {
+      pruebas?: Array<{
+        pruebaId: number;
+        archivo?: string;
+        archivo_data?: string;
+        enlace_externo?: string;
+        nombre_arte?: string;
+        notas?: string;
+      }>;
+    };
+    if (!Array.isArray(pruebas) || pruebas.length === 0) {
+      res.status(400).json({ success: false, error: 'Debes enviar al menos una prueba' });
+      return;
+    }
+    const sanitizadas = pruebas.map(p => ({
+      pruebaId: Number(p.pruebaId),
+      archivo: typeof p.archivo === 'string' ? p.archivo.trim() : '',
+      archivo_data: p.archivo_data || null,
+      enlace_externo: typeof p.enlace_externo === 'string' ? p.enlace_externo.trim() : null,
+      nombre_arte: p.nombre_arte != null ? String(p.nombre_arte).trim() : undefined,
+      notas: p.notas != null ? String(p.notas) : undefined,
+    }));
+    const result = await reenviarPruebasBatch({ pruebas: sanitizadas, userId, userNombre });
+    res.json({ success: true, data: result });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Error al reenviar pruebas en lote';
     res.status(400).json({ success: false, error: message });
   }
 }

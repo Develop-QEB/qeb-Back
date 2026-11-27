@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { crear, crearBatch, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea, reenviar } from '../controllers/pruebasColor.controller';
+import { crear, crearBatch, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea, reenviar, reenviarBatch } from '../controllers/pruebasColor.controller';
 
 const router = Router();
 router.use(authMiddleware);
@@ -23,5 +23,8 @@ router.patch('/:id/tareas/:tareaId', resolverTarea);
 
 // Jos 2026-10-12: reenviar una prueba rechazada (edita en sitio sin crear v2).
 router.post('/:id/reenviar', reenviar);
+// Jos 2026-11-27: reenvío en LOTE — crea UNA sola tarea Revisión de artes
+// con N artes corregidos (en vez de N tareas individuales).
+router.post('/batch/reenviar', reenviarBatch);
 
 export default router;
