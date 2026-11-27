@@ -818,7 +818,11 @@ async function notificarActualizacionEstatus(input: {
   enlace_adjunto?: string | null;
 }) {
   const { prueba, nuevoEstatus, actor, actorId, comentario, archivo_adjunto, enlace_adjunto } = input;
-  if (prueba.created_by === actorId) return; // el mismo creador no se auto-notifica
+  // Jos 2026-11-27: en rechazos siempre se crea la tarea de aviso al creador
+  // (aunque el revisor sea el mismo que la creó — p.ej. al probar), para que
+  // quede en Mis Tareas la acción "subir nueva versión". En otros estatus se
+  // mantiene el skip para no auto-notificar al creador.
+  if (prueba.created_by === actorId && nuevoEstatus !== 'rechazada') return;
 
   // Jos 2026-11-12: al pasar a 'arte_aprobado' el hook ya crea la tarea
   // Seguimiento (es la que el creador debe atender). La notificación
@@ -1092,7 +1096,10 @@ export async function listarTareasAsociadas(pruebaId: number) {
   // (el front guarda pruebaColorId en contenido al disparar createTarea).
   const tareas = await prisma.tareas.findMany({
     where: {
-      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Impresión', 'Recepción'] },
+      // Jos 2026-11-27: incluir 'Prueba de Color' (la tarea de aviso al
+      // creador cuando le rechazan el arte para que suba nueva versión) para
+      // que aparezca en el drawer de "Tareas de la prueba" del modal.
+      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Prueba de Color', 'Impresión', 'Recepción'] },
     },
     orderBy: { id: 'desc' },
     take: 100,
