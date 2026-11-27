@@ -26,7 +26,7 @@ import {
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
 import { aplicarHookRecepcion, aplicarHookInstalacion, registrarMovimiento } from '../services/almacenArtes.service';
 import { normalizaHoraHHMM } from '../utils/dateHelper';
-import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, desplazarTentativasEnEspacios, notificarReservasDesplazadas, ESTATUS_FIRME, ESTATUS_TENTATIVO, esInventarioNoUtilizable, sqlInventarioNoUtilizableEnRango, inventarioNoUtilizableEnRango, InventarioCamposBloqueo } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro } from '../services/circuito-completado.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride, rtCarasInvariante, esArticuloServicioCF, esArticuloBfCf } from '../utils/bonifCara';
@@ -420,7 +420,9 @@ async function buildInventarioOcupacionRows(
     occByInv.set(Number(o.inventario_id), { firme: Number(o.has_firme) === 1, tent: Number(o.has_tent) === 1 });
   }
 
-  // 2) Catálogo de inventario (excluye Bloqueado/Inhabilitado/Inactivo, igual que getDisponibles).
+  // 2) Catálogo de inventario utilizable en el periodo, igual que getDisponibles:
+  //    Inhabilitado/Inactivo fuera siempre; No Disponible solo si su vigencia
+  //    toca el periodo.
   const inv = await prisma.$queryRawUnsafe<{
     id: number; codigo_unico: string | null; tipo_de_cara: string | null;
     tipo_de_mueble: string | null; mueble: string | null; plaza: string | null;
@@ -429,7 +431,8 @@ async function buildInventarioOcupacionRows(
     `SELECT id, codigo_unico, tipo_de_cara, tipo_de_mueble, mueble, plaza, municipio,
             tradicional_digital, cto
        FROM inventarios
-      WHERE (estatus IS NULL OR estatus NOT IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}))`
+      WHERE NOT ${sqlInventarioNoUtilizableEnRango('inventarios', '?', '?')}`,
+    finFiltro, inicioFiltro
   );
 
   const dateOnly = (d: Date): string => {
@@ -11776,8 +11779,11 @@ export class CampanasController {
           sc.articulo,
           sc.inicio_periodo,
           sc.fin_periodo,
+          -- Bloqueo administrativo EN EL PERIODO de la cara (No Disponible
+          -- solo cuenta si su vigencia toca el periodo).
+          CASE WHEN ${sqlInventarioNoUtilizableEnRango('i', 'sc.inicio_periodo', 'sc.fin_periodo')} THEN 1 ELSE 0 END as bloqueado_periodo,
           CASE
-            WHEN i.estatus IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}) THEN 0
+            WHEN ${sqlInventarioNoUtilizableEnRango('i', 'sc.inicio_periodo', 'sc.fin_periodo')} THEN 0
             WHEN i.tradicional_digital = 'Digital' THEN 1
             WHEN EXISTS (
               SELECT 1 FROM reservas r2
@@ -11834,11 +11840,12 @@ export class CampanasController {
           ? (est === 'Inhabilitado' ? 'Inhabilitado' : est === 'Bloqueado' ? 'Bloqueado' : 'No Disponible')
           : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
         const disponible = Number(r.disponible) === 1;
+        const bloqueadoPeriodo = Number(r.bloqueado_periodo) === 1;
         return {
           ...r,
           disponible,
           motivo_salida,
-          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible') : 'Ocupado en el periodo'),
+          motivo_no_disponible: disponible ? null : (bloqueadoPeriodo ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible en el periodo') : 'Ocupado en el periodo'),
         };
       });
 
@@ -12058,15 +12065,15 @@ export class CampanasController {
             // re-ocupaba una pieza No Disponible/Inhabilitada (QA dev 14-oct).
             // Resolución polimórfica del id (espacio_inventario.id o inventarios.id),
             // mismo patrón COALESCE que toggleBlock.
-            const invEstRows = await prisma.$queryRawUnsafe<{ estatus: string | null }[]>(
-              `SELECT i.estatus
+            const invEstRows = await prisma.$queryRawUnsafe<InventarioCamposBloqueo[]>(
+              `SELECT i.estatus, i.bloqueo_tipo, i.bloqueo_fecha_inicio, i.bloqueo_fecha_fin
                FROM inventarios i
                LEFT JOIN espacio_inventario ei ON ei.id = ?
                WHERE i.id = COALESCE(ei.inventario_id, ?)
                LIMIT 1`,
               espacioId, espacioId
             );
-            if (esInventarioNoUtilizable(invEstRows[0]?.estatus)) {
+            if (inventarioNoUtilizableEnRango(invEstRows[0], fechaIni, fechaFinDate)) {
               omitidosDetalleCamp.push({ inventario_id: reserva.inventario_id, motivo: 'Inventario no disponible/inhabilitado' });
               reservasOmitidas++;
               continue;

@@ -12,7 +12,7 @@ import {
   getSapDatabaseDePropuesta
 } from '../services/autorizacion.service';
 import { autoReservarCircuito, redistribuirReservasCircuito, liberarReservasCircuitoPorEdicion, validarFechaEnPeriodoCara, resolverCalendarioReserva, anclarPeriodoCatorcena } from '../services/circuitos.service';
-import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL, esInventarioNoUtilizable, bloquearCircuitoPropuesta, desbloquearCircuitoPropuesta } from '../services/inventario-bloqueo.service';
+import { getEspaciosBloqueados, createReservaConLock, venderReservasPropuestaConGuardian, VentaConflictoError, DesplazadaInfo, notificarReservasDesplazadas, esInventarioNoUtilizable, sqlInventarioNoUtilizableEnRango, inventarioNoUtilizableEnRango, bloquearCircuitoPropuesta, desbloquearCircuitoPropuesta } from '../services/inventario-bloqueo.service';
 import { evaluarCompletadoSeguro, evaluarCompletadoPorReservasSeguro } from '../services/circuito-completado.service';
 import { registrarPaseVentasSeguro } from '../services/pase-ventas.service';
 import { getInventarioPropuestaConVersion } from '../services/inventario-propuesta.service';
@@ -4061,8 +4061,11 @@ export class PropuestasController {
           sc.articulo,
           sc.inicio_periodo,
           sc.fin_periodo,
+          -- Bloqueo administrativo EN EL PERIODO de la cara (No Disponible
+          -- solo cuenta si su vigencia toca el periodo).
+          CASE WHEN ${sqlInventarioNoUtilizableEnRango('i', 'sc.inicio_periodo', 'sc.fin_periodo')} THEN 1 ELSE 0 END as bloqueado_periodo,
           CASE
-            WHEN i.estatus IN (${ESTATUS_INVENTARIO_NO_UTILIZABLE_SQL}) THEN 0
+            WHEN ${sqlInventarioNoUtilizableEnRango('i', 'sc.inicio_periodo', 'sc.fin_periodo')} THEN 0
             WHEN i.tradicional_digital = 'Digital' THEN 1
             WHEN EXISTS (
               SELECT 1 FROM reservas r2
@@ -4121,11 +4124,12 @@ export class PropuestasController {
           ? (est === 'Inhabilitado' ? 'Inhabilitado' : est === 'Bloqueado' ? 'Bloqueado' : 'No Disponible')
           : (desplazados.has(cod) ? 'Desplazado' : 'Quitado');
         const disponible = Number(r.disponible) === 1;
+        const bloqueadoPeriodo = Number(r.bloqueado_periodo) === 1;
         return {
           ...r,
           disponible,
           motivo_salida,
-          motivo_no_disponible: disponible ? null : (bloqueado ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible') : 'Ocupado en el periodo'),
+          motivo_no_disponible: disponible ? null : (bloqueadoPeriodo ? (est === 'Inhabilitado' ? 'Inventario inhabilitado' : 'Inventario no disponible en el periodo') : 'Ocupado en el periodo'),
         };
       });
 
@@ -4525,12 +4529,12 @@ export class PropuestasController {
       // el check race-safe sigue viviendo dentro del lock.
       const invEstatusToggle = await prisma.inventarios.findUnique({
         where: { id: parseInt(inventarioId) },
-        select: { estatus: true },
+        select: { estatus: true, bloqueo_tipo: true, bloqueo_fecha_inicio: true, bloqueo_fecha_fin: true },
       });
-      if (esInventarioNoUtilizable(invEstatusToggle?.estatus)) {
+      if (inventarioNoUtilizableEnRango(invEstatusToggle, new Date(fechaInicio), new Date(fechaFin))) {
         res.status(409).json({
           success: false,
-          error: 'Este inventario está marcado como No Disponible o Inhabilitado y no se puede reservar.',
+          error: 'Este inventario está No Disponible o Inhabilitado en este periodo y no se puede reservar.',
         });
         return;
       }
