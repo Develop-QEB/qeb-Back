@@ -429,6 +429,12 @@ model pruebas_color {
   // se borra tambien el arte de la biblioteca.
   tipo              String    @default("prueba_color") @db.VarChar(25)
   version           Int       @default(1)
+  // Jos 2026-11-27: id de la tarea 'Revisión de artes' activa que agrupa
+  // esta prueba. Pruebas creadas en el mismo batch comparten este valor y el
+  // front las colapsa en UNA card con sus N artes. Null para pruebas viejas
+  // (pre-batch) hasta que un backfill las puebla. Se actualiza al crear la
+  // tarea individual, al crear batch y al reenviar (nueva tarea).
+  tarea_revision_id Int?
   created_by        Int
   created_by_nombre String    @db.VarChar(255)
   created_at        DateTime  @default(now()) @db.DateTime(0)
@@ -441,6 +447,7 @@ model pruebas_color {
   @@index([reserva_id])
   @@index([estatus])
   @@index([tipo, propuesta_id], map: "idx_tipo_propuesta")
+  @@index([tarea_revision_id], map: "idx_pc_tarea_revision")
 }
 
 // Filtro Autorizacion "Quitar Posteo" — comercial pide desposteo de un APS

@@ -191,7 +191,16 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   // guardó y no queremos regresar 500 al usuario por una tarea/historial
   // colgado. Cada uno tiene su propio try/catch para no cortar los otros.
   try {
-    await crearTareaRevisionArte(prueba.id, propuestaId, scId, sc.articulo || null, sc.formato || null, sc.ciudad || null, createdByNombre, createdBy, archivo, nombre_arte || null);
+    const tareaId = await crearTareaRevisionArte(prueba.id, propuestaId, scId, sc.articulo || null, sc.formato || null, sc.ciudad || null, createdByNombre, createdBy, archivo, nombre_arte || null);
+    // Jos 2026-11-27: enlaza la prueba a su tarea de Revisión activa para que
+    // el front pueda agrupar (batch) y no se vean cards duplicadas.
+    if (tareaId) {
+      try {
+        await prisma.pruebas_color.update({ where: { id: prueba.id }, data: { tarea_revision_id: tareaId } });
+      } catch (e) {
+        console.error('[pruebasColor.crear] enlazar tarea_revision_id falló:', e);
+      }
+    }
   } catch (e) {
     console.error('[pruebasColor.crear] crearTareaRevisionArte falló:', e);
   }
@@ -331,6 +340,18 @@ export async function crearPruebaColorBatch(input: {
         primero.nombre_arte || null,
         { pruebaIdsBatch: pruebasCreadas.map(p => p.id) },
       );
+      // Jos 2026-11-27: enlaza las N pruebas del batch a la tarea compartida
+      // para que el front las colapse en UNA sola card con N artes.
+      if (tareaId) {
+        try {
+          await prisma.pruebas_color.updateMany({
+            where: { id: { in: pruebasCreadas.map(p => p.id) } },
+            data: { tarea_revision_id: tareaId },
+          });
+        } catch (e) {
+          console.error('[pruebasColor.crearBatch] enlazar tarea_revision_id falló:', e);
+        }
+      }
     } catch (e) {
       console.error('[pruebasColor.crearBatch] crearTareaRevisionArte falló:', e);
     }
@@ -420,7 +441,7 @@ export async function reenviarPruebaRechazada(input: {
   const sc = await prisma.solicitudCaras.findFirst({ where: { id: prueba.sc_id } });
 
   try {
-    await crearTareaRevisionArte(
+    const nuevaTareaId = await crearTareaRevisionArte(
       prueba.id,
       prueba.propuesta_id,
       prueba.sc_id,
@@ -432,6 +453,15 @@ export async function reenviarPruebaRechazada(input: {
       archivo,
       updated.nombre_arte,
     );
+    // Jos 2026-11-27: enlazar al reenviar (la tarea anterior quedó cerrada
+    // con el rechazo; la nueva tarea es la activa para esta prueba).
+    if (nuevaTareaId) {
+      try {
+        await prisma.pruebas_color.update({ where: { id: prueba.id }, data: { tarea_revision_id: nuevaTareaId } });
+      } catch (e) {
+        console.error('[pruebasColor.reenviar] enlazar tarea_revision_id falló:', e);
+      }
+    }
   } catch (e) {
     console.error('[pruebasColor.reenviar] crearTareaRevisionArte falló:', e);
   }
