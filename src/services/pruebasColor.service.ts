@@ -68,7 +68,6 @@ export const ROLES_PRUEBA_COLOR = new Set([
   'Producción',
   'Asesor Comercial',
   'Asesor Comercial Aeropuerto',
-  'Asesor Analista',
   'Analista de Servicio al Cliente',
   'Administrador',
   'DEV',
@@ -80,13 +79,8 @@ export function puedeGestionarPruebaColor(rol: string | null | undefined): boole
 
 // Jos 2026-10-12: separar permisos.
 // CREAR / SOLICITAR / REENVIAR: solo analistas y administradores.
-// Jos 2026-11-24: ampliar a Asesores Comerciales — ellos tambien manejan el flujo
-// de pruebas de color y revisiones anticipadas desde propuestas.
 const ROLES_CREAR_PRUEBA_COLOR = new Set<string>([
   'Analista de Servicio al Cliente',
-  'Asesor Comercial',
-  'Asesor Comercial Aeropuerto',
-  'Asesor Analista',
   'Administrador',
   'DEV',
 ]);
