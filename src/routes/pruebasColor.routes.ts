@@ -21,10 +21,12 @@ router.delete('/:id', eliminar);
 router.get('/:id/tareas', listarTareas);
 router.patch('/:id/tareas/:tareaId', resolverTarea);
 
-// Jos 2026-10-12: reenviar una prueba rechazada (edita en sitio sin crear v2).
-router.post('/:id/reenviar', reenviar);
 // Jos 2026-11-27: reenvío en LOTE — crea UNA sola tarea Revisión de artes
 // con N artes corregidos (en vez de N tareas individuales).
+// IMPORTANTE: debe ir ANTES de /:id/reenviar porque Express evalúa en orden
+// y si no, 'batch' lo interpreta como el param :id.
 router.post('/batch/reenviar', reenviarBatch);
+// Jos 2026-10-12: reenviar una prueba rechazada (edita en sitio sin crear v2).
+router.post('/:id/reenviar', reenviar);
 
 export default router;
