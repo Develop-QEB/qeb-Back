@@ -650,6 +650,16 @@ export async function reenviarPruebasBatch(input: {
       scId,
       tareaId: nuevaTareaId,
     });
+    // Jos 2026-11-27: emitir también TAREA_CREADA (nueva Revisión batch) y
+    // TAREA_ACTUALIZADA (Corrección cerrada) para que el modal real-time
+    // (useSocketPruebasColor) refresque todo el drawer en vivo.
+    if (nuevaTareaId) {
+      emitToAll(SOCKET_EVENTS.TAREA_CREADA, { tareaId: nuevaTareaId, tipo: 'Revisión de artes', propuestaId });
+    }
+    emitToAll(SOCKET_EVENTS.TAREA_ACTUALIZADA, { tipo: 'Corrección', propuestaId });
+    for (const p of pruebasActualizadas) {
+      emitToAll(SOCKET_EVENTS.ARTE_SUBIDO, { pruebaColorId: p.id, propuestaId, scId });
+    }
   } catch (e) {
     console.error('[pruebasColor.reenviarBatch] emitToAll falló:', e);
   }
@@ -1001,7 +1011,10 @@ async function notificarActualizacionEstatus(input: {
   // Seguimiento (es la que el creador debe atender). La notificación
   // 'Prueba de Color' tipo "arte aprobado" queda redundante y se veía
   // colgada en Mis Tareas (feedback Akary). Se omite para evitar duplicados.
-  if (nuevoEstatus === 'arte_aprobado') return;
+  // Jos 2026-11-27: lo mismo al llegar a 'aprobada' — es el estado FINAL,
+  // llega cuando el asesor finaliza el Seguimiento; no tiene sentido crear
+  // otra notif "Prueba de Color aprobada" Pendiente (quedaba colgada).
+  if (nuevoEstatus === 'arte_aprobado' || nuevoEstatus === 'aprobada') return;
 
   const labelEstatus: Record<EstatusPruebaColor, string> = {
     solicitada: 'en revisión de arte',
