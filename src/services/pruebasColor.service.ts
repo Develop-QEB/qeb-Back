@@ -494,9 +494,11 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     // al pasar a 'aprobada' (al finalizar Seguimiento), lo cual era tarde:
     // Jos necesita el arte disponible en el Gestor para seleccionarlo mientras
     // el seguimiento sigue vivo. Idempotente via ON DUPLICATE KEY UPDATE.
-    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && (prueba.archivo || prueba.enlace_externo)) {
+    // Jos 2026-11-24: si Diseño respondió con archivo/enlace en el comentario
+    // de aprobación, ese es el arte que va a biblioteca_artes (no prueba.archivo).
+    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        await vincularArteAprobadoABibliotecaCampania(prueba);
+        await vincularArteAprobadoABibliotecaCampania(prueba, { archivo_adjunto, enlace_adjunto });
       } catch (e) {
         console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca (arte_aprobado) falló:', e);
       }
@@ -513,11 +515,14 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     // Jos 2026-10-29: cuando una Revision Anticipada se aprueba y la prueba
     // ya esta ligada a una campania, el arte se vincula a biblioteca_artes
     // de la campania (tab Aprobados). Las pruebas de color NO vinculan —
-    // solo RA, como pidio Jos. Si solo hay enlace_externo (sin archivo
-    // subido) tambien se vincula usando el link como "archivo".
-    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id && (prueba.archivo || prueba.enlace_externo)) {
+    // solo RA, como pidio Jos.
+    // Jos 2026-11-24: si Diseño respondió con archivo/enlace en la aprobación
+    // de la Revisión, se usan ESOS (leídos de la evidencia de la tarea) para
+    // mantener consistencia con lo vinculado en arte_aprobado.
+    if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        await vincularArteAprobadoABibliotecaCampania(prueba);
+        const adjuntosAprobacion = await leerAdjuntosDeUltimaRevisionAprobada(prueba.id);
+        await vincularArteAprobadoABibliotecaCampania(prueba, adjuntosAprobacion);
       } catch (e) {
         console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca falló:', e);
       }
@@ -1070,28 +1075,79 @@ export async function vincularPruebasConReservas(reservaIds: number[]): Promise<
  * que si la prueba solo tiene link (enlace_externo) sin archivo subido,
  * usamos el link como "archivo" para preservar el flujo. El tab Aprobados
  * del front ya maneja URLs externas.
+ *
+ * Jos 2026-11-24: cuando Diseño respondió con archivo/enlace en el comentario
+ * de aprobación de la Revisión, ESE es el arte que entra a biblioteca_artes
+ * (no el archivo original del asesor). Las URLs del enlace de aprobación
+ * también se integran como filas adicionales. Si no hay adjuntos de Diseño,
+ * fallback al comportamiento viejo (prueba.archivo o prueba.enlace_externo).
  */
-async function vincularArteAprobadoABibliotecaCampania(prueba: {
-  id: number;
-  campania_id: number | null;
-  archivo: string;
-  enlace_externo: string | null;
-  nombre_arte: string | null;
-  created_by: number | null;
-}) {
+async function vincularArteAprobadoABibliotecaCampania(
+  prueba: {
+    id: number;
+    campania_id: number | null;
+    archivo: string;
+    enlace_externo: string | null;
+    nombre_arte: string | null;
+    created_by: number | null;
+  },
+  override?: { archivo_adjunto?: string | null; enlace_adjunto?: string | null },
+) {
   if (!prueba.campania_id) return;
-  const archivo = (prueba.archivo && prueba.archivo.trim()) || (prueba.enlace_externo && prueba.enlace_externo.trim()) || null;
-  if (!archivo) return;
+  const archivosAVincular: string[] = [];
+  const archivoAdj = (override?.archivo_adjunto || '').trim();
+  const enlaceAdj = (override?.enlace_adjunto || '').trim();
+  if (archivoAdj || enlaceAdj) {
+    // Prioridad al adjunto que respondió Diseño en el comentario de aprobación.
+    if (archivoAdj) archivosAVincular.push(archivoAdj);
+    if (enlaceAdj) archivosAVincular.push(enlaceAdj);
+  } else {
+    // Fallback legacy: archivo o enlace original de la prueba.
+    const fallback = (prueba.archivo && prueba.archivo.trim()) || (prueba.enlace_externo && prueba.enlace_externo.trim()) || null;
+    if (fallback) archivosAVincular.push(fallback);
+  }
+  if (archivosAVincular.length === 0) return;
   // tipo 'tradicional' por default; si el archivo trae indicio digital
   // (JPG/PNG/MP4 marcados por path), el back ya los diferencia. Para RA
   // asumimos tradicional porque es el flujo documentado de la brochita.
   const nombreArte = (prueba.nombre_arte && prueba.nombre_arte.trim()) || null;
-  await prisma.$executeRawUnsafe(`
-    INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
-    VALUES (?, ?, 'tradicional', ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
-      nota = COALESCE(VALUES(nota), nota)
-  `, prueba.campania_id, archivo, nombreArte, `Aprobado desde Revisión Anticipada #${prueba.id}`, null, null, prueba.created_by || null);
-  console.log(`[pruebasColor.vincularArteAprobadoABibliotecaCampania] RA #${prueba.id} -> biblioteca_artes campania=${prueba.campania_id} archivo=${archivo}`);
+  for (const archivo of archivosAVincular) {
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO biblioteca_artes (campania_id, archivo, tipo, nombre_arte, nota, estatus_operaciones, nombre_generico, created_by_id)
+      VALUES (?, ?, 'tradicional', ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        nombre_arte = COALESCE(VALUES(nombre_arte), nombre_arte),
+        nota = COALESCE(VALUES(nota), nota)
+    `, prueba.campania_id, archivo, nombreArte, `Aprobado desde Revisión Anticipada #${prueba.id}`, null, null, prueba.created_by || null);
+  }
+  console.log(`[pruebasColor.vincularArteAprobadoABibliotecaCampania] RA #${prueba.id} -> biblioteca_artes campania=${prueba.campania_id} archivos=${archivosAVincular.join(' | ')}`);
+}
+
+/**
+ * Jos 2026-11-24: lee los adjuntos (archivo/enlace) que Diseño respondió en
+ * la aprobación de la última tarea de "Revisión de artes" de esta prueba.
+ * Se usa en el hook `aprobada` para mantener consistencia con lo vinculado
+ * en el hook `arte_aprobado` cuando el analista finaliza Seguimiento.
+ */
+async function leerAdjuntosDeUltimaRevisionAprobada(pruebaId: number): Promise<{ archivo_adjunto: string | null; enlace_adjunto: string | null }> {
+  type Row = { evidencia: string | null };
+  const rows = await prisma.$queryRawUnsafe<Row[]>(
+    `SELECT evidencia FROM tareas
+     WHERE tipo = 'Revisión de artes'
+       AND estatus = 'Atendido'
+       AND JSON_EXTRACT(contenido, '$.pruebaColorId') = ?
+     ORDER BY id DESC
+     LIMIT 1`,
+    pruebaId,
+  );
+  const evidenciaRaw = rows && rows[0]?.evidencia;
+  if (!evidenciaRaw) return { archivo_adjunto: null, enlace_adjunto: null };
+  try {
+    const obj = JSON.parse(evidenciaRaw);
+    const archivo = typeof obj?.archivoAdjunto === 'string' ? obj.archivoAdjunto : null;
+    const enlace = typeof obj?.enlaceAdjunto === 'string' ? obj.enlaceAdjunto : null;
+    return { archivo_adjunto: archivo, enlace_adjunto: enlace };
+  } catch {
+    return { archivo_adjunto: null, enlace_adjunto: null };
+  }
 }
