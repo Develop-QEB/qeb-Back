@@ -453,9 +453,13 @@ export async function reenviarPruebaRechazada(input: {
       archivo,
       updated.nombre_arte,
     );
-    // Jos 2026-11-27: enlazar al reenviar (la tarea anterior quedó cerrada
-    // con el rechazo; la nueva tarea es la activa para esta prueba).
-    if (nuevaTareaId) {
+    // Jos 2026-11-27: enlazar al reenviar — pero SOLO si la prueba no ya
+    // pertenecía a un batch (tarea_revision_id del lote original). Si sí
+    // pertenecía, mantenemos el id original para que el front siga
+    // agrupando v1+v2 en el mismo lote y el drawer de hermanas encuentre
+    // la nueva Revisión via el pruebaColorId en contenido. Para pruebas
+    // individuales (sin batch) sí seteamos el nuevo id.
+    if (nuevaTareaId && !prueba.tarea_revision_id) {
       try {
         await prisma.pruebas_color.update({ where: { id: prueba.id }, data: { tarea_revision_id: nuevaTareaId } });
       } catch (e) {
