@@ -702,11 +702,14 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     // al pasar a 'aprobada' (al finalizar Seguimiento), lo cual era tarde:
     // Jos necesita el arte disponible en el Gestor para seleccionarlo mientras
     // el seguimiento sigue vivo. Idempotente via ON DUPLICATE KEY UPDATE.
-    // Jos 2026-11-24: si Diseño respondió con archivo/enlace en el comentario
-    // de aprobación, ese es el arte que va a biblioteca_artes (no prueba.archivo).
+    // Jos 2026-11-27: si Diseño reemplazó el archivo en la aprobación, el
+    // resolver ya hizo UPDATE pruebas_color.archivo = archivo_adjunto antes
+    // de llegar aquí. Entonces vinculamos SOLO prueba.archivo (que ya es el
+    // reemplazo si lo hubo). No pasar override evita filas duplicadas en
+    // biblioteca (el original + el adjunto).
     if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        await vincularArteAprobadoABibliotecaCampania(prueba, { archivo_adjunto, enlace_adjunto });
+        await vincularArteAprobadoABibliotecaCampania(prueba);
       } catch (e) {
         console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca (arte_aprobado) falló:', e);
       }
@@ -724,13 +727,12 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     // ya esta ligada a una campania, el arte se vincula a biblioteca_artes
     // de la campania (tab Aprobados). Las pruebas de color NO vinculan —
     // solo RA, como pidio Jos.
-    // Jos 2026-11-24: si Diseño respondió con archivo/enlace en la aprobación
-    // de la Revisión, se usan ESOS (leídos de la evidencia de la tarea) para
-    // mantener consistencia con lo vinculado en arte_aprobado.
+    // Jos 2026-11-27: prueba.archivo ya refleja el reemplazo (si Diseño subió
+    // archivo en la aprobación, el resolver lo aplicó via UPDATE antes de
+    // llegar aquí). Vinculamos sin override para no duplicar filas.
     if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        const adjuntosAprobacion = await leerAdjuntosDeUltimaRevisionAprobada(prueba.id);
-        await vincularArteAprobadoABibliotecaCampania(prueba, adjuntosAprobacion);
+        await vincularArteAprobadoABibliotecaCampania(prueba);
       } catch (e) {
         console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca falló:', e);
       }
@@ -1185,6 +1187,22 @@ export async function resolverTareaAsociada(input: {
     };
     evidenciaActual.resolucionesPorPrueba = resoluciones;
 
+    // Jos 2026-11-27: "reemplazar" en vez de "adjuntar" — si Diseño sube
+    // archivo en la aprobacion/rechazo, ese REEMPLAZA al arte original de la
+    // prueba. Asi en biblioteca_artes (RA aprobada) solo queda el archivo
+    // reemplazado, no el original + el nuevo juntos (comportamiento anterior).
+    const archivoReemplazo = (archivo_adjunto || '').trim();
+    if (archivoReemplazo) {
+      try {
+        await prisma.pruebas_color.update({
+          where: { id: pruebaIdAccion },
+          data: { archivo: archivoReemplazo },
+        });
+      } catch (e) {
+        console.error('[pruebasColor.resolverEnBatch] reemplazo de archivo falló:', e);
+      }
+    }
+
     // 1) Actualizar la prueba especifica (arte_aprobado o rechazada).
     await actualizarEstatusPruebaColor({
       pruebaId: pruebaIdAccion,
@@ -1226,6 +1244,22 @@ export async function resolverTareaAsociada(input: {
     return { tareaId, nuevoEstatus: estatusFinal };
   };
 
+  // Jos 2026-11-27: "reemplazar" en vez de "adjuntar" — si Diseno sube
+  // archivo en la aprobacion/rechazo individual, ese REEMPLAZA al arte
+  // original (mismo comportamiento que en batch).
+  const aplicarReemplazoSiHay = async () => {
+    const archivoReemplazo = (archivo_adjunto || '').trim();
+    if (!archivoReemplazo) return;
+    try {
+      await prisma.pruebas_color.update({
+        where: { id: pruebaId },
+        data: { archivo: archivoReemplazo },
+      });
+    } catch (e) {
+      console.error('[pruebasColor.resolverTareaAsociada] reemplazo de archivo falló:', e);
+    }
+  };
+
   if (accion === 'aprobar' && tarea.tipo === 'Revisión de artes') {
     if (esBatch) return resolverEnBatch('arte_aprobado');
     // Flujo individual (hoy): marcar la tarea Atendido y transicionar la
@@ -1239,6 +1273,7 @@ export async function resolverTareaAsociada(input: {
         ...(evidenciaNueva ? { evidencia: evidenciaNueva } : {}),
       },
     });
+    await aplicarReemplazoSiHay();
     await actualizarEstatusPruebaColor({
       pruebaId,
       nuevoEstatus: 'arte_aprobado',
@@ -1265,6 +1300,7 @@ export async function resolverTareaAsociada(input: {
         ...(evidenciaNueva ? { evidencia: evidenciaNueva } : {}),
       },
     });
+    await aplicarReemplazoSiHay();
     await actualizarEstatusPruebaColor({
       pruebaId,
       nuevoEstatus: 'rechazada',
