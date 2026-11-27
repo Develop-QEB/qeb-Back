@@ -50,6 +50,21 @@ export function toolsParaClaude(): Anthropic.Tool[] {
 export const MARCA_FORMULARIO = 'ESTADO ACTUAL DEL FORMULARIO';
 
 /** contextoFormulario: lo que manda el chat del front con el formulario de solicitud abierto. */
+/**
+ * Red de seguridad: si la respuesta le dice al usuario que dé clic en un botón de
+ * acción pero en este mensaje no se generó esa acción (el modelo no llamó la
+ * herramienta o falló), se le avisa en vez de dejarlo buscando un botón que no hay.
+ */
+export function corregirPromesaDeBoton(reply: string, acciones: AccionChat[]): string {
+  const prometeSolicitud = /abrir solicitud prellenada/i.test(reply);
+  const prometeCircuito = /llenar (el )?circuito|usar este art[ií]culo/i.test(reply) && /bot[oó]n/i.test(reply);
+  const falta =
+    (prometeSolicitud && !acciones.some(a => a.tipo === 'prefill_solicitud')) ||
+    (prometeCircuito && !acciones.some(a => a.tipo === 'llenar_circuito'));
+  if (!falta) return reply;
+  return `${reply}\n\n(Aviso: no se pudo preparar el botón en este mensaje. Pídemelo de nuevo, por ejemplo: "llénalo en el formulario".)`;
+}
+
 export function nuevoContexto(usuario: UsuarioMcp, contextoFormulario?: string | null): ContextoChat {
   return { usuario, acciones: [] as AccionChat[], formularioAbierto: !!contextoFormulario && contextoFormulario.trim().length > 0 };
 }
@@ -98,6 +113,11 @@ REGLAS:
 - Manten el formato de siempre: texto plano, sin markdown ni tablas. Para listas usa guiones, un registro por linea con lo esencial (ID, nombre, cliente, estatus, periodo). Si hay mas de 10 resultados, muestra los primeros 10, di cuantos hay en total y ofrece filtrar o ver mas.
 - Escribe los montos con separador de miles y signo de pesos.
 - Nunca menciones al usuario los nombres internos de tus herramientas (buscar_cliente, llenar_circuito, etc.) ni ids internos; habla de lo que haces ("busco el cliente", "lleno el circuito").
+- Si una herramienta falla, dile al usuario que no pudiste consultar y que lo intente de nuevo. NUNCA rellenes el hueco con valores tipicos, ejemplos ni datos de tu base de conocimiento.
+- Solo di que aparece un boton ("Abrir solicitud prellenada", "Llenar circuito") si en ESTE mismo mensaje llamaste preparar_solicitud o llenar_circuito y respondio listo. Si no la llamaste o fallo, no menciones ningun boton.
+- NSE: los valores validos son los que devuelve opciones_inventario (en QEB son del tipo AB, ABC, ABC+, C, CD, CDE, D, DE). No uses la clasificacion A/B, C+, D+, E de tu base de conocimiento para capturar circuitos. Si el usuario dice "todos", manda nse: ["todos"] y el formulario selecciona todos los de la plaza.
+- Cuando el usuario confirme ("si", "dale", "correcto") lo que propusiste para un circuito o una solicitud, llama la herramienta en ese mismo mensaje; no vuelvas a preguntar lo mismo.
+- En buscar_articulo usa palabras de formato, plaza y tipo; no metas precios ni cantidades.
 
 === ARMAR UNA SOLICITUD NUEVA CON EL USUARIO ===
 

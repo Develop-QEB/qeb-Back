@@ -46,6 +46,8 @@ export interface OrdenCircuito {
   renta?: number;
   bonificacion?: number;
   nse?: string[];
+  /** El usuario pidió "todos" los NSE: el formulario selecciona todos los que existan en la plaza. */
+  nseTodos?: boolean;
   tarifaPublica?: number;
   /** Para el texto del botón. */
   descripcion?: string;
@@ -246,7 +248,9 @@ const buscarArticulo: HerramientaChat = {
     const palabras = String(args.busqueda || '')
       .split(/\s+/)
       .map(p => normalizar(p))
-      .filter(p => p.length >= 2)
+      // Fuera precios y cantidades ("4500", "$9,190", "80"): no están en el código ni en la descripción.
+      // (Se conservan números de circuito tipo "01", "02", que sí van en el código.)
+      .filter(p => p.length >= 2 && !(/^\d{2,}$/.test(p) && !/^0\d$/.test(p)))
       .map(p => variantes[p] || [p]);
     if (palabras.length === 0) throw new ErrorDeUso('Indica qué buscar, p. ej. "parabus guadalajara".');
     const conBonif = args.incluir_bonificacion === true;
@@ -530,7 +534,11 @@ const llenarCircuito: HerramientaChat = {
       caras: { type: 'integer', minimum: 0, description: 'Caras de renta por catorcena.' },
       bonificacion: { type: 'integer', minimum: 0, description: 'Caras bonificadas por catorcena (no más que las de renta).' },
       articulo_bf: { type: 'string', description: 'Código del artículo de bonificación (BF/CF), si hay bonificación.' },
-      nse: { type: 'array', items: { type: 'string' }, description: 'NSE exactamente como los da opciones_inventario.' },
+      nse: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'NSE exactamente como los da opciones_inventario (p. ej. "ABC+", "CD"). Si el usuario dice "todos", manda ["todos"].',
+      },
       tarifa_publica: { type: 'number', minimum: 0, description: 'Solo si el usuario quiere una tarifa distinta a la del artículo.' },
     },
     required: ['articulo'],
@@ -588,7 +596,9 @@ const llenarCircuito: HerramientaChat = {
       if (finTotal < aIni * 100 + cIni) throw new ErrorDeUso('La catorcena de fin no puede ser anterior a la de inicio.');
     }
 
-    const nse = Array.isArray(args.nse) ? args.nse.map(x => String(x).trim()).filter(Boolean).slice(0, 10) : undefined;
+    const nsePedido = Array.isArray(args.nse) ? args.nse.map(x => String(x).trim()).filter(Boolean).slice(0, 10) : [];
+    const nseTodos = nsePedido.some(n => /^(todos|todas|all|cualquiera|cualquier|\*)$/i.test(n));
+    const nse = nseTodos ? undefined : nsePedido;
     const tarifa = args.tarifa_publica !== undefined ? Number(args.tarifa_publica) : undefined;
     if (tarifa !== undefined && (!Number.isFinite(tarifa) || tarifa < 0)) throw new ErrorDeUso('tarifa_publica inválida.');
 
@@ -602,6 +612,7 @@ const llenarCircuito: HerramientaChat = {
       renta: caras,
       bonificacion,
       nse: nse && nse.length ? nse : undefined,
+      nseTodos: nseTodos || undefined,
       tarifaPublica: tarifa,
       descripcion: [
         art.ItemCode,
@@ -623,7 +634,7 @@ const llenarCircuito: HerramientaChat = {
       sin_llenar: [
         cIni === undefined ? 'periodo' : '',
         caras === undefined && tipoArt !== 'cortesía' ? 'caras' : '',
-        !nse || !nse.length ? 'NSE' : '',
+        !nseTodos && (!nse || !nse.length) ? 'NSE' : '',
       ].filter(Boolean),
     };
   },

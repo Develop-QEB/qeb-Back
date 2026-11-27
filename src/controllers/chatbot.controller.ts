@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
 import { emitToChatbotAdmin, getIO, SOCKET_EVENTS } from '../config/socket';
-import { chatbotToolsHabilitado, chatbotToolsModelo, ejecutarHerramienta, nuevoContexto, toolsParaClaude, SECCION_CONSULTAS, MARCA_FORMULARIO, type AccionChat } from '../mcp/chat';
+import { chatbotToolsHabilitado, chatbotToolsModelo, corregirPromesaDeBoton, ejecutarHerramienta, nuevoContexto, toolsParaClaude, SECCION_CONSULTAS, MARCA_FORMULARIO, type AccionChat } from '../mcp/chat';
 
 const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
@@ -1499,7 +1499,7 @@ export class ChatbotController {
           .map(b => b.text)
           .join('\n')
           .trim();
-        return { reply, acciones: ctx.acciones };
+        return { reply: corregirPromesaDeBoton(reply, ctx.acciones), acciones: ctx.acciones };
       }
 
       convo.push({ role: 'assistant', content: response.content });
