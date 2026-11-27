@@ -729,9 +729,14 @@ export async function aplicarHooksEstatus(
     comentario?: string;
     archivo_adjunto?: string | null;
     enlace_adjunto?: string | null;
+    // Jos 2026-11-27: en batch, las tareas Seguimiento (aprobadas) y
+    // Prueba de Color aviso (rechazadas) NO se crean 1-a-1 por prueba —
+    // resolverEnBatch las crea AGRUPADAS por estatus al final para evitar
+    // ruido (N artes aprobados → 1 Seguimiento con los N, no N tareas).
+    skipTareasAgregadas?: boolean;
   },
 ) {
-  const { userId, userNombre, comentario, archivo_adjunto, enlace_adjunto } = input;
+  const { userId, userNombre, comentario, archivo_adjunto, enlace_adjunto, skipTareasAgregadas } = input;
   const comentarioTrim = (comentario || '').trim();
   const pruebaId = prueba.id;
 
@@ -740,11 +745,13 @@ export async function aplicarHooksEstatus(
   if (nuevoEstatus === 'arte_aprobado') {
     try {
       await cerrarTareaAsociada(pruebaId, 'Revisión de artes', userNombre);
-      await crearTareaSeguimiento(prueba, userNombre, {
-        comentario: comentarioTrim,
-        archivo_adjunto,
-        enlace_adjunto,
-      });
+      if (!skipTareasAgregadas) {
+        await crearTareaSeguimiento(prueba, userNombre, {
+          comentario: comentarioTrim,
+          archivo_adjunto,
+          enlace_adjunto,
+        });
+      }
       // Jos 2026-11-12: cerrar notificaciones 'Prueba de Color' Pendientes
       // asociadas a esta prueba — ya hay Seguimiento que las reemplaza.
       await cerrarTareaAsociada(pruebaId, 'Prueba de Color', userNombre);
@@ -784,15 +791,17 @@ export async function aplicarHooksEstatus(
     }
   }
 
-  await notificarActualizacionEstatus({
-    prueba,
-    nuevoEstatus,
-    actor: userNombre,
-    actorId: userId,
-    comentario: comentarioTrim,
-    archivo_adjunto,
-    enlace_adjunto,
-  });
+  if (!skipTareasAgregadas) {
+    await notificarActualizacionEstatus({
+      prueba,
+      nuevoEstatus,
+      actor: userNombre,
+      actorId: userId,
+      comentario: comentarioTrim,
+      archivo_adjunto,
+      enlace_adjunto,
+    });
+  }
 
   emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
     tareaId: pruebaId,
@@ -1050,6 +1059,160 @@ async function crearTareaSeguimiento(
   });
 }
 
+// Jos 2026-11-27: crea UNA sola tarea Seguimiento para N pruebas aprobadas
+// en el mismo batch. El contenido lleva `pruebaColorIds` (array) para que
+// el front pueda renderizar la lista de artes a atender.
+async function crearTareaSeguimientoAgrupada(
+  pruebas: Array<{
+    id: number; propuesta_id: number; sc_id: number; version: number;
+    created_by: number; created_by_nombre: string; archivo: string;
+    nombre_arte: string | null;
+  }>,
+  actorNombre: string,
+  resoluciones: Record<string, unknown>,
+) {
+  // Caso borde: 1 prueba → degenera al flujo legacy para reutilizar UI.
+  if (pruebas.length === 1) {
+    const p = pruebas[0];
+    const r = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || undefined;
+    return crearTareaSeguimiento(p as any, actorNombre, {
+      comentario: typeof r?.comentario === 'string' ? r.comentario as string : undefined,
+      archivo_adjunto: typeof r?.archivoAdjunto === 'string' ? r.archivoAdjunto as string : null,
+      enlace_adjunto: typeof r?.enlaceAdjunto === 'string' ? r.enlaceAdjunto as string : null,
+    });
+  }
+
+  const ref = pruebas[0];
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 5);
+
+  const detallePorPrueba = pruebas.map(p => {
+    const r = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || {};
+    return {
+      pruebaColorId: p.id,
+      version: p.version,
+      scId: p.sc_id,
+      nombreArte: p.nombre_arte,
+      arte: p.archivo,
+      motivoAprobacion: typeof r?.comentario === 'string' ? (r.comentario as string).trim() || null : null,
+      aprobacionArchivo: typeof r?.archivoAdjunto === 'string' ? r.archivoAdjunto as string : null,
+      aprobacionEnlace: typeof r?.enlaceAdjunto === 'string' ? r.enlaceAdjunto as string : null,
+    };
+  });
+
+  const descripcion = [
+    `${actorNombre} aprobó ${pruebas.length} artes de la propuesta #${ref.propuesta_id}.`,
+    `Artes: ${pruebas.map(p => `v${p.version} (${p.nombre_arte || 'sin nombre'})`).join(', ')}.`,
+    'Gestiona el envío al proveedor y finaliza esta tarea cuando las pruebas estén aprobadas.',
+  ].join(' ');
+
+  await prisma.tareas.create({
+    data: {
+      tipo: 'Seguimiento Prueba de color',
+      titulo: `Seguimiento de ${pruebas.length} artes aprobados - Propuesta #${ref.propuesta_id}`,
+      descripcion,
+      estatus: 'Pendiente',
+      id_responsable: ref.created_by,
+      responsable: ref.created_by_nombre,
+      id_solicitud: '',
+      id_propuesta: String(ref.propuesta_id),
+      campania_id: null,
+      archivo: ref.archivo || null,
+      id_asignado: String(ref.created_by),
+      asignado: ref.created_by_nombre,
+      contenido: JSON.stringify({
+        pruebaColorIds: pruebas.map(p => p.id),
+        propuestaId: ref.propuesta_id,
+        scId: ref.sc_id,
+        origen: 'prueba_color_seguimiento',
+        esBatch: true,
+        artes: detallePorPrueba,
+      }),
+      fecha_inicio: now,
+      fecha_fin: fechaFin,
+    },
+  });
+}
+
+// Jos 2026-11-27: crea UNA sola tarea Prueba de Color (aviso de rechazo)
+// para N pruebas rechazadas en el mismo batch. El front renderiza la lista
+// de artes con su motivo y botón "Subir nueva versión" por cada uno.
+async function crearTareaRechazoAgrupada(
+  pruebas: Array<{
+    id: number; propuesta_id: number; sc_id: number; version: number;
+    created_by: number; created_by_nombre: string; archivo: string;
+    nombre_arte: string | null;
+  }>,
+  actorNombre: string,
+  actorId: number,
+  resoluciones: Record<string, unknown>,
+) {
+  // Caso borde: 1 prueba → degenera al flujo legacy (notificarActualizacionEstatus).
+  if (pruebas.length === 1) {
+    const p = pruebas[0];
+    const r = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || undefined;
+    return notificarActualizacionEstatus({
+      prueba: p as any,
+      nuevoEstatus: 'rechazada',
+      actor: actorNombre,
+      actorId,
+      comentario: typeof r?.comentario === 'string' ? r.comentario as string : undefined,
+      archivo_adjunto: typeof r?.archivoAdjunto === 'string' ? r.archivoAdjunto as string : null,
+      enlace_adjunto: typeof r?.enlaceAdjunto === 'string' ? r.enlaceAdjunto as string : null,
+    });
+  }
+
+  const ref = pruebas[0];
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const fechaFin = new Date(now); fechaFin.setDate(fechaFin.getDate() + 7);
+
+  const detallePorPrueba = pruebas.map(p => {
+    const r = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || {};
+    return {
+      pruebaColorId: p.id,
+      version: p.version,
+      scId: p.sc_id,
+      nombreArte: p.nombre_arte,
+      arte: p.archivo,
+      motivoRechazo: typeof r?.comentario === 'string' ? (r.comentario as string).trim() || null : null,
+      archivoAdjunto: typeof r?.archivoAdjunto === 'string' ? r.archivoAdjunto as string : null,
+      enlaceAdjunto: typeof r?.enlaceAdjunto === 'string' ? r.enlaceAdjunto as string : null,
+    };
+  });
+
+  const descripcion = [
+    `${actorNombre} rechazó ${pruebas.length} artes de la propuesta #${ref.propuesta_id}.`,
+    `Artes: ${pruebas.map(p => `v${p.version} (${p.nombre_arte || 'sin nombre'})`).join(', ')}.`,
+    'Abre la tarea para revisar motivos y subir una nueva versión de cada arte.',
+  ].join(' ');
+
+  await prisma.tareas.create({
+    data: {
+      tipo: 'Prueba de Color',
+      titulo: `${pruebas.length} artes rechazados - Propuesta #${ref.propuesta_id} (subir nueva versión)`,
+      descripcion,
+      estatus: 'Pendiente',
+      id_responsable: ref.created_by,
+      responsable: ref.created_by_nombre,
+      id_solicitud: '',
+      id_propuesta: String(ref.propuesta_id),
+      id_asignado: String(ref.created_by),
+      asignado: ref.created_by_nombre,
+      contenido: JSON.stringify({
+        pruebaColorIds: pruebas.map(p => p.id),
+        propuestaId: ref.propuesta_id,
+        scId: ref.sc_id,
+        origen: 'prueba_color_rechazo',
+        requiereNuevaVersion: true,
+        esBatch: true,
+        artes: detallePorPrueba,
+      }),
+      fecha_inicio: now,
+      fecha_fin: fechaFin,
+    },
+  });
+}
+
 // Cierra (marca como Finalizada) la tarea abierta ligada a una prueba
 // de color específica. Usa el campo `contenido` (JSON) para localizarla
 // por pruebaColorId. Idempotente.
@@ -1288,10 +1451,10 @@ export async function resolverTareaAsociada(input: {
       return { tareaId, nuevoEstatus: `Pendiente (${pendientes.length} por resolver)` };
     }
 
-    // Jos 2026-11-27: todas las pruebas ya están resueltas. Es momento de
-    // disparar los side-effects (Seguimiento para aprobadas, vincular RA a
-    // biblioteca, notificar). Cada prueba usa los adjuntos de SU propia
-    // resolución, leídos de evidencia.resolucionesPorPrueba.
+    // Jos 2026-11-27: todas las pruebas ya están resueltas. Disparamos los
+    // side-effects (cerrar Revisión, vincular RA a biblioteca, emit socket)
+    // con skipTareasAgregadas=true porque las tareas Seguimiento/Prueba de
+    // Color se crean AGRUPADAS por estatus al final, no 1-a-1.
     for (const p of pruebas) {
       const resPrueba = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || undefined;
       const comentarioPrueba = typeof resPrueba?.comentario === 'string' ? resPrueba.comentario as string : undefined;
@@ -1304,9 +1467,31 @@ export async function resolverTareaAsociada(input: {
           comentario: comentarioPrueba,
           archivo_adjunto: archivoAdjPrueba,
           enlace_adjunto: enlaceAdjPrueba,
+          skipTareasAgregadas: true,
         });
       } catch (e) {
         console.error(`[pruebasColor.resolverEnBatch] hooks de prueba ${p.id} fallaron:`, e);
+      }
+    }
+
+    // Jos 2026-11-27: crear las tareas AGRUPADAS por resolución.
+    // - Todas aprobadas → 1 Seguimiento con los N artes.
+    // - Todas rechazadas → 1 aviso Prueba de Color con los N artes.
+    // - Mix → 1 Seguimiento (aprobadas) + 1 aviso (rechazadas).
+    const aprobadas = pruebas.filter(p => p.estatus === 'arte_aprobado' || p.estatus === 'aprobada');
+    const rechazadas = pruebas.filter(p => p.estatus === 'rechazada');
+    if (aprobadas.length > 0) {
+      try {
+        await crearTareaSeguimientoAgrupada(aprobadas, userNombre, resoluciones);
+      } catch (e) {
+        console.error('[pruebasColor.resolverEnBatch] Seguimiento agrupado falló:', e);
+      }
+    }
+    if (rechazadas.length > 0) {
+      try {
+        await crearTareaRechazoAgrupada(rechazadas, userNombre, userId, resoluciones);
+      } catch (e) {
+        console.error('[pruebasColor.resolverEnBatch] Rechazo agrupado falló:', e);
       }
     }
 
@@ -1426,40 +1611,45 @@ export async function onFinalizarTareaSeguimiento(
 ): Promise<number | null> {
   if (tarea.tipo !== 'Seguimiento Prueba de color') return null;
   if (!tarea.contenido) return null;
-  let pruebaId: number | null = null;
+  // Jos 2026-11-27: la tarea puede ser individual (pruebaColorId) o batch
+  // (pruebaColorIds: array). En batch aprobamos TODAS las pruebas del grupo.
+  let pruebaIds: number[] = [];
   try {
     const c = JSON.parse(tarea.contenido);
     if (c.origen !== 'prueba_color_seguimiento') return null;
-    pruebaId = Number(c.pruebaColorId);
-    if (!Number.isFinite(pruebaId) || pruebaId <= 0) return null;
+    if (Array.isArray(c.pruebaColorIds)) {
+      pruebaIds = (c.pruebaColorIds as unknown[])
+        .map(v => Number(v))
+        .filter(n => Number.isFinite(n) && n > 0);
+    } else {
+      const pid = Number(c.pruebaColorId);
+      if (Number.isFinite(pid) && pid > 0) pruebaIds = [pid];
+    }
+    if (pruebaIds.length === 0) return null;
   } catch {
     return null;
   }
 
-  const prueba = await prisma.pruebas_color.findFirst({
-    where: { id: pruebaId, deleted_at: null },
-  });
-  if (!prueba) return null;
-
-  // Si ya está aprobada o rechazada (terminal), no hacer nada.
-  if (prueba.estatus === 'aprobada' || prueba.estatus === 'rechazada') return null;
-
-  // Transicionar a 'aprobada' respetando la validacion de estado. Como el
-  // origen ya venia de arte_aprobado o enviada_proveedor la transicion
-  // es legítima. Reusamos actualizarEstatusPruebaColor para el efecto
-  // completo (historial + socket + notificacion al creador).
-  try {
-    await actualizarEstatusPruebaColor({
-      pruebaId,
-      nuevoEstatus: 'aprobada',
-      userId,
-      userNombre,
+  let ultimoActualizado: number | null = null;
+  for (const pid of pruebaIds) {
+    const prueba = await prisma.pruebas_color.findFirst({
+      where: { id: pid, deleted_at: null },
     });
-    return pruebaId;
-  } catch (e) {
-    console.error(`[pruebasColor.onFinalizarTareaSeguimiento] no se pudo aprobar prueba #${pruebaId}:`, e);
-    return null;
+    if (!prueba) continue;
+    if (prueba.estatus === 'aprobada' || prueba.estatus === 'rechazada') continue;
+    try {
+      await actualizarEstatusPruebaColor({
+        pruebaId: pid,
+        nuevoEstatus: 'aprobada',
+        userId,
+        userNombre,
+      });
+      ultimoActualizado = pid;
+    } catch (e) {
+      console.error(`[pruebasColor.onFinalizarTareaSeguimiento] no se pudo aprobar prueba #${pid}:`, e);
+    }
   }
+  return ultimoActualizado;
 }
 
 /**
