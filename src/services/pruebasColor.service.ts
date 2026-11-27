@@ -633,6 +633,12 @@ interface ActualizarEstatusInput {
   nuevoEstatus: EstatusPruebaColor;
   userId: number;
   userNombre: string;
+  // Jos 2026-11-27: cuando la prueba pertenece a un batch de Revisión con
+  // artes aún pendientes, diferimos los side-effects (crear Seguimiento,
+  // vincular biblioteca, notificar, emit) hasta que TODAS las pruebas del
+  // batch estén resueltas. Se dispara `aplicarHooksEstatus` por cada una al
+  // cerrar la tarea batch.
+  diferirHooks?: boolean;
   // Comentario opcional (ej. motivo de rechazo capturado desde el modal).
   // Se concatena a la accion del historial para que quede trazabilidad.
   comentario?: string;
@@ -679,6 +685,56 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     extras: { pruebaId, scId: prueba.sc_id, ...(comentarioTrim ? { comentario: comentarioTrim } : {}) },
   });
 
+  // Jos 2026-11-27: side-effects (crear Seguimiento, cerrar tareas, vincular
+  // biblioteca, notificar creador, emit socket) se extraen a una función
+  // reutilizable. En resoluciones de batch los diferimos hasta que TODAS las
+  // pruebas del batch estén resueltas, para no generar la tarea Seguimiento
+  // de una prueba cuando otras del mismo batch siguen pendientes.
+  if (!input.diferirHooks) {
+    await aplicarHooksEstatus(prueba, nuevoEstatus, {
+      userId,
+      userNombre,
+      comentario: comentarioTrim,
+      archivo_adjunto,
+      enlace_adjunto,
+    });
+  }
+
+  return upd;
+}
+
+// Jos 2026-11-27: dispara los side-effects asociados a un cambio de estatus
+// de prueba (crear Seguimiento, cerrar Revisión, vincular biblioteca RA,
+// notificar creador, emit socket). Se llama al final de
+// `actualizarEstatusPruebaColor` y, para batches, se difiere hasta cerrar la
+// tarea de Revisión agrupada para que no haya artefactos a medias.
+export async function aplicarHooksEstatus(
+  prueba: {
+    id: number;
+    tipo: string | null;
+    propuesta_id: number;
+    sc_id: number;
+    campania_id: number | null;
+    archivo: string;
+    enlace_externo: string | null;
+    nombre_arte: string | null;
+    version: number;
+    created_by: number;
+    created_by_nombre: string;
+  },
+  nuevoEstatus: EstatusPruebaColor,
+  input: {
+    userId: number;
+    userNombre: string;
+    comentario?: string;
+    archivo_adjunto?: string | null;
+    enlace_adjunto?: string | null;
+  },
+) {
+  const { userId, userNombre, comentario, archivo_adjunto, enlace_adjunto } = input;
+  const comentarioTrim = (comentario || '').trim();
+  const pruebaId = prueba.id;
+
   // Hook 1: al aprobar el arte se cierra la tarea Revisión y se abre la
   // tarea Seguimiento para el analista/creador (Feedback Jos 2026-09-25).
   if (nuevoEstatus === 'arte_aprobado') {
@@ -690,71 +746,44 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
         enlace_adjunto,
       });
       // Jos 2026-11-12: cerrar notificaciones 'Prueba de Color' Pendientes
-      // asociadas a esta prueba — ya hay Seguimiento que las reemplaza. Fix
-      // para notificaciones colgadas en Mis Tareas (feedback Akary).
+      // asociadas a esta prueba — ya hay Seguimiento que las reemplaza.
       await cerrarTareaAsociada(pruebaId, 'Prueba de Color', userNombre);
     } catch (e) {
-      console.error('[pruebasColor.actualizar] hook arte_aprobado falló:', e);
+      console.error('[pruebasColor.aplicarHooks] arte_aprobado falló:', e);
     }
-    // Jos 2026-11-13: en Revisión Anticipada, el arte debe entrar a la
-    // biblioteca de la campaña DESDE que se aprueba la Revisión (antes
-    // de que el analista finalice Seguimiento). Antes solo se vinculaba
-    // al pasar a 'aprobada' (al finalizar Seguimiento), lo cual era tarde:
-    // Jos necesita el arte disponible en el Gestor para seleccionarlo mientras
-    // el seguimiento sigue vivo. Idempotente via ON DUPLICATE KEY UPDATE.
-    // Jos 2026-11-27: si Diseño reemplazó el archivo en la aprobación, el
-    // resolver ya hizo UPDATE pruebas_color.archivo = archivo_adjunto antes
-    // de llegar aquí. Entonces vinculamos SOLO prueba.archivo (que ya es el
-    // reemplazo si lo hubo). No pasar override evita filas duplicadas en
-    // biblioteca (el original + el adjunto).
     if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        await vincularArteAprobadoABibliotecaCampania(prueba);
+        await vincularArteAprobadoABibliotecaCampania(prueba as any);
       } catch (e) {
-        console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca (arte_aprobado) falló:', e);
+        console.error('[pruebasColor.aplicarHooks] vincular RA (arte_aprobado) falló:', e);
       }
     }
   }
 
-  // Hook 2: al llegar a aprobada se cierra la tarea Seguimiento (si existe).
   if (nuevoEstatus === 'aprobada') {
     try {
       await cerrarTareaAsociada(pruebaId, 'Seguimiento Prueba de color', userNombre);
     } catch (e) {
-      console.error('[pruebasColor.actualizar] hook aprobada falló:', e);
+      console.error('[pruebasColor.aplicarHooks] aprobada falló:', e);
     }
-    // Jos 2026-10-29: cuando una Revision Anticipada se aprueba y la prueba
-    // ya esta ligada a una campania, el arte se vincula a biblioteca_artes
-    // de la campania (tab Aprobados). Las pruebas de color NO vinculan —
-    // solo RA, como pidio Jos.
-    // Jos 2026-11-27: prueba.archivo ya refleja el reemplazo (si Diseño subió
-    // archivo en la aprobación, el resolver lo aplicó via UPDATE antes de
-    // llegar aquí). Vinculamos sin override para no duplicar filas.
     if (prueba.tipo === 'revision_anticipada' && prueba.campania_id) {
       try {
-        await vincularArteAprobadoABibliotecaCampania(prueba);
+        await vincularArteAprobadoABibliotecaCampania(prueba as any);
       } catch (e) {
-        console.error('[pruebasColor.actualizar] vincular arte RA a biblioteca falló:', e);
+        console.error('[pruebasColor.aplicarHooks] vincular RA (aprobada) falló:', e);
       }
     }
   }
 
-  // Hook 3: al rechazar, se cierra la tarea abierta (Revisión o Seguimiento)
-  // para que no quede huérfana en el módulo de tareas.
   if (nuevoEstatus === 'rechazada') {
     try {
       await cerrarTareaAsociada(pruebaId, 'Revisión de artes', userNombre);
       await cerrarTareaAsociada(pruebaId, 'Seguimiento Prueba de color', userNombre);
     } catch (e) {
-      console.error('[pruebasColor.actualizar] hook rechazada falló:', e);
+      console.error('[pruebasColor.aplicarHooks] rechazada falló:', e);
     }
   }
 
-  // Notificar al creador de la prueba con una tarea "Notificación" — asi
-  // el asesor (o quien haya solicitado) se entera del avance sin depender
-  // de que este mirando el modal. Feedback 2026-08-24.
-  // Jos 2026-10-12: incluir el motivo del rechazo para que el creador no
-  // tenga que entrar al modal a buscarlo.
   await notificarActualizacionEstatus({
     prueba,
     nuevoEstatus,
@@ -770,8 +799,6 @@ export async function actualizarEstatusPruebaColor(input: ActualizarEstatusInput
     tipo: 'Prueba de Color',
     estatus: nuevoEstatus,
   });
-
-  return upd;
 }
 
 // Notifica al creador de la prueba (el asesor / diseñador que la solicito)
@@ -1204,6 +1231,10 @@ export async function resolverTareaAsociada(input: {
     }
 
     // 1) Actualizar la prueba especifica (arte_aprobado o rechazada).
+    // Jos 2026-11-27: diferimos los side-effects (Seguimiento, vincular
+    // biblioteca, notificar) hasta que TODAS las pruebas del batch esten
+    // resueltas. Asi no aparecen tareas de Seguimiento ni artes en
+    // biblioteca mientras otras pruebas del mismo batch siguen pendientes.
     await actualizarEstatusPruebaColor({
       pruebaId: pruebaIdAccion,
       nuevoEstatus: nuevoEstatusPrueba,
@@ -1212,12 +1243,12 @@ export async function resolverTareaAsociada(input: {
       comentario,
       archivo_adjunto,
       enlace_adjunto,
+      diferirHooks: true,
     });
 
     // 2) Verificar si quedan pruebas pendientes (revision_artes/solicitada).
     const pruebas = await prisma.pruebas_color.findMany({
       where: { id: { in: pruebaIdsBatch! }, deleted_at: null },
-      select: { id: true, estatus: true },
     });
     const pendientes = pruebas.filter(p => p.estatus === 'revision_artes' || p.estatus === 'solicitada');
 
@@ -1228,6 +1259,28 @@ export async function resolverTareaAsociada(input: {
         data: { evidencia: JSON.stringify(evidenciaActual) },
       });
       return { tareaId, nuevoEstatus: `Pendiente (${pendientes.length} por resolver)` };
+    }
+
+    // Jos 2026-11-27: todas las pruebas ya están resueltas. Es momento de
+    // disparar los side-effects (Seguimiento para aprobadas, vincular RA a
+    // biblioteca, notificar). Cada prueba usa los adjuntos de SU propia
+    // resolución, leídos de evidencia.resolucionesPorPrueba.
+    for (const p of pruebas) {
+      const resPrueba = (resoluciones[String(p.id)] as Record<string, unknown> | undefined) || undefined;
+      const comentarioPrueba = typeof resPrueba?.comentario === 'string' ? resPrueba.comentario as string : undefined;
+      const archivoAdjPrueba = typeof resPrueba?.archivoAdjunto === 'string' ? resPrueba.archivoAdjunto as string : null;
+      const enlaceAdjPrueba = typeof resPrueba?.enlaceAdjunto === 'string' ? resPrueba.enlaceAdjunto as string : null;
+      try {
+        await aplicarHooksEstatus(p, p.estatus as EstatusPruebaColor, {
+          userId,
+          userNombre,
+          comentario: comentarioPrueba,
+          archivo_adjunto: archivoAdjPrueba,
+          enlace_adjunto: enlaceAdjPrueba,
+        });
+      } catch (e) {
+        console.error(`[pruebasColor.resolverEnBatch] hooks de prueba ${p.id} fallaron:`, e);
+      }
     }
 
     // Todas resueltas: si al menos 1 rechazada -> Rechazado; si no -> Atendido.
