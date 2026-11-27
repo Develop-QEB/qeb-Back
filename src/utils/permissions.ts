@@ -259,6 +259,27 @@ export function rolEnLista(rol: string | null | undefined, lista: readonly strin
  */
 export const ESTATUS_AJUSTE_COMERCIAL = 'Ajuste Comercial';
 
+/**
+ * Roles que pueden crear solicitudes. Whitelist estricta (Feedback 2026-09-10,
+ * Jos, caso Andrea 81315/81188: el back no validaba rol al crear y cualquier
+ * token podía crear). Debe estar sincronizado con canCreateSolicitudes=true de
+ * front-qeb/src/lib/permissions.ts. La usan solicitudes.controller.create y el
+ * prellenado de solicitudes de QEBooh (src/mcp/chat.ts).
+ */
+export const ROLES_CREAR_SOLICITUD: ReadonlySet<string> = new Set([
+  'Asesor Comercial',
+  'Asesor Comercial Aeropuerto',
+  'Asesor Analista',
+  'Gerente Comercial',
+  'Gerente Comercial Vía Pública',
+  'Gerente Comercial Via Publica',
+  'Gerente Comercial Plazas',
+  'Gerente Comercial (Plazas)',
+  'Gerente Comercial Aeropuerto',
+  'Administrador',
+  'DEV',
+]);
+
 // Ojo con los strings: el estatus de CTO se escribe distinto en cada módulo —
 // 'Ajuste Cto-Cliente' en propuestas y 'Ajuste CTO Cliente' en campañas. Y
 // 'Ajuste Inventario' solo existe en propuestas.

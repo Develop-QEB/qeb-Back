@@ -16,7 +16,7 @@ import { autoReservarCircuitoSiAplica } from '../services/circuitos.service';
 import { isCircuitoDigital } from '../lib/circuitos';
 import { bonifCaraOverride } from '../utils/bonifCara';
 import { emitToSolicitudes, emitToSolicitud, emitToDashboard, emitToCampanas, emitToAll, SOCKET_EVENTS } from '../config/socket';
-import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds } from '../utils/permissions';
+import { hasFullVisibility, hasTeamVisibility, getTeamMemberIds, ROLES_CREAR_SOLICITUD } from '../utils/permissions';
 import { correoPermitido } from '../utils/correoPrefs';
 import nodemailer from 'nodemailer';
 import { uploadBufferToSpaces } from '../config/spaces';
@@ -2225,22 +2225,7 @@ export class SolicitudesController {
       // el back no validaba rol al crear solicitud. Cualquier usuario con
       // token valido podia pegarle al endpoint aunque el front oculte el
       // boton (ejemplo Analista de Servicio al Cliente creando solicitudes
-      // desde su sesion sin permiso). Whitelist estricta: solo asesores y
-      // roles administrativos pueden crear. Debe estar sincronizado con
-      // canCreateSolicitudes=true de front/src/lib/permissions.ts.
-      const ROLES_CREAR_SOLICITUD = new Set([
-        'Asesor Comercial',
-        'Asesor Comercial Aeropuerto',
-        'Asesor Analista',
-        'Gerente Comercial',
-        'Gerente Comercial Vía Pública',
-        'Gerente Comercial Via Publica',
-        'Gerente Comercial Plazas',
-        'Gerente Comercial (Plazas)',
-        'Gerente Comercial Aeropuerto',
-        'Administrador',
-        'DEV',
-      ]);
+      // desde su sesion sin permiso). Whitelist estricta en utils/permissions.
       const userRolReq = req.user?.rol;
       if (!userRolReq || !ROLES_CREAR_SOLICITUD.has(userRolReq)) {
         res.status(403).json({

@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest } from '../types';
 import prisma from '../utils/prisma';
 import { emitToChatbotAdmin, getIO, SOCKET_EVENTS } from '../config/socket';
-import { chatbotToolsHabilitado, chatbotToolsModelo, ejecutarHerramienta, toolsParaClaude, SECCION_CONSULTAS } from '../mcp/chat';
+import { chatbotToolsHabilitado, chatbotToolsModelo, ejecutarHerramienta, nuevoContexto, toolsParaClaude, SECCION_CONSULTAS, MARCA_FORMULARIO, type AccionChat } from '../mcp/chat';
 
 const BASE_SYSTEM_PROMPT = `Eres QEBooh, el asistente virtual de QEB (Quality Equipment Billboard), una plataforma de gestion de publicidad exterior (OOH - Out of Home).
 
@@ -1457,11 +1457,17 @@ export class ChatbotController {
     usuario: { id: number; nombre: string; email: string; rol: string },
     contextoUI: string | null,
     permisos: string | null,
-  ): Promise<string> {
-    const MAX_VUELTAS = 6;
+    contextoFormulario: string | null = null,
+  ): Promise<{ reply: string; acciones: AccionChat[] }> {
+    const MAX_VUELTAS = 8;
+    const ctx = nuevoContexto(usuario, contextoFormulario);
     const client = this.getClient();
-    const uiSection = contextoUI
-      ? `\n\n---\nPANTALLA ACTUAL DEL USUARIO:\nEl usuario está viendo lo siguiente en este momento:\n${contextoUI}\n\nUSA ESTE CONTEXTO: Si el usuario pregunta por un campo, botón o sección de la pantalla, responde usando exactamente la información de arriba. No inventes elementos que no estén descritos. Si menciona "este botón", "este campo", "aquí", asume que se refiere a lo que está descrito en el contexto de pantalla.`
+    // Lo capturado en el formulario abierto (campo aparte que manda el chat del front).
+    const formulario = contextoFormulario
+      ? `\n\n${MARCA_FORMULARIO} (lo que el usuario lleva capturado en este momento):\n${String(contextoFormulario).slice(0, 12000)}`
+      : '';
+    const uiSection = contextoUI || formulario
+      ? `\n\n---\nPANTALLA ACTUAL DEL USUARIO:\nEl usuario está viendo lo siguiente en este momento:\n${contextoUI || ''}${formulario}\n\nUSA ESTE CONTEXTO: Si el usuario pregunta por un campo, botón o sección de la pantalla, responde usando exactamente la información de arriba. No inventes elementos que no estén descritos. Si menciona "este botón", "este campo", "aquí", asume que se refiere a lo que está descrito en el contexto de pantalla.`
       : '';
     const system: Anthropic.TextBlockParam[] = [
       // Parte estable (idéntica para todos los usuarios): se cachea junto con las tools.
@@ -1488,11 +1494,12 @@ export class ChatbotController {
 
       const usos = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
       if (response.stop_reason !== 'tool_use' || usos.length === 0) {
-        return response.content
+        const reply = response.content
           .filter((b): b is Anthropic.TextBlock => b.type === 'text')
           .map(b => b.text)
           .join('\n')
           .trim();
+        return { reply, acciones: ctx.acciones };
       }
 
       convo.push({ role: 'assistant', content: response.content });
@@ -1500,13 +1507,13 @@ export class ChatbotController {
       // resultados se devuelven juntos en un solo mensaje.
       const resultados: Anthropic.ToolResultBlockParam[] = await Promise.all(
         usos.map(async u => {
-          const r = await ejecutarHerramienta(u.name, u.input, usuario);
+          const r = await ejecutarHerramienta(u.name, u.input, ctx);
           return { type: 'tool_result' as const, tool_use_id: u.id, content: r.texto, is_error: r.error };
         }),
       );
       convo.push({ role: 'user', content: resultados });
     }
-    return '';
+    return { reply: '', acciones: ctx.acciones };
   }
 
   async chat(req: AuthRequest, res: Response): Promise<void> {
@@ -1532,14 +1539,17 @@ export class ChatbotController {
       const conHerramientas = chatbotToolsHabilitado(userRol);
 
       if (conHerramientas) {
-        const reply = await this.chatConHerramientas(
+        const { reply, acciones } = await this.chatConHerramientas(
           messages,
           { id: userId, nombre: userName, email: userEmail, rol: userRol },
           contextoUI || null,
           permisos || null,
+          typeof req.body.contextoFormulario === 'string' ? req.body.contextoFormulario : null,
         );
         this.logConversation(userId, userName, userEmail, userRol, pantalla || null, modal || null, pregunta, reply, false).catch(() => {});
-        res.json({ success: true, data: { reply } });
+        // acciones: botones que el chat ofrece bajo la respuesta (p. ej. abrir una
+        // solicitud prellenada). Un front anterior las ignora y solo muestra el texto.
+        res.json({ success: true, data: { reply, acciones } });
         return;
       }
 

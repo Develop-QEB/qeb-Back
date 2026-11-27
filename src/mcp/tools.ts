@@ -1,6 +1,7 @@
 import { apiGet } from './api';
 import type { UsuarioMcp } from './auth';
 import { hasFullVisibility } from '../utils/permissions';
+import { ESTATUS_FIRME, ESTATUS_BLOQUEADO, ESTATUS_TENTATIVO } from '../services/inventario-bloqueo.service';
 
 /**
  * Herramientas del MCP. Fase 1: solo lectura.
@@ -20,24 +21,24 @@ export interface HerramientaMcp {
   ejecutar(args: Record<string, unknown>, usuario: UsuarioMcp): Promise<unknown>;
 }
 
-interface FilaCatorcena {
+export interface FilaCatorcena {
   a_o: number;
   numero_catorcena: number;
   fecha_inicio: string;
   fecha_fin: string;
 }
 
-const dia = (iso: string) => String(iso).slice(0, 10);
+export const dia = (iso: string) => String(iso).slice(0, 10);
 
 /** Suma días a una fecha 'YYYY-MM-DD'. */
-function sumarDias(fecha: string, dias: number): string {
+export function sumarDias(fecha: string, dias: number): string {
   const d = new Date(`${fecha}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + dias);
   return d.toISOString().slice(0, 10);
 }
 
 /** Fecha de hoy en CDMX ('YYYY-MM-DD'), sin depender de la zona horaria del servidor. */
-const hoyCdmx = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' }).format(new Date());
+export const hoyCdmx = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' }).format(new Date());
 
 /**
  * La tabla `catorcenas` guarda las fechas corridas +1 día respecto a la operación real
@@ -87,15 +88,15 @@ type Modulo = 'solicitudes' | 'propuestas' | 'campanas';
 type Fila = Record<string, any>;
 
 /** Error por un argumento mal dado; su mensaje se le muestra al modelo para que corrija. */
-class ErrorDeUso extends Error {}
+export class ErrorDeUso extends Error {}
 
-const texto = (v: unknown, max = 160): string | undefined => {
+export const texto = (v: unknown, max = 160): string | undefined => {
   if (v === null || v === undefined) return undefined;
   const t = String(v).trim();
   if (!t) return undefined;
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
-const numero = (v: unknown): number | undefined => {
+export const numero = (v: unknown): number | undefined => {
   const n = Number(v);
   return v === null || v === undefined || v === '' || !Number.isFinite(n) ? undefined : Math.round(n * 100) / 100;
 };
@@ -185,7 +186,7 @@ const RECORTE: Record<Modulo, (f: Fila) => Fila> = {
 
 // ---- estatus: se aceptan nombres aproximados y se resuelven contra los reales ----
 
-const normalizar = (t: string) =>
+export const normalizar = (t: string) =>
   t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const estatusCache = new Map<string, { lista: string[]; hasta: number }>();
@@ -226,7 +227,7 @@ async function resolverEstatus(usuario: UsuarioMcp, modulo: Modulo, pedidos: unk
 
 // ---- periodo ----
 
-function entero(v: unknown, nombre: string, min: number, max: number): number | undefined {
+export function entero(v: unknown, nombre: string, min: number, max: number): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   if (!Number.isInteger(n) || n < min || n > max) throw new ErrorDeUso(`${nombre} debe ser un entero entre ${min} y ${max}.`);
@@ -366,7 +367,7 @@ const MAX_CIRCUITOS = 60;
 let catorcenasCache: { filas: FilaCatorcena[]; hasta: number } | null = null;
 
 /** Tabla de catorcenas (chica y casi inmutable): 10 min en memoria, compartida entre usuarios. */
-async function tablaCatorcenas(usuario: UsuarioMcp): Promise<FilaCatorcena[]> {
+export async function tablaCatorcenas(usuario: UsuarioMcp): Promise<FilaCatorcena[]> {
   if (catorcenasCache && catorcenasCache.hasta > Date.now()) return catorcenasCache.filas;
   const r = await apiGet<{ data: FilaCatorcena[] }>(usuario, '/solicitudes/catorcenas');
   catorcenasCache = { filas: r.data || [], hasta: Date.now() + ESTATUS_TTL_MS };
@@ -839,6 +840,256 @@ const detalleInventario: HerramientaMcp = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Disponibilidad y ocupación del inventario
+// ---------------------------------------------------------------------------
+//
+// Cómo guarda QEB la ocupación: inventarios (la cara física) → espacio_inventario
+// (sus lugares vendibles: 1 en tradicional, varios en digital) → reservas (quién
+// ocupa ese lugar y con qué estatus) → calendario (de qué fecha a qué fecha).
+//
+// Aquí NO se reimplementa ese cruce: se usan los mismos endpoints que la app.
+//  - GET /inventarios/disponibles (buscador de "Asignar inventario"): devuelve las
+//    caras utilizables con al menos un espacio libre en el periodo. Bloquean las
+//    reservas firmes (vendidas) y las bloqueadas por Tráfico; las tentativas
+//    ("Reservado", "Bonificado") NO bloquean. Las digitales salen siempre libres
+//    (rotan anuncios, sin competencia por espacio).
+//  - GET /inventarios/:id/historial (pestaña de historial de la cara): reservas
+//    de una cara con su campaña, cliente, estatus y periodo.
+//
+// Son consultas pesadas (2-4 MB y 2-3 s por plaza), así que: caché compartida de
+// 3 min, una sola consulta en curso por combinación de filtros, y un tope propio
+// de consultas por usuario. Al modelo solo se le devuelven conteos y ejemplos.
+
+const DISPO_TTL_MS = 3 * 60 * 1000;
+const DISPO_POR_MINUTO = 10;
+const dispoCache = new Map<string, { filas: Fila[]; hasta: number }>();
+const dispoEnCurso = new Map<string, Promise<Fila[]>>();
+const dispoUso = new Map<number, { n: number; hasta: number }>();
+
+/** Tope propio de consultas de ocupación por usuario (además del general del conector). */
+function exigirCupoDisponibilidad(usuario: UsuarioMcp): void {
+  const ahora = Date.now();
+  const u = dispoUso.get(usuario.id);
+  if (!u || u.hasta <= ahora) {
+    dispoUso.set(usuario.id, { n: 1, hasta: ahora + 60_000 });
+    return;
+  }
+  u.n += 1;
+  if (u.n > DISPO_POR_MINUTO) {
+    throw new ErrorDeUso('Demasiadas consultas de disponibilidad seguidas; espera un minuto. Es una consulta pesada para el servidor.');
+  }
+}
+
+async function consultarDisponibles(usuario: UsuarioMcp, params: Record<string, string | undefined>): Promise<Fila[]> {
+  const clave = JSON.stringify(params);
+  const c = dispoCache.get(clave);
+  if (c && c.hasta > Date.now()) return c.filas;
+  let enCurso = dispoEnCurso.get(clave);
+  if (!enCurso) {
+    enCurso = apiGet<{ data: Fila[] }>(usuario, '/inventarios/disponibles', params)
+      .then(r => {
+        const filas = r.data || [];
+        if (dispoCache.size > 200) dispoCache.clear();
+        dispoCache.set(clave, { filas, hasta: Date.now() + DISPO_TTL_MS });
+        return filas;
+      })
+      .finally(() => dispoEnCurso.delete(clave));
+    dispoEnCurso.set(clave, enCurso);
+  }
+  return enCurso;
+}
+
+/** Catorcenas → fechas de la tabla (las mismas que guardan los circuitos y reservas). */
+async function rangoCatorcenas(usuario: UsuarioMcp, args: Record<string, unknown>, obligatorio: boolean) {
+  const c1 = entero(args.catorcena, 'catorcena', 1, 26);
+  const a1 = entero(args.anio, 'anio', 2015, 2100);
+  const c2 = entero(args.catorcena_fin, 'catorcena_fin', 1, 26);
+  const a2 = entero(args.anio_fin, 'anio_fin', 2015, 2100);
+  if (c1 === undefined || a1 === undefined) {
+    if (obligatorio) throw new ErrorDeUso('Indica la catorcena y el año (usa catorcena_actual si dijo "esta catorcena").');
+    return null;
+  }
+  const cFin = c2 ?? c1;
+  const aFin = a2 ?? a1;
+  if (aFin * 100 + cFin < a1 * 100 + c1) throw new ErrorDeUso('La catorcena de fin no puede ser anterior a la de inicio.');
+  const cats = await tablaCatorcenas(usuario);
+  const ini = cats.find(c => Number(c.a_o) === a1 && Number(c.numero_catorcena) === c1);
+  const fin = cats.find(c => Number(c.a_o) === aFin && Number(c.numero_catorcena) === cFin);
+  if (!ini || !fin) throw new ErrorDeUso(`No existe la catorcena ${!ini ? `${c1}/${a1}` : `${cFin}/${aFin}`}.`);
+  const etiqueta = c1 === cFin && a1 === aFin ? `Cat ${c1}/${a1}` : `Cat ${c1}/${a1} a Cat ${cFin}/${aFin}`;
+  return { desde: dia(ini.fecha_inicio), hasta: dia(fin.fecha_fin), etiqueta };
+}
+
+const CDMX_AM_ALIAS = ['cdmx', 'df', 'cdmxam', 'ciudaddemexico', 'ciudaddemexicoam', 'mexico'];
+
+const contarPor = (filas: Fila[], clave: (f: Fila) => unknown) => {
+  const o: Record<string, number> = {};
+  for (const f of filas) {
+    const k = String(clave(f) ?? '').trim() || 'sin dato';
+    o[k] = (o[k] || 0) + 1;
+  }
+  return o;
+};
+
+const disponibilidadInventario: HerramientaMcp = {
+  name: 'disponibilidad_inventario',
+  title: 'Disponibilidad de inventario',
+  description:
+    'Cuántas caras están LIBRES y cuántas OCUPADAS en una plaza y periodo (catorcenas), con el mismo cálculo del buscador de ' +
+    '"Asignar inventario". Filtra por formato, tipo (Tradicional/Digital) y NSE, y desglosa por NSE, municipio y flujo/contraflujo. ' +
+    'Ocupada = tiene reserva vendida o bloqueada por Tráfico en esas fechas; las reservas tentativas de propuestas ("Reservado", ' +
+    '"Bonificado") NO ocupan, pero se informa cuántas caras libres las tienen. Las digitales rotan anuncios: siempre aparecen libres. ' +
+    'Con varias catorcenas, "libre" es libre en TODO el rango. Es una foto del momento: preséntala como orientativa.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      plaza: { type: 'string', description: 'Plaza, p. ej. "CDMX" (Ciudad de México / AM), "Guadalajara", "Monterrey".' },
+      catorcena: { type: 'integer', minimum: 1, maximum: 26, description: 'Catorcena de inicio. Requiere anio.' },
+      anio: { type: 'integer' },
+      catorcena_fin: { type: 'integer', minimum: 1, maximum: 26, description: 'Para un rango. Si se omite, solo esa catorcena.' },
+      anio_fin: { type: 'integer' },
+      formato: { type: 'string', description: 'Formato o mueble, p. ej. PARABUS, COLUMNA, MUPIS.' },
+      tipo: { type: 'string', enum: ['Tradicional', 'Digital'] },
+      nse: { type: 'array', items: { type: 'string' }, description: 'NSE exactos, p. ej. ["ABC+"].' },
+    },
+    required: ['plaza', 'catorcena', 'anio'],
+    additionalProperties: false,
+  },
+  async ejecutar(args, usuario) {
+    exigirInventario(usuario);
+    exigirCupoDisponibilidad(usuario);
+    const periodo = (await rangoCatorcenas(usuario, args, true))!;
+
+    const pedida = String(args.plaza || '').trim();
+    let estado: string;
+    let plazaTxt: string;
+    if (CDMX_AM_ALIAS.includes(normalizar(pedida))) {
+      // Mismo criterio que el formulario: CDMX + Estado de México (el endpoint excluye Toluca).
+      estado = 'Ciudad de México,Estado de México';
+      plazaTxt = 'Ciudad de México / AM';
+    } else {
+      estado = elegir(pedida, await catalogoInventario(usuario, 'plazas'), 'plaza');
+      plazaTxt = estado;
+    }
+    const formato = args.formato ? elegir(String(args.formato), await catalogoInventario(usuario, 'tipos'), 'formato') : undefined;
+    const tipo = args.tipo ? elegir(String(args.tipo), ['Tradicional', 'Digital'], 'tipo') : undefined;
+    const nse = Array.isArray(args.nse) ? args.nse.map(x => String(x).trim()).filter(Boolean).slice(0, 10) : [];
+
+    const base = { estado, formato, tipo, nse: nse.length ? nse.join(',') : undefined };
+    // Sin fechas el endpoint no cruza reservas: devuelve todas las caras utilizables (el total).
+    const [libres, todas] = await Promise.all([
+      consultarDisponibles(usuario, { ...base, fecha_inicio: periodo.desde, fecha_fin: periodo.hasta }),
+      consultarDisponibles(usuario, base),
+    ]);
+
+    const esDigital = (f: Fila) => f.tradicional_digital === 'Digital';
+    const libresTrad = libres.filter(f => !esDigital(f));
+    const todasTrad = todas.filter(f => !esDigital(f));
+    const idsLibres = new Set(libresTrad.map(f => f.id));
+    const ocupadasTrad = todasTrad.filter(f => !idsLibres.has(f.id));
+    const digitales = todas.filter(esDigital).length;
+
+    const desglose = (clave: (f: Fila) => unknown, max: number) => {
+      const lib = contarPor(libresTrad, clave);
+      const tot = contarPor(todasTrad, clave);
+      return Object.keys(tot)
+        .sort((a, b) => tot[b] - tot[a])
+        .slice(0, max)
+        .map(k => ({ valor: k, libres: lib[k] || 0, ocupadas: tot[k] - (lib[k] || 0), total: tot[k] }));
+    };
+
+    return {
+      plaza: plazaTxt,
+      periodo: periodo.etiqueta,
+      fechas_tabla: `${periodo.desde} a ${periodo.hasta}`,
+      filtros: { formato, tipo, nse: nse.length ? nse : undefined },
+      tradicionales: {
+        total: todasTrad.length,
+        libres: libresTrad.length,
+        ocupadas: ocupadasTrad.length,
+        libres_con_reserva_tentativa: libresTrad.filter(f => Number(f.reservas_tentativas_count) > 0).length,
+      },
+      digitales: digitales ? { total: digitales, nota: 'Rotan anuncios: siempre disponibles, no compiten por espacio.' } : undefined,
+      por_nse: desglose(f => f.nivel_socioeconomico, 10),
+      por_municipio: desglose(f => f.municipio, 15),
+      por_flujo: desglose(f => f.tipo_de_cara, 4),
+      ejemplos_libres: libresTrad.slice(0, 8).map(f => ({ id: f.id, codigo: f.codigo_unico, ubicacion: texto(f.ubicacion, 70), nse: f.nivel_socioeconomico })),
+      nota:
+        'No cuenta caras con estatus Bloqueado/No Disponible, Inhabilitado o Inactivo. Es una foto del momento: otra persona puede reservar ' +
+        'en cualquier momento. Para ver quién ocupa una cara concreta usa ocupacion_cara.',
+    };
+  },
+};
+
+const clasificarReserva = (estatus: string): 'firme' | 'bloqueada' | 'tentativa' | 'otra' => {
+  if ((ESTATUS_FIRME as readonly string[]).includes(estatus)) return 'firme';
+  if ((ESTATUS_BLOQUEADO as readonly string[]).includes(estatus)) return 'bloqueada';
+  if ((ESTATUS_TENTATIVO as readonly string[]).includes(estatus)) return 'tentativa';
+  return 'otra';
+};
+
+const ocupacionCara: HerramientaMcp = {
+  name: 'ocupacion_cara',
+  title: 'Ocupación de una cara',
+  description:
+    'Quién ocupa una cara concreta del inventario: sus reservas con campaña, cliente, propuesta, estatus y periodo. Con catorcena/año ' +
+    'filtra a ese periodo y dice si está libre; sin periodo muestra las reservas vigentes y futuras. Tipos de reserva: "firme" (vendida, ' +
+    'ocupa), "bloqueada" (apartada por Tráfico, ocupa), "tentativa" (de propuesta, no ocupa). El id de la cara sale de buscar_inventario ' +
+    'o de disponibilidad_inventario.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer', minimum: 1, description: 'ID de la cara de inventario.' },
+      catorcena: { type: 'integer', minimum: 1, maximum: 26 },
+      anio: { type: 'integer' },
+      catorcena_fin: { type: 'integer', minimum: 1, maximum: 26 },
+      anio_fin: { type: 'integer' },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+  async ejecutar(args, usuario) {
+    exigirInventario(usuario);
+    exigirCupoDisponibilidad(usuario);
+    const id = entero(args.id, 'id', 1, 2_000_000_000);
+    if (id === undefined) throw new ErrorDeUso('Falta el id de la cara.');
+    const periodo = await rangoCatorcenas(usuario, args, false);
+    const r = await apiGet<{ data: { inventario?: Fila; historial?: Fila[] } }>(usuario, `/inventarios/${id}/historial`);
+    const inv = r.data?.inventario;
+    if (!inv) throw new ErrorDeUso(`No existe la cara ${id}.`);
+    const desde = periodo?.desde ?? hoyCdmx();
+    const hasta = periodo?.hasta ?? '9999-12-31';
+    const enRango = (f: Fila) => {
+      const ini = f.inicio_periodo ? dia(f.inicio_periodo) : '';
+      const fin = f.fin_periodo ? dia(f.fin_periodo) : ini;
+      return ini !== '' && ini <= hasta && fin >= desde;
+    };
+    const reservas = (r.data?.historial || []).filter(enRango);
+    const lista = reservas.map(f => ({
+      tipo_reserva: clasificarReserva(String(f.reserva_estatus || '')),
+      estatus: f.reserva_estatus,
+      campana: f.campana_id ? { id: f.campana_id, nombre: texto(f.campana_nombre) } : undefined,
+      propuesta_id: f.propuesta_id ? Number(f.propuesta_id) : undefined,
+      cliente: texto(f.cliente_nombre),
+      periodo: f.numero_catorcena && f.anio_catorcena ? `Cat ${f.numero_catorcena}/${f.anio_catorcena}` : `${dia(f.inicio_periodo)} a ${dia(f.fin_periodo)}`,
+      articulo: texto(f.articulo),
+      aps: f.APS || undefined,
+    }));
+    const ocupan = lista.filter(x => x.tipo_reserva === 'firme' || x.tipo_reserva === 'bloqueada');
+    const digital = inv.tradicional_digital === 'Digital';
+    return {
+      cara: { id: inv.id, codigo: inv.codigo_unico, ubicacion: texto(inv.ubicacion, 100), formato: inv.mueble, plaza: inv.plaza, flujo: inv.tipo_de_cara, tipo: inv.tradicional_digital },
+      periodo: periodo?.etiqueta || `desde hoy (${desde})`,
+      libre: periodo ? (digital ? true : ocupan.length === 0) : undefined,
+      nota: digital ? 'Cara digital: rota anuncios, varias campañas la comparten; no se agota por reservas.' : undefined,
+      reservas: lista.slice(0, 30),
+      total_reservas: lista.length,
+      aviso: lista.length > 30 ? `Se muestran 30 de ${lista.length}; acota con catorcena.` : undefined,
+    };
+  },
+};
+
 const miPerfil: HerramientaMcp = {
   name: 'mi_perfil',
   title: 'Mi perfil en QEB',
@@ -875,4 +1126,6 @@ export const herramientas: HerramientaMcp[] = [
   buscarInventario,
   resumenInventario,
   detalleInventario,
+  disponibilidadInventario,
+  ocupacionCara,
 ];

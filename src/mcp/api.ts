@@ -27,11 +27,27 @@ export async function apiGet<T = any>(
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
   }
+  return llamar<T>(usuario, url, { method: 'GET' });
+}
 
+/**
+ * POST a la API como el usuario. Solo para endpoints que NO modifican datos
+ * (p. ej. /solicitudes/evaluar-autorizacion, que solo calcula).
+ */
+export async function apiPost<T = any>(usuario: UsuarioMcp, ruta: string, cuerpo: unknown): Promise<T> {
+  return llamar<T>(usuario, new URL(baseUrl() + ruta), {
+    method: 'POST',
+    body: JSON.stringify(cuerpo),
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function llamar<T>(usuario: UsuarioMcp, url: URL, init: RequestInit): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${firmarJwt(usuario)}`, Accept: 'application/json' },
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${firmarJwt(usuario)}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (e) {
