@@ -224,6 +224,156 @@ export async function crearPruebaColor(input: CrearPruebaInput) {
   return prueba;
 }
 
+// Jos 2026-11-24: crea N pruebas de color en batch para UNA misma tarea de
+// Revisión. Antes el front hacía N POST individuales y se generaban N tareas
+// separadas; ahora se agrupan en UNA sola tarea cuyo contenido lleva
+// `pruebaColorIds` array. Diseño las aprueba/rechaza individual o masivo y
+// la tarea solo se cierra cuando TODAS están resueltas.
+//
+// Cada input es similar a `crearPruebaColor` individual. Todos los inputs
+// deben compartir propuesta_id y tipo. sc_id puede variar (N artes × M
+// circuitos se envían como N*M inputs y se agrupan por sc_id en una tarea
+// por circuito — cada circuito tiene su propia tarea agrupada).
+export async function crearPruebaColorBatch(input: {
+  propuestaId: number;
+  tipo?: TipoPrueba;
+  createdBy: number;
+  createdByNombre: string;
+  // Array de artes. Cada arte lleva su propio sc_id → se agrupa en UNA
+  // tarea por circuito (sc_id) con todos sus artes.
+  artes: Array<{
+    scId: number;
+    archivo: string;
+    archivo_data?: string | null;
+    enlace_externo?: string | null;
+    nombre_arte?: string | null;
+    notas?: string | null;
+  }>;
+}) {
+  const { propuestaId, createdBy, createdByNombre, artes } = input;
+  const tipo: TipoPrueba = input.tipo || 'prueba_color';
+  if (!artes || artes.length === 0) throw new Error('Debes enviar al menos un arte');
+  for (const a of artes) {
+    if ((!a.archivo || !a.archivo.trim()) && (!a.enlace_externo || !a.enlace_externo.trim())) {
+      throw new Error('Cada arte debe tener archivo o enlace');
+    }
+  }
+
+  // Agrupar inputs por sc_id — cada circuito recibe su propia tarea con los
+  // artes que le correspondan.
+  const porCircuito = new Map<number, typeof artes>();
+  for (const a of artes) {
+    const arr = porCircuito.get(a.scId) || [];
+    arr.push(a);
+    porCircuito.set(a.scId, arr);
+  }
+
+  const campaniaId = await resolverCampaniaIdDePropuesta(propuestaId);
+  const resultados: Array<{ scId: number; pruebas: Array<{ id: number }> ; tareaId: number | null }> = [];
+
+  for (const [scId, artesDeCircuito] of porCircuito.entries()) {
+    const sc = await prisma.solicitudCaras.findFirst({
+      where: { id: scId, idquote: String(propuestaId) },
+      select: { id: true, articulo: true, formato: true, ciudad: true },
+    });
+    if (!sc) throw new Error(`Circuito #${scId} no encontrado en la propuesta`);
+
+    // Numeración: siguiente version para el primer arte; los demás del mismo
+    // batch comparten "lote" pero cada prueba sigue teniendo su version
+    // individual incremental para preservar trazabilidad.
+    const ultima = await prisma.pruebas_color.findFirst({
+      where: { propuesta_id: propuestaId, sc_id: scId, tipo, deleted_at: null },
+      orderBy: { version: 'desc' },
+      select: { version: true },
+    });
+    let next = (ultima?.version ?? 0) + 1;
+
+    const pruebasCreadas: Array<{ id: number }> = [];
+    for (const a of artesDeCircuito) {
+      const p = await prisma.pruebas_color.create({
+        data: {
+          propuesta_id: propuestaId,
+          sc_id: scId,
+          campania_id: campaniaId,
+          reserva_id: null,
+          archivo: a.archivo || '',
+          archivo_data: a.archivo_data || null,
+          enlace_externo: a.enlace_externo || null,
+          nombre_arte: a.nombre_arte || null,
+          notas: a.notas || null,
+          estatus: 'revision_artes',
+          tipo,
+          version: next,
+          created_by: createdBy,
+          created_by_nombre: createdByNombre,
+        },
+        select: { id: true },
+      });
+      pruebasCreadas.push(p);
+      next += 1;
+    }
+
+    // Una sola tarea para todas las pruebas del circuito. El arte primario
+    // (visible en la tabla de tareas y el correo) es el primero del batch.
+    const primero = artesDeCircuito[0];
+    let tareaId: number | null = null;
+    try {
+      tareaId = await crearTareaRevisionArte(
+        pruebasCreadas[0].id,
+        propuestaId,
+        scId,
+        sc.articulo || null,
+        sc.formato || null,
+        sc.ciudad || null,
+        createdByNombre,
+        createdBy,
+        primero.archivo || '',
+        primero.nombre_arte || null,
+        { pruebaIdsBatch: pruebasCreadas.map(p => p.id) },
+      );
+    } catch (e) {
+      console.error('[pruebasColor.crearBatch] crearTareaRevisionArte falló:', e);
+    }
+
+    try {
+      await logHistorial({
+        tipo: 'Propuesta',
+        refId: propuestaId,
+        accion: `Solicitó revisión de ${artesDeCircuito.length} arte(s) para circuito #${scId}`,
+        usuario: createdByNombre,
+        usuarioId: createdBy,
+        origen: 'pruebas_color',
+        extras: {
+          pruebaIds: pruebasCreadas.map(p => p.id),
+          scId,
+          articulo: sc.articulo,
+          formato: sc.formato,
+          ciudad: sc.ciudad,
+          campaniaId,
+          tareaId,
+        },
+      });
+    } catch (e) {
+      console.error('[pruebasColor.crearBatch] logHistorial falló:', e);
+    }
+
+    try {
+      emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
+        tareaId: pruebasCreadas[0].id,
+        tipo: 'Prueba de Color',
+        propuestaId,
+        scId,
+      });
+    } catch (e) {
+      console.error('[pruebasColor.crearBatch] emitToAll falló:', e);
+    }
+
+    resultados.push({ scId, pruebas: pruebasCreadas, tareaId });
+  }
+
+  return resultados;
+}
+
 // Reenviar prueba rechazada — Jos 2026-10-12: en lugar de crear una v2
 // nueva, el analista edita la MISMA prueba rechazada subiendo nuevo arte
 // (y opcionalmente nuevo nombre/notas). La prueba vuelve a 'revision_artes'
@@ -340,6 +490,11 @@ async function resolverCampaniaIdDePropuesta(propuestaId: number): Promise<numbe
 // endpoints de aprobar/rechazar/finalizar que leen la tarea por
 // contenido.pruebaColorId. Por eso `campania_id` queda null al crear y
 // solo se sincroniza cuando la propuesta avanza (ver sincronizarTareasConCampania).
+// Jos 2026-11-24: soporta N artes por tarea (batch). Si llega 1 arte, el
+// contenido usa `pruebaColorId` singular (compat flujo individual). Si
+// llegan N, usa `pruebaColorIds` array + `pruebaColorId = ids[0]` (compat
+// con queries existentes que solo esperan singular). Se devuelve el id
+// de la tarea creada para que el caller pueda devolverlo al front.
 async function crearTareaRevisionArte(
   pruebaId: number,
   propuestaId: number,
@@ -351,7 +506,8 @@ async function crearTareaRevisionArte(
   solicitanteId: number,
   arteUrl: string,
   nombreArte: string | null,
-) {
+  extras?: { pruebaIdsBatch?: number[] },
+): Promise<number | null> {
   const usuariosDiseno = await prisma.usuario.findMany({
     where: {
       deleted_at: null,
@@ -366,7 +522,7 @@ async function crearTareaRevisionArte(
   });
   if (usuariosDiseno.length === 0) {
     console.warn('[pruebasColor] Sin usuarios de Diseño configurados — solo se guarda la prueba.');
-    return;
+    return null;
   }
 
   // Responsable = primer Coordinador de Diseño; si no hay, primer Diseñador.
@@ -379,17 +535,46 @@ async function crearTareaRevisionArte(
   const detalleCircuito = [articulo, formato, ciudad].filter(Boolean).join(' · ') || `#${scId}`;
 
   const nombreArteSafe = nombreArte || 'sin nombre';
-  const descripcion = [
-    `${solicitanteNombre} solicitó una prueba de color para el circuito #${scId} (${detalleCircuito}).`,
-    `Arte: ${nombreArteSafe}.`,
-    arteUrl ? `URL del arte: ${arteUrl}.` : null,
-    `Revisar el arte y aprobar o rechazar antes de enviar al proveedor.`,
-  ].filter(Boolean).join(' ');
+  const pruebaIdsBatch = extras?.pruebaIdsBatch && extras.pruebaIdsBatch.length > 1
+    ? extras.pruebaIdsBatch
+    : null;
+  const esBatch = !!pruebaIdsBatch;
+  const nTotal = pruebaIdsBatch ? pruebaIdsBatch.length : 1;
 
-  await prisma.tareas.create({
+  const descripcion = esBatch
+    ? [
+        `${solicitanteNombre} solicitó una revisión de artes para el circuito #${scId} (${detalleCircuito}).`,
+        `${nTotal} artes para revisar.`,
+        `Revisa cada arte individualmente — aprueba o rechaza los que correspondan antes de cerrar la tarea.`,
+      ].filter(Boolean).join(' ')
+    : [
+        `${solicitanteNombre} solicitó una prueba de color para el circuito #${scId} (${detalleCircuito}).`,
+        `Arte: ${nombreArteSafe}.`,
+        arteUrl ? `URL del arte: ${arteUrl}.` : null,
+        `Revisar el arte y aprobar o rechazar antes de enviar al proveedor.`,
+      ].filter(Boolean).join(' ');
+
+  const contenidoJson = {
+    // pruebaColorId singular = primer id del batch (o el único cuando N=1).
+    // Compat con queries existentes que solo esperan singular.
+    pruebaColorId: pruebaId,
+    // Solo cuando N>1 incluimos el array. El resolver detecta array y exige
+    // el id especifico a resolver via `pruebaIdObjetivo`.
+    ...(pruebaIdsBatch ? { pruebaColorIds: pruebaIdsBatch } : {}),
+    scId,
+    propuestaId,
+    solicitanteId,
+    arte: arteUrl || null,
+    nombreArte: nombreArte || null,
+    origen: 'prueba_color_revision',
+  };
+
+  const tarea = await prisma.tareas.create({
     data: {
       tipo: 'Revisión de artes',
-      titulo: `Revisión de arte para prueba de color - Propuesta #${propuestaId}`,
+      titulo: esBatch
+        ? `Revisión de ${nTotal} artes - Propuesta #${propuestaId}`
+        : `Revisión de arte para prueba de color - Propuesta #${propuestaId}`,
       descripcion,
       estatus: 'Pendiente',
       id_responsable: responsable.id,
@@ -405,19 +590,12 @@ async function crearTareaRevisionArte(
       archivo: arteUrl || null,
       id_asignado: usuariosDiseno.map(u => u.id).join(','),
       asignado: usuariosDiseno.map(u => u.nombre).join(', '),
-      contenido: JSON.stringify({
-        pruebaColorId: pruebaId,
-        scId,
-        propuestaId,
-        solicitanteId,
-        arte: arteUrl || null,
-        nombreArte: nombreArte || null,
-        origen: 'prueba_color_revision',
-      }),
+      contenido: JSON.stringify(contenidoJson),
       fecha_inicio: now,
       fecha_fin: fechaFin,
     },
   });
+  return tarea.id;
 }
 
 interface ActualizarEstatusInput {
@@ -824,6 +1002,10 @@ async function cerrarTareaAsociada(pruebaId: number, tipo: string, actorNombre: 
     if (!t.contenido) return false;
     try {
       const c = JSON.parse(t.contenido);
+      // Jos 2026-11-24: tareas batch de Revisión (N pruebas en pruebaColorIds)
+      // se cierran por resolverEnBatch cuando TODAS están resueltas. Evitamos
+      // cerrarlas prematuramente desde el hook por cada prueba individual.
+      if (Array.isArray(c.pruebaColorIds) && c.pruebaColorIds.length > 1) return false;
       return c.pruebaColorId === pruebaId;
     } catch { return false; }
   });
@@ -860,7 +1042,14 @@ export async function listarTareasAsociadas(pruebaId: number) {
     if (!t.contenido) return false;
     try {
       const c = JSON.parse(t.contenido);
-      return Number(c.pruebaColorId) === pruebaId;
+      if (Number(c.pruebaColorId) === pruebaId) return true;
+      // Jos 2026-11-24: tareas batch de Revisión agrupan N pruebas en
+      // `pruebaColorIds` array. Cada PruebaCard de las N pruebas debe ver
+      // la misma tarea compartida en su drawer de tareas.
+      if (Array.isArray(c.pruebaColorIds)) {
+        return (c.pruebaColorIds as unknown[]).some(v => Number(v) === pruebaId);
+      }
+      return false;
     } catch { return false; }
   });
 }
@@ -886,8 +1075,12 @@ export async function resolverTareaAsociada(input: {
   enlace_adjunto?: string | null;
   userId: number;
   userNombre: string;
+  // Jos 2026-11-24: cuando la tarea de Revisión agrupa N pruebas (batch),
+  // el revisor resuelve una a la vez — `pruebaIdObjetivo` indica cuál del
+  // array. Si la tarea es individual (contenido.pruebaColorId) se ignora.
+  pruebaIdObjetivo?: number;
 }): Promise<{ tareaId: number; nuevoEstatus: string }> {
-  const { pruebaId, tareaId, accion, comentario, archivo_adjunto, enlace_adjunto, userId, userNombre } = input;
+  const { pruebaId, tareaId, accion, comentario, archivo_adjunto, enlace_adjunto, userId, userNombre, pruebaIdObjetivo } = input;
 
   const tarea = await prisma.tareas.findUnique({ where: { id: tareaId } });
   if (!tarea) throw new Error('Tarea no encontrada');
@@ -895,8 +1088,29 @@ export async function resolverTareaAsociada(input: {
   const contenido = tarea.contenido ? (() => {
     try { return JSON.parse(tarea.contenido); } catch { return null; }
   })() : null;
-  if (!contenido || Number(contenido.pruebaColorId) !== pruebaId) {
-    throw new Error('La tarea no pertenece a esta prueba de color');
+  if (!contenido) throw new Error('La tarea no pertenece a esta prueba de color');
+
+  // Jos 2026-11-24: detectar si la tarea agrupa N pruebas (batch) o es individual.
+  const pruebaIdsBatch: number[] | null = Array.isArray(contenido.pruebaColorIds)
+    ? (contenido.pruebaColorIds as unknown[]).map(v => Number(v)).filter(n => Number.isFinite(n) && n > 0)
+    : null;
+  const esBatch = pruebaIdsBatch && pruebaIdsBatch.length > 1;
+
+  // ID específico sobre el cual se actúa:
+  //   - Batch: pruebaIdObjetivo (si viene) o input.pruebaId
+  //   - Individual: contenido.pruebaColorId
+  const pruebaIdAccion = esBatch
+    ? (pruebaIdObjetivo || pruebaId)
+    : Number(contenido.pruebaColorId);
+
+  if (esBatch) {
+    if (!pruebaIdsBatch!.includes(pruebaIdAccion)) {
+      throw new Error('La prueba indicada no pertenece a esta tarea agrupada');
+    }
+  } else {
+    if (Number(contenido.pruebaColorId) !== pruebaId) {
+      throw new Error('La tarea no pertenece a esta prueba de color');
+    }
   }
 
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
@@ -919,9 +1133,73 @@ export async function resolverTareaAsociada(input: {
     return JSON.stringify(base);
   };
 
+  // Jos 2026-11-24: para batch guardamos una resolucion POR prueba dentro
+  // de evidencia.resolucionesPorPrueba, y actualizamos la prueba individual.
+  // La tarea solo se cierra cuando TODAS las pruebas estan resueltas.
+  const resolverEnBatch = async (nuevoEstatusPrueba: 'arte_aprobado' | 'rechazada'): Promise<{ tareaId: number; nuevoEstatus: string }> => {
+    const evidenciaActual: Record<string, unknown> = (() => {
+      if (!tarea.evidencia) return {};
+      try { return JSON.parse(tarea.evidencia) as Record<string, unknown>; } catch { return {}; }
+    })();
+    const resoluciones: Record<string, unknown> = typeof evidenciaActual.resolucionesPorPrueba === 'object' && evidenciaActual.resolucionesPorPrueba
+      ? (evidenciaActual.resolucionesPorPrueba as Record<string, unknown>)
+      : {};
+    resoluciones[String(pruebaIdAccion)] = {
+      accion,
+      comentario: (comentario || '').trim() || null,
+      archivoAdjunto: archivo_adjunto || null,
+      enlaceAdjunto: enlace_adjunto || null,
+      resueltaPor: userNombre,
+      resueltaPorId: userId,
+      resueltaAt: now.toISOString(),
+    };
+    evidenciaActual.resolucionesPorPrueba = resoluciones;
+
+    // 1) Actualizar la prueba especifica (arte_aprobado o rechazada).
+    await actualizarEstatusPruebaColor({
+      pruebaId: pruebaIdAccion,
+      nuevoEstatus: nuevoEstatusPrueba,
+      userId,
+      userNombre,
+      comentario,
+      archivo_adjunto,
+      enlace_adjunto,
+    });
+
+    // 2) Verificar si quedan pruebas pendientes (revision_artes/solicitada).
+    const pruebas = await prisma.pruebas_color.findMany({
+      where: { id: { in: pruebaIdsBatch! }, deleted_at: null },
+      select: { id: true, estatus: true },
+    });
+    const pendientes = pruebas.filter(p => p.estatus === 'revision_artes' || p.estatus === 'solicitada');
+
+    if (pendientes.length > 0) {
+      // Aun hay pendientes: solo guardar evidencia, tarea sigue Pendiente.
+      await prisma.tareas.update({
+        where: { id: tareaId },
+        data: { evidencia: JSON.stringify(evidenciaActual) },
+      });
+      return { tareaId, nuevoEstatus: `Pendiente (${pendientes.length} por resolver)` };
+    }
+
+    // Todas resueltas: si al menos 1 rechazada -> Rechazado; si no -> Atendido.
+    const algunaRechazada = pruebas.some(p => p.estatus === 'rechazada');
+    const estatusFinal = algunaRechazada ? 'Rechazado' : 'Atendido';
+    await prisma.tareas.update({
+      where: { id: tareaId },
+      data: {
+        estatus: estatusFinal,
+        fecha_fin: now,
+        evidencia: JSON.stringify(evidenciaActual),
+      },
+    });
+    return { tareaId, nuevoEstatus: estatusFinal };
+  };
+
   if (accion === 'aprobar' && tarea.tipo === 'Revisión de artes') {
-    // Marcar la tarea de revisión como Atendido y transicionar la prueba
-    // al estado arte_aprobado (que a su vez crea tarea Seguimiento).
+    if (esBatch) return resolverEnBatch('arte_aprobado');
+    // Flujo individual (hoy): marcar la tarea Atendido y transicionar la
+    // prueba al estado arte_aprobado (que a su vez crea tarea Seguimiento).
     const evidenciaNueva = buildEvidenciaConComentario();
     await prisma.tareas.update({
       where: { id: tareaId },
@@ -947,6 +1225,7 @@ export async function resolverTareaAsociada(input: {
   }
 
   if (accion === 'rechazar' && tarea.tipo === 'Revisión de artes') {
+    if (esBatch) return resolverEnBatch('rechazada');
     const evidenciaNueva = buildEvidenciaConComentario();
     await prisma.tareas.update({
       where: { id: tareaId },

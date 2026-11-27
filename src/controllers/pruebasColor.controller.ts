@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../types';
 import {
   crearPruebaColor,
+  crearPruebaColorBatch,
   actualizarEstatusPruebaColor,
   listarPruebasColor,
   eliminarPruebaColor,
@@ -76,6 +77,74 @@ export async function crear(req: AuthRequest, res: Response): Promise<void> {
     console.error('Error crear prueba color:', error);
     const message = error instanceof Error ? error.message : 'Error al crear prueba de color';
     res.status(500).json({ success: false, error: message });
+  }
+}
+
+// Jos 2026-11-24: crea N pruebas de un mismo "lote" (varios artes para
+// uno o varios circuitos) en una sola operación. Genera UNA tarea de
+// Revisión por cada circuito que agrupa todos los artes de ese circuito.
+export async function crearBatch(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const rol = req.user?.rol;
+    const userId = req.user?.userId;
+    const userNombre = req.user?.nombre || 'Usuario';
+    if (!userId) { res.status(401).json({ success: false, error: 'No autenticado' }); return; }
+    if (!puedeCrearPruebaColor(rol)) {
+      res.status(403).json({ success: false, error: 'Solo analistas y administradores pueden solicitar revisiones' });
+      return;
+    }
+
+    const { propuesta_id, tipo, artes } = req.body as {
+      propuesta_id?: number | string;
+      tipo?: string;
+      artes?: Array<{
+        sc_id?: number | string;
+        archivo?: string;
+        archivo_data?: string | null;
+        enlace_externo?: string | null;
+        nombre_arte?: string | null;
+        notas?: string | null;
+      }>;
+    };
+
+    const propuestaId = Number(propuesta_id);
+    if (!Number.isFinite(propuestaId) || propuestaId <= 0) { res.status(400).json({ success: false, error: 'propuesta_id requerido' }); return; }
+    if (!Array.isArray(artes) || artes.length === 0) {
+      res.status(400).json({ success: false, error: 'artes[] requerido con al menos 1 elemento' });
+      return;
+    }
+
+    const tipoFinal: TipoPrueba = tipo && esTipoPruebaValido(tipo) ? tipo : 'prueba_color';
+    const artesLimpios = artes.map((a, idx) => {
+      const scId = Number(a.sc_id);
+      if (!Number.isFinite(scId) || scId <= 0) throw new Error(`artes[${idx}].sc_id inválido`);
+      const archivoLimpio = typeof a.archivo === 'string' ? a.archivo.trim() : '';
+      const enlaceLimpio = typeof a.enlace_externo === 'string' ? a.enlace_externo.trim() : '';
+      if (!archivoLimpio && !enlaceLimpio) throw new Error(`artes[${idx}] debe tener archivo o enlace`);
+      const nombreLimpio = typeof a.nombre_arte === 'string' ? a.nombre_arte.trim() : '';
+      if (!nombreLimpio) throw new Error(`artes[${idx}].nombre_arte requerido`);
+      return {
+        scId,
+        archivo: archivoLimpio,
+        archivo_data: a.archivo_data || null,
+        enlace_externo: enlaceLimpio || null,
+        nombre_arte: nombreLimpio,
+        notas: a.notas || null,
+      };
+    });
+
+    const data = await crearPruebaColorBatch({
+      propuestaId,
+      tipo: tipoFinal,
+      createdBy: userId,
+      createdByNombre: userNombre,
+      artes: artesLimpios,
+    });
+    res.status(201).json({ success: true, data });
+  } catch (error) {
+    console.error('Error crear batch prueba color:', error);
+    const message = error instanceof Error ? error.message : 'Error al crear batch';
+    res.status(400).json({ success: false, error: message });
   }
 }
 
@@ -191,11 +260,16 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
     if (!Number.isFinite(pruebaId) || pruebaId <= 0) { res.status(400).json({ success: false, error: 'id invalido' }); return; }
     if (!Number.isFinite(tareaId) || tareaId <= 0) { res.status(400).json({ success: false, error: 'tareaId invalido' }); return; }
 
-    const { accion, comentario, archivo_adjunto, enlace_adjunto } = req.body as {
+    const { accion, comentario, archivo_adjunto, enlace_adjunto, prueba_id_objetivo } = req.body as {
       accion?: string;
       comentario?: string;
       archivo_adjunto?: string | null;
       enlace_adjunto?: string | null;
+      // Jos 2026-11-24: cuando la tarea agrupa N pruebas (batch), el revisor
+      // resuelve una a la vez. Este campo indica cuál del array se está
+      // resolviendo. Si la tarea es individual (contenido.pruebaColorId), se
+      // ignora. Para masivo (aprobar/rechazar todos), el front hace N requests.
+      prueba_id_objetivo?: number | string;
     };
     if (accion !== 'aprobar' && accion !== 'rechazar' && accion !== 'finalizar') {
       res.status(400).json({ success: false, error: "accion debe ser 'aprobar' | 'rechazar' | 'finalizar'" });
@@ -218,6 +292,9 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
+    const pruebaObjetivoRaw = prueba_id_objetivo != null ? Number(prueba_id_objetivo) : NaN;
+    const pruebaIdObjetivo = Number.isFinite(pruebaObjetivoRaw) && pruebaObjetivoRaw > 0 ? pruebaObjetivoRaw : undefined;
+
     const result = await resolverTareaAsociada({
       pruebaId,
       tareaId,
@@ -227,6 +304,7 @@ export async function resolverTarea(req: AuthRequest, res: Response): Promise<vo
       enlace_adjunto: enlace_adjunto || null,
       userId,
       userNombre,
+      pruebaIdObjetivo,
     });
     res.json({ success: true, data: result });
   } catch (error) {
