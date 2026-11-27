@@ -481,6 +481,17 @@ export async function reenviarPruebaRechazada(input: {
     console.error('[pruebasColor.reenviar] logHistorial falló:', e);
   }
 
+  // Jos 2026-11-27: al reenviar, cerrar la tarea 'Corrección' pendiente
+  // (aviso de rechazo que el asesor venía atendiendo) — ya hay una nueva
+  // Revisión de artes para Diseño que la reemplaza en el flujo.
+  try {
+    await cerrarTareaAsociada(prueba.id, 'Corrección', userNombre);
+    // Compat: tareas viejas que aún estén como 'Prueba de Color'.
+    await cerrarTareaAsociada(prueba.id, 'Prueba de Color', userNombre);
+  } catch (e) {
+    console.error('[pruebasColor.reenviar] cerrar tarea Corrección falló:', e);
+  }
+
   try {
     emitToAll(SOCKET_EVENTS.NOTIFICACION_NUEVA, {
       tareaId: prueba.id,
