@@ -1090,6 +1090,25 @@ async function cerrarTareaAsociada(pruebaId: number, tipo: string, actorNombre: 
  * las consuma sin ir al módulo de Tareas.
  */
 export async function listarTareasAsociadas(pruebaId: number) {
+  // Jos 2026-11-27: si la prueba pertenece a un batch (tarea_revision_id),
+  // el drawer muestra las tareas de TODAS las pruebas del batch (aprobadas,
+  // rechazadas, etc.), no solo del representante. Así se ven en una vista
+  // la Seguimiento de las aprobadas + la "Prueba de color rechazada" del
+  // aviso de cada rechazo + la tarea batch de Revisión.
+  const pruebaBase = await prisma.pruebas_color.findUnique({
+    where: { id: pruebaId },
+    select: { id: true, tarea_revision_id: true },
+  });
+  let pruebaIdsRelevantes: number[] = [pruebaId];
+  if (pruebaBase?.tarea_revision_id) {
+    const hermanas = await prisma.pruebas_color.findMany({
+      where: { tarea_revision_id: pruebaBase.tarea_revision_id, deleted_at: null },
+      select: { id: true },
+    });
+    pruebaIdsRelevantes = [...new Set([pruebaId, ...hermanas.map(h => h.id)])];
+  }
+  const setIds = new Set(pruebaIdsRelevantes);
+
   // Pre-filtrar por tipos relevantes para no scanear toda la tabla tareas.
   // Jos 2026-11-12: incluimos 'Impresión' para que el pedido de impresión
   // creado desde Seguimiento aparezca en el drawer TAREAS DE LA PRUEBA
@@ -1102,18 +1121,19 @@ export async function listarTareasAsociadas(pruebaId: number) {
       tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Prueba de Color', 'Impresión', 'Recepción'] },
     },
     orderBy: { id: 'desc' },
-    take: 100,
+    take: 200,
   });
   return tareas.filter(t => {
     if (!t.contenido) return false;
     try {
       const c = JSON.parse(t.contenido);
-      if (Number(c.pruebaColorId) === pruebaId) return true;
+      const pid = Number(c.pruebaColorId);
+      if (Number.isFinite(pid) && setIds.has(pid)) return true;
       // Jos 2026-11-24: tareas batch de Revisión agrupan N pruebas en
       // `pruebaColorIds` array. Cada PruebaCard de las N pruebas debe ver
       // la misma tarea compartida en su drawer de tareas.
       if (Array.isArray(c.pruebaColorIds)) {
-        return (c.pruebaColorIds as unknown[]).some(v => Number(v) === pruebaId);
+        return (c.pruebaColorIds as unknown[]).some(v => setIds.has(Number(v)));
       }
       return false;
     } catch { return false; }
