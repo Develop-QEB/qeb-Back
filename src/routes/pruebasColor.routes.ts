@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { crear, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea, reenviar } from '../controllers/pruebasColor.controller';
+import { crear, crearBatch, listar, actualizarEstatus, eliminar, listarTareas, resolverTarea, reenviar } from '../controllers/pruebasColor.controller';
 
 const router = Router();
 router.use(authMiddleware);
@@ -8,6 +8,11 @@ router.use(authMiddleware);
 // Feedback 2026-08-15 (Gestor artes Propuestas - prueba de color).
 router.get('/', listar);
 router.post('/', crear);
+// Jos 2026-11-24: creación de N pruebas (varios artes) en una sola tarea de
+// Revisión. Antes el front hacía N POST individuales y Diseño veía N tareas
+// sueltas; ahora todos los artes del mismo circuito van en UNA sola tarea
+// con acciones individuales y masivas.
+router.post('/batch', crearBatch);
 router.patch('/:id/estatus', actualizarEstatus);
 router.delete('/:id', eliminar);
 
