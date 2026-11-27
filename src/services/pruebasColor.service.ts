@@ -752,9 +752,11 @@ export async function aplicarHooksEstatus(
           enlace_adjunto,
         });
       }
-      // Jos 2026-11-12: cerrar notificaciones 'Prueba de Color' Pendientes
-      // asociadas a esta prueba — ya hay Seguimiento que las reemplaza.
+      // Jos 2026-11-12: cerrar notificaciones Pendientes asociadas a esta
+      // prueba — ya hay Seguimiento que las reemplaza. Cubre 'Prueba de Color'
+      // (aviso informativo) y 'Corrección' (aviso de rechazo renombrado).
       await cerrarTareaAsociada(pruebaId, 'Prueba de Color', userNombre);
+      await cerrarTareaAsociada(pruebaId, 'Corrección', userNombre);
     } catch (e) {
       console.error('[pruebasColor.aplicarHooks] arte_aprobado falló:', e);
     }
@@ -859,11 +861,16 @@ async function notificarActualizacionEstatus(input: {
       ? `${descripcionBase}\nAbre la tarea para subir una nueva versión del arte.`
       : descripcionBase;
 
+  // Jos 2026-11-27: la tarea de RECHAZO debe ser tipo 'Corrección' (el que
+  // ya se usaba antes en el gestor de artes) — "Prueba de Color" confunde
+  // porque sugiere crear una prueba, no corregir el arte. Los estatus
+  // informativos (no rechazo) siguen usando 'Prueba de Color'.
+  const tipoTarea = esRechazo ? 'Corrección' : 'Prueba de Color';
   await prisma.tareas.create({
     data: {
-      tipo: 'Prueba de Color',
+      tipo: tipoTarea,
       titulo: esRechazo
-        ? `Prueba de color rechazada - Propuesta #${prueba.propuesta_id} (subir nueva versión)`
+        ? `Corrección de arte - Propuesta #${prueba.propuesta_id} (subir nueva versión)`
         : `Prueba de color ${labelEstatus[nuevoEstatus]} - Propuesta #${prueba.propuesta_id}`,
       descripcion,
       estatus: 'Pendiente',
@@ -934,7 +941,7 @@ export async function eliminarPruebaColor(pruebaId: number, userId: number, user
   // queden huérfanas en Mis Tareas (feedback Akary). Cada cerrarTareaAsociada
   // filtra por pruebaColorId en contenido, así que no toca tareas de otras
   // versiones de la misma propuesta/circuito.
-  for (const tipoTarea of ['Revisión de artes', 'Seguimiento Prueba de color', 'Impresión', 'Recepción', 'Prueba de Color']) {
+  for (const tipoTarea of ['Revisión de artes', 'Seguimiento Prueba de color', 'Impresión', 'Recepción', 'Prueba de Color', 'Corrección']) {
     try {
       await cerrarTareaAsociada(pruebaId, tipoTarea, userNombre);
     } catch (e) {
@@ -1188,8 +1195,10 @@ async function crearTareaRechazoAgrupada(
 
   await prisma.tareas.create({
     data: {
-      tipo: 'Prueba de Color',
-      titulo: `${pruebas.length} artes rechazados - Propuesta #${ref.propuesta_id} (subir nueva versión)`,
+      // Jos 2026-11-27: tareas de RECHAZO van como 'Corrección' (tipo que
+      // ya existía) para no confundir con las informativas de 'Prueba de Color'.
+      tipo: 'Corrección',
+      titulo: `Corrección de ${pruebas.length} artes - Propuesta #${ref.propuesta_id} (subir nueva versión)`,
       descripcion,
       estatus: 'Pendiente',
       id_responsable: ref.created_by,
@@ -1278,10 +1287,11 @@ export async function listarTareasAsociadas(pruebaId: number) {
   // (el front guarda pruebaColorId en contenido al disparar createTarea).
   const tareas = await prisma.tareas.findMany({
     where: {
-      // Jos 2026-11-27: incluir 'Prueba de Color' (la tarea de aviso al
-      // creador cuando le rechazan el arte para que suba nueva versión) para
-      // que aparezca en el drawer de "Tareas de la prueba" del modal.
-      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Prueba de Color', 'Impresión', 'Recepción'] },
+      // Jos 2026-11-27: incluir 'Prueba de Color' (aviso informativo) y
+      // 'Corrección' (aviso de rechazo — tipo renombrado desde 'Prueba de
+      // Color' porque ese nombre confundía) para que ambas aparezcan en el
+      // drawer de "Tareas de la prueba" del modal.
+      tipo: { in: ['Revisión de artes', 'Seguimiento Prueba de color', 'Prueba de Color', 'Corrección', 'Impresión', 'Recepción'] },
     },
     orderBy: { id: 'desc' },
     take: 200,
