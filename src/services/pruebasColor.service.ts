@@ -578,10 +578,18 @@ export async function reenviarPruebasBatch(input: {
       { pruebaIdsBatch: pruebasActualizadas.map(p => p.id) },
     );
     if (nuevaTareaId) {
-      await prisma.pruebas_color.updateMany({
-        where: { id: { in: pruebasActualizadas.map(p => p.id) } },
-        data: { tarea_revision_id: nuevaTareaId },
-      });
+      // Jos 2026-11-27: SOLO actualizar tarea_revision_id de pruebas que no
+      // tenían una (nunca estuvieron en un batch). Para pruebas que SÍ venían
+      // de un batch, mantener el id original — si lo cambiamos, v2 deja de
+      // ser "hermana" de v1 en el drawer y las tareas asociadas de v1
+      // (Seguimiento, Corrección) desaparecen de la vista.
+      const sinBatchPrevio = pruebasActualizadas.filter(p => !p.tarea_revision_id).map(p => p.id);
+      if (sinBatchPrevio.length > 0) {
+        await prisma.pruebas_color.updateMany({
+          where: { id: { in: sinBatchPrevio } },
+          data: { tarea_revision_id: nuevaTareaId },
+        });
+      }
     }
   } catch (e) {
     console.error('[pruebasColor.reenviarBatch] crear tarea Revisión batch falló:', e);
